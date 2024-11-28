@@ -106,8 +106,5 @@ Change streams are available for [replica sets and sharded clusters](https://www
 
 If you are using a standalone MongoDB instance, it must be converted to a replica set. See [Convert Standalone to Replica Set](https://www.mongodb.com/docs/manual/tutorial/convert-standalone-to-replica-set/).
 
-## License
-This project is licensed under the [MIT License](LICENSE).
-
 ## Contributing
 Contributions are welcome! Please fork the repository, make changes, and submit a pull request.
