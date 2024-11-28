@@ -2,7 +2,8 @@
 
 A Go-based tool to synchronize MongoDB data from a **MongoDB replica set** or **sharded cluster** to a **standalone MongoDB instance**, supporting both initial and incremental synchronization with change stream monitoring.
 
-![image](https://github.com/user-attachments/assets/531d4b97-39d5-4c8c-a878-fd74d43b6d23)
+![image](https://github.com/user-attachments/assets/f600c3ae-a6bf-4d64-9a7b-6715456a146b)
+
 
 
 ## Features
