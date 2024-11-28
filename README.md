@@ -2,6 +2,9 @@
 
 A Go-based tool to synchronize MongoDB data from a **MongoDB cluster** to a **standalone MongoDB instance**, supporting both initial and incremental synchronization with change stream monitoring.
 
+![image](https://github.com/user-attachments/assets/ecf34f6b-c16e-43bb-81b5-f023154f630f)
+
+
 ## Features
 
 - **Initial Sync**: Bulk synchronization of data from the MongoDB cluster to the standalone MongoDB instance.
