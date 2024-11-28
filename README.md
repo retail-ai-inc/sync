@@ -1,6 +1,6 @@
 # MongoDB Sync
 
-A Go-based tool to synchronize MongoDB data from a **MongoDB cluster** to a **standalone MongoDB instance**, supporting both initial and incremental synchronization with change stream monitoring.
+A Go-based tool to synchronize MongoDB data from a **MongoDB replica set** or **sharded cluster** to a **standalone MongoDB instance**, supporting both initial and incremental synchronization with change stream monitoring.
 
 ![image](https://github.com/user-attachments/assets/ecf34f6b-c16e-43bb-81b5-f023154f630f)
 
@@ -31,6 +31,16 @@ cd mongodb-sync
 go mod tidy
 
 # 3.Build the binary
-export PROJECT_ID=$PROJECT_ID
-gcloud builds submit --config=cloudbuild/staging/cloudbuild.yaml
+cp config.json.local config.json
+# Edit config.json to replace the placeholders with your MongoDB cluster and standalone instance details.
+go build -o mongodb_sync .
+
+# 4.Build the Docker image
+docker build -t mongodb-sync .
 ```
+
+## Availability  
+
+Change streams are available for [replica sets and sharded clusters](https://www.mongodb.com/docs/manual/changeStreams/#availability).
+
+If you are using a standalone instance, it can be converted to a replica set by following this guide: [Convert a Standalone to a Replica Set](https://www.mongodb.com/docs/manual/tutorial/convert-standalone-to-replica-set/).
