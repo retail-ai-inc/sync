@@ -7,7 +7,7 @@ A Go-based tool to synchronize MongoDB data from a **MongoDB replica set** or **
 
 ## Features
 
-- **Initial Sync**: Bulk synchronization of data from the MongoDB cluster to the standalone MongoDB instance.
+- **Initial Sync**: Bulk synchronization of data from the MongoDB cluster or MongoDB replica set to the standalone MongoDB instance.
 - **Incremental Sync**: Synchronizes newly updated or inserted data since the last sync using timestamps.
 - **Change Stream Monitoring**: Watches for real-time changes (insert, update, replace, delete) in the cluster's collections and reflects them in the standalone instance.
 - **Batch Processing**: Handles synchronization in batches for optimized performance.
