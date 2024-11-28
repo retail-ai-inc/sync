@@ -1,0 +1,34 @@
+{
+  "cluster_a_uri": "mongodb://username:password@cluster-a.mongodb.example.com",
+  "standalone_b_uri": "mongodb://username:password@127.0.0.1:27017",
+  "sync_mappings": [
+    {
+      "source_database": "source_db_1",
+      "target_database": "target_db_1",
+      "collections": [
+        {
+          "source_collection": "collection_a",
+          "target_collection": "collection_a"
+        },
+        {
+          "source_collection": "collection_b",
+          "target_collection": "collection_b"
+        }
+      ]
+    },
+    {
+      "source_database": "source_db_2",
+      "target_database": "target_db_2",
+      "collections": [
+        {
+          "source_collection": "collection_a",
+          "target_collection": "collection_a"
+        },
+        {
+          "source_collection": "collection_b",
+          "target_collection": "collection_b"
+        }
+      ]
+    }
+  ]
+}

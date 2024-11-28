@@ -13,44 +13,44 @@ import (
 )
 
 func main() {
-    // 创建上下文
+    // Create a context
     ctx, cancel := context.WithCancel(context.Background())
     defer cancel()
 
-    // 捕获系统中断信号
+    // Capture system interrupt signal
     c := make(chan os.Signal, 1)
     signal.Notify(c, os.Interrupt, syscall.SIGTERM)
     go func() {
         <-c
-        utils.Log.Info("收到中断信号，正在退出...")
+        utils.Log.Info("Received interrupt signal, exiting...")
         cancel()
     }()
 
-    // 加载配置
+    // Load configuration
     cfg := config.NewConfig()
     utils.InitLogger(cfg.Logger)
 
-    // 连接到 MongoDB 集群 A
+    // Connect to MongoDB cluster A
     clientA, err := mongo.Connect(ctx, cfg.GetClientOptions(cfg.ClusterAURI))
     if err != nil {
-        utils.Log.Fatalf("连接到集群 A 失败：%v", err)
+        utils.Log.Fatalf("Failed to connect to cluster A: %v", err)
     }
     defer clientA.Disconnect(ctx)
 
-    // 连接到 MongoDB 单机 B
+    // Connect to standalone MongoDB B
     clientB, err := mongo.Connect(ctx, cfg.GetClientOptions(cfg.StandaloneBURI))
     if err != nil {
-        utils.Log.Fatalf("连接到单机 B 失败：%v", err)
+        utils.Log.Fatalf("Failed to connect to standalone B: %v", err)
     }
     defer clientB.Disconnect(ctx)
 
-    utils.Log.Info("成功连接到 MongoDB 集群 A 和单机 B")
+    utils.Log.Info("Successfully connected to MongoDB cluster A and standalone B")
 
-    // 启动同步器
+    // Start syncer
     mySyncer := syncer.NewSyncer(clientA, clientB, cfg.SyncMappings, cfg.Logger)
     mySyncer.Start(ctx)
 
-    // 等待程序结束
+    // Wait for program to end
     <-ctx.Done()
-    utils.Log.Info("程序已退出")
+    utils.Log.Info("Program has exited")
 }

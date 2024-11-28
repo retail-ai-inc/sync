@@ -1,64 +1,63 @@
 package config
 
 import (
+    "encoding/json"
+    "io/ioutil"
+    "log"
+    "os"
+
     "github.com/sirupsen/logrus"
     "go.mongodb.org/mongo-driver/mongo/options"
 )
 
-// CollectionMapping 定义源集合和目标集合的映射关系
+// CollectionMapping defines the mapping between source and target collections
 type CollectionMapping struct {
-    SourceCollection string
-    TargetCollection string
+    SourceCollection string `json:"source_collection"`
+    TargetCollection string `json:"target_collection"`
 }
 
-// SyncMapping 定义源数据库和目标数据库的映射关系，以及集合映射列表
+// SyncMapping defines the source and target databases, and the collection mappings
 type SyncMapping struct {
-    SourceDatabase   string
-    TargetDatabase   string
-    Collections      []CollectionMapping // 集合映射列表
+    SourceDatabase   string             `json:"source_database"`
+    TargetDatabase   string             `json:"target_database"`
+    Collections      []CollectionMapping `json:"collections"` // List of collection mappings
 }
 
-// 配置结构体
+// Configuration struct
 type Config struct {
-    ClusterAURI    string
-    StandaloneBURI string
-    SyncMappings   []SyncMapping
+    ClusterAURI    string        `json:"cluster_a_uri"`
+    StandaloneBURI string        `json:"standalone_b_uri"`
+    SyncMappings   []SyncMapping `json:"sync_mappings"`
     Logger         *logrus.Logger
 }
 
-// NewConfig 返回配置实例
+// NewConfig returns a new configuration instance
 func NewConfig() *Config {
-    return &Config{
-        ClusterAURI: "mongodb://root:WcLOIVWfG8I4owE0@localhost:27017/admin",
-        StandaloneBURI: "mongodb://root:WcLOIVWfG8I4owE0@localhost:27017/admin",
-        // 需要同步的数据库和集合映射
-        SyncMappings: []SyncMapping{
-            {
-                SourceDatabase: "test",
-                TargetDatabase: "test",
-                Collections: []CollectionMapping{
-                    {SourceCollection: "test", TargetCollection: "test2"},
-                    {SourceCollection: "test3", TargetCollection: "test4"},
-                    // 添加更多的集合映射
-                },
-            },
-            {
-                SourceDatabase: "test2",
-                TargetDatabase: "test2",
-                Collections: []CollectionMapping{
-                    {SourceCollection: "test", TargetCollection: "test2"},
-                    // 添加更多的集合映射
-                },
-            },
-            // 添加其他数据库的映射，共计 7 个
-        },
-
-        // 日志器
-        Logger: logrus.New(),
+    // Try to get the configuration file path from the environment variable
+    configPath := os.Getenv("CONFIG_PATH")
+    if configPath == "" {
+        configPath = "config.json" // Default configuration file path
     }
+
+    // Read the configuration file
+    data, err := ioutil.ReadFile(configPath)
+    if err != nil {
+        log.Fatalf("Failed to read configuration file: %v", err)
+    }
+
+    // Parse the configuration file
+    var cfg Config
+    if err := json.Unmarshal(data, &cfg); err != nil {
+        log.Fatalf("Failed to parse configuration file: %v", err)
+    }
+
+    // Initialize logger
+    cfg.Logger = logrus.New()
+    
+    return &cfg
 }
 
-// MongoDB 客户端选项
+// MongoDB client options
 func (cfg *Config) GetClientOptions(uri string) *options.ClientOptions {
     return options.Client().ApplyURI(uri)
 }

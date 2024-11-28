@@ -4,6 +4,7 @@ import (
     "context"
     "fmt"
     "sync"
+    "time"
 
     "github.com/sirupsen/logrus"
     "go.mongodb.org/mongo-driver/bson"
@@ -18,6 +19,7 @@ type Syncer struct {
     clientB      *mongo.Client
     syncMappings []config.SyncMapping
     logger       *logrus.Logger
+    lastSyncedAt time.Time
 }
 
 func NewSyncer(clientA, clientB *mongo.Client, syncMappings []config.SyncMapping, logger *logrus.Logger) *Syncer {
@@ -26,6 +28,7 @@ func NewSyncer(clientA, clientB *mongo.Client, syncMappings []config.SyncMapping
         clientB:      clientB,
         syncMappings: syncMappings,
         logger:       logger,
+        lastSyncedAt: time.Now().Add(-10 * time.Minute), // Initial synchronization time
     }
 }
 
@@ -40,175 +43,268 @@ func (s *Syncer) Start(ctx context.Context) {
         }(mapping)
     }
 
-    // 等待所有同步协程完成
     go func() {
         wg.Wait()
-        s.logger.Info("所有数据库的同步已完成")
+        s.logger.Info("Synchronization of all databases completed")
     }()
 }
 
 func (s *Syncer) syncDatabase(ctx context.Context, mapping config.SyncMapping) {
     dbA := s.clientA.Database(mapping.SourceDatabase)
     dbB := s.clientB.Database(mapping.TargetDatabase)
+    s.logger.Infof("Processing mapping: %+v", mapping)
 
-    // 对需要同步的集合进行初始同步
-    for _, collMapping := range mapping.Collections {
-        collA := dbA.Collection(collMapping.SourceCollection)
-        collB := dbB.Collection(collMapping.TargetCollection)
+    for _, collMap := range mapping.Collections {
+        collA := dbA.Collection(collMap.SourceCollection)
+        collB := dbB.Collection(collMap.TargetCollection)
+        s.logger.Infof("Processing collection mapping: %+v", collMap)
 
-        err := s.initialSync(ctx, collA, collB, mapping.SourceDatabase, mapping.TargetDatabase, collMapping)
+        // Initial sync
+        err := s.initialSync(ctx, collA, collB, mapping.SourceDatabase, mapping.TargetDatabase)
         if err != nil {
-            s.logger.Errorf("初始同步集合 %s.%s 到 %s.%s 失败：%v",
-                mapping.SourceDatabase, collMapping.SourceCollection,
-                mapping.TargetDatabase, collMapping.TargetCollection, err)
-            // 初始同步失败，跳过该集合
+            s.logger.Errorf("Initial sync of collection %s.%s to %s.%s failed: %v",
+                mapping.SourceDatabase, collA.Name(), mapping.TargetDatabase, collB.Name(), err)
             continue
+        }
+
+        // Incremental sync
+        // err = s.incrementalSync(ctx, collA, collB)
+        // if err != nil {
+        //     s.logger.Errorf("Incremental sync of collection %s.%s to %s.%s failed: %v",
+        //         mapping.SourceDatabase, collMap.SourceCollection,
+        //         mapping.TargetDatabase, collMap.TargetCollection, err)
+        //     continue
+        // }
+
+        go s.watchChangesForCollection(ctx, collA, collB, mapping.SourceDatabase, mapping.TargetDatabase)
+    }
+}
+
+func (s *Syncer) initialSync(ctx context.Context, collA, collB *mongo.Collection, sourceDatabase, targetDatabase string) error {
+    count, err := collB.EstimatedDocumentCount(ctx)
+    if err != nil {
+        return fmt.Errorf("Failed to check target collection %s.%s document count: %v", targetDatabase, collB.Name(), err)
+    }
+
+    if count > 0 {
+        s.logger.Infof("Skipping initial sync for %s.%s to %s.%s as target collection already contains data",
+            sourceDatabase, collA.Name(), targetDatabase, collB.Name())
+        return nil
+    }
+
+    s.logger.Infof("Starting initial sync for collection %s.%s to %s.%s", sourceDatabase, collA.Name(), targetDatabase, collB.Name())
+
+    cursor, err := collA.Find(ctx, bson.M{})
+    if err != nil {
+        return fmt.Errorf("Failed to query source collection %s.%s for initial sync: %v", sourceDatabase, collA.Name(), err)
+    }
+    defer cursor.Close(ctx)
+
+    batchSize := 200
+    var batch []interface{}
+
+    for cursor.Next(ctx) {
+        var doc bson.M
+        if err := cursor.Decode(&doc); err != nil {
+            return fmt.Errorf("Failed to decode document during initial sync: %v", err)
+        }
+        batch = append(batch, doc)
+
+        if len(batch) >= batchSize {
+            _, err := collB.InsertMany(ctx, batch)
+            if err != nil {
+                return fmt.Errorf("Failed to insert documents into target collection %s.%s during initial sync: %v", targetDatabase, collB.Name(), err)
+            }
+            batch = batch[:0]
         }
     }
 
-    // 创建数据库级别的 Change Stream
-    pipeline := mongo.Pipeline{}
+    if len(batch) > 0 {
+        _, err := collB.InsertMany(ctx, batch)
+        if err != nil {
+            return fmt.Errorf("Failed to insert remaining documents into target collection %s.%s during initial sync: %v", targetDatabase, collB.Name(), err)
+        }
+    }
+
+    s.logger.Infof("Initial sync of collection %s.%s to %s.%s completed", sourceDatabase, collA.Name(), targetDatabase, collB.Name())
+    return nil
+}
+
+func (s *Syncer) incrementalSync(ctx context.Context, collA, collB *mongo.Collection) error {
+    filter := bson.M{"updatedAt": bson.M{"$gt": s.lastSyncedAt}}
+
+    s.logger.Infof("Performing incremental sync for collection: %s, filter: %v, lastSyncedAt: %v", collA.Name(), filter, s.lastSyncedAt)
+
+    cursor, err := collA.Find(ctx, filter)
+    if err != nil {
+        return fmt.Errorf("Failed to query source collection for incremental sync: %v", err)
+    }
+    defer cursor.Close(ctx)
+
+    var models []mongo.WriteModel
+    batchSize := 200  
+
+    for cursor.Next(ctx) {
+        var doc bson.M
+        if err := cursor.Decode(&doc); err != nil {
+            return fmt.Errorf("Failed to decode document during incremental sync: %v", err)
+        }
+
+        id := doc["_id"]
+        filter := bson.M{"_id": id}
+        update := bson.M{"$set": doc}  
+
+        // Upsert
+        model := mongo.NewUpdateOneModel().SetFilter(filter).SetUpdate(update).SetUpsert(true)
+        models = append(models, model)
+
+        // Perform batch write operations when batch size is reached
+        if len(models) >= batchSize {
+            if err := s.executeBulkWrite(ctx, collB, models); err != nil {
+                return err
+            }
+            models = models[:0] // Clear batch
+        }
+    }
+
+    // Insert remaining documents
+    if len(models) > 0 {
+        if err := s.executeBulkWrite(ctx, collB, models); err != nil {
+            return err
+        }
+    }
+
+    s.logger.Infof("Incremental sync completed.")
+    return nil
+}
+
+// Helper function for executing batch write operations
+func (s *Syncer) executeBulkWrite(ctx context.Context, coll *mongo.Collection, models []mongo.WriteModel) error {
+    if len(models) == 0 {
+        return nil
+    }
+
+    opts := options.BulkWrite().SetOrdered(false)
+    result, err := coll.BulkWrite(ctx, models, opts)
+    if err != nil {
+        return fmt.Errorf("Failed to execute bulk write: %v", err)
+    }
+
+    s.logger.Infof("Bulk write result - Matched: %d, Modified: %d, Upserted: %d",
+        result.MatchedCount, result.ModifiedCount, result.UpsertedCount)
+
+    return nil
+}
+
+func (s *Syncer) watchChangesForCollection(ctx context.Context, collA, collB *mongo.Collection, sourceDatabase, targetDatabase string) {
+    // Set up Change Stream pipeline, filtering operation types
+    pipeline := mongo.Pipeline{
+        {{Key: "$match", Value: bson.D{
+            {Key: "ns.db", Value: sourceDatabase},
+            {Key: "ns.coll", Value: collA.Name()},
+            {Key: "operationType", Value: bson.M{"$in": []string{"insert", "update", "replace", "delete"}}},
+        }}},
+    }
     opts := options.ChangeStream().SetFullDocument(options.UpdateLookup)
 
-    cs, err := dbA.Watch(ctx, pipeline, opts)
+    cs, err := collA.Watch(ctx, pipeline, opts)
     if err != nil {
-        s.logger.Errorf("监听数据库 %s 的 Change Stream 失败：%v", mapping.SourceDatabase, err)
+        s.logger.Errorf("Failed to watch Change Stream for collection %s.%s: %v", sourceDatabase, collA.Name(), err)
         return
     }
     defer cs.Close(ctx)
 
-    s.logger.Infof("开始监听数据库 %s 的变更", mapping.SourceDatabase)
+    s.logger.Infof("Started watching changes in collection %s.%s", sourceDatabase, collA.Name())
 
-    for cs.Next(ctx) {
-        var changeEvent bson.M
-        if err := cs.Decode(&changeEvent); err != nil {
-            s.logger.Errorf("解码变更事件失败：%v", err)
-            continue
+    // Introduce batch processing
+    var buffer []mongo.WriteModel
+    const batchSize = 200
+    flushInterval := time.Second * 1 // Periodic flush
+    timer := time.NewTimer(flushInterval)
+    defer timer.Stop()
+
+    for {
+        select {
+        case <-ctx.Done():
+            return
+        default:
+            if cs.TryNext(ctx) {
+                var changeEvent bson.M
+                if err := cs.Decode(&changeEvent); err != nil {
+                    s.logger.Errorf("Failed to decode change event for %s.%s: %v", sourceDatabase, collA.Name(), err)
+                    continue
+                }
+
+                // Build batch operations
+                writeModel := s.prepareWriteModel(changeEvent)
+                if writeModel != nil {
+                    buffer = append(buffer, writeModel)
+                }
+
+                // Perform batch write when batch size is reached
+                if len(buffer) >= batchSize {
+                    s.flushBuffer(ctx, collB, &buffer, targetDatabase)
+                    timer.Reset(flushInterval)
+                }
+            } else {
+                // Check for errors
+                if err := cs.Err(); err != nil {
+                    s.logger.Errorf("Change Stream error for collection %s.%s: %v", sourceDatabase, collA.Name(), err)
+                    return
+                }
+            }
+
+            
+            select {
+            case <-timer.C:
+                if len(buffer) > 0 {
+                    s.flushBuffer(ctx, collB, &buffer, targetDatabase)
+                }
+                timer.Reset(flushInterval)
+            default:
+                // Continue watching for changes
+            }
         }
-
-        // 获取集合名称
-        ns, ok := changeEvent["ns"].(bson.M)
-        if !ok {
-            s.logger.Warn("无法获取命名空间信息")
-            continue
-        }
-        collectionName, ok := ns["coll"].(string)
-        if !ok {
-            s.logger.Warn("无法获取集合名称")
-            continue
-        }
-
-        // 查找对应的集合映射
-        collMapping, found := s.getCollectionMapping(mapping.Collections, collectionName)
-        if !found {
-            // 非目标集合，跳过
-            continue
-        }
-
-        // 获取对应的目标集合
-        collB := dbB.Collection(collMapping.TargetCollection)
-
-        // 处理变更事件
-        s.handleChangeEvent(ctx, changeEvent, collB, mapping.TargetDatabase, collMapping.TargetCollection)
-    }
-
-    if err := cs.Err(); err != nil {
-        s.logger.Errorf("Change Stream 错误：%v", err)
     }
 }
 
-func (s *Syncer) getCollectionMapping(collections []config.CollectionMapping, sourceCollectionName string) (config.CollectionMapping, bool) {
-    for _, mapping := range collections {
-        if mapping.SourceCollection == sourceCollectionName {
-            return mapping, true
-        }
-    }
-    return config.CollectionMapping{}, false
-}
-
-func (s *Syncer) handleChangeEvent(ctx context.Context, changeEvent bson.M, collB *mongo.Collection, targetDatabase, targetCollection string) {
+func (s *Syncer) prepareWriteModel(changeEvent bson.M) mongo.WriteModel {
     operationType, _ := changeEvent["operationType"].(string)
-    fullDocument := changeEvent["fullDocument"]
+    fullDocument, _ := changeEvent["fullDocument"].(bson.M)
     documentKey, _ := changeEvent["documentKey"].(bson.M)
     filter := documentKey
 
     switch operationType {
     case "insert":
-        s.logger.Infof("处理插入事件，集合：%s.%s，文档：%v", targetDatabase, targetCollection, fullDocument)
         if fullDocument != nil {
-            _, err := collB.InsertOne(ctx, fullDocument)
-            if err != nil {
-                s.logger.Errorf("插入文档到集合 %s.%s 失败：%v",
-                    targetDatabase, targetCollection, err)
-            } else {
-                s.logger.Infof("插入文档到集合 %s.%s 成功",
-                    targetDatabase, targetCollection)
-            }
+            return mongo.NewInsertOneModel().SetDocument(fullDocument)
         }
     case "update", "replace":
-        s.logger.Infof("处理更新事件，集合：%s.%s，文档：%v", targetDatabase, targetCollection, fullDocument)
         if fullDocument != nil {
-            _, err := collB.ReplaceOne(ctx, filter, fullDocument)
-            if err != nil {
-                s.logger.Errorf("更新集合 %s.%s 中的文档失败：%v",
-                    targetDatabase, targetCollection, err)
-            } else {
-                s.logger.Infof("更新集合 %s.%s 中的文档成功",
-                    targetDatabase, targetCollection)
-            }
+            return mongo.NewReplaceOneModel().SetFilter(filter).SetReplacement(fullDocument).SetUpsert(true)
         }
     case "delete":
-        s.logger.Infof("处理删除事件，集合：%s.%s，文档Key：%v", targetDatabase, targetCollection, documentKey)
-        _, err := collB.DeleteOne(ctx, filter)
-        if err != nil {
-            s.logger.Errorf("删除集合 %s.%s 中的文档失败：%v",
-                targetDatabase, targetCollection, err)
-        } else {
-            s.logger.Infof("删除集合 %s.%s 中的文档成功",
-                targetDatabase, targetCollection)
-        }
+        return mongo.NewDeleteOneModel().SetFilter(filter)
     default:
-        s.logger.Warnf("未处理的操作类型：%s", operationType)
+        s.logger.Warnf("Unhandled operation type: %s", operationType)
     }
+    return nil
 }
 
-func (s *Syncer) initialSync(ctx context.Context, collA, collB *mongo.Collection, sourceDatabase, targetDatabase string, collMapping config.CollectionMapping) error {
-    // 清空目标集合（根据需要，可以选择不清空）
-    err := collB.Drop(ctx)
+func (s *Syncer) flushBuffer(ctx context.Context, collB *mongo.Collection, buffer *[]mongo.WriteModel, targetDatabase string) {
+    if len(*buffer) == 0 {
+        return
+    }
+
+    opts := options.BulkWrite().SetOrdered(false)
+    result, err := collB.BulkWrite(ctx, *buffer, opts)
     if err != nil {
-        return fmt.Errorf("清空目标集合失败：%v", err)
+        s.logger.Errorf("Bulk write failed for collection %s.%s: %v", targetDatabase, collB.Name(), err)
+    } else {
+        s.logger.Infof("Bulk write result for collection %s.%s - Matched: %d, Modified: %d, Upserted: %d",
+            targetDatabase, collB.Name(), result.MatchedCount, result.ModifiedCount, result.UpsertedCount)
     }
 
-    // 从源集合读取所有文档
-    cursor, err := collA.Find(ctx, bson.M{})
-    if err != nil {
-        return fmt.Errorf("查询源集合失败：%v", err)
-    }
-    defer cursor.Close(ctx)
-
-    var documents []interface{}
-    for cursor.Next(ctx) {
-        var doc bson.M
-        if err := cursor.Decode(&doc); err != nil {
-            return fmt.Errorf("解码文档失败：%v", err)
-        }
-        documents = append(documents, doc)
-    }
-
-    if err := cursor.Err(); err != nil {
-        return fmt.Errorf("遍历游标时出错：%v", err)
-    }
-
-    if len(documents) > 0 {
-        // 将文档批量插入到目标集合
-        _, err = collB.InsertMany(ctx, documents)
-        if err != nil {
-            return fmt.Errorf("插入文档到目标集合失败：%v", err)
-        }
-    }
-
-    s.logger.Infof("初始同步集合 %s.%s 到 %s.%s 完成，共同步 %d 个文档",
-        sourceDatabase, collMapping.SourceCollection,
-        targetDatabase, collMapping.TargetCollection, len(documents))
-    return nil
+    // Clear buffer
+    *buffer = (*buffer)[:0]
 }
