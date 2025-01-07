@@ -74,6 +74,7 @@ jobs:
           done
 
           echo "All services are up!"
+          sleep 5
         
       - name: Run tests
         run: go test -race -coverprofile=coverage.txt -covermode=atomic ./...
@@ -88,3 +89,4 @@ jobs:
         if: always()
         run: |
           docker-compose -f docker/docker-compose.yml down
+12
