@@ -66,6 +66,10 @@ func isPostgresDBType(dbType string) bool {
 
 // TestFullSync is a comprehensive integration test example.
 func TestFullSync(t *testing.T) {
+
+	t.Log("TestFullSync start...")
+	time.Sleep(5 * time.Second)
+	
 	// Prepare environment
 	ctx, cancel := prepareTestEnvironment(t)
 	defer cancel()
