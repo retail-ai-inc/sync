@@ -3,7 +3,7 @@
 Synchronize Production NOSQL and SQL data to Standalone instances for Data scientists or other purposes. A **Go-based** tool to synchronize MongoDB or SQL data from a **MongoDB replica set** or **sharded cluster** or production SQL instance to a **standalone instance**, supports initial and incremental synchronization with change stream monitoring.
 
 > [!NOTE]
-> Sync is now supporting MongoDB, MySQl, PostgreSQL and MariaDB. Next `Sync` will support Redis and Elasticsearch.
+> Sync is now supporting MongoDB, MySQL, PostgreSQL, MariaDB, and Redis. Next, `Sync` will support Elasticsearch.
 
 ## What is the problem
 Let’s assume you have a mid to big-size SaaS platform or service with multiple tech teams and stakeholders. Different teams have different requirements for analyzing the production data independently. However, the tech team doesn’t want to allow all these stakeholders direct access to the production databases due to security and stability issues.
@@ -16,7 +16,8 @@ Create standalone databases outside of your production database servers with the
 - MongoDB (Sharded clusters, Replica sets)
 - MySQL
 - MariaDB 
-- PostgreSQL (PostgreSQL version 10+、Enable logical replication)
+- PostgreSQL (PostgreSQL version 10+ with logical replication enabled)
+- Redis (Standalone, Sentinel; does not support cluster mode)
 
 ## High Level Design Diagram
 
@@ -31,7 +32,7 @@ Create standalone databases outside of your production database servers with the
 
 ![image](https://github.com/user-attachments/assets/65b23a4c-56db-4833-89a1-0f802af878bd)
 
-### Grafana Integration(temporary transition phase)
+### Grafana Integration (temporary transition phase)
 ![image](https://github.com/user-attachments/assets/cdc8e57b-8aa4-4386-8aa8-de5028698fd0)
 
 
@@ -41,14 +42,17 @@ Create standalone databases outside of your production database servers with the
   - MongoDB: Bulk synchronization of data from the MongoDB cluster or MongoDB replica set to the standalone MongoDB instance.
   - MySQL/MariaDB: Initial synchronization using batch inserts (default batch size: 100 rows) from the source to the target if the target table is empty.
   - PostgreSQL: Initial synchronization using batch inserts (default batch size: 100 rows) from the source to the target using logical replication slots and the pgoutput plugin.
-- **Change Stream & Binlog Monitoring**:
+  - Redis: Supports full data synchronization for standalone Redis and Sentinel setups using Redis Streams and Keyspace Notifications.
+- **Change Stream & Incremental Updates**:
   - MongoDB: Watches for real-time changes (insert, update, replace, delete) in the cluster's collections and reflects them in the standalone instance.
   - MySQL/MariaDB: Uses binlog replication events to capture and apply incremental changes to the target.
   - PostgreSQL: Uses WAL (Write-Ahead Log) with the pgoutput plugin to capture and apply incremental changes to the target.
+  - Redis: Uses Redis Streams and Keyspace Notifications to capture and sync incremental changes in real-time.
 - **Batch Processing & Concurrency**:  
   Handles synchronization in batches for optimized performance and supports parallel synchronization for multiple collections/tables.
 - **Restart Resilience**: 
-  Stores MongoDB resume tokens, MySQL binlog positions, and PostgreSQL replication positions in configurable state files, allowing the tool to resume synchronization from the last known position after a restart.
+  Stores MongoDB resume tokens, MySQL binlog positions, PostgreSQL replication positions, and Redis stream offsets in configurable state files, allowing the tool to resume synchronization from the last known position after a restart.
+  - **Note for Redis**: Redis does not support resuming from the last state after a sync interruption. If `Sync` is interrupted or crashes, it will restart the synchronization process by executing the initial sync method to retrieve all keys and sync them to the target database. This is due to limitations in Redis Streams and Keyspace Notifications, which do not provide a built-in mechanism to persist and resume stream offsets across restarts. As a result, the tool cannot accurately determine the last synced state and must perform a full resync to ensure data consistency.
 - **Grafana Integration**:
   - For data visualization, this tool integrates with **Grafana** using data from **GCP Logging** and **GCP BigQuery**.
   - When **`enable_table_row_count_monitoring`** is enabled, the tool records data changes, including table row counts, in **GCP Logging**.
@@ -65,6 +69,10 @@ Create standalone databases outside of your production database servers with the
 - For PostgreSQL sources:
   - A PostgreSQL instance with logical replication enabled and a replication slot created.
   - A target PostgreSQL instance with write permissions.
+- For Redis sources:
+  - Redis standalone or Sentinel setup with Redis version >= 5.0.
+  - Redis Streams and Keyspace Notifications enabled.
+  - A target Redis instance with write permissions.
 
 ## Quick start
 
@@ -169,6 +177,18 @@ sync_configs:
         tables:
           - source_table: "users"
             target_table: "users"
+
+  - type: "redis"
+    enable: true
+    source_connection: "redis://localhost:6379/0"
+    target_connection: "redis://localhost:6379/1"
+    redis_position_path: "/tmp/state/redis_position"
+    mappings:
+      - source_database: "db0"
+        target_database: "db1"
+        tables:
+          - source_table: "source_stream"  # Redis Stream Name
+            target_table: "" 
 ```
 
 ## Real-Time Synchronization
@@ -176,6 +196,8 @@ sync_configs:
 - MongoDB: Uses Change Streams from replica sets or sharded clusters for incremental updates.
 - MySQL/MariaDB: Uses binlog replication to apply incremental changes to the target.
 - PostgreSQL: Uses WAL (Write-Ahead Log) with the pgoutput plugin to apply incremental changes to the target.
+- Redis: Uses Redis Streams and Keyspace Notifications to sync changes in real-time.
+  - **Note for Redis**: If `Sync` is interrupted, Redis will restart the synchronization process with an initial sync of all keys to the target. This ensures data consistency but may increase synchronization time after interruptions.
 
 On the restart, the tool resumes from the stored state (resume token for MongoDB, binlog position for MySQL/MariaDB, replication slot for PostgreSQL).
 
@@ -183,7 +205,8 @@ On the restart, the tool resumes from the stored state (resume token for MongoDB
 
 - MongoDB: MongoDB Change Streams require a replica set or sharded cluster. See [Convert Standalone to Replica Set](https://www.mongodb.com/docs/manual/tutorial/convert-standalone-to-replica-set/).
 - MySQL/MariaDB: MySQL/MariaDB binlog-based incremental sync requires ROW or MIXED binlog format for proper event capturing.
-- PostgreSQL incremental sync requires logical replication enabled with a replication slot.
+- PostgreSQL: PostgreSQL incremental sync requires logical replication enabled with a replication slot.
+- Redis: Redis sync supports standalone and Sentinel setups but does not support Redis Cluster mode. Redis does not support resuming from the last synced state after a crash or interruption.
 
 ## Contributing
 

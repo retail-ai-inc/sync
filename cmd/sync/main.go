@@ -17,6 +17,7 @@ import (
 	"github.com/retail-ai-inc/sync/pkg/logger"
 	"github.com/retail-ai-inc/sync/pkg/syncer"
 	"github.com/sirupsen/logrus"
+	"github.com/retail-ai-inc/sync/pkg/utils"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
@@ -74,6 +75,12 @@ func main() {
 				syncer := syncer.NewPostgreSQLSyncer(syncCfg, log)
 				syncer.Start(ctx)
 			}(syncCfg)
+		case "redis":
+			go func(syncCfg config.SyncConfig) {
+				defer wg.Done()
+				syncer := syncer.NewRedisSyncer(syncCfg, log)
+				syncer.Start(ctx)
+			}(syncCfg)
 		default:
 			log.Errorf("Unknown sync type: %s", syncCfg.Type)
 			wg.Done()
@@ -82,24 +89,7 @@ func main() {
 
 	// Start monitoring goroutine: output row counts every minute for each mapped table (source/target)
 	if cfg.EnableTableRowCountMonitoring {
-		go func() {
-			ticker := time.NewTicker(monitorInterval)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-ticker.C:
-					// For each sync config, gather row counts and log
-					for _, sc := range cfg.SyncConfigs {
-						if !sc.Enable {
-							continue
-						}
-						countAndLogTables(ctx, sc)
-					}
-				}
-			}
-		}()
+		utils.StartRowCountMonitoring(ctx, cfg, log, monitorInterval)
 	}
 
 	// Wait for all sync to complete

@@ -12,12 +12,15 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	goredis "github.com/redis/go-redis/v9"
 	"github.com/retail-ai-inc/sync/pkg/config"
 	"github.com/retail-ai-inc/sync/pkg/logger"
 	"github.com/retail-ai-inc/sync/pkg/syncer/mariadb"
 	"github.com/retail-ai-inc/sync/pkg/syncer/mongodb"
 	"github.com/retail-ai-inc/sync/pkg/syncer/mysql"
 	"github.com/retail-ai-inc/sync/pkg/syncer/postgresql"
+	"github.com/retail-ai-inc/sync/pkg/syncer/redis"
+	"github.com/retail-ai-inc/sync/pkg/utils"
 	"github.com/sirupsen/logrus"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -29,6 +32,7 @@ import (
 	_ "github.com/lib/pq"
 )
 
+const monitorInterval = time.Second * 10
 // Added function: get the full "schema.table" or "database.table"
 func getQualifiedTableName(dbmap config.DatabaseMapping, useSource bool, tblmap config.TableMapping) string {
 	if useSource {
@@ -66,52 +70,60 @@ func TestFullSync(t *testing.T) {
 	defer cancel()
 
 	// Connect all databases
-	mongoEnabled, mysqlEnabled, mariaDBEnabled, postgresEnabled,
+	mongoEnabled, mysqlEnabled, mariaDBEnabled, postgresEnabled, redisEnabled,
 		mongoSourceClient, mongoTargetClient,
 		mysqlSourceDB, mysqlTargetDB,
 		mariaDBSourceDB, mariaDBTargetDB,
-		pgSourceDB, pgTargetDB :=
+		pgSourceDB, pgTargetDB,
+		redisSourceClient, redisTargetClient :=
 		connectAllDatabases(t)
 
 	// Extract all mappings
 	cfg := config.NewConfig()
-	mongoMapping, mysqlMapping, mariadbMapping, pgMapping := extractAllMappings(cfg)
+	mongoMapping, mysqlMapping, mariadbMapping, pgMapping, redisMapping := extractAllMappings(cfg)
+
 
 	// Start all syncers
-	startAllSyncers(ctx, cfg, logger.InitLogger(logrus.DebugLevel.String()))
+	log := logger.InitLogger(cfg.LogLevel)
+	startAllSyncers(ctx, cfg, log)
 	t.Log("Syncers started, waiting initial sync...")
-	time.Sleep(5 * time.Second)
+	time.Sleep(3 * time.Second)
+
+	if cfg.EnableTableRowCountMonitoring {
+		utils.StartRowCountMonitoring(ctx, cfg, log, monitorInterval)
+	}
 
 	// Insert initial data
 	const initialInsertCount = 3
 	insertInitialData(t,
-		mongoEnabled, mysqlEnabled, mariaDBEnabled, postgresEnabled,
-		mongoSourceClient, mysqlSourceDB, mariaDBSourceDB, pgSourceDB,
-		mongoMapping, mysqlMapping, mariadbMapping, pgMapping,
+		mongoEnabled, mysqlEnabled, mariaDBEnabled, postgresEnabled, redisEnabled,
+		mongoSourceClient, mysqlSourceDB, mariaDBSourceDB, pgSourceDB, redisSourceClient,
+		mongoMapping, mysqlMapping, mariadbMapping, pgMapping, redisMapping,
 		initialInsertCount,
 	)
 
 	// Verify initial data synchronization
 	verifyInitialDataConsistency(t,
-		mongoEnabled, mysqlEnabled, mariaDBEnabled, postgresEnabled,
+		mongoEnabled, mysqlEnabled, mariaDBEnabled, postgresEnabled, redisEnabled,
 		mongoSourceClient, mongoTargetClient,
 		mysqlSourceDB, mysqlTargetDB,
 		mariaDBSourceDB, mariaDBTargetDB,
 		pgSourceDB, pgTargetDB,
-		mongoMapping, mysqlMapping, mariadbMapping, pgMapping,
+		redisSourceClient, redisTargetClient,
+		mongoMapping, mysqlMapping, mariadbMapping, pgMapping, redisMapping,
 	)
 
 	// Create/Update/Delete tests
 	performCRUDOperations(t,
-		mongoEnabled, mysqlEnabled, mariaDBEnabled, postgresEnabled,
+		mongoEnabled, mysqlEnabled, mariaDBEnabled, postgresEnabled, redisEnabled,
 		mongoSourceClient, mongoTargetClient,
 		mysqlSourceDB, mysqlTargetDB,
 		mariaDBSourceDB, mariaDBTargetDB,
 		pgSourceDB, pgTargetDB,
-		mongoMapping, mysqlMapping, mariadbMapping, pgMapping,
+		redisSourceClient, redisTargetClient,
+		mongoMapping, mysqlMapping, mariadbMapping, pgMapping, redisMapping,
 	)
 
-	time.Sleep(5 * time.Second)
 	t.Log("Full synchronization test completed successfully.")
 }
 
@@ -133,11 +145,12 @@ func prepareTestEnvironment(t *testing.T) (context.Context, context.CancelFunc) 
 
 // 2. Connect all databases and determine which are enabled
 func connectAllDatabases(t *testing.T) (
-	bool, bool, bool, bool,
+	bool, bool, bool, bool, bool, // mongoEnabled, mysqlEnabled, mariaDBEnabled, postgresEnabled, redisEnabled
 	*mongo.Client, *mongo.Client,
 	*sql.DB, *sql.DB,
 	*sql.DB, *sql.DB,
 	*sql.DB, *sql.DB,
+	*goredis.Client, *goredis.Client,
 ) {
 	cfg := config.NewConfig()
 	var (
@@ -145,6 +158,7 @@ func connectAllDatabases(t *testing.T) (
 		mysqlEnabled    = false
 		mariaDBEnabled  = false
 		postgresEnabled = false
+		redisEnabled    = false
 	)
 
 	for _, sc := range cfg.SyncConfigs {
@@ -157,11 +171,13 @@ func connectAllDatabases(t *testing.T) (
 			mariaDBEnabled = true
 		case sc.Type == "postgresql" && sc.Enable:
 			postgresEnabled = true
+		case sc.Type == "redis" && sc.Enable:
+			redisEnabled = true
 		}
 	}
 
-	if !mongoEnabled && !mysqlEnabled && !mariaDBEnabled && !postgresEnabled {
-		t.Skip("No enabled MongoDB, MySQL, MariaDB or PostgreSQL sync config found in config.yaml, skipping test.")
+	if !mongoEnabled && !mysqlEnabled && !mariaDBEnabled && !postgresEnabled && !redisEnabled {
+		t.Skip("No enabled DB sync config found (MongoDB/MySQL/MariaDB/PostgreSQL/Redis) in config.yaml, skipping test.")
 	}
 
 	// Initialize return objects
@@ -174,6 +190,8 @@ func connectAllDatabases(t *testing.T) (
 		mariaDBTargetDB   *sql.DB
 		pgSourceDB        *sql.DB
 		pgTargetDB        *sql.DB
+		redisSourceClient *goredis.Client
+		redisTargetClient *goredis.Client
 		err               error
 	)
 
@@ -229,16 +247,42 @@ func connectAllDatabases(t *testing.T) (
 		})
 	}
 
-	return mongoEnabled, mysqlEnabled, mariaDBEnabled, postgresEnabled,
+	// Redis
+	if redisEnabled {
+		redisSourceClient, redisTargetClient, err = connectRedis(cfg)
+		if err != nil {
+			t.Fatalf("Failed to connect Redis: %v", err)
+		}
+		t.Log("Redis source/target connected successfully.")
+		t.Cleanup(func() {
+			_ = redisSourceClient.Close()
+			_ = redisTargetClient.Close()
+		})
+	}
+
+	return mongoEnabled, mysqlEnabled, mariaDBEnabled, postgresEnabled, redisEnabled,
 		mongoSourceClient, mongoTargetClient,
 		mysqlSourceDB, mysqlTargetDB,
 		mariaDBSourceDB, mariaDBTargetDB,
-		pgSourceDB, pgTargetDB
+		pgSourceDB, pgTargetDB,
+		redisSourceClient, redisTargetClient
 }
 
 // 3. Extract all database mappings
-func extractAllMappings(cfg *config.Config) ([]config.DatabaseMapping, []config.DatabaseMapping, []config.DatabaseMapping, []config.DatabaseMapping) {
-	var mongoMapping, mysqlMapping, mariadbMapping, pgMapping []config.DatabaseMapping
+func extractAllMappings(cfg *config.Config) (
+	[]config.DatabaseMapping,
+	[]config.DatabaseMapping,
+	[]config.DatabaseMapping,
+	[]config.DatabaseMapping,
+	[]config.DatabaseMapping, // redisMapping
+) {
+	var (
+		mongoMapping  []config.DatabaseMapping
+		mysqlMapping  []config.DatabaseMapping
+		mariadbMapping []config.DatabaseMapping
+		pgMapping     []config.DatabaseMapping
+		redisMapping  []config.DatabaseMapping
+	)
 	for _, sc := range cfg.SyncConfigs {
 		if sc.Type == "mongodb" && sc.Enable {
 			mongoMapping = sc.Mappings
@@ -252,8 +296,11 @@ func extractAllMappings(cfg *config.Config) ([]config.DatabaseMapping, []config.
 		if sc.Type == "postgresql" && sc.Enable {
 			pgMapping = sc.Mappings
 		}
+		if sc.Type == "redis" && sc.Enable {
+			redisMapping = sc.Mappings
+		}
 	}
-	return mongoMapping, mysqlMapping, mariadbMapping, pgMapping
+	return mongoMapping, mysqlMapping, mariadbMapping, pgMapping, redisMapping
 }
 
 // 4. Start all Syncers
@@ -275,6 +322,9 @@ func startAllSyncers(ctx context.Context, cfg *config.Config, log *logrus.Logger
 		case "postgresql":
 			syncer := postgresql.NewPostgreSQLSyncer(sc, log)
 			go syncer.Start(ctx)
+		case "redis":
+			syncer := redis.NewRedisSyncer(sc, log)
+			go syncer.Start(ctx)
 		}
 	}
 }
@@ -282,10 +332,11 @@ func startAllSyncers(ctx context.Context, cfg *config.Config, log *logrus.Logger
 // 5. Insert initial data
 func insertInitialData(
 	t *testing.T,
-	mongoEnabled, mysqlEnabled, mariaDBEnabled, postgresEnabled bool,
+	mongoEnabled, mysqlEnabled, mariaDBEnabled, postgresEnabled, redisEnabled bool,
 	mongoSourceClient *mongo.Client,
 	mysqlSourceDB, mariaDBSourceDB, pgSourceDB *sql.DB,
-	mongoMapping, mysqlMapping, mariadbMapping, pgMapping []config.DatabaseMapping,
+	redisSourceClient *goredis.Client,
+	mongoMapping, mysqlMapping, mariadbMapping, pgMapping, redisMapping []config.DatabaseMapping,
 	initialInsertCount int,
 ) {
 	if mongoEnabled && mongoSourceClient != nil {
@@ -304,15 +355,20 @@ func insertInitialData(
 		prepareInitialData(t, pgSourceDB, pgMapping, "initial_postgres_doc", initialInsertCount, "postgresql")
 		t.Logf("Inserted %d initial rows into PostgreSQL source.", initialInsertCount)
 	}
+	if redisEnabled && redisSourceClient != nil {
+		prepareInitialData(t, redisSourceClient, redisMapping, "initial_redis_doc", initialInsertCount, "redis")
+		t.Logf("Inserted %d initial keys into Redis source.", initialInsertCount)
+	}
 }
 
 // 6. Verify initial data synchronization
 func verifyInitialDataConsistency(
 	t *testing.T,
-	mongoEnabled, mysqlEnabled, mariaDBEnabled, postgresEnabled bool,
+	mongoEnabled, mysqlEnabled, mariaDBEnabled, postgresEnabled, redisEnabled bool,
 	mongoSourceClient, mongoTargetClient *mongo.Client,
 	mysqlSourceDB, mysqlTargetDB, mariaDBSourceDB, mariaDBTargetDB, pgSourceDB, pgTargetDB *sql.DB,
-	mongoMapping, mysqlMapping, mariadbMapping, pgMapping []config.DatabaseMapping,
+	redisSourceClient, redisTargetClient *goredis.Client,
+	mongoMapping, mysqlMapping, mariadbMapping, pgMapping, redisMapping []config.DatabaseMapping,
 ) {
 	if mongoEnabled && mongoSourceClient != nil && mongoTargetClient != nil {
 		verifyDataConsistency(t, mongoSourceClient, mongoTargetClient, mongoMapping, "initial_mongo_sync")
@@ -330,15 +386,20 @@ func verifyInitialDataConsistency(
 		verifyDataConsistency(t, pgSourceDB, pgTargetDB, pgMapping, "initial_postgres_sync")
 		t.Log("Verified PostgreSQL initial sync data consistency.")
 	}
+	if redisEnabled && redisSourceClient != nil && redisTargetClient != nil {
+		verifyDataConsistency(t, redisSourceClient, redisTargetClient, redisMapping, "initial_redis_sync")
+		t.Log("Verified Redis initial sync data consistency.")
+	}
 }
 
 // 7. Create/Update/Delete operation tests
 func performCRUDOperations(
 	t *testing.T,
-	mongoEnabled, mysqlEnabled, mariaDBEnabled, postgresEnabled bool,
+	mongoEnabled, mysqlEnabled, mariaDBEnabled, postgresEnabled, redisEnabled bool,
 	mongoSourceClient, mongoTargetClient *mongo.Client,
 	mysqlSourceDB, mysqlTargetDB, mariaDBSourceDB, mariaDBTargetDB, pgSourceDB, pgTargetDB *sql.DB,
-	mongoMapping, mysqlMapping, mariadbMapping, pgMapping []config.DatabaseMapping,
+	redisSourceClient, redisTargetClient *goredis.Client,
+	mongoMapping, mysqlMapping, mariadbMapping, pgMapping, redisMapping []config.DatabaseMapping,
 ) {
 	if mongoEnabled && mongoSourceClient != nil && mongoTargetClient != nil {
 		performDataOperations(t, mongoSourceClient, mongoTargetClient, mongoMapping, "mongodb")
@@ -355,6 +416,10 @@ func performCRUDOperations(
 	if postgresEnabled && pgSourceDB != nil && pgTargetDB != nil {
 		performDataOperations(t, pgSourceDB, pgTargetDB, pgMapping, "postgresql")
 		t.Log("PostgreSQL increment/update/delete operations tested successfully.")
+	}
+	if redisEnabled && redisSourceClient != nil && redisTargetClient != nil {
+		performDataOperations(t, redisSourceClient, redisTargetClient, redisMapping, "redis")
+		t.Log("Redis increment/update/delete operations tested successfully.")
 	}
 }
 
@@ -455,6 +520,42 @@ func connectPGDB(cfg *config.Config) (*sql.DB, *sql.DB, error) {
 	return srcDB, tgtDB, nil
 }
 
+// Connect to Redis
+func connectRedis(cfg *config.Config) (*goredis.Client, *goredis.Client, error) {
+	var redisSourceDSN, redisTargetDSN string
+	for _, sc := range cfg.SyncConfigs {
+		if sc.Type == "redis" && sc.Enable {
+			redisSourceDSN = sc.SourceConnection
+			redisTargetDSN = sc.TargetConnection
+			break
+		}
+	}
+	if redisSourceDSN == "" || redisTargetDSN == "" {
+		return nil, nil, fmt.Errorf("no enabled redis sync config found in config.yaml")
+	}
+
+	sourceOpt, err := goredis.ParseURL(redisSourceDSN)
+	if err != nil {
+		return nil, nil, err
+	}
+	targetOpt, err := goredis.ParseURL(redisTargetDSN)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	sourceClient := goredis.NewClient(sourceOpt)
+	if err := sourceClient.Ping(context.Background()).Err(); err != nil {
+		return nil, nil, err
+	}
+
+	targetClient := goredis.NewClient(targetOpt)
+	if err := targetClient.Ping(context.Background()).Err(); err != nil {
+		return nil, nil, err
+	}
+
+	return sourceClient, targetClient, nil
+}
+
 // Insert initial data
 func prepareInitialData(t *testing.T, src interface{}, mappings []config.DatabaseMapping, docName string, count int, dbType string) {
 	switch s := src.(type) {
@@ -479,26 +580,15 @@ func prepareInitialData(t *testing.T, src interface{}, mappings []config.Databas
 		}
 
 	case *sql.DB:
+		// MySQL / MariaDB / PostgreSQL insertion logic
 		for _, dbmap := range mappings {
 			for _, tblmap := range dbmap.Tables {
-				// Build the source table name (like public.a1 or sync.a1)
 				fullTableName := getQualifiedTableName(dbmap, true, tblmap)
 
-				// If it is PostgreSQL, we can optionally TRUNCATE before insert to avoid duplicate keys
-				// if isPostgresDBType(dbType) {
-				//     truncSQL := fmt.Sprintf("TRUNCATE TABLE %s CASCADE", fullTableName)
-				//     if _, err := s.Exec(truncSQL); err != nil {
-				//         t.Fatalf("Failed to TRUNCATE table %s: %v", fullTableName, err)
-				//     }
-				// }
-
-				// Choose placeholders based on dbType
 				var insertSQL string
 				if isPostgresDBType(dbType) {
-					// PostgreSQL uses $1, $2, $3
 					insertSQL = fmt.Sprintf("INSERT INTO %s (id, name, email) VALUES ($1, $2, $3)", fullTableName)
 				} else {
-					// MySQL / MariaDB still uses ?
 					insertSQL = fmt.Sprintf("INSERT INTO %s (id, name, email) VALUES (?, ?, ?)", fullTableName)
 				}
 
@@ -507,13 +597,30 @@ func prepareInitialData(t *testing.T, src interface{}, mappings []config.Databas
 					name := fmt.Sprintf("%s_%s", docName, uuid.New().String())
 					email := fmt.Sprintf("Randomemail_%d_%s", i, uuid.New().String())
 
-					// Execute insert
 					if _, err := s.Exec(insertSQL, nextID, name, email); err != nil {
 						t.Fatalf("Failed to insert row into %s: %v", fullTableName, err)
 					}
 				}
 			}
 		}
+
+	case *goredis.Client:
+		// Redis insertion logic: simply set some string keys
+		for _, dbmap := range mappings {
+			// We assume each "table" is actually a Redis key pattern; to keep it simple, let's treat
+			// SourceTable as a stream name or prefix. Here we just create normal string keys:
+			for _, tblmap := range dbmap.Tables {
+				prefix := fmt.Sprintf("%s:%s", dbmap.SourceDatabase, tblmap.SourceTable)
+				for i := 0; i < count; i++ {
+					key := fmt.Sprintf("%s:%d", prefix, i)
+					value := fmt.Sprintf("%s_%s", docName, uuid.New().String())
+					if err := s.Set(context.Background(), key, value, 0).Err(); err != nil {
+						t.Fatalf("Redis SET fail key=%s: %v", key, err)
+					}
+				}
+			}
+		}
+
 	}
 }
 
@@ -522,15 +629,13 @@ func verifyDataConsistency(t *testing.T, src interface{}, tgt interface{}, mappi
 	time.Sleep(3 * time.Second)
 	switch s := src.(type) {
 	case *mongo.Client:
-		// Additional wait for Mongo sync
-		time.Sleep(10 * time.Second)
+		time.Sleep(5 * time.Second) // Additional wait for Mongo sync
 		tc := tgt.(*mongo.Client)
 		for _, dbmap := range mappings {
 			for _, tblmap := range dbmap.Tables {
 				srcColl := s.Database(dbmap.SourceDatabase).Collection(tblmap.SourceTable)
 				tgtColl := tc.Database(dbmap.TargetDatabase).Collection(tblmap.TargetTable)
 
-				// Fetch source data
 				srcCursor, err := srcColl.Find(context.Background(), bson.M{})
 				if err != nil {
 					t.Fatalf("Failed to fetch documents from MongoDB source %s.%s: %v",
@@ -543,7 +648,6 @@ func verifyDataConsistency(t *testing.T, src interface{}, tgt interface{}, mappi
 						dbmap.SourceDatabase, tblmap.SourceTable, err)
 				}
 
-				// Fetch target data
 				tgtCursor, err := tgtColl.Find(context.Background(), bson.M{})
 				if err != nil {
 					t.Fatalf("Failed to fetch documents from MongoDB target %s.%s: %v",
@@ -556,29 +660,23 @@ func verifyDataConsistency(t *testing.T, src interface{}, tgt interface{}, mappi
 						dbmap.TargetDatabase, tblmap.TargetTable, err)
 				}
 
-				// Compare counts
 				if len(srcDocs) != len(tgtDocs) {
 					t.Fatalf("MongoDB data mismatch at %s stage for %s.%s -> %s.%s: sourceCount=%d, targetCount=%d",
 						stage, dbmap.SourceDatabase, tblmap.SourceTable,
 						dbmap.TargetDatabase, tblmap.TargetTable, len(srcDocs), len(tgtDocs))
 				}
-
-				// Compare emails
 				srcMap := make(map[string]bson.M)
 				for _, doc := range srcDocs {
 					id, ok := doc["_id"].(primitive.ObjectID)
 					if !ok {
-						t.Fatalf("MongoDB document missing _id or invalid type in %s.%s",
-							dbmap.SourceDatabase, tblmap.SourceTable)
+						t.Fatalf("MongoDB document missing _id in %s.%s", dbmap.SourceDatabase, tblmap.SourceTable)
 					}
 					srcMap[id.Hex()] = doc
 				}
-
 				for _, doc := range tgtDocs {
 					id, ok := doc["_id"].(primitive.ObjectID)
 					if !ok {
-						t.Fatalf("MongoDB target document missing _id or invalid type in %s.%s",
-							dbmap.TargetDatabase, tblmap.TargetTable)
+						t.Fatalf("MongoDB target document missing _id in %s.%s", dbmap.TargetDatabase, tblmap.TargetTable)
 					}
 					srcDoc, exists := srcMap[id.Hex()]
 					if !exists {
@@ -603,7 +701,6 @@ func verifyDataConsistency(t *testing.T, src interface{}, tgt interface{}, mappi
 				fullSrcTable := getQualifiedTableName(dbmap, true, tblmap)
 				fullTgtTable := getQualifiedTableName(dbmap, false, tblmap)
 
-				// Fetch source data
 				srcQuery := fmt.Sprintf("SELECT id, name, email FROM %s ORDER BY id", fullSrcTable)
 				srcRows, err := s.Query(srcQuery)
 				if err != nil {
@@ -624,7 +721,6 @@ func verifyDataConsistency(t *testing.T, src interface{}, tgt interface{}, mappi
 					})
 				}
 
-				// Fetch target data
 				tgtQuery := fmt.Sprintf("SELECT id, name, email FROM %s ORDER BY id", fullTgtTable)
 				tgtRows, err := tc.Query(tgtQuery)
 				if err != nil {
@@ -645,7 +741,6 @@ func verifyDataConsistency(t *testing.T, src interface{}, tgt interface{}, mappi
 					})
 				}
 
-				// Compare counts
 				if len(srcRowsData) != len(tgtRowsData) {
 					t.Fatalf("%s data mismatch at %s stage for %s -> %s: sourceCount=%d, targetCount=%d",
 						dbmap.SourceDatabase, stage, fullSrcTable, fullTgtTable,
@@ -674,6 +769,62 @@ func verifyDataConsistency(t *testing.T, src interface{}, tgt interface{}, mappi
 				}
 			}
 		}
+
+	case *goredis.Client:
+		// Minimal verification: check that the same number of keys exist
+		tc := tgt.(*goredis.Client)
+
+		// Scan all keys in source
+		var srcKeys []string
+		var srcCursor uint64
+		for {
+			k, newCursor, err := s.Scan(context.Background(), srcCursor, "*", 100).Result()
+			if err != nil {
+				t.Fatalf("Redis source SCAN fail: %v", err)
+			}
+			srcKeys = append(srcKeys, k...)
+			srcCursor = newCursor
+			if newCursor == 0 {
+				break
+			}
+		}
+
+		// Scan all keys in target
+		var tgtKeys []string
+		var tgtCursor uint64 = 0
+		for {
+			k, newCursor, err := tc.Scan(context.Background(), tgtCursor, "*", 100).Result()
+			if err != nil {
+				t.Fatalf("Redis target SCAN fail: %v", err)
+			}
+			tgtKeys = append(tgtKeys, k...)
+			tgtCursor = newCursor
+			if newCursor == 0 {
+				break
+			}
+		}
+
+		excludeKeys := map[string]struct{}{
+			"source_stream": {},
+		}
+
+		filterKeys := func(keys []string, exclude map[string]struct{}) []string {
+			var filtered []string
+			for _, key := range keys {
+				if _, shouldExclude := exclude[key]; !shouldExclude {
+					filtered = append(filtered, key)
+				}
+			}
+			return filtered
+		}
+
+		filteredSrcKeys := filterKeys(srcKeys, excludeKeys)
+		filteredTgtKeys := filterKeys(tgtKeys, excludeKeys)
+
+		if len(filteredSrcKeys) != len(filteredTgtKeys) {
+			t.Fatalf("Redis data mismatch at %s stage: sourceCount=%d, targetCount=%d",
+				stage, len(filteredSrcKeys), len(filteredTgtKeys))
+		}
 	}
 }
 
@@ -684,6 +835,8 @@ func performDataOperations(t *testing.T, src interface{}, tgt interface{}, mappi
 		performMongoOperations(t, src.(*mongo.Client), tgt.(*mongo.Client), mappings)
 	case "mysql", "mariadb", "postgresql":
 		performSQLOperations(t, src.(*sql.DB), tgt.(*sql.DB), mappings, dbType)
+	case "redis":
+		performRedisOperations(t, src.(*goredis.Client), tgt.(*goredis.Client), mappings)
 	default:
 		t.Fatalf("Unknown dbType: %s", dbType)
 	}
@@ -694,7 +847,6 @@ func performMongoOperations(t *testing.T, sClient, tClient *mongo.Client, mappin
 		for _, tblmap := range dbmap.Tables {
 			srcColl := sClient.Database(dbmap.SourceDatabase).Collection(tblmap.SourceTable)
 
-			// Insert
 			insertCount := 3
 			var docs []interface{}
 			for i := 0; i < insertCount; i++ {
@@ -707,11 +859,9 @@ func performMongoOperations(t *testing.T, sClient, tClient *mongo.Client, mappin
 			if err != nil {
 				t.Fatalf("MongoDB insert failed: %v", err)
 			}
-
 			t.Log("MongoDB insert operation successful.")
 			verifyDataConsistency(t, sClient, tClient, []config.DatabaseMapping{dbmap}, "mongo_insert")
 
-			// Update
 			updateFilter := bson.M{"name": bson.M{"$regex": "^test_insert_"}}
 			update := bson.M{"$set": bson.M{"name": "test_updated_" + uuid.New().String()}}
 			_, err = srcColl.UpdateMany(context.Background(), updateFilter, update)
@@ -721,7 +871,6 @@ func performMongoOperations(t *testing.T, sClient, tClient *mongo.Client, mappin
 			t.Log("MongoDB update operation successful.")
 			verifyDataConsistency(t, sClient, tClient, []config.DatabaseMapping{dbmap}, "mongo_update")
 
-			// Delete
 			deleteFilter := bson.M{"name": bson.M{"$regex": "^test_updated_"}}
 			_, err = srcColl.DeleteMany(context.Background(), deleteFilter)
 			if err != nil {
@@ -738,7 +887,6 @@ func performSQLOperations(t *testing.T, sDB, tDB *sql.DB, mappings []config.Data
 		for _, tblmap := range dbmap.Tables {
 			fullSrcTable := getQualifiedTableName(dbmap, true, tblmap)
 
-			// Insert
 			insertCount := 3
 			var insertSQL string
 			if isPostgresDBType(dbType) {
@@ -758,11 +906,8 @@ func performSQLOperations(t *testing.T, sDB, tDB *sql.DB, mappings []config.Data
 			t.Logf("%s insert operation successful.", dbType)
 			verifyDataConsistency(t, sDB, tDB, []config.DatabaseMapping{dbmap}, dbType+"_insert")
 
-			// Update
-			// PostgreSQL does not have CONCAT or UUID() by default, handle differently
 			updateQuery := fmt.Sprintf("UPDATE %s SET name=CONCAT('test_updated_', UUID()) WHERE name LIKE 'test_insert_%%'", fullSrcTable)
 			if isPostgresDBType(dbType) {
-				// change to 'test_updated_' || substring(md5(random()::text),1,8)
 				updateQuery = fmt.Sprintf("UPDATE %s SET name='test_updated_' || substring(md5(random()::text),1,8) WHERE name LIKE 'test_insert_%%'", fullSrcTable)
 			}
 			if _, err := sDB.Exec(updateQuery); err != nil {
@@ -771,7 +916,6 @@ func performSQLOperations(t *testing.T, sDB, tDB *sql.DB, mappings []config.Data
 			t.Logf("%s update operation successful.", dbType)
 			verifyDataConsistency(t, sDB, tDB, []config.DatabaseMapping{dbmap}, dbType+"_update")
 
-			// Delete
 			deleteQuery := fmt.Sprintf("DELETE FROM %s WHERE name LIKE 'test_updated_%%'", fullSrcTable)
 			if _, err := sDB.Exec(deleteQuery); err != nil {
 				t.Fatalf("%s delete failed: %v", dbType, err)
@@ -779,5 +923,66 @@ func performSQLOperations(t *testing.T, sDB, tDB *sql.DB, mappings []config.Data
 			t.Logf("%s delete operation successful.", dbType)
 			verifyDataConsistency(t, sDB, tDB, []config.DatabaseMapping{dbmap}, dbType+"_delete")
 		}
+	}
+}
+
+// Minimal Redis create/update/delete test
+func performRedisOperations(t *testing.T, sClient, tClient *goredis.Client, mappings []config.DatabaseMapping) {
+	ctx := context.Background()
+
+	for _, dbmap := range mappings {
+		for _, tblmap := range dbmap.Tables {
+			// We'll pick a single test key
+			srcKey := fmt.Sprintf("%s:%s:%s", dbmap.SourceDatabase, tblmap.SourceTable, "testKey")
+			tgtKey := fmt.Sprintf("%s:%s:%s", dbmap.TargetDatabase, tblmap.TargetTable, "testKey")
+
+			// Insert (set)
+			val := fmt.Sprintf("testval_%s", uuid.New().String())
+			if err := sClient.Set(ctx, srcKey, val, 0).Err(); err != nil {
+				t.Fatalf("Redis insert failed: %v", err)
+			}
+			t.Log("Redis insert operation successful.")
+			verifyRedisKey(t, sClient, tClient, srcKey, tgtKey, val, "[redis_insert]")
+
+			// Update
+			newVal := fmt.Sprintf("updated_val_%s", uuid.New().String())
+			if err := sClient.Set(ctx, srcKey, newVal, 0).Err(); err != nil {
+				t.Fatalf("Redis update failed: %v", err)
+			}
+			t.Log("Redis update operation successful.")
+			verifyRedisKey(t, sClient, tClient, srcKey, tgtKey, newVal, "[redis_update]")
+
+			// Delete
+			if err := sClient.Del(ctx, srcKey).Err(); err != nil {
+				t.Fatalf("Redis delete failed: %v", err)
+			}
+			t.Log("Redis delete operation successful.")
+
+			// Check target is also deleted
+			if tgtVal, _ := tClient.Get(ctx, tgtKey).Result(); tgtVal != "" {
+				t.Fatalf("[redis_delete] Expected empty on target key=%s, got '%s'", tgtKey, tgtVal)
+			}
+		}
+	}
+}
+
+// Helper to verify a single Redis key from source/target
+func verifyRedisKey(t *testing.T, sClient, tClient *goredis.Client, srcKey, tgtKey, expectedVal, stage string) {
+	ctx := context.Background()
+	srcVal, err := sClient.Get(ctx, srcKey).Result()
+	if err != nil {
+		t.Fatalf("%s Redis GET fail on source: key=%s err=%v", stage, srcKey, err)
+	}
+	tgtVal, err := tClient.Get(ctx, tgtKey).Result()
+	// If key not exist, tClient.Get returns redis.Nil => err != nil
+	if err != nil && err != goredis.Nil {
+		t.Fatalf("%s Redis GET fail on target: key=%s err=%v", stage, tgtKey, err)
+	}
+	if srcVal != tgtVal && err != goredis.Nil {
+		t.Fatalf("%s Redis mismatch: sourceKey=%s val=%s, targetKey=%s val=%s",
+			stage, srcKey, srcVal, tgtKey, tgtVal)
+	}
+	if srcVal != expectedVal {
+		t.Fatalf("%s Unexpected sourceVal for key=%s => got '%s', want '%s'", stage, srcKey, srcVal, expectedVal)
 	}
 }

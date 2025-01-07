@@ -54,3 +54,15 @@ sync_configs:
         tables:
           - source_table: "users"
             target_table: "users"
+
+  - type: "redis"
+    enable: true
+    source_connection: "redis://localhost:6379/0"
+    target_connection: "redis://localhost:6379/1"
+    redis_position_path: "/tmp/state/redis_position"
+    mappings:
+      - source_database: "db0"
+        target_database: "db1"
+        tables:
+          - source_table: "source_stream"  # Redis Stream Name
+            target_table: "" 

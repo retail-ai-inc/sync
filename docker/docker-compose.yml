@@ -45,3 +45,20 @@ services:
       - ./resources/mongodb/init.js:/docker-entrypoint-initdb.d/init.js:ro
     ports:
       - "27017:27017"
+
+  redis:
+    image: redis:7.0
+    container_name: redis
+    restart: always
+    # Start Redis with Append Only File enabled. Then run a small init script.
+    command: >
+      /bin/bash -c "
+        redis-server --appendonly yes --appendfsync everysec --notify-keyspace-events KA &
+        sleep 5 &&
+        # Insert initial data into DB0 (source_db simulation)
+        redis-cli -h 127.0.0.1 -p 6379 XADD source_stream * user_id 1 name John email John@mail &&
+        # Keep container running in foreground
+        wait
+      "
+    ports:
+      - "6379:6379"
