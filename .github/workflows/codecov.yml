@@ -77,7 +77,7 @@ jobs:
           echo "All services are up!"
         
       - name: Run tests
-        run: go test -v -race -coverprofile=coverage.txt -covermode=atomic ./...
+        run: go test -race -coverprofile=coverage.txt -covermode=atomic ./...
 
       - name: Upload results to Codecov
         uses: codecov/codecov-action@v5
