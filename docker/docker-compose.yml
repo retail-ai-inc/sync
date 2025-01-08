@@ -1,34 +1,55 @@
 version: '3.9'
 
 services:
-  mysql:
+  mysql_source:
     image: mysql:8.1
     restart: always
     environment:
       MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: source_db
     volumes:
       - ./resources/mysql/init.sql:/docker-entrypoint-initdb.d/init.sql
       - ./resources/mysql/mysql_custom.cnf:/etc/mysql/conf.d/mysql_custom.cnf
     ports:
       - "3306:3306"
 
-  mariadb:
+  mysql_target:
+    image: mysql:8.1
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: target_db
+    ports:
+      - "3308:3306"
+
+  mariadb_source:
     image: mariadb:10.6
     restart: always
     environment:
       MARIADB_ROOT_PASSWORD: root
+      MARIADB_DATABASE: source_db
     volumes:
       - ./resources/mariadb/init.sql:/docker-entrypoint-initdb.d/init.sql
       - ./resources/mariadb/mariadb_custom.cnf:/etc/mysql/conf.d/mariadb_custom.cnf
     ports:
       - "3307:3306"
 
-  postgresql:
+  mariadb_target:
+    image: mariadb:10.6
+    restart: always
+    environment:
+      MARIADB_ROOT_PASSWORD: root
+      MARIADB_DATABASE: target_db
+    ports:
+      - "3309:3306"
+
+  postgresql_source:
     image: postgres:15
     restart: always
     environment:
       POSTGRES_USER: root
       POSTGRES_PASSWORD: root
+      POSTGRES_DB: source_db
       POSTGRES_INITDB_ARGS: "--data-checksums"
     ports:
       - "5432:5432"
@@ -37,7 +58,18 @@ services:
       - ./resources/postgresql/postgresql.conf:/etc/postgresql/postgresql.conf
     command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf"]
 
-  mongodb:
+  postgresql_target:
+    image: postgres:15
+    restart: always
+    environment:
+      POSTGRES_USER: root
+      POSTGRES_PASSWORD: root
+      POSTGRES_DB: target_db
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    ports:
+      - "5433:5432"
+
+  mongodb_source:
     image: mongo:6.0
     restart: always
     command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
@@ -46,11 +78,16 @@ services:
     ports:
       - "27017:27017"
 
-  redis:
-    image: redis:7.0
-    container_name: redis
+  mongodb_target:
+    image: mongo:6.0
     restart: always
-    # Start Redis with Append Only File enabled. Then run a small init script.
+    ports:
+      - "27018:27017"
+
+  redis_source:
+    image: redis:7.0
+    container_name: redis_source
+    restart: always
     command: >
       /bin/bash -c "
         redis-server --appendonly yes --appendfsync everysec --notify-keyspace-events KA &

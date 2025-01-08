@@ -146,6 +146,22 @@ func (s *MariaDBSyncer) doInitialFullSyncIfNeeded(ctx context.Context, c *canal.
 		targetDBName := mapping.TargetDatabase
 
 		for _, tableMap := range mapping.Tables {
+			exists, errExist := s.targetTableExists(ctx, targetDB, targetDBName, tableMap.TargetTable)
+			if errExist != nil {
+				s.logger.Errorf("[MariaDB] Could not check if target table %s.%s exists: %v",
+					targetDBName, tableMap.TargetTable, errExist)
+				continue
+			}
+			if !exists {
+				if errCreate := s.createTargetTableAndIndexes(ctx, sourceDB, targetDB, sourceDBName, tableMap.SourceTable, targetDBName, tableMap.TargetTable); errCreate != nil {
+					s.logger.Errorf("[MariaDB] Failed to create target table or indexes for %s.%s: %v",
+						targetDBName, tableMap.TargetTable, errCreate)
+					continue
+				}
+				s.logger.Infof("[MariaDB] Created table %s.%s from source %s.%s",
+					targetDBName, tableMap.TargetTable, sourceDBName, tableMap.SourceTable)
+			}
+
 			targetCountQuery := fmt.Sprintf("SELECT COUNT(1) FROM %s.%s", targetDBName, tableMap.TargetTable)
 			var count int
 			if err := targetDB.QueryRow(targetCountQuery).Scan(&count); err != nil {
@@ -219,6 +235,73 @@ func (s *MariaDBSyncer) doInitialFullSyncIfNeeded(ctx context.Context, c *canal.
 				sourceDBName, tableMap.SourceTable, targetDBName, tableMap.TargetTable, insertedCount)
 		}
 	}
+}
+
+func (s *MariaDBSyncer) targetTableExists(ctx context.Context, db *sql.DB, dbName, tableName string) (bool, error) {
+	query := `SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=? AND table_name=?`
+	var cnt int
+	err := db.QueryRowContext(ctx, query, dbName, tableName).Scan(&cnt)
+	if err != nil {
+		return false, err
+	}
+	return cnt > 0, nil
+}
+
+// createTargetTableAndIndexes no longer uses "CREATE TABLE ... LIKE".
+// Instead, it executes SHOW CREATE TABLE on the source database, replaces the source database name with the target database name, and then executes it on the target database.
+func (s *MariaDBSyncer) createTargetTableAndIndexes(ctx context.Context,
+	sourceDB, targetDB *sql.DB,
+	srcDBName, srcTableName, tgtDBName, tgtTableName string) error {
+
+	createStmt, seqs, errGen := s.generateCreateTableSQL(ctx, sourceDB, srcDBName, srcTableName, tgtDBName, tgtTableName)
+	if errGen != nil {
+		return fmt.Errorf("generateCreateTableSQL fail: %w", errGen)
+	}
+
+	// If sequences are detected in MariaDB, create them first (usually empty)
+	for _, seqStmt := range seqs {
+		s.logger.Infof("[MariaDB] Creating sequence => %s", seqStmt)
+		if _, err := targetDB.ExecContext(ctx, seqStmt); err != nil {
+			s.logger.Errorf("[MariaDB] Create sequence fail => %v", err)
+		}
+	}
+
+	// 3) Execute the create table statement
+	s.logger.Infof("[MariaDB] Creating table => %s", createStmt)
+	if _, errExec := targetDB.ExecContext(ctx, createStmt); errExec != nil {
+		return fmt.Errorf("create table fail: %w", errExec)
+	}
+	return nil
+}
+
+// generateCreateTableSQL uses SHOW CREATE TABLE to get the create table statement from the source database,
+// replaces the source database name with the target database name, and then returns it.
+func (s *MariaDBSyncer) generateCreateTableSQL(
+	ctx context.Context,
+	sourceDB *sql.DB,
+	srcDBName, srcTableName, tgtDBName, tgtTableName string,
+) (string, []string, error) {
+
+	var tableName, createSQL string
+	showQuery := fmt.Sprintf("SHOW CREATE TABLE `%s`.`%s`", srcDBName, srcTableName)
+	row := sourceDB.QueryRowContext(ctx, showQuery)
+	if err := row.Scan(&tableName, &createSQL); err != nil {
+		return "", nil, fmt.Errorf("SHOW CREATE TABLE fail: %w", err)
+	}
+
+	// Replace CREATE TABLE `source_db`.xxx with CREATE TABLE `target_db`.xxx
+	oldPrefix := fmt.Sprintf("CREATE TABLE `%s`.", srcDBName)
+	newPrefix := fmt.Sprintf("CREATE TABLE `%s`.", tgtDBName)
+	createSQL = strings.Replace(createSQL, oldPrefix, newPrefix, 1)
+
+	// Replace table name part
+	oldTable := fmt.Sprintf("`%s`.`%s`", srcDBName, srcTableName)
+	newTable := fmt.Sprintf("`%s`.`%s`", tgtDBName, tgtTableName)
+	createSQL = strings.Replace(createSQL, oldTable, newTable, 1)
+
+	// Sequences are generally not needed in MariaDB
+	var seqs []string
+	return createSQL, seqs, nil
 }
 
 func (s *MariaDBSyncer) batchInsert(

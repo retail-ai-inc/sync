@@ -4,20 +4,20 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"log"
-	"net/url"
-	"os"
-	"path/filepath"
-	"strconv"
-	"strings"
-	"sync/atomic"
-	"time"
-
 	"github.com/jackc/pglogrepl"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgproto3"
 	_ "github.com/lib/pq"
+	"log"
+	"net/url"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
+	"sync/atomic"
+	"time"
 
 	"github.com/retail-ai-inc/sync/pkg/config"
 	"github.com/sirupsen/logrus"
@@ -119,6 +119,10 @@ func (s *PostgreSQLSyncer) Start(ctx context.Context) {
 		}
 	}
 
+	if err := s.prepareTargetSchema(ctx); err != nil {
+		s.logger.Errorf("[PostgreSQL] prepareTargetSchema error: %v", err)
+	}
+
 	err = s.initialSync(ctx)
 	if err != nil {
 		s.logger.Errorf("[PostgreSQL] Initial sync failed: %v", err)
@@ -159,7 +163,7 @@ func (s *PostgreSQLSyncer) ensureReplicationSlot(ctx context.Context) error {
 	if err != nil {
 		if !strings.Contains(err.Error(), "already exists") {
 			return fmt.Errorf("CreateReplicationSlot failed: %w", err)
-		}else {
+		} else {
 			s.logger.Infof("[PostgreSQL] Replication slot %s already exists. Using XLogPos as start if not loaded.", s.repSlot)
 			if s.currentLsn == 0 {
 				s.currentLsn = info.XLogPos
@@ -176,6 +180,204 @@ func (s *PostgreSQLSyncer) ensureReplicationSlot(ctx context.Context) error {
 		s.currentLsn = lsn
 	}
 	return nil
+}
+
+func (s *PostgreSQLSyncer) prepareTargetSchema(ctx context.Context) error {
+	for _, dbmap := range s.cfg.Mappings {
+		srcSchema := dbmap.SourceSchema
+		if srcSchema == "" {
+			srcSchema = "public"
+		}
+		tgtSchema := dbmap.TargetSchema
+		if tgtSchema == "" {
+			tgtSchema = "public"
+		}
+
+		for _, tbl := range dbmap.Tables {
+			exist, err := s.checkTableExist(ctx, tgtSchema, tbl.TargetTable)
+			if err != nil {
+				s.logger.Errorf("[PostgreSQL] check table exist error: %v", err)
+				continue
+			}
+			if !exist {
+				createSQL, seqs, errGen := s.generateCreateTableSQL(ctx, srcSchema, tbl.SourceTable, tgtSchema, tbl.TargetTable)
+				if errGen != nil {
+					s.logger.Errorf("[PostgreSQL] generateCreateTableSQL fail => %v", errGen)
+					continue
+				}
+
+				for _, seqSQL := range seqs {
+					s.logger.Infof("[PostgreSQL] Creating sequence => %s", seqSQL)
+					if _, errSeq := s.targetDB.ExecContext(ctx, seqSQL); errSeq != nil {
+						s.logger.Errorf("[PostgreSQL] Create sequence fail => %v", errSeq)
+						continue
+					}
+				}
+
+				s.logger.Infof("[PostgreSQL] Creating table => %s", createSQL)
+				if _, err2 := s.targetDB.ExecContext(ctx, createSQL); err2 != nil {
+					s.logger.Errorf("[PostgreSQL] Create table fail => %v", err2)
+					continue
+				}
+				// create index
+				if err3 := s.copyIndexes(ctx, srcSchema, tbl.SourceTable, tgtSchema, tbl.TargetTable); err3 != nil {
+					s.logger.Errorf("[PostgreSQL] copyIndexes fail => %v", err3)
+				} else {
+					s.logger.Infof("[PostgreSQL] Created table and indexes for %s.%s from source %s.%s",
+						tgtSchema, tbl.TargetTable, srcSchema, tbl.SourceTable)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// generateCreateTableSQL queries the table structure from the source database,
+// and generates the CREATE TABLE statement and necessary CREATE SEQUENCE statements
+// that can be executed in the target database.
+func (s *PostgreSQLSyncer) generateCreateTableSQL(
+	ctx context.Context,
+	srcSchema, srcTable, tgtSchema, tgtTable string,
+) (createTableSQL string, sequences []string, err error) {
+
+	query := `
+SELECT 
+    column_name,
+    data_type,
+    is_nullable,
+    column_default,
+    character_maximum_length,
+    numeric_precision,
+    numeric_scale
+FROM information_schema.columns
+WHERE table_schema=$1
+  AND table_name=$2
+ORDER BY ordinal_position
+`
+	rows, errQ := s.sourceConnNormal.Query(ctx, query, srcSchema, srcTable)
+	if errQ != nil {
+		return "", nil, fmt.Errorf("query source table columns fail: %w", errQ)
+	}
+	defer rows.Close()
+
+	var columns []string
+	sequencesMap := make(map[string]bool)
+
+	for rows.Next() {
+		var (
+			columnName, dataType, isNullable   string
+			columnDefault                      sql.NullString
+			charMaxLen, numPrecision, numScale sql.NullInt64
+		)
+		if errScan := rows.Scan(&columnName, &dataType, &isNullable, &columnDefault,
+			&charMaxLen, &numPrecision, &numScale); errScan != nil {
+			return "", nil, fmt.Errorf("scan column info fail: %w", errScan)
+		}
+
+		colDef := fmt.Sprintf(`"%s" %s`, columnName, dataType)
+
+		if (dataType == "character varying" || dataType == "varchar" ||
+			dataType == "character" || dataType == "char") && charMaxLen.Valid {
+			colDef += fmt.Sprintf("(%d)", charMaxLen.Int64)
+		} else if (dataType == "numeric" || dataType == "decimal") && numPrecision.Valid {
+			colDef += fmt.Sprintf("(%d", numPrecision.Int64)
+			if numScale.Valid {
+				colDef += fmt.Sprintf(",%d", numScale.Int64)
+			}
+			colDef += ")"
+		}
+
+		if columnDefault.Valid {
+			colDef += fmt.Sprintf(" DEFAULT %s", columnDefault.String)
+
+			if strings.Contains(columnDefault.String, "nextval(") {
+				seqName := extractSequenceName(columnDefault.String)
+				if seqName != "" {
+					sequencesMap[seqName] = true
+				}
+			}
+		}
+
+		if isNullable == "NO" {
+			colDef += " NOT NULL"
+		}
+
+		columns = append(columns, colDef)
+	}
+	if errClose := rows.Err(); errClose != nil {
+		return "", nil, fmt.Errorf("iterate columns fail: %w", errClose)
+	}
+
+	createSQL := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS "%s"."%s" (
+  %s
+);`, tgtSchema, tgtTable, strings.Join(columns, ",\n  "))
+
+	// CREATE SEQUENCE
+	var seqSlice []string
+	for seqName := range sequencesMap {
+		// Note: You can add INCREMENT BY / OWNED BY as needed, but for minimal fix, just write IF NOT EXISTS
+		seq := fmt.Sprintf(`CREATE SEQUENCE IF NOT EXISTS "%s"`, seqName)
+		seqSlice = append(seqSlice, seq)
+	}
+
+	return createSQL, seqSlice, nil
+}
+
+// extractSequenceName extracts the sequence name from a string like "nextval('users_id_seq'::regclass)"
+func extractSequenceName(defaultVal string) string {
+	// match nextval('xxx'::regclass)
+	reg := regexp.MustCompile(`nextval\('([^']+)'::regclass\)`)
+	matches := reg.FindStringSubmatch(defaultVal)
+	if len(matches) == 2 {
+		return matches[1]
+	}
+	return ""
+}
+
+func (s *PostgreSQLSyncer) checkTableExist(ctx context.Context, schemaName, tableName string) (bool, error) {
+	query := `SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=$1 AND table_name=$2`
+	var cnt int
+	err := s.targetDB.QueryRowContext(ctx, query, schemaName, tableName).Scan(&cnt)
+	if err != nil {
+		return false, err
+	}
+	return cnt > 0, nil
+}
+
+func (s *PostgreSQLSyncer) copyIndexes(ctx context.Context, srcSchema, srcTable, tgtSchema, tgtTable string) error {
+	sqlIdx := `
+SELECT indexname, indexdef
+FROM pg_indexes
+WHERE schemaname=$1 
+  AND tablename=$2
+`
+	rows, err := s.sourceConnNormal.Query(ctx, sqlIdx, srcSchema, srcTable)
+	if err != nil {
+		return fmt.Errorf("query source indexes fail: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var idxName, idxDef string
+		if err2 := rows.Scan(&idxName, &idxDef); err2 != nil {
+			return fmt.Errorf("scan idx fail: %w", err2)
+		}
+		// Replace the index definition's original schema.table with target schema.table
+		newIdxDef := idxDef
+		oldName := fmt.Sprintf("%s.%s", srcSchema, srcTable)
+		newName := fmt.Sprintf("%s.%s", tgtSchema, tgtTable)
+		newIdxDef = strings.ReplaceAll(newIdxDef, oldName, newName)
+		// Also replace the index name to avoid duplicates
+		newIdxName := fmt.Sprintf("%s_%s", tgtTable, idxName)
+		newIdxDef = strings.Replace(newIdxDef, idxName, newIdxName, 1)
+
+		s.logger.Infof("[PostgreSQL] Creating index => %s", newIdxDef)
+		_, errExec := s.targetDB.ExecContext(ctx, newIdxDef)
+		if errExec != nil && !strings.Contains(errExec.Error(), "already exists") {
+			s.logger.Warnf("[PostgreSQL] Create index fail => %v", errExec)
+		}
+	}
+	return rows.Err()
 }
 
 func (s *PostgreSQLSyncer) initialSync(ctx context.Context) error {

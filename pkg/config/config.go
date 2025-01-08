@@ -36,7 +36,7 @@ type SyncConfig struct {
 	PGPositionPath         string            `yaml:"pg_position_path,omitempty"` // New field to store LSN position
 	PGPublicationNames     string            `yaml:"pg_publication_names"`
 
-	RedisPositionPath     string            `yaml:"redis_position_path"`
+	RedisPositionPath string `yaml:"redis_position_path"`
 }
 
 type Config struct {
