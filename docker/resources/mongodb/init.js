@@ -11,4 +11,5 @@ id: 1,
 name: 'John',
 email: 'John@mail'
 });
-  
+
+db.users.createIndex({ email: 1 }, { unique: true });

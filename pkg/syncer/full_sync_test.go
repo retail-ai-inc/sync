@@ -15,13 +15,13 @@ import (
 	goredis "github.com/redis/go-redis/v9"
 	"github.com/retail-ai-inc/sync/pkg/config"
 	"github.com/retail-ai-inc/sync/pkg/logger"
+	"github.com/retail-ai-inc/sync/pkg/state"
 	"github.com/retail-ai-inc/sync/pkg/syncer/mariadb"
 	"github.com/retail-ai-inc/sync/pkg/syncer/mongodb"
 	"github.com/retail-ai-inc/sync/pkg/syncer/mysql"
 	"github.com/retail-ai-inc/sync/pkg/syncer/postgresql"
 	"github.com/retail-ai-inc/sync/pkg/syncer/redis"
 	"github.com/retail-ai-inc/sync/pkg/utils"
-	"github.com/retail-ai-inc/sync/pkg/state"
 	"github.com/sirupsen/logrus"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -34,6 +34,7 @@ import (
 )
 
 const monitorInterval = time.Second * 10
+
 // Added function: get the full "schema.table" or "database.table"
 func getQualifiedTableName(dbmap config.DatabaseMapping, useSource bool, tblmap config.TableMapping) string {
 	if useSource {
@@ -69,7 +70,7 @@ func TestFullSync(t *testing.T) {
 
 	t.Log("TestFullSync start...")
 	time.Sleep(5 * time.Second)
-	
+
 	// Prepare environment
 	ctx, cancel := prepareTestEnvironment(t)
 	defer cancel()
@@ -86,7 +87,6 @@ func TestFullSync(t *testing.T) {
 	// Extract all mappings
 	cfg := config.NewConfig()
 	mongoMapping, mysqlMapping, mariadbMapping, pgMapping, redisMapping := extractAllMappings(cfg)
-
 
 	// Start all syncers
 	log := logger.InitLogger(cfg.LogLevel)
@@ -131,7 +131,7 @@ func TestFullSync(t *testing.T) {
 
 	t.Log("Full synchronization test completed successfully.")
 
-		// ------------------ Begin: Extra coverage checks (Minimal Additions) ------------------
+	// ------------------ Begin: Extra coverage checks (Minimal Additions) ------------------
 	// 1. Simple call to utils.GetCurrentTime to include pkg/utils coverage
 	now := utils.GetCurrentTime()
 	t.Logf("Utils.GetCurrentTime => %v", now)
@@ -306,11 +306,11 @@ func extractAllMappings(cfg *config.Config) (
 	[]config.DatabaseMapping, // redisMapping
 ) {
 	var (
-		mongoMapping  []config.DatabaseMapping
-		mysqlMapping  []config.DatabaseMapping
+		mongoMapping   []config.DatabaseMapping
+		mysqlMapping   []config.DatabaseMapping
 		mariadbMapping []config.DatabaseMapping
-		pgMapping     []config.DatabaseMapping
-		redisMapping  []config.DatabaseMapping
+		pgMapping      []config.DatabaseMapping
+		redisMapping   []config.DatabaseMapping
 	)
 	for _, sc := range cfg.SyncConfigs {
 		if sc.Type == "mongodb" && sc.Enable {

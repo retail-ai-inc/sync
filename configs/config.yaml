@@ -4,8 +4,8 @@ log_level: "info"  # Optional values: "debug", "info", "warn", "error", "fatal",
 sync_configs:
   - type: "mongodb"
     enable: true
-    source_connection: "mongodb://localhost:27017"
-    target_connection: "mongodb://localhost:27017"
+    source_connection: "mongodb://localhost:27017/source_db"
+    target_connection: "mongodb://localhost:27018/target_db"
     mongodb_resume_token_path: "/tmp/state/mongodb_resume_token"
     mappings:
       - source_database: "source_db"
@@ -17,7 +17,7 @@ sync_configs:
   - type: "mysql"
     enable: true
     source_connection: "root:root@tcp(localhost:3306)/source_db"
-    target_connection: "root:root@tcp(localhost:3306)/target_db"
+    target_connection: "root:root@tcp(localhost:3308)/target_db"
     mysql_position_path: "/tmp/state/mysql_position"
     mappings:
       - source_database: "source_db"
@@ -29,7 +29,7 @@ sync_configs:
   - type: "mariadb"
     enable: true
     source_connection: "root:root@tcp(localhost:3307)/source_db"
-    target_connection: "root:root@tcp(localhost:3307)/target_db"
+    target_connection: "root:root@tcp(localhost:3309)/target_db"
     mysql_position_path: "/tmp/state/mariadb_position"
     mappings:
       - source_database: "source_db"
@@ -41,7 +41,7 @@ sync_configs:
   - type: "postgresql"
     enable: true
     source_connection: "postgres://root:root@localhost:5432/source_db?sslmode=disable"
-    target_connection: "postgres://root:root@localhost:5432/target_db?sslmode=disable"
+    target_connection: "postgres://root:root@localhost:5433/target_db?sslmode=disable"
     pg_position_path: "/tmp/state/pg_position"
     pg_replication_slot: "sync_slot"
     pg_plugin: "pgoutput"

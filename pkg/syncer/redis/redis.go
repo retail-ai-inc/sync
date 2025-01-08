@@ -105,10 +105,10 @@ func (r *RedisSyncer) copyKeys(ctx context.Context, keys []string) error {
 
 /*
 doFullCopyOfKey:
-	- Get TTL (if ttl < 0 and not -1, it means the key does not exist or has expired, so do not process)
-	- If ttl == -1, treat it as indefinite => use 0 for RESTORE
-	- DUMP key => if empty string, it means the key does not exist
-	- RESTORE REPLACE on the target side
+  - Get TTL (if ttl < 0 and not -1, it means the key does not exist or has expired, so do not process)
+  - If ttl == -1, treat it as indefinite => use 0 for RESTORE
+  - DUMP key => if empty string, it means the key does not exist
+  - RESTORE REPLACE on the target side
 */
 func (r *RedisSyncer) doFullCopyOfKey(ctx context.Context, key string) error {
 	ttl, err := r.source.TTL(ctx, key).Result()
@@ -209,9 +209,7 @@ func (r *RedisSyncer) handleKeyspaceEvent(ctx context.Context, ch, op string) {
 	}
 }
 
-// 以下与Stream同步相关逻辑不变 (示例略)
-
-// streamSync: 处理自定义场景中 Mappings->StreamName 的增量同步逻辑
+// streamSync: Handle the incremental synchronization logic for Mappings->StreamName in custom scenarios
 func (r *RedisSyncer) streamSync(ctx context.Context) {
 	if len(r.cfg.Mappings) == 0 || len(r.cfg.Mappings[0].Tables) == 0 {
 		r.logger.Warn("[Redis] No mapping found, skip streamSync.")

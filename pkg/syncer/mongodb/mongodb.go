@@ -14,6 +14,7 @@ import (
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
+	"strings"
 )
 
 type bufferedChange struct {
@@ -146,6 +147,16 @@ func (s *MongoDBSyncer) syncDatabase(ctx context.Context, mapping config.Databas
 		targetColl := targetDB.Collection(tableMap.TargetTable)
 		s.logger.Infof("[MongoDB] Processing collection mapping: %s -> %s", tableMap.SourceTable, tableMap.TargetTable)
 
+		// If the target collection does not exist, create it first (MongoDB write operations can automatically create collections, but we explicitly do it here)
+		if err := s.createCollectionIfNotExists(ctx, targetDB, tableMap.TargetTable); err != nil {
+			s.logger.Errorf("[MongoDB] Failed to create target collection %s.%s: %v", mapping.TargetDatabase, tableMap.TargetTable, err)
+			continue
+		}
+
+		if err := s.syncIndexes(ctx, sourceColl, targetColl); err != nil {
+			s.logger.Errorf("[MongoDB] Failed to sync indexes for %s.%s: %v", mapping.TargetDatabase, tableMap.TargetTable, err)
+		}
+
 		err := s.initialSync(ctx, sourceColl, targetColl, mapping.SourceDatabase, mapping.TargetDatabase)
 		if err != nil {
 			s.logger.Errorf("[MongoDB] Initial sync failed for %s.%s: %v", mapping.SourceDatabase, tableMap.SourceTable, err)
@@ -154,6 +165,55 @@ func (s *MongoDBSyncer) syncDatabase(ctx context.Context, mapping config.Databas
 
 		go s.watchChangesForCollection(ctx, sourceColl, targetColl, mapping.SourceDatabase, mapping.TargetDatabase)
 	}
+}
+
+// If the target collection does not exist, create it
+func (s *MongoDBSyncer) createCollectionIfNotExists(ctx context.Context, db *mongo.Database, collName string) error {
+	collections, err := db.ListCollectionNames(ctx, bson.M{"name": collName})
+	if err != nil {
+		return err
+	}
+	if len(collections) == 0 {
+		s.logger.Infof("[MongoDB] Target collection not found, creating => %s.%s", db.Name(), collName)
+		if err2 := db.CreateCollection(ctx, collName); err2 != nil {
+			return err2
+		}
+	}
+	return nil
+}
+
+// Sync indexes: Copy all indexes from sourceColl to targetColl
+func (s *MongoDBSyncer) syncIndexes(ctx context.Context, sourceColl, targetColl *mongo.Collection) error {
+	cursor, err := sourceColl.Indexes().List(ctx)
+	if err != nil {
+		return fmt.Errorf("list source indexes fail: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var indexDocs []bson.M
+	if err = cursor.All(ctx, &indexDocs); err != nil {
+		return fmt.Errorf("read indexes fail: %w", err)
+	}
+
+	for _, idx := range indexDocs {
+		keys, ok := idx["key"].(bson.M)
+		if !ok {
+			continue
+		}
+		indexModel := mongo.IndexModel{
+			Keys: keys,
+		}
+		if uniqueVal, hasUnique := idx["unique"]; hasUnique {
+			if uv, isBool := uniqueVal.(bool); isBool && uv {
+				indexModel.Options = options.Index().SetUnique(true)
+			}
+		}
+		_, errCreate := targetColl.Indexes().CreateOne(ctx, indexModel)
+		if errCreate != nil && !strings.Contains(errCreate.Error(), "already exists") {
+			s.logger.Warnf("[MongoDB] create index fail => %v", errCreate)
+		}
+	}
+	return nil
 }
 
 func (s *MongoDBSyncer) initialSync(ctx context.Context, sourceColl, targetColl *mongo.Collection, sourceDB, targetDB string) error {
