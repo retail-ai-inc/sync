@@ -293,6 +293,10 @@ func (s *PostgreSQLSyncer) startLogicalReplication(ctx context.Context) error {
 			rawMsg, rErr := s.sourceConnRepl.ReceiveMessage(ctx2)
 			cancel()
 			if rErr != nil {
+				if strings.Contains(rErr.Error(), "context canceled") {
+					s.logger.Warnf("[PostgreSQL] context canceled, normal exit: %v", rErr)
+					return nil
+				}
 				if pgconn.Timeout(rErr) {
 					continue
 				}

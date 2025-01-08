@@ -113,13 +113,18 @@ func (s *MariaDBSyncer) Start(ctx context.Context) {
 	}()
 
 	go func() {
+		var runErr error
 		if startPos != nil {
-			err = c.RunFrom(*startPos)
+			runErr = c.RunFrom(*startPos)
 		} else {
-			err = c.Run()
+			runErr = c.Run()
 		}
-		if err != nil {
-			s.logger.Fatalf("[MariaDB] Failed to run canal: %v", err)
+		if runErr != nil {
+			if strings.Contains(runErr.Error(), "context canceled") {
+				s.logger.Warnf("[MariaDB] Canal run context canceled, normal exit: %v", runErr)
+			} else {
+				s.logger.Fatalf("[MariaDB] Failed to run canal: %v", runErr)
+			}
 		}
 	}()
 
