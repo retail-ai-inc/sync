@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	goredis "github.com/redis/go-redis/v9"
 )
 
+// StartRowCountMonitoring periodically logs row counts to console + DB
 func StartRowCountMonitoring(ctx context.Context, cfg *config.Config, log *logrus.Logger, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	go func() {
@@ -34,7 +36,6 @@ func StartRowCountMonitoring(ctx context.Context, cfg *config.Config, log *logru
 		}
 	}()
 }
-
 
 func countAndLogTables(ctx context.Context, sc config.SyncConfig, log *logrus.Logger) {
 	switch strings.ToLower(sc.Type) {
@@ -77,11 +78,10 @@ func countAndLogMySQLOrMariaDB(ctx context.Context, sc config.SyncConfig, log *l
 			srcName := tblMap.SourceTable
 			tgtName := tblMap.TargetTable
 
-			// Source table
 			srcCount := getRowCount(db, fmt.Sprintf("%s.%s", srcDBName, srcName))
-			// Target table
 			tgtCount := getRowCount(db2, fmt.Sprintf("%s.%s", tgtDBName, tgtName))
 
+			// 1) Log output
 			log.WithFields(logrus.Fields{
 				"db_type":        dbType,
 				"src_db":         srcDBName,
@@ -92,6 +92,9 @@ func countAndLogMySQLOrMariaDB(ctx context.Context, sc config.SyncConfig, log *l
 				"tgt_row_count":  tgtCount,
 				"monitor_action": "row_count_minutely",
 			}).Info("row_count_minutely")
+
+			// 2) Insert into database monitoring_log
+			storeMonitoringLog(dbType, srcDBName, srcName, srcCount, tgtDBName, tgtName, tgtCount, "row_count_minutely")
 		}
 	}
 }
@@ -148,6 +151,9 @@ func countAndLogPostgreSQL(ctx context.Context, sc config.SyncConfig, log *logru
 				"tgt_row_count":  tgtCount,
 				"monitor_action": "row_count_minutely",
 			}).Info("row_count_minutely")
+
+			// Insert into database monitoring_log
+			storeMonitoringLog("POSTGRESQL", srcDBName, srcName, srcCount, tgtDBName, tgtName, tgtCount, "row_count_minutely")
 		}
 	}
 }
@@ -218,10 +224,12 @@ func countAndLogMongoDB(ctx context.Context, sc config.SyncConfig, log *logrus.L
 				"tgt_row_count":  tgtCount,
 				"monitor_action": "row_count_minutely",
 			}).Info("row_count_minutely")
+
+			// Insert into database monitoring_log
+			storeMonitoringLog("MONGODB", srcDBName, srcName, int64(srcCount), tgtDBName, tgtName, int64(tgtCount), "row_count_minutely")
 		}
 	}
 }
-
 
 func countAndLogRedis(ctx context.Context, sc config.SyncConfig, log *logrus.Logger) {
 	dbType := strings.ToUpper(sc.Type)
@@ -282,9 +290,13 @@ func countAndLogRedis(ctx context.Context, sc config.SyncConfig, log *logrus.Log
 			"tgt_row_count":  tgtCount,
 			"monitor_action": "row_count_minutely",
 		}).Info("row_count_minutely")
+
+		// Insert into database monitoring_log
+		storeMonitoringLog(dbType, srcDBName, "", int64(srcCount), tgtDBName, "", int64(tgtCount), "row_count_minutely")
 	}
 }
 
+// getRowCount is used by MySQL / MariaDB / PostgreSQL
 func getRowCount(db *sql.DB, table string) int64 {
 	query := fmt.Sprintf("SELECT COUNT(*) FROM %s", table)
 	var cnt int64
@@ -292,4 +304,46 @@ func getRowCount(db *sql.DB, table string) int64 {
 		return -1
 	}
 	return cnt
+}
+
+// ------------------------------------------------------------------
+// Added function: Insert monitoring results into the monitoring_log table
+func storeMonitoringLog(dbType, srcDB, srcTable string, srcCount int64,
+	tgtDB, tgtTable string, tgtCount int64, action string) {
+
+	// Preferably read the DB path from environment variables
+	dbPath := os.Getenv("SYNC_DB_PATH")
+	if dbPath == "" {
+		dbPath = "sync.db"
+	}
+
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		// If it fails, just ignore
+		return
+	}
+	defer db.Close()
+
+	const insSQL = `
+INSERT INTO monitoring_log (
+	db_type,
+	src_db,
+	src_table,
+	src_row_count,
+	tgt_db,
+	tgt_table,
+	tgt_row_count,
+	monitor_action
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+`
+	_, _ = db.Exec(insSQL,
+		dbType,
+		srcDB,
+		srcTable,
+		srcCount,
+		tgtDB,
+		tgtTable,
+		tgtCount,
+		action,
+	)
 }

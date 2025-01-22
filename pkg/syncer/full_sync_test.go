@@ -5,8 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"math/rand"
-	"os"
-	"path/filepath"
+    "os"
 	"strconv"
 	"testing"
 	"time"
@@ -71,7 +70,7 @@ func TestFullSync(t *testing.T) {
 	t.Log("TestFullSync start...")
 	time.Sleep(5 * time.Second)
 
-	// Prepare environment
+	// Prepare environment (no longer sets config.yaml path; just uses sqlite-based config)
 	ctx, cancel := prepareTestEnvironment(t)
 	defer cancel()
 
@@ -81,11 +80,12 @@ func TestFullSync(t *testing.T) {
 		mysqlSourceDB, mysqlTargetDB,
 		mariaDBSourceDB, mariaDBTargetDB,
 		pgSourceDB, pgTargetDB,
-		redisSourceClient, redisTargetClient :=
-		connectAllDatabases(t)
+		redisSourceClient, redisTargetClient := connectAllDatabases(t)
 
 	// Extract all mappings
 	cfg := config.NewConfig()
+	t.Logf("Raw SyncConfigs: %+v\n", cfg.SyncConfigs)
+
 	mongoMapping, mysqlMapping, mariadbMapping, pgMapping, redisMapping := extractAllMappings(cfg)
 
 	// Start all syncers
@@ -156,23 +156,16 @@ func TestFullSync(t *testing.T) {
 	// ------------------ End: Extra coverage checks ------------------
 }
 
-// 1. Read config, initialize Logger, and set environment
+// prepareTestEnvironment: minimal approach, no config.yaml references
 func prepareTestEnvironment(t *testing.T) (context.Context, context.CancelFunc) {
-	projectRoot := "../../"
-	configPath := filepath.Join(projectRoot, "configs/config.yaml")
-	os.Setenv("CONFIG_PATH", configPath)
+    // Specify the DB path for testing
+    os.Setenv("SYNC_DB_PATH", "../../sync.db")
 
 	ctx, cancel := context.WithCancel(context.Background())
-
-	// Cleanup after test
-	t.Cleanup(func() {
-		os.Unsetenv("CONFIG_PATH")
-	})
-
 	return ctx, cancel
 }
 
-// 2. Connect all databases and determine which are enabled
+// Connect all databases and determine which are enabled
 func connectAllDatabases(t *testing.T) (
 	bool, bool, bool, bool, bool, // mongoEnabled, mysqlEnabled, mariaDBEnabled, postgresEnabled, redisEnabled
 	*mongo.Client, *mongo.Client,
@@ -206,10 +199,9 @@ func connectAllDatabases(t *testing.T) (
 	}
 
 	if !mongoEnabled && !mysqlEnabled && !mariaDBEnabled && !postgresEnabled && !redisEnabled {
-		t.Skip("No enabled DB sync config found (MongoDB/MySQL/MariaDB/PostgreSQL/Redis) in config.yaml, skipping test.")
+		t.Skip("No enabled DB sync config found in the sqlite config, skipping test.")
 	}
 
-	// Initialize return objects
 	var (
 		mongoSourceClient *mongo.Client
 		mongoTargetClient *mongo.Client
@@ -297,7 +289,7 @@ func connectAllDatabases(t *testing.T) (
 		redisSourceClient, redisTargetClient
 }
 
-// 3. Extract all database mappings
+// Extract all database mappings
 func extractAllMappings(cfg *config.Config) (
 	[]config.DatabaseMapping,
 	[]config.DatabaseMapping,
@@ -332,7 +324,7 @@ func extractAllMappings(cfg *config.Config) (
 	return mongoMapping, mysqlMapping, mariadbMapping, pgMapping, redisMapping
 }
 
-// 4. Start all Syncers
+// Start all Syncers
 func startAllSyncers(ctx context.Context, cfg *config.Config, log *logrus.Logger) {
 	for _, sc := range cfg.SyncConfigs {
 		if !sc.Enable {
@@ -340,25 +332,25 @@ func startAllSyncers(ctx context.Context, cfg *config.Config, log *logrus.Logger
 		}
 		switch sc.Type {
 		case "mongodb":
-			syncer := mongodb.NewMongoDBSyncer(sc, log)
-			go syncer.Start(ctx)
+			s := mongodb.NewMongoDBSyncer(sc, log)
+			go s.Start(ctx)
 		case "mysql":
-			syncer := mysql.NewMySQLSyncer(sc, log)
-			go syncer.Start(ctx)
+			s := mysql.NewMySQLSyncer(sc, log)
+			go s.Start(ctx)
 		case "mariadb":
-			syncer := mariadb.NewMariaDBSyncer(sc, log)
-			go syncer.Start(ctx)
+			s := mariadb.NewMariaDBSyncer(sc, log)
+			go s.Start(ctx)
 		case "postgresql":
-			syncer := postgresql.NewPostgreSQLSyncer(sc, log)
-			go syncer.Start(ctx)
+			s := postgresql.NewPostgreSQLSyncer(sc, log)
+			go s.Start(ctx)
 		case "redis":
-			syncer := redis.NewRedisSyncer(sc, log)
-			go syncer.Start(ctx)
+			s := redis.NewRedisSyncer(sc, log)
+			go s.Start(ctx)
 		}
 	}
 }
 
-// 5. Insert initial data
+// Insert initial data
 func insertInitialData(
 	t *testing.T,
 	mongoEnabled, mysqlEnabled, mariaDBEnabled, postgresEnabled, redisEnabled bool,
@@ -390,7 +382,7 @@ func insertInitialData(
 	}
 }
 
-// 6. Verify initial data synchronization
+// Verify initial data synchronization
 func verifyInitialDataConsistency(
 	t *testing.T,
 	mongoEnabled, mysqlEnabled, mariaDBEnabled, postgresEnabled, redisEnabled bool,
@@ -421,7 +413,7 @@ func verifyInitialDataConsistency(
 	}
 }
 
-// 7. Create/Update/Delete operation tests
+// Create/Update/Delete operation tests
 func performCRUDOperations(
 	t *testing.T,
 	mongoEnabled, mysqlEnabled, mariaDBEnabled, postgresEnabled, redisEnabled bool,
@@ -463,7 +455,7 @@ func connectMongoDB(cfg *config.Config) (*mongo.Client, *mongo.Client, error) {
 		}
 	}
 	if mongoSourceURI == "" || mongoTargetURI == "" {
-		return nil, nil, fmt.Errorf("no enabled MongoDB sync config found in config.yaml")
+		return nil, nil, fmt.Errorf("no enabled MongoDB sync config found in sqlite config")
 	}
 
 	sourceClient, err := mongo.Connect(context.Background(), options.Client().ApplyURI(mongoSourceURI))
@@ -485,6 +477,7 @@ func connectMongoDB(cfg *config.Config) (*mongo.Client, *mongo.Client, error) {
 	return sourceClient, targetClient, nil
 }
 
+// Connect MySQL / MariaDB
 func connectSQLDB(cfg *config.Config, dbType string) (*sql.DB, *sql.DB, error) {
 	var sourceDSN, targetDSN string
 	for _, sc := range cfg.SyncConfigs {
@@ -495,7 +488,7 @@ func connectSQLDB(cfg *config.Config, dbType string) (*sql.DB, *sql.DB, error) {
 		}
 	}
 	if sourceDSN == "" || targetDSN == "" {
-		return nil, nil, fmt.Errorf("no enabled %s sync config found in config.yaml", dbType)
+		return nil, nil, fmt.Errorf("no enabled %s sync config found in sqlite config", dbType)
 	}
 
 	srcDB, err := sql.Open("mysql", sourceDSN)
@@ -517,6 +510,7 @@ func connectSQLDB(cfg *config.Config, dbType string) (*sql.DB, *sql.DB, error) {
 	return srcDB, tgtDB, nil
 }
 
+// Connect PostgreSQL
 func connectPGDB(cfg *config.Config) (*sql.DB, *sql.DB, error) {
 	var pgSourceDSN, pgTargetDSN string
 	for _, sc := range cfg.SyncConfigs {
@@ -527,7 +521,7 @@ func connectPGDB(cfg *config.Config) (*sql.DB, *sql.DB, error) {
 		}
 	}
 	if pgSourceDSN == "" || pgTargetDSN == "" {
-		return nil, nil, fmt.Errorf("no enabled postgresql sync config found in config.yaml")
+		return nil, nil, fmt.Errorf("no enabled postgresql sync config found in sqlite config")
 	}
 
 	srcDB, err := sql.Open("postgres", pgSourceDSN)
@@ -560,7 +554,7 @@ func connectRedis(cfg *config.Config) (*goredis.Client, *goredis.Client, error) 
 		}
 	}
 	if redisSourceDSN == "" || redisTargetDSN == "" {
-		return nil, nil, fmt.Errorf("no enabled redis sync config found in config.yaml")
+		return nil, nil, fmt.Errorf("no enabled redis sync config found in sqlite config")
 	}
 
 	sourceOpt, err := goredis.ParseURL(redisSourceDSN)
@@ -585,7 +579,7 @@ func connectRedis(cfg *config.Config) (*goredis.Client, *goredis.Client, error) 
 	return sourceClient, targetClient, nil
 }
 
-// Insert initial data
+// Insert initial data for each DB type
 func prepareInitialData(t *testing.T, src interface{}, mappings []config.DatabaseMapping, docName string, count int, dbType string) {
 	switch s := src.(type) {
 	case *mongo.Client:
@@ -636,8 +630,6 @@ func prepareInitialData(t *testing.T, src interface{}, mappings []config.Databas
 	case *goredis.Client:
 		// Redis insertion logic: simply set some string keys
 		for _, dbmap := range mappings {
-			// We assume each "table" is actually a Redis key pattern; to keep it simple, let's treat
-			// SourceTable as a stream name or prefix. Here we just create normal string keys:
 			for _, tblmap := range dbmap.Tables {
 				prefix := fmt.Sprintf("%s:%s", dbmap.SourceDatabase, tblmap.SourceTable)
 				for i := 0; i < count; i++ {
@@ -649,7 +641,6 @@ func prepareInitialData(t *testing.T, src interface{}, mappings []config.Databas
 				}
 			}
 		}
-
 	}
 }
 

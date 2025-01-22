@@ -1,77 +1,251 @@
 package config
 
 import (
+	"database/sql"
 	"log"
 	"os"
-	"path/filepath"
 
 	"github.com/sirupsen/logrus"
-	"gopkg.in/yaml.v2"
+	_ "github.com/mattn/go-sqlite3" // SQLite driver
 )
 
 type TableMapping struct {
-	SourceTable string `yaml:"source_table"`
-	TargetTable string `yaml:"target_table"`
+	SourceTable string
+	TargetTable string
 }
 
 type DatabaseMapping struct {
-	SourceDatabase string         `yaml:"source_database"`
-	SourceSchema   string         `yaml:"source_schema,omitempty"`
-	TargetDatabase string         `yaml:"target_database"`
-	TargetSchema   string         `yaml:"target_schema,omitempty"`
-	Tables         []TableMapping `yaml:"tables"`
+	SourceDatabase string
+	SourceSchema   string
+	TargetDatabase string
+	TargetSchema   string
+	Tables         []TableMapping
 }
 
 type SyncConfig struct {
-	Type                   string            `yaml:"type"`
-	Enable                 bool              `yaml:"enable"`
-	SourceConnection       string            `yaml:"source_connection"`
-	TargetConnection       string            `yaml:"target_connection"`
-	Mappings               []DatabaseMapping `yaml:"mappings"`
-	DumpExecutionPath      string            `yaml:"dump_execution_path,omitempty"`
-	MySQLPositionPath      string            `yaml:"mysql_position_path,omitempty"`
-	MongoDBResumeTokenPath string            `yaml:"mongodb_resume_token_path,omitempty"`
-	PGReplicationSlotName  string            `yaml:"pg_replication_slot,omitempty"`
-	PGPluginName           string            `yaml:"pg_plugin,omitempty"`
-	PGPositionPath         string            `yaml:"pg_position_path,omitempty"` // New field to store LSN position
-	PGPublicationNames     string            `yaml:"pg_publication_names"`
-
-	RedisPositionPath string `yaml:"redis_position_path"`
+	Type                   string
+	Enable                 bool
+	SourceConnection       string
+	TargetConnection       string
+	Mappings               []DatabaseMapping
+	DumpExecutionPath      string
+	MySQLPositionPath      string
+	MongoDBResumeTokenPath string
+	PGReplicationSlotName  string
+	PGPluginName           string
+	PGPositionPath         string
+	PGPublicationNames     string
+	RedisPositionPath      string
 }
 
 type Config struct {
-	EnableTableRowCountMonitoring bool           `yaml:"enable_table_row_count_monitoring,omitempty"`
-	LogLevel                      string         `yaml:"log_level,omitempty"`
-	SyncConfigs                   []SyncConfig   `yaml:"sync_configs"`
-	Logger                        *logrus.Logger `yaml:"-"`
+	EnableTableRowCountMonitoring bool
+	LogLevel                      string
+	SyncConfigs                   []SyncConfig
+	Logger                        *logrus.Logger
 }
 
+// NewConfig loads the configuration using SQLite
 func NewConfig() *Config {
-	cwd, err := os.Getwd()
+	// Preferably read the DB path from environment variables
+	dbPath := os.Getenv("SYNC_DB_PATH")
+	if dbPath == "" {
+		dbPath = "sync.db"
+	}
+	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
-		log.Fatalf("Failed to get working directory: %v", err)
+		log.Fatalf("Failed to open SQLite config DB: %v", err)
 	}
-	log.Printf("Current working directory: %s", cwd)
-
-	configPath := os.Getenv("CONFIG_PATH")
-	if configPath == "" {
-		configPath = filepath.Join(cwd, "configs/config.yaml")
+	if err := db.Ping(); err != nil {
+		log.Fatalf("Failed to ping SQLite config DB: %v", err)
 	}
 
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		log.Fatalf("Failed to read configuration file: %v", err)
+	EnsureSchema(db)
+
+	// Load global configuration
+	globalCfg := loadGlobalConfig(db)
+
+	// Load sync_configs
+	syncConfigs := loadSyncConfigs(db)
+
+	cfg := &Config{
+		EnableTableRowCountMonitoring: globalCfg.EnableTableRowCountMonitoring,
+		LogLevel:                      globalCfg.LogLevel,
+		SyncConfigs:                   syncConfigs,
+		Logger:                        logrus.New(),
 	}
 
-	var cfg Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		log.Fatalf("Failed to parse configuration file: %v", err)
-	}
-
-	cfg.Logger = logrus.New()
-	return &cfg
+	_ = db.Close()
+	return cfg
 }
 
+// globalConfig is used to store config_global
+type globalConfig struct {
+	EnableTableRowCountMonitoring bool
+	LogLevel                      string
+}
+
+func loadGlobalConfig(db *sql.DB) globalConfig {
+	var (
+		enableMonitoring int
+		logLevel         string
+	)
+	err := db.QueryRow(`
+SELECT enable_table_row_count_monitoring, log_level
+FROM config_global
+WHERE id=1`).Scan(&enableMonitoring, &logLevel)
+	if err != nil {
+		log.Fatalf("Failed to load global config: %v", err)
+	}
+	return globalConfig{
+		EnableTableRowCountMonitoring: (enableMonitoring != 0),
+		LogLevel:                      logLevel,
+	}
+}
+
+func loadSyncConfigs(db *sql.DB) []SyncConfig {
+	rows, err := db.Query(`SELECT
+       id,
+       type,
+       enable,
+       source_connection,
+       target_connection,
+       dump_execution_path,
+       mysql_position_path,
+       mongodb_resume_token_path,
+       pg_replication_slot,
+       pg_plugin,
+       pg_position_path,
+       pg_publication_names,
+       redis_position_path
+     FROM sync_configs`)
+	if err != nil {
+		log.Fatalf("Failed to query sync_configs: %v", err)
+	}
+	defer rows.Close()
+
+	var result []SyncConfig
+	for rows.Next() {
+		var (
+			id                  int
+			sType               string
+			enableInt           int
+			srcConn             string
+			tgtConn             string
+			dumpExecPath        sql.NullString
+			mysqlPosPath        sql.NullString
+			mongoResTokenPath   sql.NullString
+			pgReplSlot          sql.NullString
+			pgPlugin            sql.NullString
+			pgPosPath           sql.NullString
+			pgPubNames          sql.NullString
+			redisPosPath        sql.NullString
+		)
+		if err2 := rows.Scan(
+			&id,
+			&sType,
+			&enableInt,
+			&srcConn,
+			&tgtConn,
+			&dumpExecPath,
+			&mysqlPosPath,
+			&mongoResTokenPath,
+			&pgReplSlot,
+			&pgPlugin,
+			&pgPosPath,
+			&pgPubNames,
+			&redisPosPath,
+		); err2 != nil {
+			log.Fatalf("Failed scanning sync_config row: %v", err2)
+		}
+
+		newCfg := SyncConfig{
+			Type:                   sType,
+			Enable:                 (enableInt != 0),
+			SourceConnection:       srcConn,
+			TargetConnection:       tgtConn,
+			DumpExecutionPath:      dumpExecPath.String,
+			MySQLPositionPath:      mysqlPosPath.String,
+			MongoDBResumeTokenPath: mongoResTokenPath.String,
+			PGReplicationSlotName:  pgReplSlot.String,
+			PGPluginName:           pgPlugin.String,
+			PGPositionPath:         pgPosPath.String,
+			PGPublicationNames:     pgPubNames.String,
+			RedisPositionPath:      redisPosPath.String,
+		}
+		newCfg.Mappings = loadDatabaseMappings(db, id)
+		result = append(result, newCfg)
+	}
+	if err := rows.Err(); err != nil {
+		log.Fatalf("sync_configs rows iteration error: %v", err)
+	}
+	return result
+}
+
+func loadDatabaseMappings(db *sql.DB, syncConfigID int) []DatabaseMapping {
+	rows, err := db.Query(`
+	  SELECT id, source_database, COALESCE(source_schema,''), target_database, COALESCE(target_schema,'')
+	  FROM database_mappings
+	  WHERE sync_config_id=?
+	`, syncConfigID)
+	if err != nil {
+		log.Fatalf("Failed to query database_mappings for sync_config_id=%d: %v", syncConfigID, err)
+	}
+	defer rows.Close()
+
+	var dbMaps []DatabaseMapping
+	for rows.Next() {
+		var (
+			mID       int
+			srcDB     string
+			srcSchema string
+			tgtDB     string
+			tgtSchema string
+		)
+		if err2 := rows.Scan(&mID, &srcDB, &srcSchema, &tgtDB, &tgtSchema); err2 != nil {
+			log.Fatalf("Failed scanning database_mappings row: %v", err2)
+		}
+		dbMap := DatabaseMapping{
+			SourceDatabase: srcDB,
+			SourceSchema:   srcSchema,
+			TargetDatabase: tgtDB,
+			TargetSchema:   tgtSchema,
+		}
+		dbMap.Tables = loadTableMappings(db, mID)
+		dbMaps = append(dbMaps, dbMap)
+	}
+	return dbMaps
+}
+
+func loadTableMappings(db *sql.DB, dbMappingID int) []TableMapping {
+	rows, err := db.Query(`
+	  SELECT source_table, target_table
+	  FROM table_mappings
+	  WHERE database_mapping_id=?
+	`, dbMappingID)
+	if err != nil {
+		log.Fatalf("Failed to query table_mappings for dbMappingID=%d: %v", dbMappingID, err)
+	}
+	defer rows.Close()
+
+	var tblMaps []TableMapping
+	for rows.Next() {
+		var (
+			srcTable string
+			tgtTable string
+		)
+		if err2 := rows.Scan(&srcTable, &tgtTable); err2 != nil {
+			log.Fatalf("Failed scanning table_mappings row: %v", err2)
+		}
+		tblMaps = append(tblMaps, TableMapping{
+			SourceTable: srcTable,
+			TargetTable: tgtTable,
+		})
+	}
+	return tblMaps
+}
+
+// For PostgreSQL Syncer
 func (s *SyncConfig) PGReplicationSlot() string {
 	return s.PGReplicationSlotName
 }
