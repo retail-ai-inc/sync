@@ -97,15 +97,39 @@ func main() {
 	// Serving static files from ui/dist
 	router.Handle("/*", http.StripPrefix("/", http.FileServer(http.Dir("ui/dist"))))
 
-	// Start server on port 8080
+	// Define HTTP server
+	server := &http.Server{
+		Addr:    ":8080",
+		Handler: router,
+	}
+
+	// Start HTTP server in a separate goroutine
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
 	logger.Log.Info("Starting server on :8080")
-	http.ListenAndServe(":8080", router)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Errorf("HTTP server ListenAndServe error: %v", err)
+			cancel()
+		}
+	}()
 
-	// Wait for all sync to complete
-	wg.Wait()
-	logger.Log.Info("All synchronization tasks have completed.")
-
-	// Wait for program to end
+	// Wait for context cancellation
 	<-ctx.Done()
-	logger.Log.Info("Program has exited")
+
+	// Gracefully shutdown HTTP server
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		log.Errorf("HTTP server Shutdown error: %v", err)
+	} else {
+		log.Info("HTTP server gracefully stopped")
+	}
+
+	// Wait for all goroutines to finish
+	wg.Wait()
+	log.Info("All synchronization tasks have completed.")
+
+	// Final log
+	log.Info("Program has exited")
 }

@@ -69,6 +69,13 @@ func EnsureSchema(db *sql.DB) {
         sync_config_id INTEGER -- New field
     );
     
+    CREATE TABLE IF NOT EXISTS sync_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        log_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        level TEXT,
+        message TEXT
+    );
+
     -- Ensure there is a default config_global record
     INSERT INTO config_global (id, enable_table_row_count_monitoring, log_level)
     SELECT 1, 0, 'info'

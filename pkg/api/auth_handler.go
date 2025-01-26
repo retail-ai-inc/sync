@@ -4,8 +4,6 @@ package api
 import (
 	"encoding/json"
 	"net/http"
-
-	"github.com/sirupsen/logrus"
 )
 
 // Store user login status and permissions in memory. For demonstration purposes only.
@@ -33,11 +31,8 @@ func AuthLoginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	logrus.Infof("AuthLoginHandler => username=%s, password=%s", req.Username, req.Password)
-
-	// 简单示例：假设只有 admin/admin 为正确账号
 	if req.Username == "admin" && req.Password == "admin" {
-		access = "admin" // 表示当前用户已登录，权限=admin
+		access = "admin" // Indicates that the current user is logged in with admin privileges
 		resp := map[string]interface{}{
 			"status":           "ok",
 			"type":             req.Type,
@@ -57,9 +52,9 @@ func AuthLoginHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// AuthCurrentUserHandler 处理 GET /api/currentUser
+// AuthCurrentUserHandler  GET /api/currentUser
 func AuthCurrentUserHandler(w http.ResponseWriter, r *http.Request) {
-	// 若未登录，返回401
+	// If not logged in, return 401
 	if access == "" || access == "guest" {
 		w.WriteHeader(http.StatusUnauthorized)
 		resp := map[string]interface{}{
@@ -67,14 +62,14 @@ func AuthCurrentUserHandler(w http.ResponseWriter, r *http.Request) {
 				"isLogin": false,
 			},
 			"errorCode":    "401",
-			"errorMessage": "请先登录！",
+			"errorMessage": "Please log in first!",
 			"success":      true,
 		}
 		_ = json.NewEncoder(w).Encode(resp)
 		return
 	}
 
-	// 已登录 => 返回 mock 用户信息
+	// Logged in => return mock user information
 	resp := map[string]interface{}{
 		"success": true,
 		"data": map[string]interface{}{
@@ -89,9 +84,9 @@ func AuthCurrentUserHandler(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-// AuthLogoutHandler 处理 POST /api/logout
+// AuthLogoutHandler POST /api/logout
 func AuthLogoutHandler(w http.ResponseWriter, r *http.Request) {
-	// 清除登录状态
+	// Clear login status
 	access = ""
 	resp := map[string]interface{}{
 		"data":    map[string]interface{}{},
