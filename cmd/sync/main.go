@@ -14,6 +14,9 @@ import (
 	"github.com/retail-ai-inc/sync/pkg/logger"
 	"github.com/retail-ai-inc/sync/pkg/syncer"
 	"github.com/retail-ai-inc/sync/pkg/utils"
+	"net/http"
+	"github.com/go-chi/chi/v5"
+	"github.com/retail-ai-inc/sync/pkg/api"
 )
 
 // Interval for row count monitoring every minute
@@ -85,6 +88,18 @@ func main() {
 	if cfg.EnableTableRowCountMonitoring {
 		utils.StartRowCountMonitoring(ctx, cfg, log, monitorInterval)
 	}
+
+	// cmd/sync/main.go
+	router := chi.NewRouter()
+	router.Mount("/api", api.NewRouter())
+
+	// Serve static files (index.html, etc.) from ui/dist folder
+	// Serving static files from ui/dist
+	router.Handle("/*", http.StripPrefix("/", http.FileServer(http.Dir("ui/dist"))))
+
+	// Start server on port 8080
+	logger.Log.Info("Starting server on :8080")
+	http.ListenAndServe(":8080", router)
 
 	// Wait for all sync to complete
 	wg.Wait()

@@ -3,6 +3,7 @@ module github.com/retail-ai-inc/sync
 go 1.22.5
 
 require (
+	github.com/go-chi/chi/v5 v5.2.0
 	github.com/go-mysql-org/go-mysql v1.10.0
 	github.com/go-sql-driver/mysql v1.8.1
 	github.com/google/uuid v1.3.0

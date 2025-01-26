@@ -23,6 +23,7 @@ type DatabaseMapping struct {
 }
 
 type SyncConfig struct {
+	ID 					   int
 	Type                   string
 	Enable                 bool
 	SourceConnection       string
@@ -160,6 +161,7 @@ func loadSyncConfigs(db *sql.DB) []SyncConfig {
 		}
 
 		newCfg := SyncConfig{
+			ID:                     id,
 			Type:                   sType,
 			Enable:                 (enableInt != 0),
 			SourceConnection:       srcConn,

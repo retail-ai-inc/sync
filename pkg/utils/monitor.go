@@ -10,10 +10,9 @@ import (
 
 	"github.com/retail-ai-inc/sync/pkg/config"
 	"github.com/sirupsen/logrus"
+	goredis "github.com/redis/go-redis/v9"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
-
-	goredis "github.com/redis/go-redis/v9"
 )
 
 // StartRowCountMonitoring periodically logs row counts to console + DB
@@ -93,8 +92,8 @@ func countAndLogMySQLOrMariaDB(ctx context.Context, sc config.SyncConfig, log *l
 				"monitor_action": "row_count_minutely",
 			}).Info("row_count_minutely")
 
-			// 2) Insert into database monitoring_log
-			storeMonitoringLog(dbType, srcDBName, srcName, srcCount, tgtDBName, tgtName, tgtCount, "row_count_minutely")
+			// 2) Insert into database monitoring_log with sync_config_id
+			storeMonitoringLog(sc.ID, dbType, srcDBName, srcName, srcCount, tgtDBName, tgtName, tgtCount, "row_count_minutely")
 		}
 	}
 }
@@ -152,8 +151,8 @@ func countAndLogPostgreSQL(ctx context.Context, sc config.SyncConfig, log *logru
 				"monitor_action": "row_count_minutely",
 			}).Info("row_count_minutely")
 
-			// Insert into database monitoring_log
-			storeMonitoringLog("POSTGRESQL", srcDBName, srcName, srcCount, tgtDBName, tgtName, tgtCount, "row_count_minutely")
+			// Insert into database monitoring_log with sync_config_id
+			storeMonitoringLog(sc.ID, "POSTGRESQL", srcDBName, srcName, srcCount, tgtDBName, tgtName, tgtCount, "row_count_minutely")
 		}
 	}
 }
@@ -225,8 +224,8 @@ func countAndLogMongoDB(ctx context.Context, sc config.SyncConfig, log *logrus.L
 				"monitor_action": "row_count_minutely",
 			}).Info("row_count_minutely")
 
-			// Insert into database monitoring_log
-			storeMonitoringLog("MONGODB", srcDBName, srcName, int64(srcCount), tgtDBName, tgtName, int64(tgtCount), "row_count_minutely")
+			// Insert into database monitoring_log with sync_config_id
+			storeMonitoringLog(sc.ID, "MONGODB", srcDBName, srcName, srcCount, tgtDBName, tgtName, tgtCount, "row_count_minutely")
 		}
 	}
 }
@@ -291,8 +290,8 @@ func countAndLogRedis(ctx context.Context, sc config.SyncConfig, log *logrus.Log
 			"monitor_action": "row_count_minutely",
 		}).Info("row_count_minutely")
 
-		// Insert into database monitoring_log
-		storeMonitoringLog(dbType, srcDBName, "", int64(srcCount), tgtDBName, "", int64(tgtCount), "row_count_minutely")
+		// Insert into database monitoring_log with sync_config_id
+		storeMonitoringLog(sc.ID, dbType, srcDBName, "", srcCount, tgtDBName, "", tgtCount, "row_count_minutely")
 	}
 }
 
@@ -308,7 +307,7 @@ func getRowCount(db *sql.DB, table string) int64 {
 
 // ------------------------------------------------------------------
 // Added function: Insert monitoring results into the monitoring_log table
-func storeMonitoringLog(dbType, srcDB, srcTable string, srcCount int64,
+func storeMonitoringLog(syncConfigID int, dbType, srcDB, srcTable string, srcCount int64,
 	tgtDB, tgtTable string, tgtCount int64, action string) {
 
 	// Preferably read the DB path from environment variables
@@ -320,12 +319,14 @@ func storeMonitoringLog(dbType, srcDB, srcTable string, srcCount int64,
 	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
 		// If it fails, just ignore
+		logrus.Errorf("Failed to open local DB for monitoring_log: %v", err)
 		return
 	}
 	defer db.Close()
 
 	const insSQL = `
 INSERT INTO monitoring_log (
+	sync_config_id,
 	db_type,
 	src_db,
 	src_table,
@@ -334,9 +335,10 @@ INSERT INTO monitoring_log (
 	tgt_table,
 	tgt_row_count,
 	monitor_action
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
 `
-	_, _ = db.Exec(insSQL,
+	_, err = db.Exec(insSQL,
+		syncConfigID,
 		dbType,
 		srcDB,
 		srcTable,
@@ -346,4 +348,7 @@ INSERT INTO monitoring_log (
 		tgtCount,
 		action,
 	)
+	if err != nil {
+		logrus.Errorf("Failed to insert into monitoring_log: %v", err)
+	}
 }
