@@ -167,7 +167,7 @@ func TestFullSync(t *testing.T) {
 // prepareTestEnvironment: minimal approach, no config.yaml references
 func prepareTestEnvironment(t *testing.T) (context.Context, context.CancelFunc) {
     // Specify the DB path for testing
-    os.Setenv("SYNC_DB_PATH", "../../sync.db")
+    os.Setenv("SYNC_DB_PATH", "sync.db")
 
     // Remove any old replication state so we don't reuse outdated binlog offsets
     _ = os.RemoveAll("/tmp/state")
@@ -1034,7 +1034,7 @@ func TestExtendedCoverage(t *testing.T) {
 	})
 
 	t.Run("TestConfigAndSchema", func(t *testing.T) {
-		os.Setenv("SYNC_DB_PATH", "../../sync.db")
+		os.Setenv("SYNC_DB_PATH", "sync.db")
 
 		cfg := config.NewConfig()
 		if cfg == nil {
@@ -1202,7 +1202,7 @@ func TestExtendedCoverage(t *testing.T) {
 
 // ensureTestSchema helps verifying schema
 func ensureTestSchema() error {
-	dbPath := "../../sync.db"
+	dbPath := "sync.db"
 	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
 		return err

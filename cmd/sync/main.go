@@ -40,6 +40,19 @@ func main() {
 	cfg := config.NewConfig()
 	log := logger.InitLogger(cfg.LogLevel)
 
+	uiDistPath := "ui/dist"
+	unzipDistPath := "ui"
+	zipFilePath := "ui/dist.zip"
+	if _, err := os.Stat(uiDistPath); os.IsNotExist(err) {
+		log.Info("ui/dist does not exist. Unzipping dist.zip...")
+		if err := utils.UnzipDistFile(zipFilePath, unzipDistPath); err != nil {
+			log.Errorf("Failed to unzip dist.zip: %v", err)
+			cancel()
+			return
+		}
+		log.Info("dist.zip has been successfully unzipped.")
+	}
+
 	// Start backend synchronization
 	var wg sync.WaitGroup
 	for _, syncCfg := range cfg.SyncConfigs {
