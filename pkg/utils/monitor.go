@@ -92,7 +92,7 @@ func countAndLogMySQLOrMariaDB(ctx context.Context, sc config.SyncConfig, log *l
 				"monitor_action": "row_count_minutely",
 			}).Info("row_count_minutely")
 
-			// 2) Insert into database monitoring_log with sync_config_id
+			// 2) Insert into database monitoring_log with sync_task_id
 			storeMonitoringLog(sc.ID, dbType, srcDBName, srcName, srcCount, tgtDBName, tgtName, tgtCount, "row_count_minutely")
 		}
 	}
@@ -151,7 +151,7 @@ func countAndLogPostgreSQL(ctx context.Context, sc config.SyncConfig, log *logru
 				"monitor_action": "row_count_minutely",
 			}).Info("row_count_minutely")
 
-			// Insert into database monitoring_log with sync_config_id
+			// Insert into database monitoring_log with sync_task_id
 			storeMonitoringLog(sc.ID, "POSTGRESQL", srcDBName, srcName, srcCount, tgtDBName, tgtName, tgtCount, "row_count_minutely")
 		}
 	}
@@ -224,7 +224,7 @@ func countAndLogMongoDB(ctx context.Context, sc config.SyncConfig, log *logrus.L
 				"monitor_action": "row_count_minutely",
 			}).Info("row_count_minutely")
 
-			// Insert into database monitoring_log with sync_config_id
+			// Insert into database monitoring_log with sync_task_id
 			storeMonitoringLog(sc.ID, "MONGODB", srcDBName, srcName, srcCount, tgtDBName, tgtName, tgtCount, "row_count_minutely")
 		}
 	}
@@ -290,7 +290,7 @@ func countAndLogRedis(ctx context.Context, sc config.SyncConfig, log *logrus.Log
 			"monitor_action": "row_count_minutely",
 		}).Info("row_count_minutely")
 
-		// Insert into database monitoring_log with sync_config_id
+		// Insert into database monitoring_log with sync_task_id
 		storeMonitoringLog(sc.ID, dbType, srcDBName, "", srcCount, tgtDBName, "", tgtCount, "row_count_minutely")
 	}
 }
@@ -307,7 +307,7 @@ func getRowCount(db *sql.DB, table string) int64 {
 
 // ------------------------------------------------------------------
 // Added function: Insert monitoring results into the monitoring_log table
-func storeMonitoringLog(syncConfigID int, dbType, srcDB, srcTable string, srcCount int64,
+func storeMonitoringLog(syncTaskID int, dbType, srcDB, srcTable string, srcCount int64,
 	tgtDB, tgtTable string, tgtCount int64, action string) {
 
 	// Preferably read the DB path from environment variables
@@ -326,7 +326,7 @@ func storeMonitoringLog(syncConfigID int, dbType, srcDB, srcTable string, srcCou
 
 	const insSQL = `
 INSERT INTO monitoring_log (
-	sync_config_id,
+	sync_task_id,
 	db_type,
 	src_db,
 	src_table,
@@ -338,7 +338,7 @@ INSERT INTO monitoring_log (
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
 `
 	_, err = db.Exec(insSQL,
-		syncConfigID,
+		syncTaskID,
 		dbType,
 		srcDB,
 		srcTable,

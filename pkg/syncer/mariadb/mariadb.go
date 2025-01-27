@@ -23,13 +23,13 @@ import (
 
 type MariaDBSyncer struct {
 	cfg    config.SyncConfig
-	logger *logrus.Logger
+	logger logrus.FieldLogger
 }
 
 func NewMariaDBSyncer(cfg config.SyncConfig, logger *logrus.Logger) *MariaDBSyncer {
 	return &MariaDBSyncer{
 		cfg:    cfg,
-		logger: logger,
+		logger: logger.WithField("sync_task_id", cfg.ID),
 	}
 }
 
@@ -410,7 +410,7 @@ type MariaDBEventHandler struct {
 	canal.DummyEventHandler
 	targetDB          *sql.DB
 	mappings          []config.DatabaseMapping
-	logger            *logrus.Logger
+	logger            logrus.FieldLogger
 	positionSaverPath string
 	canal             *canal.Canal
 	lastExecError     int32

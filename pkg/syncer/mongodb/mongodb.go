@@ -26,7 +26,7 @@ type MongoDBSyncer struct {
 	sourceClient  *mongo.Client
 	targetClient  *mongo.Client
 	syncConfig    config.SyncConfig
-	logger        *logrus.Logger
+	logger        logrus.FieldLogger
 	resumeTokens  map[string]bson.Raw
 	resumeTokensM sync.RWMutex
 }
@@ -55,7 +55,7 @@ func NewMongoDBSyncer(syncCfg config.SyncConfig, logger *logrus.Logger) *MongoDB
 		sourceClient: sourceClient,
 		targetClient: targetClient,
 		syncConfig:   syncCfg,
-		logger:       logger,
+		logger:       logger.WithField("sync_task_id", syncCfg.ID),
 		resumeTokens: resumeMap,
 	}
 }

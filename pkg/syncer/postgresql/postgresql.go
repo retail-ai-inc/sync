@@ -36,7 +36,7 @@ type replicationState struct {
 
 type PostgreSQLSyncer struct {
 	cfg    config.SyncConfig
-	logger *logrus.Logger
+	logger logrus.FieldLogger
 
 	sourceConnNormal *pgx.Conn
 	sourceConnRepl   *pgconn.PgConn
@@ -56,7 +56,7 @@ type PostgreSQLSyncer struct {
 func NewPostgreSQLSyncer(cfg config.SyncConfig, logger *logrus.Logger) *PostgreSQLSyncer {
 	return &PostgreSQLSyncer{
 		cfg:    cfg,
-		logger: logger,
+		logger: logger.WithField("sync_task_id", cfg.ID),
 	}
 }
 

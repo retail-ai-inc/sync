@@ -18,7 +18,7 @@ import (
 
 type RedisSyncer struct {
 	cfg         config.SyncConfig
-	logger      *logrus.Logger
+	logger      logrus.FieldLogger
 	source      *goredis.Client
 	target      *goredis.Client
 	lastExecErr int32
@@ -29,7 +29,7 @@ type RedisSyncer struct {
 func NewRedisSyncer(cfg config.SyncConfig, logger *logrus.Logger) *RedisSyncer {
 	return &RedisSyncer{
 		cfg:          cfg,
-		logger:       logger,
+		logger: logger.WithField("sync_task_id", cfg.ID),
 		positionPath: cfg.RedisPositionPath,
 	}
 }

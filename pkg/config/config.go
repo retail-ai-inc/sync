@@ -2,18 +2,19 @@ package config
 
 import (
 	"database/sql"
+	"encoding/json"
+	"fmt"
 	"log"
 	"os"
+	"strings"
 
 	"github.com/sirupsen/logrus"
-	_ "github.com/mattn/go-sqlite3" // SQLite driver
 )
 
 type TableMapping struct {
 	SourceTable string
 	TargetTable string
 }
-
 type DatabaseMapping struct {
 	SourceDatabase string
 	SourceSchema   string
@@ -23,9 +24,13 @@ type DatabaseMapping struct {
 }
 
 type SyncConfig struct {
-	ID 					   int
+	ID         int  // from sync_tasks.id
+	Enable     bool // from sync_tasks.enable
+
+	LastUpdateTime string // from sync_tasks.last_update_time
+	LastRunTime    string // from sync_tasks.last_run_time
+
 	Type                   string
-	Enable                 bool
 	SourceConnection       string
 	TargetConnection       string
 	Mappings               []DatabaseMapping
@@ -37,6 +42,15 @@ type SyncConfig struct {
 	PGPositionPath         string
 	PGPublicationNames     string
 	RedisPositionPath      string
+	Status                 string
+	TaskName               string
+}
+
+func (s *SyncConfig) PGReplicationSlot() string {
+	return s.PGReplicationSlotName
+}
+func (s *SyncConfig) PGPlugin() string {
+	return s.PGPluginName
 }
 
 type Config struct {
@@ -46,212 +60,206 @@ type Config struct {
 	Logger                        *logrus.Logger
 }
 
-// NewConfig loads the configuration using SQLite
+type globalConfig struct {
+	EnableTableRowCountMonitoring bool
+	LogLevel                      string
+}
+
 func NewConfig() *Config {
-	// Preferably read the DB path from environment variables
 	dbPath := os.Getenv("SYNC_DB_PATH")
 	if dbPath == "" {
 		dbPath = "sync.db"
 	}
 	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
-		log.Fatalf("Failed to open SQLite config DB: %v", err)
+		log.Fatalf("Failed opening DB: %v", err)
 	}
 	if err := db.Ping(); err != nil {
-		log.Fatalf("Failed to ping SQLite config DB: %v", err)
+		log.Fatalf("Failed pinging DB: %v", err)
 	}
 
 	EnsureSchema(db)
 
-	// Load global configuration
-	globalCfg := loadGlobalConfig(db)
-
-	// Load sync_configs
-	syncConfigs := loadSyncConfigs(db)
-
-	cfg := &Config{
-		EnableTableRowCountMonitoring: globalCfg.EnableTableRowCountMonitoring,
-		LogLevel:                      globalCfg.LogLevel,
-		SyncConfigs:                   syncConfigs,
-		Logger:                        logrus.New(),
-	}
+	gcfg := loadGlobalConfig(db)
+	syncCfgs := loadSyncTasks(db)
 
 	_ = db.Close()
-	return cfg
-}
-
-// globalConfig is used to store config_global
-type globalConfig struct {
-	EnableTableRowCountMonitoring bool
-	LogLevel                      string
+	return &Config{
+		EnableTableRowCountMonitoring: gcfg.EnableTableRowCountMonitoring,
+		LogLevel:                      gcfg.LogLevel,
+		SyncConfigs:                   syncCfgs,
+		Logger:                        logrus.New(),
+	}
 }
 
 func loadGlobalConfig(db *sql.DB) globalConfig {
-	var (
-		enableMonitoring int
-		logLevel         string
-	)
+	var em int
+	var ll string
 	err := db.QueryRow(`
 SELECT enable_table_row_count_monitoring, log_level
 FROM config_global
-WHERE id=1`).Scan(&enableMonitoring, &logLevel)
+WHERE id=1
+`).Scan(&em, &ll)
 	if err != nil {
-		log.Fatalf("Failed to load global config: %v", err)
+		log.Fatalf("Failed to load config_global: %v", err)
 	}
 	return globalConfig{
-		EnableTableRowCountMonitoring: (enableMonitoring != 0),
-		LogLevel:                      logLevel,
+		EnableTableRowCountMonitoring: (em != 0),
+		LogLevel:                      ll,
 	}
 }
 
-func loadSyncConfigs(db *sql.DB) []SyncConfig {
-	rows, err := db.Query(`SELECT
-       id,
-       type,
-       enable,
-       source_connection,
-       target_connection,
-       dump_execution_path,
-       mysql_position_path,
-       mongodb_resume_token_path,
-       pg_replication_slot,
-       pg_plugin,
-       pg_position_path,
-       pg_publication_names,
-       redis_position_path
-     FROM sync_configs`)
+func loadSyncTasks(db *sql.DB) []SyncConfig {
+	rows, err := db.Query(`
+SELECT
+  id,
+  enable,
+  COALESCE(last_update_time,''),
+  COALESCE(last_run_time,''),
+  config_json
+FROM sync_tasks
+ORDER BY id ASC
+`)
 	if err != nil {
-		log.Fatalf("Failed to query sync_configs: %v", err)
+		log.Fatalf("Failed to query sync_tasks: %v", err)
 	}
 	defer rows.Close()
 
-	var result []SyncConfig
+	var results []SyncConfig
 	for rows.Next() {
 		var (
-			id                  int
-			sType               string
-			enableInt           int
-			srcConn             string
-			tgtConn             string
-			dumpExecPath        sql.NullString
-			mysqlPosPath        sql.NullString
-			mongoResTokenPath   sql.NullString
-			pgReplSlot          sql.NullString
-			pgPlugin            sql.NullString
-			pgPosPath           sql.NullString
-			pgPubNames          sql.NullString
-			redisPosPath        sql.NullString
+			id        int
+			enableInt int
+			upTime    string
+			runTime   string
+			js        string
 		)
-		if err2 := rows.Scan(
-			&id,
-			&sType,
-			&enableInt,
-			&srcConn,
-			&tgtConn,
-			&dumpExecPath,
-			&mysqlPosPath,
-			&mongoResTokenPath,
-			&pgReplSlot,
-			&pgPlugin,
-			&pgPosPath,
-			&pgPubNames,
-			&redisPosPath,
-		); err2 != nil {
-			log.Fatalf("Failed scanning sync_config row: %v", err2)
+		if err2 := rows.Scan(&id, &enableInt, &upTime, &runTime, &js); err2 != nil {
+			log.Fatalf("scan row fail: %v", err2)
 		}
 
-		newCfg := SyncConfig{
-			ID:                     id,
-			Type:                   sType,
-			Enable:                 (enableInt != 0),
-			SourceConnection:       srcConn,
-			TargetConnection:       tgtConn,
-			DumpExecutionPath:      dumpExecPath.String,
-			MySQLPositionPath:      mysqlPosPath.String,
-			MongoDBResumeTokenPath: mongoResTokenPath.String,
-			PGReplicationSlotName:  pgReplSlot.String,
-			PGPluginName:           pgPlugin.String,
-			PGPositionPath:         pgPosPath.String,
-			PGPublicationNames:     pgPubNames.String,
-			RedisPositionPath:      redisPosPath.String,
+		sc := SyncConfig{
+			ID:             id,
+			Enable:         (enableInt != 0),
+			LastUpdateTime: upTime,
+			LastRunTime:    runTime,
 		}
-		newCfg.Mappings = loadDatabaseMappings(db, id)
-		result = append(result, newCfg)
+
+		if js != "" {
+			var extra struct {
+				Type                   string            `json:"type"`
+				TaskName               string            `json:"taskName"`
+				Status                 string            `json:"status"`
+				SourceConn             map[string]string `json:"sourceConn"`
+				TargetConn             map[string]string `json:"targetConn"`
+				Mappings               []DatabaseMapping `json:"mappings"`
+				DumpExecutionPath      *string           `json:"dump_execution_path"`
+				MySQLPositionPath      *string           `json:"mysql_position_path"`
+				MongoDBResumeTokenPath *string           `json:"mongodb_resume_token_path"`
+				PGReplicationSlot      *string           `json:"pg_replication_slot"`
+				PGPlugin               *string           `json:"pg_plugin"`
+				PGPositionPath         *string           `json:"pg_position_path"`
+				PGPublicationNames     *string           `json:"pg_publication_names"`
+				RedisPositionPath      *string           `json:"redis_position_path"`
+			}
+			if errJ := json.Unmarshal([]byte(js), &extra); errJ != nil {
+				log.Printf("[WARN] parse config_json for id=%d => %v", id, errJ)
+			} else {
+				sc.Type = extra.Type
+				sc.TaskName = extra.TaskName
+				sc.Status = extra.Status
+
+				if extra.DumpExecutionPath != nil {
+					sc.DumpExecutionPath = *extra.DumpExecutionPath
+				}
+				if extra.MySQLPositionPath != nil {
+					sc.MySQLPositionPath = *extra.MySQLPositionPath
+				}
+				if extra.MongoDBResumeTokenPath != nil {
+					sc.MongoDBResumeTokenPath = *extra.MongoDBResumeTokenPath
+				}
+				if extra.PGReplicationSlot != nil {
+					sc.PGReplicationSlotName = *extra.PGReplicationSlot
+				}
+				if extra.PGPlugin != nil {
+					sc.PGPluginName = *extra.PGPlugin
+				}
+				if extra.PGPositionPath != nil {
+					sc.PGPositionPath = *extra.PGPositionPath
+				}
+				if extra.PGPublicationNames != nil {
+					sc.PGPublicationNames = *extra.PGPublicationNames
+				}
+				if extra.RedisPositionPath != nil {
+					sc.RedisPositionPath = *extra.RedisPositionPath
+				}
+				sc.Mappings = extra.Mappings
+
+				sc.SourceConnection = buildDSNByType(sc.Type, extra.SourceConn)
+				sc.TargetConnection = buildDSNByType(sc.Type, extra.TargetConn)
+			}
+		}
+
+		results = append(results, sc)
 	}
 	if err := rows.Err(); err != nil {
-		log.Fatalf("sync_configs rows iteration error: %v", err)
+		log.Fatalf("rows iteration fail: %v", err)
 	}
-	return result
+	return results
 }
 
-func loadDatabaseMappings(db *sql.DB, syncConfigID int) []DatabaseMapping {
-	rows, err := db.Query(`
-	  SELECT id, source_database, COALESCE(source_schema,''), target_database, COALESCE(target_schema,'')
-	  FROM database_mappings
-	  WHERE sync_config_id=?
-	`, syncConfigID)
-	if err != nil {
-		log.Fatalf("Failed to query database_mappings for sync_config_id=%d: %v", syncConfigID, err)
+func buildDSNByType(dbType string, c map[string]string) string {
+	if c == nil {
+		return ""
 	}
-	defer rows.Close()
+	switch strings.ToLower(dbType) {
+	case "mysql", "mariadb":
+		// MySQL => user:password@tcp(host:port)/database
+		// e.g. root:root@tcp(localhost:3306)/source_db
+		user := c["user"]
+		pwd := c["password"]
+		host := c["host"]
+		port := c["port"]
+		dbn := c["database"]
+		return fmt.Sprintf("%s:%s@tcp(%s:%s)/%s", user, pwd, host, port, dbn)
 
-	var dbMaps []DatabaseMapping
-	for rows.Next() {
-		var (
-			mID       int
-			srcDB     string
-			srcSchema string
-			tgtDB     string
-			tgtSchema string
-		)
-		if err2 := rows.Scan(&mID, &srcDB, &srcSchema, &tgtDB, &tgtSchema); err2 != nil {
-			log.Fatalf("Failed scanning database_mappings row: %v", err2)
+	case "postgresql":
+		// PostgreSQL => postgres://user:pwd@host:port/db?sslmode=disable
+		// e.g. "postgres://root:root@localhost:5432/source_db?sslmode=disable"
+		user := c["user"]
+		pwd := c["password"]
+		host := c["host"]
+		port := c["port"]
+		dbn := c["database"]
+		// ?sslmode=disable
+		return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", user, pwd, host, port, dbn)
+
+	case "mongodb":
+		// MongoDB => mongodb://host:port/database
+		// e.g. "mongodb://localhost:27017/source_db"
+		host := c["host"]
+		port := c["port"]
+		dbn := c["database"]
+		return fmt.Sprintf("mongodb://%s:%s/%s", host, port, dbn)
+
+	case "redis":
+		// Redis => redis://:pwd@host:port/db
+		// e.g. "redis://:mypwd@localhost:6379/0"
+		host := c["host"]
+		port := c["port"]
+		// user := c["user"]     // redis user rarely used
+		pwd := c["password"]  // e.g. :mypwd
+		dbn := c["database"]  // e.g. 0 or 1
+		// user part in redis might not always exist, typically we do "redis://:pwd@host:port/db"
+		// to keep it simple:
+		if pwd != "" {
+			return fmt.Sprintf("redis://:%s@%s:%s/%s", pwd, host, port, dbn)
+		} else {
+			return fmt.Sprintf("redis://%s:%s/%s", host, port, dbn)
 		}
-		dbMap := DatabaseMapping{
-			SourceDatabase: srcDB,
-			SourceSchema:   srcSchema,
-			TargetDatabase: tgtDB,
-			TargetSchema:   tgtSchema,
-		}
-		dbMap.Tables = loadTableMappings(db, mID)
-		dbMaps = append(dbMaps, dbMap)
+
+	default:
+		// fallback => maybe user gave direct DSN
+		return c["host"] // or something
 	}
-	return dbMaps
-}
-
-func loadTableMappings(db *sql.DB, dbMappingID int) []TableMapping {
-	rows, err := db.Query(`
-	  SELECT source_table, target_table
-	  FROM table_mappings
-	  WHERE database_mapping_id=?
-	`, dbMappingID)
-	if err != nil {
-		log.Fatalf("Failed to query table_mappings for dbMappingID=%d: %v", dbMappingID, err)
-	}
-	defer rows.Close()
-
-	var tblMaps []TableMapping
-	for rows.Next() {
-		var (
-			srcTable string
-			tgtTable string
-		)
-		if err2 := rows.Scan(&srcTable, &tgtTable); err2 != nil {
-			log.Fatalf("Failed scanning table_mappings row: %v", err2)
-		}
-		tblMaps = append(tblMaps, TableMapping{
-			SourceTable: srcTable,
-			TargetTable: tgtTable,
-		})
-	}
-	return tblMaps
-}
-
-// For PostgreSQL Syncer
-func (s *SyncConfig) PGReplicationSlot() string {
-	return s.PGReplicationSlotName
-}
-
-func (s *SyncConfig) PGPlugin() string {
-	return s.PGPluginName
 }

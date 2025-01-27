@@ -23,13 +23,13 @@ import (
 
 type MySQLSyncer struct {
 	cfg    config.SyncConfig
-	logger *logrus.Logger
+	logger logrus.FieldLogger
 }
 
 func NewMySQLSyncer(cfg config.SyncConfig, logger *logrus.Logger) *MySQLSyncer {
 	return &MySQLSyncer{
 		cfg:    cfg,
-		logger: logger,
+		logger: logger.WithField("sync_task_id", cfg.ID),
 	}
 }
 
@@ -403,7 +403,7 @@ type MyEventHandler struct {
 	canal.DummyEventHandler
 	targetDB          *sql.DB
 	mappings          []config.DatabaseMapping
-	logger            *logrus.Logger
+	logger            logrus.FieldLogger
 	positionSaverPath string
 	canal             *canal.Canal
 	lastExecError     int32

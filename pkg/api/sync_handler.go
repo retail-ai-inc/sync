@@ -1,4 +1,3 @@
-// pkg/api/sync_handler.go
 package api
 
 import (
@@ -7,9 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
+	// "net/url"
 	"os"
-	"regexp"
+	// "regexp"
 	"strings"
 	"time"
 
@@ -17,8 +16,8 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// GET /api/sync
-// Read sync_configs and return fields similar to mock/sync.ts
+
+// GET /api/sync => query sync_tasks
 func SyncListHandler(w http.ResponseWriter, r *http.Request) {
 	db, err := openLocalDB()
 	if err != nil {
@@ -28,21 +27,17 @@ func SyncListHandler(w http.ResponseWriter, r *http.Request) {
 	defer db.Close()
 
 	rows, err := db.Query(`
-SELECT 
-  id, 
-  type, 
+SELECT
+  id,
   enable,
-  source_connection,
-  target_connection,
-  COALESCE(task_name, ''),
-  COALESCE(status, ''),
-  COALESCE(last_update_time, ''),
-  COALESCE(last_run_time, '')
-FROM sync_configs
+  COALESCE(last_update_time,''),
+  COALESCE(last_run_time,''),
+  config_json
+FROM sync_tasks
 ORDER BY id ASC
 `)
 	if err != nil {
-		errorJSON(w, "query sync_configs fail", err)
+		errorJSON(w, "query sync_tasks fail", err)
 		return
 	}
 	defer rows.Close()
@@ -50,67 +45,72 @@ ORDER BY id ASC
 	var result []map[string]interface{}
 	for rows.Next() {
 		var (
-			id       int
-			sType    string
-			enable   int
-			srcConn  string
-			tgtConn  string
-
-			taskName       string
-			status         string
-			lastUpdateTime string
-			lastRunTime    string
+			id           int
+			enableInt    int
+			lastUpdate   string
+			lastRun      string
+			cfgJSON      string
 		)
-		if err := rows.Scan(
-			&id, &sType, &enable, &srcConn, &tgtConn,
-			&taskName, &status, &lastUpdateTime, &lastRunTime,
-		); err != nil {
-			errorJSON(w, "scan sync_configs fail", err)
+		if err := rows.Scan(&id, &enableInt, &lastUpdate, &lastRun, &cfgJSON); err != nil {
+			errorJSON(w, "scan sync_tasks fail", err)
 			return
 		}
 
-		if status == "" {
-			if enable == 1 {
-				status = "Running"
-			} else {
-				status = "Stopped"
-			}
+		// enable => status
+		status := "Stopped"
+		if enableInt == 1 {
+			status = "Running"
 		}
-		if taskName == "" {
-			taskName = fmt.Sprintf("Sync Task %d", id)
+
+		// Deserialize config_json
+		var extra struct {
+			Type       string            `json:"type"`
+			TaskName   string            `json:"taskName"`
+			Status     string            `json:"status"`
+			SourceConn map[string]string `json:"sourceConn"`
+			TargetConn map[string]string `json:"targetConn"`
+			Mappings   []map[string]interface{} `json:"mappings"`
 		}
+		if cfgJSON != "" {
+			_ = json.Unmarshal([]byte(cfgJSON), &extra)
+		}
+		if extra.Status != "" {
+			status = extra.Status
+		}
+		if extra.TaskName == "" {
+			extra.TaskName = fmt.Sprintf("Sync Task %d", id)
+		}
+
 
 		item := map[string]interface{}{
 			"id":             id,
-			"taskName":       taskName,
-			"sourceType":     sType,
-			"source":         srcConn,
-			"target":         tgtConn,
+			"enable":         (enableInt != 0),
 			"status":         status,
-			"lastUpdateTime": lastUpdateTime,
-			"lastRunTime":    lastRunTime,
-			"sourceConn":     parseConnection(srcConn),
-			"targetConn":     parseConnection(tgtConn),
-			"mappings":       loadMappingsForSync(db, id),
+			"lastUpdateTime": lastUpdate,
+			"lastRunTime":    lastRun,
+
+			"taskName":   extra.TaskName,
+			"sourceType": extra.Type,
+			"sourceConn": extra.SourceConn,
+			"targetConn": extra.TargetConn,
+			"mappings":   extra.Mappings,
+
 		}
 		result = append(result, item)
 	}
 	if err := rows.Err(); err != nil {
-		errorJSON(w, "sync_configs iteration error", err)
+		errorJSON(w, "sync_tasks iteration error", err)
 		return
 	}
 
-	resp := map[string]interface{}{
+	writeJSON(w, map[string]interface{}{
 		"success": true,
 		"data":    result,
-	}
-	writeJSON(w, resp)
+	})
 }
 
-// POST /api/sync
-// Create a new sync_configs record
+// POST /api/sync => create
 func SyncCreateHandler(w http.ResponseWriter, r *http.Request) {
-	// Add logging to debug "405 Method Not Allowed" or other issues
 	logrus.Infof("SyncCreateHandler => method=%s, URL=%s", r.Method, r.URL.String())
 
 	db, err := openLocalDB()
@@ -121,271 +121,180 @@ func SyncCreateHandler(w http.ResponseWriter, r *http.Request) {
 	defer db.Close()
 
 	var req struct {
+		TaskName   string            `json:"taskName"`
 		Type       string            `json:"sourceType"`
+		Status     string            `json:"status"`
 		SourceConn map[string]string `json:"sourceConn"`
 		TargetConn map[string]string `json:"targetConn"`
-		Mappings   []struct {
-			SourceTable string `json:"sourceTable"`
-			TargetTable string `json:"targetTable"`
-		} `json:"mappings"`
-		TaskName string `json:"taskName"`
-		Status   string `json:"status"`
+		Mappings   []map[string]interface{} `json:"mappings"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		errorJSON(w, "decode request fail", err)
+		errorJSON(w, "decode fail", err)
 		return
-	}
-
-	// Construct DSN
-	srcC := buildConnection(req.SourceConn)
-	tgtC := buildConnection(req.TargetConn)
-
-	if req.Status == "" {
-		req.Status = "Stopped"
 	}
 	if req.TaskName == "" {
 		req.TaskName = "Sync Task"
 	}
-	nowStr := time.Now().Format("2006-01-02 15:04:05")
+	if req.Status == "" {
+		req.Status = "Stopped"
+	}
 	enableVal := 0
 	if strings.ToLower(req.Status) == "running" {
 		enableVal = 1
 	}
 
+	nowStr := time.Now().Format("2006-01-02 15:04:05")
+
+	var cfgJSONStruct = struct {
+		Type       string            `json:"type"`
+		TaskName   string            `json:"taskName"`
+		Status     string            `json:"status"`
+		SourceConn map[string]string `json:"sourceConn"`
+		TargetConn map[string]string `json:"targetConn"`
+		Mappings   []map[string]interface{} `json:"mappings"`
+	}{
+		Type:       req.Type,
+		TaskName:   req.TaskName,
+		Status:     req.Status,
+		SourceConn: req.SourceConn,
+		TargetConn: req.TargetConn,
+		Mappings:   req.Mappings,
+	}
+	cfgBytes, _ := json.Marshal(cfgJSONStruct)
+
 	res, err := db.Exec(`
-INSERT INTO sync_configs (
-  type,
-  enable,
-  source_connection,
-  target_connection,
-  task_name,
-  status,
-  last_update_time,
-  last_run_time
-)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-`,
-		req.Type,
-		enableVal,
-		srcC,
-		tgtC,
-		req.TaskName,
-		req.Status,
-		nowStr,
-		"",
-	)
+INSERT INTO sync_tasks(enable, last_update_time, last_run_time, config_json)
+VALUES(?, ?, ?, ?)
+`, enableVal, nowStr, "", string(cfgBytes))
 	if err != nil {
-		errorJSON(w, "insert sync_configs fail", err)
+		errorJSON(w, "insert fail", err)
 		return
 	}
-	newID, err := res.LastInsertId()
-	if err != nil {
-		errorJSON(w, "retrieve last insert id fail", err)
-		return
-	}
-
-	res2, err := db.Exec(`
-INSERT INTO database_mappings (sync_config_id, source_database, target_database)
-VALUES (?, ?, ?)
-`, newID, req.SourceConn["database"], req.TargetConn["database"])
-	if err != nil {
-		errorJSON(w, "insert database_mappings fail", err)
-		return
-	}
-	mapID, err := res2.LastInsertId()
-	if err != nil {
-		errorJSON(w, "retrieve mapping last insert id fail", err)
-		return
-	}
-
-	for _, m := range req.Mappings {
-		_, err = db.Exec(`
-INSERT INTO table_mappings (database_mapping_id, source_table, target_table)
-VALUES (?, ?, ?)
-`, mapID, m.SourceTable, m.TargetTable)
-		if err != nil {
-			errorJSON(w, "insert table_mappings fail", err)
-			return
-		}
-	}
+	newID, _ := res.LastInsertId()
 
 	respData := map[string]interface{}{
 		"id":             newID,
-		"status":         req.Status,
+		"enable":         (enableVal != 0),
 		"lastUpdateTime": nowStr,
 		"lastRunTime":    "",
 		"taskName":       req.TaskName,
+		"status":         req.Status,
 		"sourceType":     req.Type,
 		"sourceConn":     req.SourceConn,
 		"targetConn":     req.TargetConn,
 		"mappings":       req.Mappings,
-		"source":         srcC,
-		"target":         tgtC,
 	}
-
-	resp := map[string]interface{}{
+	writeJSON(w, map[string]interface{}{
 		"success": true,
 		"data": map[string]interface{}{
 			"msg":      "Added successfully",
 			"formData": respData,
 		},
-	}
-	writeJSON(w, resp)
+	})
 }
 
-// PUT /api/sync/:id/start
+// PUT /api/sync/{id}/start => enable=1, update config_json.status='Running'
 func SyncStartHandler(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	logrus.Infof("SyncStartHandler => Attempting to start sync task with id=%s", id)
 
-	db, err := openLocalDB()
+	err := updateTaskStatus(id, true)
 	if err != nil {
-		errorJSON(w, "open db fail", err)
+		errorJSON(w, "start fail", err)
 		return
 	}
-	defer db.Close()
-
-	nowStr := time.Now().Format("2006-01-02 15:04:05")
-	res, err := db.Exec(`
-UPDATE sync_configs
-SET enable=1,
-    status='Running',
-    last_run_time=?,
-    last_update_time=?
-WHERE id=?
-`, nowStr, nowStr, id)
-	if err != nil {
-		errorJSON(w, "update sync_configs start fail", err)
-		return
-	}
-	rowsAffected, err := res.RowsAffected()
-	if err != nil {
-		errorJSON(w, "retrieve rows affected for start fail", err)
-		return
-	}
-	if rowsAffected == 0 {
-		errorJSON(w, "no sync_config found with the given id", errors.New("no rows affected"))
-		return
-	}
-
-	resp := map[string]interface{}{
+	writeJSON(w, map[string]interface{}{
 		"success": true,
-		"data": map[string]interface{}{
-			"msg": fmt.Sprintf("Started the sync task: %s", id),
-		},
-	}
-	writeJSON(w, resp)
+		"data":    map[string]interface{}{"msg": "Started the sync task: " + id},
+	})
 }
 
-// PUT /api/sync/:id/stop
+// PUT /api/sync/{id}/stop => enable=0, Update config_json.status='Stopped'
 func SyncStopHandler(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	logrus.Infof("SyncStopHandler => Attempting to stop sync task with id=%s", id)
 
-	db, err := openLocalDB()
+	err := updateTaskStatus(id, false)
 	if err != nil {
-		errorJSON(w, "open db fail", err)
+		errorJSON(w, "stop fail", err)
 		return
 	}
-	defer db.Close()
-
-	nowStr := time.Now().Format("2006-01-02 15:04:05")
-	res, err := db.Exec(`
-UPDATE sync_configs
-SET enable=0,
-    status='Stopped',
-    last_update_time=?
-WHERE id=?
-`, nowStr, id)
-	if err != nil {
-		errorJSON(w, "update sync_configs stop fail", err)
-		return
-	}
-	rowsAffected, err := res.RowsAffected()
-	if err != nil {
-		errorJSON(w, "retrieve rows affected for stop fail", err)
-		return
-	}
-	if rowsAffected == 0 {
-		errorJSON(w, "no sync_config found with the given id", errors.New("no rows affected"))
-		return
-	}
-
-	resp := map[string]interface{}{
+	writeJSON(w, map[string]interface{}{
 		"success": true,
-		"data": map[string]interface{}{
-			"msg": fmt.Sprintf("Stopped the sync task: %s", id),
-		},
-	}
-	writeJSON(w, resp)
+		"data":    map[string]interface{}{"msg": "Stopped the sync task: " + id},
+	})
 }
 
-// GET /api/sync/:id/monitor
+// GET /api/sync/{id}/monitor => {status, progress, tps, ...}
 func SyncMonitorHandler(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	logrus.Infof("SyncMonitorHandler => Monitoring sync task with id=%s", id)
 
 	db, err := openLocalDB()
 	if err != nil {
-		errorJSON(w, "open db fail", err)
+		errorJSON(w, "db fail", err)
 		return
 	}
 	defer db.Close()
 
-	var status sql.NullString
-	err = db.QueryRow(`SELECT status FROM sync_configs WHERE id=?`, id).Scan(&status)
+	var enableInt sql.NullInt32
+	err = db.QueryRow(`SELECT enable FROM sync_tasks WHERE id=?`, id).Scan(&enableInt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			// If no rows found => return success=false
-			resp := map[string]interface{}{
-				"success": false,
-				"data":    map[string]interface{}{},
-			}
-			writeJSON(w, resp)
+			writeJSON(w, map[string]interface{}{"success": false, "data": map[string]interface{}{}})
 			return
 		}
-		errorJSON(w, "select sync_configs fail", err)
+		errorJSON(w, "select fail", err)
 		return
 	}
 
-	st := status.String
-	if st == "" {
-		st = "Stopped"
+	status := "Stopped"
+	if enableInt.Int32 == 1 {
+		status = "Running"
 	}
-	resp := map[string]interface{}{
+	writeJSON(w, map[string]interface{}{
 		"success": true,
 		"data": map[string]interface{}{
 			"progress": 85,
 			"tps":      500,
 			"delay":    0.2,
-			"status":   st,
+			"status":   status,
 		},
-	}
-	writeJSON(w, resp)
+	})
 }
 
-// GET /api/sync/:id/metrics
-// Query from monitoring_log => rowCountTrend
+// GET /api/sync/{id}/metrics
+// -------------------------
 func SyncMetricsHandler(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	logrus.Infof("SyncMetricsHandler => Fetching metrics for sync task id=%s", id)
+
+    rangeStr := r.URL.Query().Get("range")
+    sinceTime := parseRangeToSince(rangeStr)
 
 	db, err := openLocalDB()
 	if err != nil {
-		errorJSON(w, "open db fail", err)
+		errorJSON(w, "db fail", err)
 		return
 	}
 	defer db.Close()
 
-	// Modify SQL query to only fetch monitoring logs related to the specific sync_config_id
-	rows, err := db.Query(`
-SELECT ml.logged_at, ml.src_row_count, ml.tgt_row_count
-FROM monitoring_log ml
-JOIN database_mappings dm ON ml.sync_config_id = dm.sync_config_id
-WHERE dm.sync_config_id=?
-ORDER BY ml.logged_at ASC
+    var rows *sql.Rows
+    if !sinceTime.IsZero() {
+        // "logged_at >= ?"
+        rows, err = db.Query(`
+SELECT logged_at, src_row_count, tgt_row_count
+FROM monitoring_log
+WHERE sync_task_id=?
+  AND datetime(logged_at) >= datetime(?)
+ORDER BY logged_at ASC
+LIMIT 1000
+`, id, sinceTime.Format("2006-01-02 15:04:05"))
+    } else {
+        rows, err = db.Query(`
+SELECT logged_at, src_row_count, tgt_row_count
+FROM monitoring_log
+WHERE sync_task_id=?
+ORDER BY logged_at ASC
 LIMIT 1000
 `, id)
+    }
 	if err != nil {
 		errorJSON(w, "query monitoring_log fail", err)
 		return
@@ -394,87 +303,103 @@ LIMIT 1000
 
 	var rowCountTrend []map[string]interface{}
 	for rows.Next() {
-		var (
-			loggedAt string
-			srcCount int64
-			tgtCount int64
-		)
-		if err := rows.Scan(&loggedAt, &srcCount, &tgtCount); err != nil {
+		var t string
+		var src, tgt int64
+		if err := rows.Scan(&t, &src, &tgt); err != nil {
 			errorJSON(w, "scan monitoring_log fail", err)
 			return
 		}
-		diffVal := srcCount - tgtCount
-		if diffVal < 0 {
-			diffVal = -diffVal
+		diff := src - tgt
+		if diff < 0 {
+			diff = -diff
 		}
 		rowCountTrend = append(rowCountTrend,
-			map[string]interface{}{
-				"time":  loggedAt,
-				"value": srcCount,
-				"type":  "source",
-			},
-			map[string]interface{}{
-				"time":  loggedAt,
-				"value": tgtCount,
-				"type":  "target",
-			},
-			map[string]interface{}{
-				"time":  loggedAt,
-				"value": diffVal,
-				"type":  "diff",
-			},
+			map[string]interface{}{"time": t, "value": src, "type": "source"},
+			map[string]interface{}{"time": t, "value": tgt, "type": "target"},
+			map[string]interface{}{"time": t, "value": diff, "type": "diff"},
 		)
 	}
-	syncEventStats := []map[string]interface{}{}
 
-	resp := map[string]interface{}{
+	writeJSON(w, map[string]interface{}{
 		"success": true,
 		"data": map[string]interface{}{
 			"rowCountTrend":  rowCountTrend,
-			"syncEventStats": syncEventStats,
+			"syncEventStats": []interface{}{},
 		},
-	}
-	writeJSON(w, resp)
+	})
 }
 
-// GET /api/sync/:id/logs
+// GET /api/sync/{id}/logs
+// -----------------------
 func SyncLogsHandler(w http.ResponseWriter, r *http.Request) {
-	level := r.URL.Query().Get("level")
+    taskID := chi.URLParam(r, "id")
+    levelParam := r.URL.Query().Get("level")
 	search := r.URL.Query().Get("search")
 
-	// Keep it as is, or read logs from the database as needed
-	logs := []map[string]interface{}{
-		{"time": "2025-01-14 10:01:02", "level": "ERROR", "message": "some error log"},
-		{"time": "2025-01-14 09:59:50", "level": "WARN", "message": "some warning"},
-		{"time": "2025-01-14 09:59:00", "level": "INFO", "message": "some info message"},
-		{"time": "2025-01-14 09:58:30", "level": "INFO", "message": "another info"},
+    db, err := openLocalDB()
+    if err != nil {
+        errorJSON(w, "open db fail", err)
+        return
+    }
+    defer db.Close()
+
+    rows, err := db.Query(`
+SELECT log_time, level, message
+FROM sync_log
+WHERE sync_task_id=?
+ORDER BY log_time DESC
+LIMIT 500
+`, taskID)
+    if err != nil {
+        errorJSON(w, "query sync_log fail", err)
+        return
+    }
+    defer rows.Close()
+
+    var logs []map[string]interface{}
+    for rows.Next() {
+        var t string
+        var lvl, msg string
+        if err := rows.Scan(&t, &lvl, &msg); err != nil {
+            errorJSON(w, "scan sync_log fail", err)
+            return
+        }
+        logs = append(logs, map[string]interface{}{
+            "time":    t,
+            "level":   lvl,
+            "message": msg,
+        })
+    }
+    if err := rows.Err(); err != nil {
+        errorJSON(w, "sync_log iteration error", err)
+        return
 	}
 	var filtered []map[string]interface{}
 	for _, l := range logs {
-		if level != "" && l["level"] != level {
+        if levelParam != "" && !strings.EqualFold(l["level"].(string), levelParam) {
 			continue
 		}
-		msgStr := l["message"].(string)
-		if search != "" && !strings.Contains(strings.ToLower(msgStr), strings.ToLower(search)) {
+        if search != "" {
+            if !strings.Contains(strings.ToLower(l["message"].(string)), strings.ToLower(search)) {
 			continue
 		}
+        }
 		filtered = append(filtered, l)
 	}
-	resp := map[string]interface{}{
+
+	writeJSON(w, map[string]interface{}{
 		"success": true,
 		"data":    filtered,
-	}
-	writeJSON(w, resp)
+	})
 }
 
-// PUT /api/sync/:id
+// PUT /api/sync/{id} => Update sync_tasks.config_json + enable + last_update_time
 func SyncUpdateHandler(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	logrus.Infof("SyncUpdateHandler => Updating sync task with id=%s", id)
 
 	db, err := openLocalDB()
 	if err != nil {
-		errorJSON(w, "open db fail", err)
+		errorJSON(w, "db fail", err)
 		return
 	}
 	defer db.Close()
@@ -485,106 +410,60 @@ func SyncUpdateHandler(w http.ResponseWriter, r *http.Request) {
 		Status     string            `json:"status"`
 		SourceConn map[string]string `json:"sourceConn"`
 		TargetConn map[string]string `json:"targetConn"`
-		Mappings   []struct {
-			SourceTable string `json:"sourceTable"`
-			TargetTable string `json:"targetTable"`
-		} `json:"mappings"`
+		Mappings   []map[string]interface{} `json:"mappings"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		errorJSON(w, "decode request fail", err)
+		errorJSON(w, "decode fail", err)
 		return
 	}
-
-	nowStr := time.Now().Format("2006-01-02 15:04:05")
-	enableVal := 0
-	if strings.ToLower(req.Status) == "running" {
-		enableVal = 1
+	if req.TaskName == "" {
+		req.TaskName = "Sync Task"
 	}
 	if req.Status == "" {
 		req.Status = "Stopped"
 	}
+	enableVal := 0
+	if strings.ToLower(req.Status) == "running" {
+		enableVal = 1
+	}
 
-	srcC := buildConnection(req.SourceConn)
-	tgtC := buildConnection(req.TargetConn)
+	nowStr := time.Now().Format("2006-01-02 15:04:05")
+
+	var cfgJSONStruct = struct {
+		Type       string            `json:"type"`
+		TaskName   string            `json:"taskName"`
+		Status     string            `json:"status"`
+		SourceConn map[string]string `json:"sourceConn"`
+		TargetConn map[string]string `json:"targetConn"`
+		Mappings   []map[string]interface{} `json:"mappings"`
+	}{
+		Type:       req.SourceType,
+		TaskName:   req.TaskName,
+		Status:     req.Status,
+		SourceConn: req.SourceConn,
+		TargetConn: req.TargetConn,
+		Mappings:   req.Mappings,
+	}
+	cfgBytes, _ := json.Marshal(cfgJSONStruct)
 
 	res, err := db.Exec(`
-UPDATE sync_configs
-SET type=?,
-    source_connection=?,
-    target_connection=?,
-    task_name=?,
-    status=?,
+UPDATE sync_tasks
+SET enable=?,
     last_update_time=?,
-    enable=?
+    config_json=?
 WHERE id=?
-`,
-		req.SourceType,
-		srcC,
-		tgtC,
-		req.TaskName,
-		req.Status,
-		nowStr,
-		enableVal,
-		id)
+`, enableVal, nowStr, string(cfgBytes), id)
 	if err != nil {
-		errorJSON(w, "update sync_configs fail", err)
+		errorJSON(w, "update fail", err)
 		return
 	}
-	rowsAffected, err := res.RowsAffected()
-	if err != nil {
-		errorJSON(w, "retrieve rows affected for update fail", err)
-		return
-	}
-	if rowsAffected == 0 {
-		errorJSON(w, "no sync_config found with the given id", errors.New("no rows affected"))
+	ra, _ := res.RowsAffected()
+	if ra == 0 {
+		errorJSON(w, "no record found", errors.New("no rows affected"))
 		return
 	}
 
-	// Rebuild mappings
-	_, err = db.Exec(`
-DELETE FROM table_mappings 
-WHERE database_mapping_id IN (
-	SELECT id FROM database_mappings WHERE sync_config_id=?
-)`, id)
-	if err != nil {
-		errorJSON(w, "delete existing table_mappings fail", err)
-		return
-	}
-	_, err = db.Exec(`DELETE FROM database_mappings WHERE sync_config_id=?`, id)
-	if err != nil {
-		errorJSON(w, "delete existing database_mappings fail", err)
-		return
-	}
-
-	res2, err := db.Exec(`
-INSERT INTO database_mappings (sync_config_id, source_database, target_database)
-VALUES (?, ?, ?)
-`,
-		id,
-		req.SourceConn["database"],
-		req.TargetConn["database"])
-	if err != nil {
-		errorJSON(w, "insert new database_mappings fail", err)
-		return
-	}
-	mappingID, err := res2.LastInsertId()
-	if err != nil {
-		errorJSON(w, "retrieve mapping last insert id fail", err)
-		return
-	}
-
-	for _, m := range req.Mappings {
-		_, err = db.Exec(`
-INSERT INTO table_mappings (database_mapping_id, source_table, target_table)
-VALUES (?, ?, ?)
-`, mappingID, m.SourceTable, m.TargetTable)
-		if err != nil {
-			errorJSON(w, "insert table_mappings fail", err)
-			return
-		}
-	}
-
-	resp := map[string]interface{}{
+	writeJSON(w, map[string]interface{}{
 		"success": true,
 		"data": map[string]interface{}{
 			"msg": "Update success",
@@ -595,75 +474,37 @@ VALUES (?, ?, ?)
 				"status":     req.Status,
 			},
 		},
-	}
-	writeJSON(w, resp)
+	})
 }
 
-// DELETE /api/sync/:id
+// DELETE /api/sync/{id} => 
 func SyncDeleteHandler(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	logrus.Infof("SyncDeleteHandler => Attempting to delete sync task with id=%s", id)
 
 	db, err := openLocalDB()
 	if err != nil {
-		errorJSON(w, "open db fail", err)
+        errorJSON(w, "open db fail", err)
 		return
 	}
 	defer db.Close()
 
-	// Delete related table_mappings
-	res1, err := db.Exec(`
-DELETE FROM table_mappings
-WHERE database_mapping_id IN (
-	SELECT id FROM database_mappings WHERE sync_config_id=?
-)
-`, id)
+	res, err := db.Exec(`DELETE FROM sync_tasks WHERE id=?`, id)
 	if err != nil {
-		errorJSON(w, "delete table_mappings fail", err)
+		errorJSON(w, "delete fail", err)
 		return
 	}
-	rowsAffected1, _ := res1.RowsAffected()
-	logrus.Infof("Deleted %d table_mappings for sync_config_id=%s", rowsAffected1, id)
-
-	// Delete related database_mappings
-	res2, err := db.Exec(`DELETE FROM database_mappings WHERE sync_config_id=?`, id)
-	if err != nil {
-		errorJSON(w, "delete database_mappings fail", err)
-		return
-	}
-	rowsAffected2, _ := res2.RowsAffected()
-	logrus.Infof("Deleted %d database_mappings for sync_config_id=%s", rowsAffected2, id)
-
-	// Delete sync_configs record
-	res3, err := db.Exec(`DELETE FROM sync_configs WHERE id=?`, id)
-	if err != nil {
-		errorJSON(w, "delete sync_configs fail", err)
-		return
-	}
-	rowsAffected3, err := res3.RowsAffected()
-	if err != nil {
-		errorJSON(w, "retrieve rows affected for delete fail", err)
-		return
-	}
-	logrus.Infof("Deleted %d sync_configs records for id=%s", rowsAffected3, id)
-
-	if rowsAffected3 == 0 {
-		resp := map[string]interface{}{
+	ra, _ := res.RowsAffected()
+	if ra == 0 {
+		writeJSON(w, map[string]interface{}{
 			"success": false,
-			"data": map[string]interface{}{
-				"msg": "Deletion failed: no record",
-			},
-		}
-		writeJSON(w, resp)
+			"data":    map[string]interface{}{"msg": "Deletion failed: no record"},
+		})
 		return
 	}
-	resp := map[string]interface{}{
+	writeJSON(w, map[string]interface{}{
 		"success": true,
-		"data": map[string]interface{}{
-			"msg": "Deleted successfully",
-		},
-	}
-	writeJSON(w, resp)
+		"data":    map[string]interface{}{"msg": "Deleted successfully"},
+	})
 }
 
 // --------------------------------------------------------------------
@@ -677,143 +518,72 @@ func openLocalDB() (*sql.DB, error) {
 	return sql.Open("sqlite3", dbPath)
 }
 
-func loadMappingsForSync(db *sql.DB, syncConfigID int) []map[string]string {
-	var result []map[string]string
-	rows, err := db.Query(`
-SELECT tm.source_table, tm.target_table
-FROM table_mappings tm
-JOIN database_mappings dm ON dm.id = tm.database_mapping_id
-WHERE dm.sync_config_id=?
-`, syncConfigID)
+func updateTaskStatus(id string, toStart bool) error {
+	db, err := openLocalDB()
 	if err != nil {
-		logrus.Errorf("loadMappingsForSync query fail: %v", err)
-		return result
+		return err
 	}
-	defer rows.Close()
+	defer db.Close()
 
-	for rows.Next() {
-		var st, tt string
-		if err := rows.Scan(&st, &tt); err != nil {
-			logrus.Errorf("loadMappingsForSync scan fail: %v", err)
-			continue
-		}
-		result = append(result, map[string]string{
-			"sourceTable": st,
-			"targetTable": tt,
-		})
+	var oldCfgJSON string
+	var oldEnable sql.NullInt32
+	err = db.QueryRow(`SELECT config_json, enable FROM sync_tasks WHERE id=?`, id).
+		Scan(&oldCfgJSON, &oldEnable)
+	if err != nil {
+		return err
 	}
-	return result
+	var statusStr string
+	var newEnable int
+	if toStart {
+		statusStr = "Running"
+		newEnable = 1
+	} else {
+		statusStr = "Stopped"
+		newEnable = 0
+	}
+
+	var data map[string]interface{}
+	if err2 := json.Unmarshal([]byte(oldCfgJSON), &data); err2 != nil {
+		data = make(map[string]interface{})
+	}
+	data["status"] = statusStr
+	newBytes, _ := json.Marshal(data)
+
+	nowStr := time.Now().Format("2006-01-02 15:04:05")
+	_, err = db.Exec(`
+UPDATE sync_tasks
+SET enable=?,
+    last_update_time=?,
+    config_json=?
+WHERE id=?
+`, newEnable, nowStr, string(newBytes), id)
+	return err
 }
 
-// parseConnection: Simple parsing for mongodb://, mysql DSN, postgres://, redis://, etc.
-func parseConnection(raw string) map[string]string {
-	res := map[string]string{
-		"host":     raw,
-		"port":     "",
-		"user":     "",
-		"password": "",
-		"database": "",
-	}
-	if raw == "" {
-		return res
-	}
-
-	// mongodb://
-	if strings.HasPrefix(strings.ToLower(raw), "mongodb://") {
-		uri, err := url.Parse(raw)
-		if err == nil {
-			res["host"] = uri.Hostname()
-			res["port"] = uri.Port()
-			pw, _ := uri.User.Password()
-			res["user"] = uri.User.Username()
-			res["password"] = pw
-			dbp := strings.TrimPrefix(uri.Path, "/")
-			res["database"] = dbp
-		}
-		return res
-	}
-
-	// mysql => root:pwd@tcp(host:port)/db
-	reMy := regexp.MustCompile(`^(?P<User>.*?):(?P<Pass>.*?)@tcp\((?P<Host>.*?):(?P<Port>\d+)\)/(?P<Db>\w+)$`)
-	if matches := reMy.FindStringSubmatch(raw); len(matches) == 6 {
-		res["user"] = matches[1]
-		res["password"] = matches[2]
-		res["host"] = matches[3]
-		res["port"] = matches[4]
-		res["database"] = matches[5]
-		return res
-	}
-
-	// postgres://user:pwd@localhost:5432/db?sslmode=disable
-	if strings.HasPrefix(strings.ToLower(raw), "postgres://") {
-		uri, err := url.Parse(raw)
-		if err == nil {
-			res["host"] = uri.Hostname()
-			res["port"] = uri.Port()
-			pw, _ := uri.User.Password()
-			res["user"] = uri.User.Username()
-			res["password"] = pw
-			dbp := strings.TrimPrefix(uri.Path, "/")
-			res["database"] = dbp
-		}
-		return res
-	}
-
-	// redis://:pwd@host:6379/db
-	if strings.HasPrefix(strings.ToLower(raw), "redis://") {
-		uri, err := url.Parse(raw)
-		if err == nil {
-			res["host"] = uri.Hostname()
-			res["port"] = uri.Port()
-			pw, _ := uri.User.Password()
-			res["user"] = uri.User.Username()
-			res["password"] = pw
-			dbp := strings.TrimPrefix(uri.Path, "/")
-			res["database"] = dbp
-		}
-		return res
-	}
-
-	// fallback => return host=raw
-	return res
-}
-
-// buildConnection: Combine host, port, user, password, database back to DSN
-func buildConnection(m map[string]string) string {
-	if m == nil {
-		return ""
-	}
-	host := m["host"]
-	port := m["port"]
-	user := m["user"]
-	pwd := m["password"]
-	dbn := m["database"]
-
-	// MySQL
-	if user != "" && host != "" && port != "" && dbn != "" && strings.Contains(strings.ToLower(m["host"]), "tcp") {
-		return fmt.Sprintf("%s:%s@tcp(%s:%s)/%s", user, pwd, host, port, dbn)
-	}
-
-	// postgres
-	if strings.HasPrefix(strings.ToLower(m["host"]), "postgres://") {
-		return host
-	}
-
-	// redis
-	if strings.HasPrefix(strings.ToLower(m["host"]), "redis://") {
-		return host
-	}
-
-	// mongodb
-	if strings.HasPrefix(strings.ToLower(m["host"]), "mongodb://") {
-		return host
-	}
-
-	// fallback
-	if port != "" && dbn != "" {
-		return fmt.Sprintf("%s:%s/%s", host, port, dbn)
-	}
-	return host
+// Support 1h,3h,6h,12h,1d,2d,7d
+func parseRangeToSince(rangeStr string) time.Time {
+    if rangeStr == "" {
+        return time.Time{} 
+    }
+    now := time.Now()
+    lower := strings.ToLower(rangeStr)
+    switch lower {
+    case "1h":
+        return now.Add(-1 * time.Hour)
+    case "3h":
+        return now.Add(-3 * time.Hour)
+    case "6h":
+        return now.Add(-6 * time.Hour)
+    case "12h":
+        return now.Add(-12 * time.Hour)
+    case "1d":
+        return now.AddDate(0, 0, -1)
+    case "2d":
+        return now.AddDate(0, 0, -2)
+    case "7d":
+        return now.AddDate(0, 0, -7)
+    }
+    return time.Time{}
 }
 
 func errorJSON(w http.ResponseWriter, msg string, err error) {
