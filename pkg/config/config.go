@@ -24,8 +24,8 @@ type DatabaseMapping struct {
 }
 
 type SyncConfig struct {
-	ID         int  // from sync_tasks.id
-	Enable     bool // from sync_tasks.enable
+	ID     int  // from sync_tasks.id
+	Enable bool // from sync_tasks.enable
 
 	LastUpdateTime string // from sync_tasks.last_update_time
 	LastRunTime    string // from sync_tasks.last_run_time
@@ -70,6 +70,7 @@ func NewConfig() *Config {
 	if dbPath == "" {
 		dbPath = "sync.db"
 	}
+	
 	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
 		log.Fatalf("Failed opening DB: %v", err)
@@ -240,7 +241,7 @@ func buildDSNByType(dbType string, c map[string]string) string {
 		host := c["host"]
 		port := c["port"]
 		dbn := c["database"]
-		return fmt.Sprintf("mongodb://%s:%s/%s", host, port, dbn)
+		return fmt.Sprintf("mongodb://%s:%s/%s?directConnection=true", host, port, dbn)
 
 	case "redis":
 		// Redis => redis://:pwd@host:port/db
@@ -248,8 +249,8 @@ func buildDSNByType(dbType string, c map[string]string) string {
 		host := c["host"]
 		port := c["port"]
 		// user := c["user"]     // redis user rarely used
-		pwd := c["password"]  // e.g. :mypwd
-		dbn := c["database"]  // e.g. 0 or 1
+		pwd := c["password"] // e.g. :mypwd
+		dbn := c["database"] // e.g. 0 or 1
 		// user part in redis might not always exist, typically we do "redis://:pwd@host:port/db"
 		// to keep it simple:
 		if pwd != "" {

@@ -6,16 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	// "net/url"
 	"os"
-	// "regexp"
 	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/sirupsen/logrus"
 )
-
 
 // GET /api/sync => query sync_tasks
 func SyncListHandler(w http.ResponseWriter, r *http.Request) {
@@ -45,32 +42,39 @@ ORDER BY id ASC
 	var result []map[string]interface{}
 	for rows.Next() {
 		var (
-			id           int
-			enableInt    int
-			lastUpdate   string
-			lastRun      string
-			cfgJSON      string
+			id         int
+			enableInt  int
+			lastUpdate string
+			lastRun    string
+			cfgJSON    string
 		)
 		if err := rows.Scan(&id, &enableInt, &lastUpdate, &lastRun, &cfgJSON); err != nil {
 			errorJSON(w, "scan sync_tasks fail", err)
 			return
 		}
 
-		// enable => status
 		status := "Stopped"
 		if enableInt == 1 {
 			status = "Running"
 		}
 
-		// Deserialize config_json
+		// Add DB-specific fields to the struct:
 		var extra struct {
-			Type       string            `json:"type"`
-			TaskName   string            `json:"taskName"`
-			Status     string            `json:"status"`
-			SourceConn map[string]string `json:"sourceConn"`
-			TargetConn map[string]string `json:"targetConn"`
-			Mappings   []map[string]interface{} `json:"mappings"`
+			Type                   string                   `json:"type"`
+			TaskName               string                   `json:"taskName"`
+			Status                 string                   `json:"status"`
+			SourceConn             map[string]string        `json:"sourceConn"`
+			TargetConn             map[string]string        `json:"targetConn"`
+			Mappings               []map[string]interface{} `json:"mappings"`
+			PgReplicationSlot      string                   `json:"pg_replication_slot"`
+			PgPlugin               string                   `json:"pg_plugin"`
+			PgPositionPath         string                   `json:"pg_position_path"`
+			PgPublicationNames     string                   `json:"pg_publication_names"`
+			MysqlPositionPath      string                   `json:"mysql_position_path"`
+			MongodbResumeTokenPath string                   `json:"mongodb_resume_token_path"`
+			RedisPositionPath      string                   `json:"redis_position_path"`
 		}
+
 		if cfgJSON != "" {
 			_ = json.Unmarshal([]byte(cfgJSON), &extra)
 		}
@@ -81,20 +85,26 @@ ORDER BY id ASC
 			extra.TaskName = fmt.Sprintf("Sync Task %d", id)
 		}
 
-
 		item := map[string]interface{}{
 			"id":             id,
 			"enable":         (enableInt != 0),
 			"status":         status,
 			"lastUpdateTime": lastUpdate,
 			"lastRunTime":    lastRun,
+			"taskName":       extra.TaskName,
+			"sourceType":     extra.Type,
+			"sourceConn":     extra.SourceConn,
+			"targetConn":     extra.TargetConn,
+			"mappings":       extra.Mappings,
 
-			"taskName":   extra.TaskName,
-			"sourceType": extra.Type,
-			"sourceConn": extra.SourceConn,
-			"targetConn": extra.TargetConn,
-			"mappings":   extra.Mappings,
-
+			// Include the DB-specific fields in the returned item:
+			"pg_replication_slot":       extra.PgReplicationSlot,
+			"pg_plugin":                 extra.PgPlugin,
+			"pg_position_path":          extra.PgPositionPath,
+			"pg_publication_names":      extra.PgPublicationNames,
+			"mysql_position_path":       extra.MysqlPositionPath,
+			"mongodb_resume_token_path": extra.MongodbResumeTokenPath,
+			"redis_position_path":       extra.RedisPositionPath,
 		}
 		result = append(result, item)
 	}
@@ -120,13 +130,21 @@ func SyncCreateHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer db.Close()
 
+	// Include all DB-specific fields in the request struct:
 	var req struct {
-		TaskName   string            `json:"taskName"`
-		Type       string            `json:"sourceType"`
-		Status     string            `json:"status"`
-		SourceConn map[string]string `json:"sourceConn"`
-		TargetConn map[string]string `json:"targetConn"`
-		Mappings   []map[string]interface{} `json:"mappings"`
+		TaskName               string                   `json:"taskName"`
+		Type                   string                   `json:"sourceType"` // Note: front-end might send "sourceType"
+		Status                 string                   `json:"status"`
+		SourceConn             map[string]string        `json:"sourceConn"`
+		TargetConn             map[string]string        `json:"targetConn"`
+		Mappings               []map[string]interface{} `json:"mappings"`
+		PgReplicationSlot      string                   `json:"pg_replication_slot"`
+		PgPlugin               string                   `json:"pg_plugin"`
+		PgPositionPath         string                   `json:"pg_position_path"`
+		PgPublicationNames     string                   `json:"pg_publication_names"`
+		MysqlPositionPath      string                   `json:"mysql_position_path"`
+		MongodbResumeTokenPath string                   `json:"mongodb_resume_token_path"`
+		RedisPositionPath      string                   `json:"redis_position_path"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		errorJSON(w, "decode fail", err)
@@ -143,22 +161,37 @@ func SyncCreateHandler(w http.ResponseWriter, r *http.Request) {
 		enableVal = 1
 	}
 
-	nowStr := time.Now().Format("2006-01-02 15:04:05")
+	nowStr := timeNowStr()
 
+	// Build the config JSON struct with all DB-specific fields
 	var cfgJSONStruct = struct {
-		Type       string            `json:"type"`
-		TaskName   string            `json:"taskName"`
-		Status     string            `json:"status"`
-		SourceConn map[string]string `json:"sourceConn"`
-		TargetConn map[string]string `json:"targetConn"`
-		Mappings   []map[string]interface{} `json:"mappings"`
+		Type                   string                   `json:"type"`
+		TaskName               string                   `json:"taskName"`
+		Status                 string                   `json:"status"`
+		SourceConn             map[string]string        `json:"sourceConn"`
+		TargetConn             map[string]string        `json:"targetConn"`
+		Mappings               []map[string]interface{} `json:"mappings"`
+		PgReplicationSlot      string                   `json:"pg_replication_slot"`
+		PgPlugin               string                   `json:"pg_plugin"`
+		PgPositionPath         string                   `json:"pg_position_path"`
+		PgPublicationNames     string                   `json:"pg_publication_names"`
+		MysqlPositionPath      string                   `json:"mysql_position_path"`
+		MongodbResumeTokenPath string                   `json:"mongodb_resume_token_path"`
+		RedisPositionPath      string                   `json:"redis_position_path"`
 	}{
-		Type:       req.Type,
-		TaskName:   req.TaskName,
-		Status:     req.Status,
-		SourceConn: req.SourceConn,
-		TargetConn: req.TargetConn,
-		Mappings:   req.Mappings,
+		Type:                   req.Type,
+		TaskName:               req.TaskName,
+		Status:                 req.Status,
+		SourceConn:             req.SourceConn,
+		TargetConn:             req.TargetConn,
+		Mappings:               req.Mappings,
+		PgReplicationSlot:      req.PgReplicationSlot,
+		PgPlugin:               req.PgPlugin,
+		PgPositionPath:         req.PgPositionPath,
+		PgPublicationNames:     req.PgPublicationNames,
+		MysqlPositionPath:      req.MysqlPositionPath,
+		MongodbResumeTokenPath: req.MongodbResumeTokenPath,
+		RedisPositionPath:      req.RedisPositionPath,
 	}
 	cfgBytes, _ := json.Marshal(cfgJSONStruct)
 
@@ -172,6 +205,7 @@ VALUES(?, ?, ?, ?)
 	}
 	newID, _ := res.LastInsertId()
 
+	// Build response data
 	respData := map[string]interface{}{
 		"id":             newID,
 		"enable":         (enableVal != 0),
@@ -183,7 +217,16 @@ VALUES(?, ?, ?, ?)
 		"sourceConn":     req.SourceConn,
 		"targetConn":     req.TargetConn,
 		"mappings":       req.Mappings,
+
+		"pg_replication_slot":       req.PgReplicationSlot,
+		"pg_plugin":                 req.PgPlugin,
+		"pg_position_path":          req.PgPositionPath,
+		"pg_publication_names":      req.PgPublicationNames,
+		"mysql_position_path":       req.MysqlPositionPath,
+		"mongodb_resume_token_path": req.MongodbResumeTokenPath,
+		"redis_position_path":       req.RedisPositionPath,
 	}
+
 	writeJSON(w, map[string]interface{}{
 		"success": true,
 		"data": map[string]interface{}{
@@ -223,176 +266,6 @@ func SyncStopHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// GET /api/sync/{id}/monitor => {status, progress, tps, ...}
-func SyncMonitorHandler(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-
-	db, err := openLocalDB()
-	if err != nil {
-		errorJSON(w, "db fail", err)
-		return
-	}
-	defer db.Close()
-
-	var enableInt sql.NullInt32
-	err = db.QueryRow(`SELECT enable FROM sync_tasks WHERE id=?`, id).Scan(&enableInt)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeJSON(w, map[string]interface{}{"success": false, "data": map[string]interface{}{}})
-			return
-		}
-		errorJSON(w, "select fail", err)
-		return
-	}
-
-	status := "Stopped"
-	if enableInt.Int32 == 1 {
-		status = "Running"
-	}
-	writeJSON(w, map[string]interface{}{
-		"success": true,
-		"data": map[string]interface{}{
-			"progress": 85,
-			"tps":      500,
-			"delay":    0.2,
-			"status":   status,
-		},
-	})
-}
-
-// GET /api/sync/{id}/metrics
-// -------------------------
-func SyncMetricsHandler(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-
-    rangeStr := r.URL.Query().Get("range")
-    sinceTime := parseRangeToSince(rangeStr)
-
-	db, err := openLocalDB()
-	if err != nil {
-		errorJSON(w, "db fail", err)
-		return
-	}
-	defer db.Close()
-
-    var rows *sql.Rows
-    if !sinceTime.IsZero() {
-        // "logged_at >= ?"
-        rows, err = db.Query(`
-SELECT logged_at, src_row_count, tgt_row_count
-FROM monitoring_log
-WHERE sync_task_id=?
-  AND datetime(logged_at) >= datetime(?)
-ORDER BY logged_at ASC
-LIMIT 1000
-`, id, sinceTime.Format("2006-01-02 15:04:05"))
-    } else {
-        rows, err = db.Query(`
-SELECT logged_at, src_row_count, tgt_row_count
-FROM monitoring_log
-WHERE sync_task_id=?
-ORDER BY logged_at ASC
-LIMIT 1000
-`, id)
-    }
-	if err != nil {
-		errorJSON(w, "query monitoring_log fail", err)
-		return
-	}
-	defer rows.Close()
-
-	var rowCountTrend []map[string]interface{}
-	for rows.Next() {
-		var t string
-		var src, tgt int64
-		if err := rows.Scan(&t, &src, &tgt); err != nil {
-			errorJSON(w, "scan monitoring_log fail", err)
-			return
-		}
-		diff := src - tgt
-		if diff < 0 {
-			diff = -diff
-		}
-		rowCountTrend = append(rowCountTrend,
-			map[string]interface{}{"time": t, "value": src, "type": "source"},
-			map[string]interface{}{"time": t, "value": tgt, "type": "target"},
-			map[string]interface{}{"time": t, "value": diff, "type": "diff"},
-		)
-	}
-
-	writeJSON(w, map[string]interface{}{
-		"success": true,
-		"data": map[string]interface{}{
-			"rowCountTrend":  rowCountTrend,
-			"syncEventStats": []interface{}{},
-		},
-	})
-}
-
-// GET /api/sync/{id}/logs
-// -----------------------
-func SyncLogsHandler(w http.ResponseWriter, r *http.Request) {
-    taskID := chi.URLParam(r, "id")
-    levelParam := r.URL.Query().Get("level")
-	search := r.URL.Query().Get("search")
-
-    db, err := openLocalDB()
-    if err != nil {
-        errorJSON(w, "open db fail", err)
-        return
-    }
-    defer db.Close()
-
-    rows, err := db.Query(`
-SELECT log_time, level, message
-FROM sync_log
-WHERE sync_task_id=?
-ORDER BY log_time DESC
-LIMIT 500
-`, taskID)
-    if err != nil {
-        errorJSON(w, "query sync_log fail", err)
-        return
-    }
-    defer rows.Close()
-
-    var logs []map[string]interface{}
-    for rows.Next() {
-        var t string
-        var lvl, msg string
-        if err := rows.Scan(&t, &lvl, &msg); err != nil {
-            errorJSON(w, "scan sync_log fail", err)
-            return
-        }
-        logs = append(logs, map[string]interface{}{
-            "time":    t,
-            "level":   lvl,
-            "message": msg,
-        })
-    }
-    if err := rows.Err(); err != nil {
-        errorJSON(w, "sync_log iteration error", err)
-        return
-	}
-	var filtered []map[string]interface{}
-	for _, l := range logs {
-        if levelParam != "" && !strings.EqualFold(l["level"].(string), levelParam) {
-			continue
-		}
-        if search != "" {
-            if !strings.Contains(strings.ToLower(l["message"].(string)), strings.ToLower(search)) {
-			continue
-		}
-        }
-		filtered = append(filtered, l)
-	}
-
-	writeJSON(w, map[string]interface{}{
-		"success": true,
-		"data":    filtered,
-	})
-}
-
 // PUT /api/sync/{id} => Update sync_tasks.config_json + enable + last_update_time
 func SyncUpdateHandler(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
@@ -404,13 +277,21 @@ func SyncUpdateHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer db.Close()
 
+	// Include all DB-specific fields in the request struct:
 	var req struct {
-		TaskName   string            `json:"taskName"`
-		SourceType string            `json:"sourceType"`
-		Status     string            `json:"status"`
-		SourceConn map[string]string `json:"sourceConn"`
-		TargetConn map[string]string `json:"targetConn"`
-		Mappings   []map[string]interface{} `json:"mappings"`
+		TaskName               string                   `json:"taskName"`
+		SourceType             string                   `json:"sourceType"`
+		Status                 string                   `json:"status"`
+		SourceConn             map[string]string        `json:"sourceConn"`
+		TargetConn             map[string]string        `json:"targetConn"`
+		Mappings               []map[string]interface{} `json:"mappings"`
+		PgReplicationSlot      string                   `json:"pg_replication_slot"`
+		PgPlugin               string                   `json:"pg_plugin"`
+		PgPositionPath         string                   `json:"pg_position_path"`
+		PgPublicationNames     string                   `json:"pg_publication_names"`
+		MysqlPositionPath      string                   `json:"mysql_position_path"`
+		MongodbResumeTokenPath string                   `json:"mongodb_resume_token_path"`
+		RedisPositionPath      string                   `json:"redis_position_path"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		errorJSON(w, "decode fail", err)
@@ -427,22 +308,37 @@ func SyncUpdateHandler(w http.ResponseWriter, r *http.Request) {
 		enableVal = 1
 	}
 
-	nowStr := time.Now().Format("2006-01-02 15:04:05")
+	nowStr := timeNowStr()
 
+	// Build the config JSON struct with all DB-specific fields
 	var cfgJSONStruct = struct {
-		Type       string            `json:"type"`
-		TaskName   string            `json:"taskName"`
-		Status     string            `json:"status"`
-		SourceConn map[string]string `json:"sourceConn"`
-		TargetConn map[string]string `json:"targetConn"`
-		Mappings   []map[string]interface{} `json:"mappings"`
+		Type                   string                   `json:"type"`
+		TaskName               string                   `json:"taskName"`
+		Status                 string                   `json:"status"`
+		SourceConn             map[string]string        `json:"sourceConn"`
+		TargetConn             map[string]string        `json:"targetConn"`
+		Mappings               []map[string]interface{} `json:"mappings"`
+		PgReplicationSlot      string                   `json:"pg_replication_slot"`
+		PgPlugin               string                   `json:"pg_plugin"`
+		PgPositionPath         string                   `json:"pg_position_path"`
+		PgPublicationNames     string                   `json:"pg_publication_names"`
+		MysqlPositionPath      string                   `json:"mysql_position_path"`
+		MongodbResumeTokenPath string                   `json:"mongodb_resume_token_path"`
+		RedisPositionPath      string                   `json:"redis_position_path"`
 	}{
-		Type:       req.SourceType,
-		TaskName:   req.TaskName,
-		Status:     req.Status,
-		SourceConn: req.SourceConn,
-		TargetConn: req.TargetConn,
-		Mappings:   req.Mappings,
+		Type:                   req.SourceType,
+		TaskName:               req.TaskName,
+		Status:                 req.Status,
+		SourceConn:             req.SourceConn,
+		TargetConn:             req.TargetConn,
+		Mappings:               req.Mappings,
+		PgReplicationSlot:      req.PgReplicationSlot,
+		PgPlugin:               req.PgPlugin,
+		PgPositionPath:         req.PgPositionPath,
+		PgPublicationNames:     req.PgPublicationNames,
+		MysqlPositionPath:      req.MysqlPositionPath,
+		MongodbResumeTokenPath: req.MongodbResumeTokenPath,
+		RedisPositionPath:      req.RedisPositionPath,
 	}
 	cfgBytes, _ := json.Marshal(cfgJSONStruct)
 
@@ -468,22 +364,29 @@ WHERE id=?
 		"data": map[string]interface{}{
 			"msg": "Update success",
 			"formData": map[string]interface{}{
-				"id":         id,
-				"taskName":   req.TaskName,
-				"sourceType": req.SourceType,
-				"status":     req.Status,
+				"id":                        id,
+				"taskName":                  req.TaskName,
+				"sourceType":                req.SourceType,
+				"status":                    req.Status,
+				"pg_replication_slot":       req.PgReplicationSlot,
+				"pg_plugin":                 req.PgPlugin,
+				"pg_position_path":          req.PgPositionPath,
+				"pg_publication_names":      req.PgPublicationNames,
+				"mysql_position_path":       req.MysqlPositionPath,
+				"mongodb_resume_token_path": req.MongodbResumeTokenPath,
+				"redis_position_path":       req.RedisPositionPath,
 			},
 		},
 	})
 }
 
-// DELETE /api/sync/{id} => 
+// DELETE /api/sync/{id}
 func SyncDeleteHandler(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
 	db, err := openLocalDB()
 	if err != nil {
-        errorJSON(w, "open db fail", err)
+		errorJSON(w, "open db fail", err)
 		return
 	}
 	defer db.Close()
@@ -507,8 +410,9 @@ func SyncDeleteHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// --------------------------------------------------------------------
-// Helpers
+// -------------------------
+// Helpers & Common Utilities
+// -------------------------
 
 func openLocalDB() (*sql.DB, error) {
 	dbPath := os.Getenv("SYNC_DB_PATH")
@@ -526,9 +430,7 @@ func updateTaskStatus(id string, toStart bool) error {
 	defer db.Close()
 
 	var oldCfgJSON string
-	var oldEnable sql.NullInt32
-	err = db.QueryRow(`SELECT config_json, enable FROM sync_tasks WHERE id=?`, id).
-		Scan(&oldCfgJSON, &oldEnable)
+	err = db.QueryRow(`SELECT config_json FROM sync_tasks WHERE id=?`, id).Scan(&oldCfgJSON)
 	if err != nil {
 		return err
 	}
@@ -549,7 +451,7 @@ func updateTaskStatus(id string, toStart bool) error {
 	data["status"] = statusStr
 	newBytes, _ := json.Marshal(data)
 
-	nowStr := time.Now().Format("2006-01-02 15:04:05")
+	nowStr := timeNowStr()
 	_, err = db.Exec(`
 UPDATE sync_tasks
 SET enable=?,
@@ -558,32 +460,6 @@ SET enable=?,
 WHERE id=?
 `, newEnable, nowStr, string(newBytes), id)
 	return err
-}
-
-// Support 1h,3h,6h,12h,1d,2d,7d
-func parseRangeToSince(rangeStr string) time.Time {
-    if rangeStr == "" {
-        return time.Time{} 
-    }
-    now := time.Now()
-    lower := strings.ToLower(rangeStr)
-    switch lower {
-    case "1h":
-        return now.Add(-1 * time.Hour)
-    case "3h":
-        return now.Add(-3 * time.Hour)
-    case "6h":
-        return now.Add(-6 * time.Hour)
-    case "12h":
-        return now.Add(-12 * time.Hour)
-    case "1d":
-        return now.AddDate(0, 0, -1)
-    case "2d":
-        return now.AddDate(0, 0, -2)
-    case "7d":
-        return now.AddDate(0, 0, -7)
-    }
-    return time.Time{}
 }
 
 func errorJSON(w http.ResponseWriter, msg string, err error) {
@@ -599,4 +475,8 @@ func errorJSON(w http.ResponseWriter, msg string, err error) {
 func writeJSON(w http.ResponseWriter, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(data)
+}
+
+func timeNowStr() string {
+	return time.Now().Format("2006-01-02 15:04:05")
 }

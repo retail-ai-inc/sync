@@ -4,11 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"github.com/jackc/pglogrepl"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgproto3"
-	_ "github.com/lib/pq"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -18,7 +13,13 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/jackc/pglogrepl"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgproto3"
+	_ "github.com/lib/pq"
 	"github.com/retail-ai-inc/sync/pkg/config"
+	"github.com/retail-ai-inc/sync/pkg/utils"
 	"github.com/sirupsen/logrus"
 )
 
@@ -49,7 +50,6 @@ type PostgreSQLSyncer struct {
 
 	state replicationState
 
-	// lastExecError is set to 1 if replicateQuery fails
 	lastExecError int32
 }
 
@@ -65,28 +65,46 @@ func (s *PostgreSQLSyncer) Start(ctx context.Context) {
 
 	s.logger.Info("[PostgreSQL] Starting synchronization...")
 
-	s.sourceConnNormal, err = pgx.Connect(ctx, s.cfg.SourceConnection)
+	// Connect normal
+	err = utils.Retry(5, 2*time.Second, 2.0, func() error {
+		var connErr error
+		s.sourceConnNormal, connErr = pgx.Connect(ctx, s.cfg.SourceConnection)
+		return connErr
+	})
 	if err != nil {
-		s.logger.Errorf("[PostgreSQL] Failed to connect to source (normal): %v", err)
+		s.logger.Errorf("[PostgreSQL] Failed to connect to source (normal) after retries: %v", err)
 		return
 	}
 	defer s.sourceConnNormal.Close(ctx)
 
+	// Connect replication
 	replDSN, err := s.buildReplicationDSN(s.cfg.SourceConnection)
 	if err != nil {
 		s.logger.Errorf("[PostgreSQL] Failed to build replication DSN: %v", err)
 		return
 	}
-	s.sourceConnRepl, err = pgconn.Connect(ctx, replDSN)
+	err = utils.Retry(5, 2*time.Second, 2.0, func() error {
+		var connErr error
+		s.sourceConnRepl, connErr = pgconn.Connect(ctx, replDSN)
+		return connErr
+	})
 	if err != nil {
-		s.logger.Errorf("[PostgreSQL] Failed to connect to source (replication): %v", err)
+		s.logger.Errorf("[PostgreSQL] Failed to connect to source (replication) after retries: %v", err)
 		return
 	}
 	defer s.sourceConnRepl.Close(ctx)
 
+	// Connect target
 	s.targetDB, err = sql.Open("postgres", s.cfg.TargetConnection)
 	if err != nil {
-		s.logger.Errorf("[PostgreSQL] Failed to connect to target: %v", err)
+		s.logger.Errorf("[PostgreSQL] Failed to open target DB: %v", err)
+		return
+	}
+	err = utils.Retry(5, 2*time.Second, 2.0, func() error {
+		return s.targetDB.PingContext(ctx)
+	})
+	if err != nil {
+		s.logger.Errorf("[PostgreSQL] Failed to connect to target DB after retries: %v", err)
 		return
 	}
 	defer s.targetDB.Close()
@@ -125,21 +143,19 @@ func (s *PostgreSQLSyncer) Start(ctx context.Context) {
 		}
 	}
 
-	// prepare target schema
 	if err := s.prepareTargetSchema(ctx); err != nil {
 		s.logger.Warnf("[PostgreSQL] prepareTargetSchema error: %v", err)
 	}
 
-	// initial sync
-	s.logger.Info("[PostgreSQL] Starting initial full sync...")
-	err = s.initialSync(ctx)
+	// Perform initial sync
+	err = s.doInitialSync(ctx)
 	if err != nil {
-		s.logger.Errorf("[PostgreSQL] Initial sync failed: %v", err)
+		s.logger.Errorf("[PostgreSQL] doInitialSync failed after retries: %v", err)
 		return
 	}
 	s.logger.Info("[PostgreSQL] Initial full sync done.")
 
-	// start logical replication
+	// Start logical replication
 	err = s.startLogicalReplication(ctx)
 	if err != nil {
 		s.logger.Errorf("[PostgreSQL] Logical replication failed: %v", err)
@@ -268,16 +284,20 @@ ORDER BY ordinal_position
 
 	for rows.Next() {
 		var (
-			columnName, dataType, isNullable   string
-			columnDefault                      sql.NullString
-			charMaxLen, numPrecision, numScale sql.NullInt64
+			columnName    string
+			dataType      string
+			isNullable    string
+			columnDefault sql.NullString
+			charMaxLen    sql.NullInt64
+			numPrecision  sql.NullInt64
+			numScale      sql.NullInt64
 		)
 		if errScan := rows.Scan(&columnName, &dataType, &isNullable, &columnDefault,
 			&charMaxLen, &numPrecision, &numScale); errScan != nil {
 			return "", nil, fmt.Errorf("scan column info fail: %w", errScan)
 		}
 
-		colDef := fmt.Sprintf(`"%s" %s`, columnName, dataType)
+		colDef := fmt.Sprintf("%s %s", columnName, dataType)
 
 		if (dataType == "character varying" || dataType == "varchar" ||
 			dataType == "character" || dataType == "char") && charMaxLen.Valid {
@@ -373,7 +393,7 @@ WHERE schemaname=$1
 	return rows.Err()
 }
 
-func (s *PostgreSQLSyncer) initialSync(ctx context.Context) error {
+func (s *PostgreSQLSyncer) doInitialSync(ctx context.Context) error {
 	for _, dbmap := range s.cfg.Mappings {
 		srcSchema := dbmap.SourceSchema
 		if srcSchema == "" {
@@ -582,21 +602,21 @@ func (s *PostgreSQLSyncer) processMessage(xld pglogrepl.XLogData, state *replica
 			s.logger.Debug("[PostgreSQL][INSERT] Stale insert => ignoring")
 			return false, nil
 		}
-		return s.handleInsertV2(typed, state)
+		return s.handleInsert(typed, state)
 
 	case *pglogrepl.UpdateMessageV2:
 		if !state.processMessages {
 			s.logger.Debug("[PostgreSQL][UPDATE] Stale update => ignoring")
 			return false, nil
 		}
-		return s.handleUpdateV2(typed, state)
+		return s.handleUpdate(typed, state)
 
 	case *pglogrepl.DeleteMessageV2:
 		if !state.processMessages {
 			s.logger.Debug("[PostgreSQL][DELETE] Stale delete => ignoring")
 			return false, nil
 		}
-		return s.handleDeleteV2(typed, state)
+		return s.handleDelete(typed, state)
 
 	default:
 		s.logger.Debugf("[PostgreSQL] Unhandled message => %T", typed)
@@ -604,7 +624,7 @@ func (s *PostgreSQLSyncer) processMessage(xld pglogrepl.XLogData, state *replica
 	return false, nil
 }
 
-func (s *PostgreSQLSyncer) handleInsertV2(
+func (s *PostgreSQLSyncer) handleInsert(
 	msg *pglogrepl.InsertMessageV2,
 	st *replicationState,
 ) (bool, error) {
@@ -648,7 +668,7 @@ func (s *PostgreSQLSyncer) handleInsertV2(
 	return false, err
 }
 
-func (s *PostgreSQLSyncer) handleUpdateV2(
+func (s *PostgreSQLSyncer) handleUpdate(
 	msg *pglogrepl.UpdateMessageV2,
 	st *replicationState,
 ) (bool, error) {
@@ -700,7 +720,7 @@ func (s *PostgreSQLSyncer) handleUpdateV2(
 	return false, err
 }
 
-func (s *PostgreSQLSyncer) handleDeleteV2(
+func (s *PostgreSQLSyncer) handleDelete(
 	msg *pglogrepl.DeleteMessageV2,
 	st *replicationState,
 ) (bool, error) {
@@ -768,17 +788,19 @@ func (s *PostgreSQLSyncer) buildWhereClausesFromPK(
 	return clauses
 }
 
-// replicateQuery: unified function for executing and logging each DML
 func (s *PostgreSQLSyncer) replicateQuery(db *sql.DB, query, opType, tableName string) error {
+	s.logger.Debugf("[PostgreSQL][%s] table=%s query=%s", opType, tableName, query)
+
 	res, err := db.Exec(query)
 	if err != nil {
-		s.logger.Errorf("[PostgreSQL][%s] table=%s error=%v query=%s", opType, tableName, err, query)
+		s.logger.Errorf("[PostgreSQL][%s] table=%s error=%v", opType, tableName, err)
 		atomic.StoreInt32(&s.lastExecError, 1)
 		return err
 	}
 	atomic.StoreInt32(&s.lastExecError, 0)
+
 	rowsAff, _ := res.RowsAffected()
-	s.logger.Infof("[PostgreSQL][%s] table=%s rowsAffected=%d query=%s", opType, tableName, rowsAff, query)
+	s.logger.Infof("[PostgreSQL][%s] table=%s rowsAffected=%d", opType, tableName, rowsAff)
 	return nil
 }
 

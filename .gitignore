@@ -57,4 +57,4 @@ dist/
 
 sync
 cloudbuild.yaml
-sync.db
+# sync.db

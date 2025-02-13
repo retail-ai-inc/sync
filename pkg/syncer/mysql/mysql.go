@@ -16,6 +16,8 @@ import (
 	"github.com/go-mysql-org/go-mysql/replication"
 	"github.com/go-mysql-org/go-mysql/schema"
 	"github.com/retail-ai-inc/sync/pkg/config"
+	"github.com/retail-ai-inc/sync/pkg/syncer/common"
+	"github.com/retail-ai-inc/sync/pkg/utils"
 	"github.com/sirupsen/logrus"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -37,6 +39,11 @@ func (s *MySQLSyncer) Start(ctx context.Context) {
 	s.logger.Info("[MySQL] Starting synchronization...")
 
 	cfg := canal.NewDefaultConfig()
+	if strings.ToLower(s.cfg.Type) == "mariadb" {
+		cfg.Flavor = "mariadb"
+	} else {
+		cfg.Flavor = "mysql"
+	}
 	cfg.Addr = s.parseAddr(s.cfg.SourceConnection)
 	cfg.User, cfg.Password = s.parseUserPassword(s.cfg.SourceConnection)
 	cfg.Dump.ExecutionPath = s.cfg.DumpExecutionPath
@@ -44,24 +51,38 @@ func (s *MySQLSyncer) Start(ctx context.Context) {
 	var includeTables []string
 	for _, mapping := range s.cfg.Mappings {
 		for _, table := range mapping.Tables {
-			includeTables = append(includeTables, fmt.Sprintf("%s\\.%s", mapping.SourceDatabase, table.SourceTable))
+			includeTables = append(includeTables, fmt.Sprintf("%s\\.%s", common.GetDatabaseName(s.cfg.Type, s.cfg.SourceConnection), table.SourceTable))
 		}
 	}
 	cfg.IncludeTableRegex = includeTables
 
-	c, err := canal.NewCanal(cfg)
+	var c *canal.Canal
+	err := utils.Retry(5, 2*time.Second, 2.0, func() error {
+		var e error
+		c, e = canal.NewCanal(cfg)
+		return e
+	})
 	if err != nil {
-		s.logger.Errorf("[MySQL] Failed to create canal: %v", err)
+		s.logger.Errorf("[MySQL] Failed to create canal after retries: %v", err)
 		return
 	}
 
-	targetDB, err := sql.Open("mysql", s.cfg.TargetConnection)
+	var targetDB *sql.DB
+	err = utils.Retry(5, 2*time.Second, 2.0, func() error {
+		var connErr error
+		targetDB, connErr = sql.Open("mysql", s.cfg.TargetConnection)
+		if connErr != nil {
+			return connErr
+		}
+		return targetDB.PingContext(ctx)
+	})
 	if err != nil {
-		s.logger.Errorf("[MySQL] Failed to connect to target: %v", err)
+		s.logger.Errorf("[MySQL] Failed to connect to target DB after retries: %v", err)
 		return
 	}
 
-	s.doInitialFullSyncIfNeeded(ctx, c, targetDB)
+	// Perform initial sync if target is empty
+	s.doInitialSync(ctx, c, targetDB)
 
 	h := &MyEventHandler{
 		targetDB:          targetDB,
@@ -70,6 +91,7 @@ func (s *MySQLSyncer) Start(ctx context.Context) {
 		positionSaverPath: s.cfg.MySQLPositionPath,
 		canal:             c,
 		lastExecError:     0,
+		TargetConnection:  s.cfg.TargetConnection,
 	}
 	c.SetEventHandler(h)
 
@@ -99,11 +121,11 @@ func (s *MySQLSyncer) Start(ctx context.Context) {
 					if h.positionSaverPath != "" {
 						positionDir := filepath.Dir(h.positionSaverPath)
 						if errMk := os.MkdirAll(positionDir, os.ModePerm); errMk != nil {
-							s.logger.Errorf("[MySQL] Failed to create dir for binlog position file %s: %v", h.positionSaverPath, errMk)
+							s.logger.Errorf("[MySQL] Failed to create dir for binlog position => %s: %v", s.cfg.MySQLPositionPath, errMk)
 							continue
 						}
 						if errWrite := os.WriteFile(h.positionSaverPath, data, 0644); errWrite != nil {
-							s.logger.Errorf("[MySQL] Failed to write binlog position => %s: %v", h.positionSaverPath, errWrite)
+							s.logger.Errorf("[MySQL] Failed to write binlog position to %s: %v", h.positionSaverPath, errWrite)
 						} else {
 							s.logger.Debugf("[MySQL] Timer => saved position %v", pos)
 						}
@@ -135,7 +157,7 @@ func (s *MySQLSyncer) Start(ctx context.Context) {
 	s.logger.Info("[MySQL] Synchronization stopped.")
 }
 
-func (s *MySQLSyncer) doInitialFullSyncIfNeeded(ctx context.Context, c *canal.Canal, targetDB *sql.DB) {
+func (s *MySQLSyncer) doInitialSync(ctx context.Context, c *canal.Canal, targetDB *sql.DB) {
 	s.logger.Info("[MySQL] Checking if initial full sync is needed...")
 
 	sourceDB, err := sql.Open("mysql", s.cfg.SourceConnection)
@@ -146,33 +168,28 @@ func (s *MySQLSyncer) doInitialFullSyncIfNeeded(ctx context.Context, c *canal.Ca
 	defer sourceDB.Close()
 
 	const batchSize = 100
+	sourceDBName := common.GetDatabaseName(s.cfg.Type, s.cfg.SourceConnection)
+	targetDBName := common.GetDatabaseName(s.cfg.Type, s.cfg.TargetConnection)
 
 	for _, mapping := range s.cfg.Mappings {
-		sourceDBName := mapping.SourceDatabase
-		targetDBName := mapping.TargetDatabase
 		for _, tableMap := range mapping.Tables {
 			exists, errExist := s.targetTableExists(ctx, targetDB, targetDBName, tableMap.TargetTable)
 			if errExist != nil {
-				s.logger.Errorf("[MySQL] Could not check if target table %s.%s exists: %v",
-					targetDBName, tableMap.TargetTable, errExist)
+				s.logger.Errorf("[MySQL] Could not check if target table %s.%s exists: %v", targetDBName, tableMap.TargetTable, errExist)
 				continue
 			}
 			if !exists {
-				if errCreate := s.createTargetTableAndIndexes(ctx, sourceDB, targetDB,
-					sourceDBName, tableMap.SourceTable, targetDBName, tableMap.TargetTable); errCreate != nil {
-					s.logger.Errorf("[MySQL] Failed to create target table %s.%s: %v",
-						targetDBName, tableMap.TargetTable, errCreate)
+				if errCreate := s.createTargetTableAndIndexes(ctx, sourceDB, targetDB, sourceDBName, tableMap.SourceTable, targetDBName, tableMap.TargetTable); errCreate != nil {
+					s.logger.Errorf("[MySQL] Failed to create target table %s.%s: %v", targetDBName, tableMap.TargetTable, errCreate)
 					continue
 				}
-				s.logger.Infof("[MySQL] Created table %s.%s from source %s.%s",
-					targetDBName, tableMap.TargetTable, sourceDBName, tableMap.SourceTable)
+				s.logger.Infof("[MySQL] Created table %s.%s from source %s.%s", targetDBName, tableMap.TargetTable, sourceDBName, tableMap.SourceTable)
 			}
 
 			targetCountQuery := fmt.Sprintf("SELECT COUNT(1) FROM %s.%s", targetDBName, tableMap.TargetTable)
 			var count int
 			if errC := targetDB.QueryRow(targetCountQuery).Scan(&count); errC != nil {
-				s.logger.Errorf("[MySQL] Could not check if table %s.%s is empty: %v",
-					targetDBName, tableMap.TargetTable, errC)
+				s.logger.Errorf("[MySQL] Could not check if table %s.%s is empty: %v", targetDBName, tableMap.TargetTable, errC)
 				continue
 			}
 			if count > 0 {
@@ -180,10 +197,9 @@ func (s *MySQLSyncer) doInitialFullSyncIfNeeded(ctx context.Context, c *canal.Ca
 				continue
 			}
 
-			s.logger.Infof("[MySQL] Doing initial full sync from %s.%s => %s.%s",
-				sourceDBName, tableMap.SourceTable, targetDBName, tableMap.TargetTable)
+			s.logger.Infof("[MySQL] Doing initial full sync from %s.%s => %s.%s", sourceDBName, tableMap.SourceTable, targetDBName, tableMap.TargetTable)
 
-			cols, errCols := s.getColumnsOfTable(ctx, sourceDB, sourceDBName, tableMap.SourceTable)
+			cols, errCols := s.getTableColumns(ctx, sourceDB, sourceDBName, tableMap.SourceTable)
 			if errCols != nil {
 				s.logger.Errorf("[MySQL] get columns fail => %s.%s => %v", sourceDBName, tableMap.SourceTable, errCols)
 				continue
@@ -235,7 +251,7 @@ func (s *MySQLSyncer) doInitialFullSyncIfNeeded(ctx context.Context, c *canal.Ca
 }
 
 func (s *MySQLSyncer) targetTableExists(ctx context.Context, db *sql.DB, dbName, tableName string) (bool, error) {
-	query := `SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=? AND table_name=?`
+	query := "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=? AND table_name=?"
 	var cnt int
 	err := db.QueryRowContext(ctx, query, dbName, tableName).Scan(&cnt)
 	if err != nil {
@@ -255,8 +271,8 @@ func (s *MySQLSyncer) createTargetTableAndIndexes(
 	}
 	for _, seqStmt := range seqs {
 		s.logger.Debugf("[MySQL] Creating sequence => %s", seqStmt)
-		if _, errSQ := targetDB.ExecContext(ctx, seqStmt); errSQ != nil {
-			s.logger.Warnf("[MySQL] create sequence fail => %v", errSQ)
+		if _, errExec := targetDB.ExecContext(ctx, seqStmt); errExec != nil {
+			s.logger.Warnf("[MySQL] create sequence fail => %v", errExec)
 		}
 	}
 	s.logger.Infof("[MySQL] Creating table => %s", createStmt)
@@ -272,17 +288,17 @@ func (s *MySQLSyncer) generateCreateTableSQL(
 	srcDBName, srcTableName, tgtDBName, tgtTableName string,
 ) (string, []string, error) {
 	var tableName, createSQL string
-	showQuery := fmt.Sprintf("SHOW CREATE TABLE `%s`.`%s`", srcDBName, srcTableName)
+	showQuery := fmt.Sprintf("SHOW CREATE TABLE %s.%s", srcDBName, srcTableName)
 	row := sourceDB.QueryRowContext(ctx, showQuery)
 	if err := row.Scan(&tableName, &createSQL); err != nil {
 		return "", nil, fmt.Errorf("SHOW CREATE TABLE fail: %w", err)
 	}
-	oldPrefix := fmt.Sprintf("CREATE TABLE `%s`.", srcDBName)
-	newPrefix := fmt.Sprintf("CREATE TABLE `%s`.", tgtDBName)
+	oldPrefix := fmt.Sprintf("CREATE TABLE %s.", srcDBName)
+	newPrefix := fmt.Sprintf("CREATE TABLE %s.", tgtDBName)
 	createSQL = strings.Replace(createSQL, oldPrefix, newPrefix, 1)
 
-	oldTable := fmt.Sprintf("`%s`.`%s`", srcDBName, srcTableName)
-	newTable := fmt.Sprintf("`%s`.`%s`", tgtDBName, tgtTableName)
+	oldTable := fmt.Sprintf("%s.%s", srcDBName, srcTableName)
+	newTable := fmt.Sprintf("%s.%s", tgtDBName, tgtTableName)
 	createSQL = strings.Replace(createSQL, oldTable, newTable, 1)
 
 	var seqs []string
@@ -299,14 +315,14 @@ func (s *MySQLSyncer) batchInsert(
 	if len(rows) == 0 {
 		return nil
 	}
-	insertSQL := fmt.Sprintf("INSERT INTO %s.%s (%s) VALUES",
-		dbName, tableName, strings.Join(cols, ", "))
+	insertSQL := fmt.Sprintf("INSERT INTO %s.%s (%s) VALUES", dbName, tableName, strings.Join(cols, ", "))
 	singleRowPlaceholder := fmt.Sprintf("(%s)", strings.Join(makeQuestionMarks(len(cols)), ","))
 	var allPlaceholder []string
 	for range rows {
 		allPlaceholder = append(allPlaceholder, singleRowPlaceholder)
 	}
 	insertSQL = insertSQL + " " + strings.Join(allPlaceholder, ", ")
+
 	var args []interface{}
 	for _, rowData := range rows {
 		args = append(args, rowData...)
@@ -374,7 +390,7 @@ func (s *MySQLSyncer) parseUserPassword(dsn string) (string, string) {
 	return userParts[0], userParts[1]
 }
 
-func (s *MySQLSyncer) getColumnsOfTable(ctx context.Context, db *sql.DB, database, table string) ([]string, error) {
+func (s *MySQLSyncer) getTableColumns(ctx context.Context, db *sql.DB, database, table string) ([]string, error) {
 	query := fmt.Sprintf("SHOW COLUMNS FROM %s.%s", database, table)
 	rows, err := db.QueryContext(ctx, query)
 	if err != nil {
@@ -397,8 +413,6 @@ func (s *MySQLSyncer) getColumnsOfTable(ctx context.Context, db *sql.DB, databas
 	return cols, nil
 }
 
-// ------------------ Custom Event Handler ------------------
-
 type MyEventHandler struct {
 	canal.DummyEventHandler
 	targetDB          *sql.DB
@@ -407,6 +421,7 @@ type MyEventHandler struct {
 	positionSaverPath string
 	canal             *canal.Canal
 	lastExecError     int32
+	TargetConnection  string
 }
 
 func (h *MyEventHandler) OnRow(e *canal.RowsEvent) error {
@@ -414,17 +429,15 @@ func (h *MyEventHandler) OnRow(e *canal.RowsEvent) error {
 	sourceDB := table.Schema
 	tableName := table.Name
 
-	var targetDBName, targetTableName string
+	var targetTableName string
+	targetDBName := common.GetDatabaseName("mysql", h.TargetConnection)
 	found := false
 	for _, mapping := range h.mappings {
-		if mapping.SourceDatabase == sourceDB {
-			for _, tableMap := range mapping.Tables {
-				if tableMap.SourceTable == tableName {
-					targetDBName = mapping.TargetDatabase
-					targetTableName = tableMap.TargetTable
-					found = true
-					break
-				}
+		for _, tableMap := range mapping.Tables {
+			if tableMap.SourceTable == tableName {
+				targetTableName = tableMap.TargetTable
+				found = true
+				break
 			}
 		}
 		if found {
@@ -467,23 +480,28 @@ func (h *MyEventHandler) handleDML(
 	newRow []interface{},
 	oldRow []interface{},
 ) {
+	var query string
+
 	switch opType {
 	case "INSERT":
 		placeholders := make([]string, len(cols))
 		for i := range placeholders {
 			placeholders[i] = "?"
 		}
-		query := fmt.Sprintf("INSERT INTO %s.%s (%s) VALUES (%s)",
+		query = fmt.Sprintf("INSERT INTO %s.%s (%s) VALUES (%s)",
 			tgtDB, tgtTable,
 			strings.Join(cols, ", "),
-			strings.Join(placeholders, ", "))
+			strings.Join(placeholders, ", "),
+		)
+		h.logger.Debugf("[MySQL][INSERT] table=%s.%s query=%s", tgtDB, tgtTable, query)
+
 		res, err := h.targetDB.Exec(query, newRow...)
 		if err != nil {
-			h.logger.Errorf("[MySQL][INSERT] table=%s.%s error=%v query=%s", tgtDB, tgtTable, err, query)
+			h.logger.Errorf("[MySQL][INSERT] table=%s.%s error=%v", tgtDB, tgtTable, err)
 			atomic.StoreInt32(&h.lastExecError, 1)
 		} else {
 			ra, _ := res.RowsAffected()
-			h.logger.Infof("[MySQL][INSERT] table=%s.%s rowsAffected=%d query=%s", tgtDB, tgtTable, ra, query)
+			h.logger.Infof("[MySQL][INSERT] table=%s.%s rowsAffected=%d", tgtDB, tgtTable, ra)
 			atomic.StoreInt32(&h.lastExecError, 0)
 		}
 	case "UPDATE":
@@ -491,8 +509,8 @@ func (h *MyEventHandler) handleDML(
 		for i, colName := range cols {
 			setClauses[i] = fmt.Sprintf("%s = ?", colName)
 		}
-		whereClauses := []string{}
-		whereVals := []interface{}{}
+		var whereClauses []string
+		var whereVals []interface{}
 		for _, pkIndex := range table.PKColumns {
 			whereClauses = append(whereClauses, fmt.Sprintf("%s = ?", cols[pkIndex]))
 			whereVals = append(whereVals, oldRow[pkIndex])
@@ -501,23 +519,26 @@ func (h *MyEventHandler) handleDML(
 			h.logger.Warnf("[MySQL][UPDATE] table=%s.%s no PK => skip", tgtDB, tgtTable)
 			return
 		}
-		query := fmt.Sprintf("UPDATE %s.%s SET %s WHERE %s",
+		query = fmt.Sprintf("UPDATE %s.%s SET %s WHERE %s",
 			tgtDB, tgtTable,
 			strings.Join(setClauses, ", "),
-			strings.Join(whereClauses, " AND "))
+			strings.Join(whereClauses, " AND "),
+		)
+		h.logger.Debugf("[MySQL][UPDATE] table=%s.%s query=%s", tgtDB, tgtTable, query)
+
 		args := append(newRow, whereVals...)
 		res, err := h.targetDB.Exec(query, args...)
 		if err != nil {
-			h.logger.Errorf("[MySQL][UPDATE] table=%s.%s error=%v query=%s", tgtDB, tgtTable, err, query)
+			h.logger.Errorf("[MySQL][UPDATE] table=%s.%s error=%v", tgtDB, tgtTable, err)
 			atomic.StoreInt32(&h.lastExecError, 1)
 		} else {
 			ra, _ := res.RowsAffected()
-			h.logger.Infof("[MySQL][UPDATE] table=%s.%s rowsAffected=%d query=%s", tgtDB, tgtTable, ra, query)
+			h.logger.Infof("[MySQL][UPDATE] table=%s.%s rowsAffected=%d", tgtDB, tgtTable, ra)
 			atomic.StoreInt32(&h.lastExecError, 0)
 		}
 	case "DELETE":
-		whereClauses := []string{}
-		whereVals := []interface{}{}
+		var whereClauses []string
+		var whereVals []interface{}
 		for _, pkIndex := range table.PKColumns {
 			whereClauses = append(whereClauses, fmt.Sprintf("%s = ?", cols[pkIndex]))
 			whereVals = append(whereVals, newRow[pkIndex])
@@ -526,14 +547,16 @@ func (h *MyEventHandler) handleDML(
 			h.logger.Warnf("[MySQL][DELETE] table=%s.%s no PK => skip", tgtDB, tgtTable)
 			return
 		}
-		query := fmt.Sprintf("DELETE FROM %s.%s WHERE %s", tgtDB, tgtTable, strings.Join(whereClauses, " AND "))
+		query = fmt.Sprintf("DELETE FROM %s.%s WHERE %s", tgtDB, tgtTable, strings.Join(whereClauses, " AND "))
+		h.logger.Debugf("[MySQL][DELETE] table=%s.%s query=%s", tgtDB, tgtTable, query)
+
 		res, err := h.targetDB.Exec(query, whereVals...)
 		if err != nil {
-			h.logger.Errorf("[MySQL][DELETE] table=%s.%s error=%v query=%s", tgtDB, tgtTable, err, query)
+			h.logger.Errorf("[MySQL][DELETE] table=%s.%s error=%v", tgtDB, tgtTable, err)
 			atomic.StoreInt32(&h.lastExecError, 1)
 		} else {
 			ra, _ := res.RowsAffected()
-			h.logger.Infof("[MySQL][DELETE] table=%s.%s rowsAffected=%d query=%s", tgtDB, tgtTable, ra, query)
+			h.logger.Infof("[MySQL][DELETE] table=%s.%s rowsAffected=%d", tgtDB, tgtTable, ra)
 			atomic.StoreInt32(&h.lastExecError, 0)
 		}
 	}

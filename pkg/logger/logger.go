@@ -8,8 +8,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/sirupsen/logrus"
 	_ "github.com/mattn/go-sqlite3" // for sqlite
+	"github.com/sirupsen/logrus"
 )
 
 var Log = logrus.New()
@@ -47,7 +47,6 @@ func InitLogger(logLevel string) *logrus.Logger {
 	logger.SetLevel(getLogLevel(logLevel))
 	logger.SetFormatter(&CustomTextFormatter{})
 
-	// 在这里添加写入SQLite的Hook
 	logger.AddHook(NewSQLiteHook())
 
 	Log = logger
@@ -95,7 +94,6 @@ func (h *SQLiteHook) Fire(entry *logrus.Entry) error {
 	level := entry.Level.String()
 	message := strings.TrimSuffix(string(formatted), "\n")
 
-	// 若 entry.Data["sync_task_id"] 存在，就取其值；否则用 0
 	syncTaskID := 0
 	if val, ok := entry.Data["sync_task_id"]; ok {
 		switch v := val.(type) {

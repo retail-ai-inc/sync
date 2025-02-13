@@ -8,9 +8,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/retail-ai-inc/sync/pkg/config"
-	"github.com/sirupsen/logrus"
 	goredis "github.com/redis/go-redis/v9"
+	"github.com/retail-ai-inc/sync/pkg/config"
+	"github.com/retail-ai-inc/sync/pkg/syncer/common"
+	"github.com/sirupsen/logrus"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
@@ -69,10 +70,11 @@ func countAndLogMySQLOrMariaDB(ctx context.Context, sc config.SyncConfig, log *l
 	}
 	defer db2.Close()
 
-	dbType := strings.ToUpper(sc.Type) // "MYSQL" or "MARIADB"
+	dbType := strings.ToUpper(sc.Type)
+	srcDBName := common.GetDatabaseName(sc.Type, sc.SourceConnection)
+	tgtDBName := common.GetDatabaseName(sc.Type, sc.TargetConnection)
+
 	for _, mapping := range sc.Mappings {
-		srcDBName := mapping.SourceDatabase
-		tgtDBName := mapping.TargetDatabase
 		for _, tblMap := range mapping.Tables {
 			srcName := tblMap.SourceTable
 			tgtName := tblMap.TargetTable
@@ -116,9 +118,11 @@ func countAndLogPostgreSQL(ctx context.Context, sc config.SyncConfig, log *logru
 	}
 	defer db2.Close()
 
+	dbType := strings.ToUpper(sc.Type)
+	srcDBName := common.GetDatabaseName(sc.Type, sc.SourceConnection)
+	tgtDBName := common.GetDatabaseName(sc.Type, sc.TargetConnection)
+
 	for _, mapping := range sc.Mappings {
-		srcDBName := mapping.SourceDatabase
-		tgtDBName := mapping.TargetDatabase
 		srcSchema := mapping.SourceSchema
 		if srcSchema == "" {
 			srcSchema = "public"
@@ -139,7 +143,7 @@ func countAndLogPostgreSQL(ctx context.Context, sc config.SyncConfig, log *logru
 			tgtCount := getRowCount(db2, fullTgt)
 
 			log.WithFields(logrus.Fields{
-				"db_type":        "POSTGRESQL",
+				"db_type":        dbType,
 				"src_schema":     srcSchema,
 				"src_table":      srcName,
 				"src_db":         srcDBName,
@@ -152,7 +156,7 @@ func countAndLogPostgreSQL(ctx context.Context, sc config.SyncConfig, log *logru
 			}).Info("row_count_minutely")
 
 			// Insert into database monitoring_log with sync_task_id
-			storeMonitoringLog(sc.ID, "POSTGRESQL", srcDBName, srcName, srcCount, tgtDBName, tgtName, tgtCount, "row_count_minutely")
+			storeMonitoringLog(sc.ID, dbType, srcDBName, srcName, srcCount, tgtDBName, tgtName, tgtCount, "row_count_minutely")
 		}
 	}
 }
@@ -179,24 +183,23 @@ func countAndLogMongoDB(ctx context.Context, sc config.SyncConfig, log *logrus.L
 		_ = tgtClient.Disconnect(ctx)
 	}()
 
-	for _, mapping := range sc.Mappings {
-		srcDBName := mapping.SourceDatabase
-		tgtDBName := mapping.TargetDatabase
-		for _, tblMap := range mapping.Tables {
-			srcName := tblMap.SourceTable
-			tgtName := tblMap.TargetTable
+	dbType := strings.ToUpper(sc.Type)
+	srcDBName := common.GetDatabaseName(sc.Type, sc.SourceConnection)
+	tgtDBName := common.GetDatabaseName(sc.Type, sc.TargetConnection)
 
-			srcColl := srcClient.Database(srcDBName).Collection(srcName)
-			tgtColl := tgtClient.Database(tgtDBName).Collection(tgtName)
+	for _, mapping := range sc.Mappings {
+		for _, tblMap := range mapping.Tables {
+			srcColl := srcClient.Database(srcDBName).Collection(tblMap.SourceTable)
+			tgtColl := tgtClient.Database(tgtDBName).Collection(tblMap.TargetTable)
 
 			srcCount, err := srcColl.EstimatedDocumentCount(ctx)
 			if err != nil {
 				log.WithError(err).WithFields(logrus.Fields{
-					"db_type":   "MONGODB",
+					"db_type":   dbType,
 					"src_db":    srcDBName,
-					"src_coll":  srcName,
+					"src_coll":  tblMap.SourceTable,
 					"tgt_db":    tgtDBName,
-					"tgt_coll":  tgtName,
+					"tgt_coll":  tblMap.TargetTable,
 					"operation": "source_count",
 				}).Error("Failed to get source collection count")
 				srcCount = -1
@@ -205,27 +208,27 @@ func countAndLogMongoDB(ctx context.Context, sc config.SyncConfig, log *logrus.L
 			tgtCount, err := tgtColl.EstimatedDocumentCount(ctx)
 			if err != nil {
 				log.WithError(err).WithFields(logrus.Fields{
-					"db_type":   "MONGODB",
+					"db_type":   dbType,
 					"tgt_db":    tgtDBName,
-					"tgt_coll":  tgtName,
+					"tgt_coll":  tblMap.TargetTable,
 					"operation": "target_count",
 				}).Error("Failed to get target collection count")
 				tgtCount = -1
 			}
 
 			log.WithFields(logrus.Fields{
-				"db_type":        "MONGODB",
+				"db_type":        dbType,
 				"src_db":         srcDBName,
-				"src_coll":       srcName,
+				"src_coll":       tblMap.SourceTable,
 				"src_row_count":  srcCount,
 				"tgt_db":         tgtDBName,
-				"tgt_coll":       tgtName,
+				"tgt_coll":       tblMap.TargetTable,
 				"tgt_row_count":  tgtCount,
 				"monitor_action": "row_count_minutely",
 			}).Info("row_count_minutely")
 
 			// Insert into database monitoring_log with sync_task_id
-			storeMonitoringLog(sc.ID, "MONGODB", srcDBName, srcName, srcCount, tgtDBName, tgtName, tgtCount, "row_count_minutely")
+			storeMonitoringLog(sc.ID, dbType, srcDBName, tblMap.SourceTable, srcCount, tgtDBName, tblMap.TargetTable, tgtCount, "row_count_minutely")
 		}
 	}
 }
@@ -263,6 +266,9 @@ func countAndLogRedis(ctx context.Context, sc config.SyncConfig, log *logrus.Log
 		return
 	}
 
+	srcDBName := common.GetDatabaseName(sc.Type, sc.SourceConnection)
+	tgtDBName := common.GetDatabaseName(sc.Type, sc.TargetConnection)
+
 	srcCount, err := srcClient.DBSize(ctx).Result()
 	if err != nil {
 		log.WithError(err).WithField("db_type", dbType).
@@ -277,10 +283,7 @@ func countAndLogRedis(ctx context.Context, sc config.SyncConfig, log *logrus.Log
 		tgtCount = -1
 	}
 
-	for _, mapping := range sc.Mappings {
-		srcDBName := mapping.SourceDatabase
-		tgtDBName := mapping.TargetDatabase
-
+	for range sc.Mappings {
 		log.WithFields(logrus.Fields{
 			"db_type":        dbType,
 			"src_db":         srcDBName,

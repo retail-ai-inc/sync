@@ -10,11 +10,21 @@ CREATE TABLE IF NOT EXISTS users (
     email VARCHAR(100)
 );
 
+-- Create table orders in source_db
+CREATE TABLE IF NOT EXISTS orders (
+    id SERIAL PRIMARY KEY,
+    user_id INT,
+    product VARCHAR(100),
+    quantity INT,
+    order_date TIMESTAMP
+);
 
 \c source_db
 SELECT * FROM pg_create_logical_replication_slot('sync_slot', 'pgoutput');
 
--- Create publication for logical replication
-CREATE PUBLICATION mypub FOR TABLE users;
+-- Create publication for logical replication including both users and orders tables
+CREATE PUBLICATION mypub FOR TABLE users, orders;
 ALTER TABLE users REPLICA IDENTITY FULL;
+ALTER TABLE orders REPLICA IDENTITY FULL;
+
 insert into users (id, name, email) values (1, 'John', 'John@mail' );
