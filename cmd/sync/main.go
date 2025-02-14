@@ -57,7 +57,7 @@ func main() {
 		Handler: router,
 	}
 	go func() {
-		log.Info("Starting HTTP server on :8080")
+		log.Info("UI is running at http://localhost:8080")
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Errorf("HTTP server error: %v", err)
 			cancel()

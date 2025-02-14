@@ -77,6 +77,9 @@ func TestSyncIntegration(t *testing.T) {
 	log.Println("[TEST] Starting sync as child process...")
 	os.Setenv("SYNC_DB_PATH", "../../../sync.db")
 
+	dbPath := os.Getenv("SYNC_DB_PATH")
+	testTC01ConfigUpdate(dbPath);
+
 	cfg := config.NewConfig()
 	log := logger.InitLogger(cfg.LogLevel)
 

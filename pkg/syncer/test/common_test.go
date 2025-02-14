@@ -11,9 +11,11 @@ import (
 	"math/rand"
 	"testing"
 	"time"
+	"log"
 	// "github.com/retail-ai-inc/sync/pkg/config"
 	// "github.com/sirupsen/logrus"
 	// "github.com/retail-ai-inc/sync/pkg/syncer/common"
+	_ "github.com/mattn/go-sqlite3"
 	goredis "github.com/redis/go-redis/v9"
 )
 
@@ -349,4 +351,20 @@ func connectMongo(uri string) (*mongo.Client, error) {
 		return nil, err
 	}
 	return cl, nil
+}
+
+func testTC01ConfigUpdate(dbPath string) {
+
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer db.Close()
+
+	_, err = db.Exec("UPDATE sync_tasks SET enable = 1 WHERE 1 = 1;")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println("Database update successful.")
 }
