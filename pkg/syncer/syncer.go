@@ -2,7 +2,6 @@ package syncer
 
 import (
 	"github.com/retail-ai-inc/sync/pkg/config"
-	"github.com/retail-ai-inc/sync/pkg/syncer/mariadb"
 	"github.com/retail-ai-inc/sync/pkg/syncer/mongodb"
 	"github.com/retail-ai-inc/sync/pkg/syncer/mysql"
 	"github.com/retail-ai-inc/sync/pkg/syncer/postgresql"
@@ -16,10 +15,6 @@ func NewMongoDBSyncer(cfg config.SyncConfig, logger *logrus.Logger) *mongodb.Mon
 
 func NewMySQLSyncer(cfg config.SyncConfig, logger *logrus.Logger) *mysql.MySQLSyncer {
 	return mysql.NewMySQLSyncer(cfg, logger)
-}
-
-func NewMariaDBSyncer(cfg config.SyncConfig, logger *logrus.Logger) *mariadb.MariaDBSyncer {
-	return mariadb.NewMariaDBSyncer(cfg, logger)
 }
 
 func NewPostgreSQLSyncer(cfg config.SyncConfig, logger *logrus.Logger) *postgresql.PostgreSQLSyncer {

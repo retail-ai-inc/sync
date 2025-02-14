@@ -4,12 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"github.com/jackc/pglogrepl"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgproto3"
-	_ "github.com/lib/pq"
-	"log"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -19,7 +13,13 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/jackc/pglogrepl"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgproto3"
+	_ "github.com/lib/pq"
 	"github.com/retail-ai-inc/sync/pkg/config"
+	"github.com/retail-ai-inc/sync/pkg/utils"
 	"github.com/sirupsen/logrus"
 )
 
@@ -37,7 +37,7 @@ type replicationState struct {
 
 type PostgreSQLSyncer struct {
 	cfg    config.SyncConfig
-	logger *logrus.Logger
+	logger logrus.FieldLogger
 
 	sourceConnNormal *pgx.Conn
 	sourceConnRepl   *pgconn.PgConn
@@ -50,39 +50,62 @@ type PostgreSQLSyncer struct {
 
 	state replicationState
 
-	// lastExecError is set to 1 if replicateQuery fails
 	lastExecError int32
 }
 
 func NewPostgreSQLSyncer(cfg config.SyncConfig, logger *logrus.Logger) *PostgreSQLSyncer {
 	return &PostgreSQLSyncer{
 		cfg:    cfg,
-		logger: logger,
+		logger: logger.WithField("sync_task_id", cfg.ID),
 	}
 }
 
 func (s *PostgreSQLSyncer) Start(ctx context.Context) {
 	var err error
 
-	s.sourceConnNormal, err = pgx.Connect(ctx, s.cfg.SourceConnection)
+	s.logger.Info("[PostgreSQL] Starting synchronization...")
+
+	// Connect normal
+	err = utils.Retry(5, 2*time.Second, 2.0, func() error {
+		var connErr error
+		s.sourceConnNormal, connErr = pgx.Connect(ctx, s.cfg.SourceConnection)
+		return connErr
+	})
 	if err != nil {
-		s.logger.Fatalf("[PostgreSQL] Failed to connect to source (normal): %v", err)
+		s.logger.Errorf("[PostgreSQL] Failed to connect to source (normal) after retries: %v", err)
+		return
 	}
 	defer s.sourceConnNormal.Close(ctx)
 
+	// Connect replication
 	replDSN, err := s.buildReplicationDSN(s.cfg.SourceConnection)
 	if err != nil {
-		s.logger.Fatalf("[PostgreSQL] Failed to build replication DSN: %v", err)
+		s.logger.Errorf("[PostgreSQL] Failed to build replication DSN: %v", err)
+		return
 	}
-	s.sourceConnRepl, err = pgconn.Connect(ctx, replDSN)
+	err = utils.Retry(5, 2*time.Second, 2.0, func() error {
+		var connErr error
+		s.sourceConnRepl, connErr = pgconn.Connect(ctx, replDSN)
+		return connErr
+	})
 	if err != nil {
-		s.logger.Fatalf("[PostgreSQL] Failed to connect to source (replication): %v", err)
+		s.logger.Errorf("[PostgreSQL] Failed to connect to source (replication) after retries: %v", err)
+		return
 	}
 	defer s.sourceConnRepl.Close(ctx)
 
+	// Connect target
 	s.targetDB, err = sql.Open("postgres", s.cfg.TargetConnection)
 	if err != nil {
-		s.logger.Fatalf("[PostgreSQL] Failed to connect to target: %v", err)
+		s.logger.Errorf("[PostgreSQL] Failed to open target DB: %v", err)
+		return
+	}
+	err = utils.Retry(5, 2*time.Second, 2.0, func() error {
+		return s.targetDB.PingContext(ctx)
+	})
+	if err != nil {
+		s.logger.Errorf("[PostgreSQL] Failed to connect to target DB after retries: %v", err)
+		return
 	}
 	defer s.targetDB.Close()
 
@@ -90,7 +113,8 @@ func (s *PostgreSQLSyncer) Start(ctx context.Context) {
 	s.outputPlugin = s.cfg.PGPlugin()
 	s.publicationNames = s.cfg.PGPublicationNames
 	if s.repSlot == "" || s.outputPlugin == "" {
-		s.logger.Fatalf("[PostgreSQL] Must specify pg_replication_slot and pg_plugin")
+		s.logger.Error("[PostgreSQL] Must specify pg_replication_slot and pg_plugin in config")
+		return
 	}
 
 	s.state = replicationState{
@@ -102,17 +126,17 @@ func (s *PostgreSQLSyncer) Start(ctx context.Context) {
 		lastWrittenLSN:  0,
 		replicaConn:     s.targetDB,
 	}
-
 	atomic.StoreInt32(&s.lastExecError, 0)
 
 	err = s.ensureReplicationSlot(ctx)
 	if err != nil {
-		s.logger.Fatalf("[PostgreSQL] Failed to ensure replication slot: %v", err)
+		s.logger.Errorf("[PostgreSQL] ensureReplicationSlot error: %v", err)
+		return
 	}
 
 	if s.cfg.PGPositionPath != "" {
-		lsnFromFile, err := s.loadPosition(s.cfg.PGPositionPath)
-		if err == nil && lsnFromFile > 0 {
+		lsnFromFile, errLoad := s.loadPosition(s.cfg.PGPositionPath)
+		if errLoad == nil && lsnFromFile > 0 {
 			s.logger.Infof("[PostgreSQL] Loaded last LSN from file: %X", lsnFromFile)
 			s.currentLsn = lsnFromFile
 			s.state.lastWrittenLSN = lsnFromFile
@@ -120,14 +144,18 @@ func (s *PostgreSQLSyncer) Start(ctx context.Context) {
 	}
 
 	if err := s.prepareTargetSchema(ctx); err != nil {
-		s.logger.Errorf("[PostgreSQL] prepareTargetSchema error: %v", err)
+		s.logger.Warnf("[PostgreSQL] prepareTargetSchema error: %v", err)
 	}
 
-	err = s.initialSync(ctx)
+	// Perform initial sync
+	err = s.doInitialSync(ctx)
 	if err != nil {
-		s.logger.Errorf("[PostgreSQL] Initial sync failed: %v", err)
+		s.logger.Errorf("[PostgreSQL] doInitialSync failed after retries: %v", err)
+		return
 	}
+	s.logger.Info("[PostgreSQL] Initial full sync done.")
 
+	// Start logical replication
 	err = s.startLogicalReplication(ctx)
 	if err != nil {
 		s.logger.Errorf("[PostgreSQL] Logical replication failed: %v", err)
@@ -163,13 +191,12 @@ func (s *PostgreSQLSyncer) ensureReplicationSlot(ctx context.Context) error {
 	if err != nil {
 		if !strings.Contains(err.Error(), "already exists") {
 			return fmt.Errorf("CreateReplicationSlot failed: %w", err)
-		} else {
-			s.logger.Infof("[PostgreSQL] Replication slot %s already exists. Using XLogPos as start if not loaded.", s.repSlot)
-			if s.currentLsn == 0 {
-				s.currentLsn = info.XLogPos
-			}
-			return nil
 		}
+		s.logger.Infof("[PostgreSQL] Replication slot %s already exists, will use existing slot.", s.repSlot)
+		if s.currentLsn == 0 {
+			s.currentLsn = info.XLogPos
+		}
+		return nil
 	}
 	lsn, err2 := pglogrepl.ParseLSN(slot.ConsistentPoint)
 	if err2 != nil {
@@ -192,39 +219,34 @@ func (s *PostgreSQLSyncer) prepareTargetSchema(ctx context.Context) error {
 		if tgtSchema == "" {
 			tgtSchema = "public"
 		}
-
 		for _, tbl := range dbmap.Tables {
-			exist, err := s.checkTableExist(ctx, tgtSchema, tbl.TargetTable)
-			if err != nil {
-				s.logger.Errorf("[PostgreSQL] check table exist error: %v", err)
+			exist, errCheck := s.checkTableExist(ctx, tgtSchema, tbl.TargetTable)
+			if errCheck != nil {
+				s.logger.Warnf("[PostgreSQL] check table exist error: %v", errCheck)
 				continue
 			}
 			if !exist {
 				createSQL, seqs, errGen := s.generateCreateTableSQL(ctx, srcSchema, tbl.SourceTable, tgtSchema, tbl.TargetTable)
 				if errGen != nil {
-					s.logger.Errorf("[PostgreSQL] generateCreateTableSQL fail => %v", errGen)
+					s.logger.Warnf("[PostgreSQL] generateCreateTableSQL fail => %v", errGen)
 					continue
 				}
-
 				for _, seqSQL := range seqs {
-					s.logger.Infof("[PostgreSQL] Creating sequence => %s", seqSQL)
+					s.logger.Debugf("[PostgreSQL] Creating sequence => %s", seqSQL)
 					if _, errSeq := s.targetDB.ExecContext(ctx, seqSQL); errSeq != nil {
-						s.logger.Errorf("[PostgreSQL] Create sequence fail => %v", errSeq)
+						s.logger.Warnf("[PostgreSQL] Create sequence fail => %v", errSeq)
 						continue
 					}
 				}
-
 				s.logger.Infof("[PostgreSQL] Creating table => %s", createSQL)
 				if _, err2 := s.targetDB.ExecContext(ctx, createSQL); err2 != nil {
 					s.logger.Errorf("[PostgreSQL] Create table fail => %v", err2)
 					continue
 				}
-				// create index
 				if err3 := s.copyIndexes(ctx, srcSchema, tbl.SourceTable, tgtSchema, tbl.TargetTable); err3 != nil {
-					s.logger.Errorf("[PostgreSQL] copyIndexes fail => %v", err3)
+					s.logger.Warnf("[PostgreSQL] copyIndexes fail => %v", err3)
 				} else {
-					s.logger.Infof("[PostgreSQL] Created table and indexes for %s.%s from source %s.%s",
-						tgtSchema, tbl.TargetTable, srcSchema, tbl.SourceTable)
+					s.logger.Infof("[PostgreSQL] Created table and indexes for %s.%s", tgtSchema, tbl.TargetTable)
 				}
 			}
 		}
@@ -232,9 +254,6 @@ func (s *PostgreSQLSyncer) prepareTargetSchema(ctx context.Context) error {
 	return nil
 }
 
-// generateCreateTableSQL queries the table structure from the source database,
-// and generates the CREATE TABLE statement and necessary CREATE SEQUENCE statements
-// that can be executed in the target database.
 func (s *PostgreSQLSyncer) generateCreateTableSQL(
 	ctx context.Context,
 	srcSchema, srcTable, tgtSchema, tgtTable string,
@@ -265,16 +284,20 @@ ORDER BY ordinal_position
 
 	for rows.Next() {
 		var (
-			columnName, dataType, isNullable   string
-			columnDefault                      sql.NullString
-			charMaxLen, numPrecision, numScale sql.NullInt64
+			columnName    string
+			dataType      string
+			isNullable    string
+			columnDefault sql.NullString
+			charMaxLen    sql.NullInt64
+			numPrecision  sql.NullInt64
+			numScale      sql.NullInt64
 		)
 		if errScan := rows.Scan(&columnName, &dataType, &isNullable, &columnDefault,
 			&charMaxLen, &numPrecision, &numScale); errScan != nil {
 			return "", nil, fmt.Errorf("scan column info fail: %w", errScan)
 		}
 
-		colDef := fmt.Sprintf(`"%s" %s`, columnName, dataType)
+		colDef := fmt.Sprintf("%s %s", columnName, dataType)
 
 		if (dataType == "character varying" || dataType == "varchar" ||
 			dataType == "character" || dataType == "char") && charMaxLen.Valid {
@@ -289,7 +312,6 @@ ORDER BY ordinal_position
 
 		if columnDefault.Valid {
 			colDef += fmt.Sprintf(" DEFAULT %s", columnDefault.String)
-
 			if strings.Contains(columnDefault.String, "nextval(") {
 				seqName := extractSequenceName(columnDefault.String)
 				if seqName != "" {
@@ -297,11 +319,9 @@ ORDER BY ordinal_position
 				}
 			}
 		}
-
 		if isNullable == "NO" {
 			colDef += " NOT NULL"
 		}
-
 		columns = append(columns, colDef)
 	}
 	if errClose := rows.Err(); errClose != nil {
@@ -312,20 +332,15 @@ ORDER BY ordinal_position
   %s
 );`, tgtSchema, tgtTable, strings.Join(columns, ",\n  "))
 
-	// CREATE SEQUENCE
 	var seqSlice []string
 	for seqName := range sequencesMap {
-		// Note: You can add INCREMENT BY / OWNED BY as needed, but for minimal fix, just write IF NOT EXISTS
 		seq := fmt.Sprintf(`CREATE SEQUENCE IF NOT EXISTS "%s"`, seqName)
 		seqSlice = append(seqSlice, seq)
 	}
-
 	return createSQL, seqSlice, nil
 }
 
-// extractSequenceName extracts the sequence name from a string like "nextval('users_id_seq'::regclass)"
 func extractSequenceName(defaultVal string) string {
-	// match nextval('xxx'::regclass)
 	reg := regexp.MustCompile(`nextval\('([^']+)'::regclass\)`)
 	matches := reg.FindStringSubmatch(defaultVal)
 	if len(matches) == 2 {
@@ -362,16 +377,14 @@ WHERE schemaname=$1
 		if err2 := rows.Scan(&idxName, &idxDef); err2 != nil {
 			return fmt.Errorf("scan idx fail: %w", err2)
 		}
-		// Replace the index definition's original schema.table with target schema.table
 		newIdxDef := idxDef
 		oldName := fmt.Sprintf("%s.%s", srcSchema, srcTable)
 		newName := fmt.Sprintf("%s.%s", tgtSchema, tgtTable)
 		newIdxDef = strings.ReplaceAll(newIdxDef, oldName, newName)
-		// Also replace the index name to avoid duplicates
 		newIdxName := fmt.Sprintf("%s_%s", tgtTable, idxName)
 		newIdxDef = strings.Replace(newIdxDef, idxName, newIdxName, 1)
 
-		s.logger.Infof("[PostgreSQL] Creating index => %s", newIdxDef)
+		s.logger.Debugf("[PostgreSQL] Creating index => %s", newIdxDef)
 		_, errExec := s.targetDB.ExecContext(ctx, newIdxDef)
 		if errExec != nil && !strings.Contains(errExec.Error(), "already exists") {
 			s.logger.Warnf("[PostgreSQL] Create index fail => %v", errExec)
@@ -380,9 +393,7 @@ WHERE schemaname=$1
 	return rows.Err()
 }
 
-func (s *PostgreSQLSyncer) initialSync(ctx context.Context) error {
-	s.logger.Info("[PostgreSQL] Starting initial full sync")
-
+func (s *PostgreSQLSyncer) doInitialSync(ctx context.Context) error {
 	for _, dbmap := range s.cfg.Mappings {
 		srcSchema := dbmap.SourceSchema
 		if srcSchema == "" {
@@ -396,7 +407,7 @@ func (s *PostgreSQLSyncer) initialSync(ctx context.Context) error {
 			checkSQL := fmt.Sprintf("SELECT COUNT(*) FROM %s.%s", tgtSchema, tbl.TargetTable)
 			var cnt int
 			if err := s.targetDB.QueryRow(checkSQL).Scan(&cnt); err != nil {
-				s.logger.Errorf("[PostgreSQL] Could not check %s.%s: %v", tgtSchema, tbl.TargetTable, err)
+				s.logger.Warnf("[PostgreSQL] Could not check table %s.%s: %v", tgtSchema, tbl.TargetTable, err)
 				continue
 			}
 			if cnt > 0 {
@@ -405,9 +416,9 @@ func (s *PostgreSQLSyncer) initialSync(ctx context.Context) error {
 			}
 
 			selectSQL := fmt.Sprintf("SELECT * FROM %s.%s", srcSchema, tbl.SourceTable)
-			rows, err := s.sourceConnNormal.Query(ctx, selectSQL)
-			if err != nil {
-				return fmt.Errorf("query source %s.%s => %w", srcSchema, tbl.SourceTable, err)
+			rows, errQ := s.sourceConnNormal.Query(ctx, selectSQL)
+			if errQ != nil {
+				return fmt.Errorf("query source %s.%s => %w", srcSchema, tbl.SourceTable, errQ)
 			}
 			fds := rows.FieldDescriptions()
 			colNames := make([]string, len(fds))
@@ -422,12 +433,11 @@ func (s *PostgreSQLSyncer) initialSync(ctx context.Context) error {
 				strings.Join(phArr, ", "),
 			)
 
-			tx, err2 := s.targetDB.Begin()
-			if err2 != nil {
+			tx, errB := s.targetDB.Begin()
+			if errB != nil {
 				rows.Close()
-				return err2
+				return errB
 			}
-
 			count := 0
 			for rows.Next() {
 				vals, errVal := rows.Values()
@@ -436,17 +446,21 @@ func (s *PostgreSQLSyncer) initialSync(ctx context.Context) error {
 					rows.Close()
 					return errVal
 				}
-				if _, errExec := tx.Exec(insertSQL, vals...); errExec != nil {
+				res, errExec := tx.Exec(insertSQL, vals...)
+				if errExec != nil {
 					_ = tx.Rollback()
 					rows.Close()
 					return errExec
 				}
-				count++
+				af, _ := res.RowsAffected()
+				if af > 0 {
+					count++
+				}
 			}
 			rows.Close()
-			if errClose := rows.Err(); errClose != nil {
+			if errRows := rows.Err(); errRows != nil {
 				_ = tx.Rollback()
-				return errClose
+				return errRows
 			}
 			if cErr := tx.Commit(); cErr != nil {
 				return cErr
@@ -455,16 +469,14 @@ func (s *PostgreSQLSyncer) initialSync(ctx context.Context) error {
 				srcSchema, tbl.SourceTable, tgtSchema, tbl.TargetTable, count)
 		}
 	}
-	s.logger.Info("[PostgreSQL] Initial full sync done.")
 	return nil
 }
 
 func (s *PostgreSQLSyncer) startLogicalReplication(ctx context.Context) error {
 	if s.publicationNames == "" {
 		s.publicationNames = "mypub"
-		s.logger.Warn("[PostgreSQL] No publication name set, using 'mypub'")
+		s.logger.Warn("[PostgreSQL] No publication name set, default to 'mypub'")
 	}
-
 	opts := pglogrepl.StartReplicationOptions{
 		PluginArgs: []string{
 			"proto_version '1'",
@@ -488,21 +500,18 @@ func (s *PostgreSQLSyncer) startLogicalReplication(ctx context.Context) error {
 				ReplyRequested:   false,
 			})
 			if upErr != nil {
-				s.logger.Errorf("[PostgreSQL] SendStandbyStatusUpdate fail: %v", upErr)
+				s.logger.Warnf("[PostgreSQL] SendStandbyStatusUpdate fail: %v", upErr)
 			}
 		default:
 			ctx2, cancel := context.WithDeadline(ctx, time.Now().Add(1*time.Second))
 			rawMsg, rErr := s.sourceConnRepl.ReceiveMessage(ctx2)
 			cancel()
 			if rErr != nil {
-				if strings.Contains(rErr.Error(), "context canceled") {
-					s.logger.Warnf("[PostgreSQL] context canceled, normal exit: %v", rErr)
-					return nil
-				}
-				if pgconn.Timeout(rErr) {
+				if strings.Contains(rErr.Error(), "context canceled") || pgconn.Timeout(rErr) {
 					continue
 				}
-				return fmt.Errorf("ReceiveMessage fail: %w", rErr)
+				s.logger.Errorf("[PostgreSQL] ReceiveMessage error: %v", rErr)
+				return rErr
 			}
 			if errResp, ok := rawMsg.(*pgproto3.ErrorResponse); ok {
 				return fmt.Errorf("WAL error: %+v", errResp)
@@ -515,7 +524,8 @@ func (s *PostgreSQLSyncer) startLogicalReplication(ctx context.Context) error {
 			case pglogrepl.PrimaryKeepaliveMessageByteID:
 				pkm, pErr := pglogrepl.ParsePrimaryKeepaliveMessage(cd.Data[1:])
 				if pErr != nil {
-					return pErr
+					s.logger.Errorf("[PostgreSQL] ParsePrimaryKeepaliveMessage error: %v", pErr)
+					continue
 				}
 				if pkm.ServerWALEnd > s.currentLsn {
 					s.currentLsn = pkm.ServerWALEnd
@@ -530,7 +540,8 @@ func (s *PostgreSQLSyncer) startLogicalReplication(ctx context.Context) error {
 			case pglogrepl.XLogDataByteID:
 				xld, xErr := pglogrepl.ParseXLogData(cd.Data[1:])
 				if xErr != nil {
-					return xErr
+					s.logger.Errorf("[PostgreSQL] ParseXLogData error: %v", xErr)
+					continue
 				}
 				committed, procErr := s.processMessage(xld, &s.state)
 				if procErr != nil {
@@ -538,10 +549,9 @@ func (s *PostgreSQLSyncer) startLogicalReplication(ctx context.Context) error {
 					continue
 				}
 				if committed {
-					// Only if lastExecError == 0 do we save LSN
 					if atomic.LoadInt32(&s.lastExecError) == 0 {
 						s.state.lastWrittenLSN = s.state.currentTxLSN
-						s.logger.Infof("[PostgreSQL] Commit => writing LSN %s", s.state.lastWrittenLSN)
+						s.logger.Debugf("[PostgreSQL] Commit => LSN %s saved", s.state.lastWrittenLSN)
 						if s.cfg.PGPositionPath != "" {
 							if fErr := s.writeWALPosition(s.state.lastWrittenLSN); fErr != nil {
 								s.logger.Errorf("[PostgreSQL] writeWALPosition fail: %v", fErr)
@@ -554,7 +564,7 @@ func (s *PostgreSQLSyncer) startLogicalReplication(ctx context.Context) error {
 				s.currentLsn = xld.ServerWALEnd
 
 			default:
-				s.logger.Warnf("[PostgreSQL] Unknown message byte: %v", cd.Data[0])
+				s.logger.Debugf("[PostgreSQL] Unknown message byte: %v", cd.Data[0])
 			}
 		}
 	}
@@ -566,10 +576,6 @@ func (s *PostgreSQLSyncer) processMessage(xld pglogrepl.XLogData, state *replica
 	if err != nil {
 		return false, fmt.Errorf("ParseV2 fail: %w", err)
 	}
-
-	s.logger.Debugf("[PostgreSQL] XLogData => WALStart %s, ServerWALEnd %s, ServerTime %s, MessageType=%T",
-		xld.WALStart, xld.ServerWALEnd, xld.ServerTime, logicalMsg)
-
 	state.lastReceivedLSN = xld.ServerWALEnd
 
 	switch typed := logicalMsg.(type) {
@@ -584,33 +590,33 @@ func (s *PostgreSQLSyncer) processMessage(xld pglogrepl.XLogData, state *replica
 		}
 		state.processMessages = true
 		state.currentTxLSN = typed.FinalLSN
-		s.logger.Debugf("[PostgreSQL] Begin => %v", typed)
-		_ = s.replicateQuery(state.replicaConn, "START TRANSACTION")
+		s.logger.Debug("[PostgreSQL][BEGIN] Start transaction")
 
 	case *pglogrepl.CommitMessage:
-		s.logger.Debugf("[PostgreSQL] Commit => %v", typed)
-		_ = s.replicateQuery(state.replicaConn, "COMMIT")
+		s.logger.Debug("[PostgreSQL][COMMIT] Transaction commit")
 		state.processMessages = false
 		return true, nil
 
 	case *pglogrepl.InsertMessageV2:
 		if !state.processMessages {
-			s.logger.Debugf("[PostgreSQL] Stale insert => ignoring")
+			s.logger.Debug("[PostgreSQL][INSERT] Stale insert => ignoring")
 			return false, nil
 		}
-		return s.handleInsertV2(typed, state)
+		return s.handleInsert(typed, state)
 
 	case *pglogrepl.UpdateMessageV2:
 		if !state.processMessages {
+			s.logger.Debug("[PostgreSQL][UPDATE] Stale update => ignoring")
 			return false, nil
 		}
-		return s.handleUpdateV2(typed, state)
+		return s.handleUpdate(typed, state)
 
 	case *pglogrepl.DeleteMessageV2:
 		if !state.processMessages {
+			s.logger.Debug("[PostgreSQL][DELETE] Stale delete => ignoring")
 			return false, nil
 		}
-		return s.handleDeleteV2(typed, state)
+		return s.handleDelete(typed, state)
 
 	default:
 		s.logger.Debugf("[PostgreSQL] Unhandled message => %T", typed)
@@ -618,28 +624,23 @@ func (s *PostgreSQLSyncer) processMessage(xld pglogrepl.XLogData, state *replica
 	return false, nil
 }
 
-func (s *PostgreSQLSyncer) handleInsertV2(
+func (s *PostgreSQLSyncer) handleInsert(
 	msg *pglogrepl.InsertMessageV2,
 	st *replicationState,
 ) (bool, error) {
 	rel, ok := st.relations[msg.RelationID]
 	if !ok || rel == nil {
-		log.Printf("[PostgreSQL] Unknown or nil relation for Insert, relationID=%d", msg.RelationID)
+		s.logger.Warnf("[PostgreSQL][INSERT] Unknown relationID=%d => skip", msg.RelationID)
 		return false, nil
 	}
 	if msg.Tuple == nil {
-		s.logger.Warnf("[PostgreSQL] InsertMessageV2 => msg.Tuple is nil => skip, relationID=%d", msg.RelationID)
+		s.logger.Debugf("[PostgreSQL][INSERT] msg.Tuple is nil => skip, relID=%d", msg.RelationID)
 		return false, nil
 	}
-	if len(rel.Columns) == 0 {
-		s.logger.Warnf("[PostgreSQL] relationID=%d has no columns => skip insert", msg.RelationID)
-		return false, nil
-	}
-
 	var colNames, colVals []string
 	for idx, col := range msg.Tuple.Columns {
 		if idx >= len(rel.Columns) {
-			s.logger.Warnf("[PostgreSQL] Insert col idx=%d out of range for relID=%d", idx, msg.RelationID)
+			s.logger.Warnf("[PostgreSQL][INSERT] col idx=%d out of range => skip", idx)
 			continue
 		}
 		colName := rel.Columns[idx].Name
@@ -655,7 +656,6 @@ func (s *PostgreSQLSyncer) handleInsertV2(
 		colNames = append(colNames, colName)
 	}
 	if len(colNames) == 0 {
-		s.logger.Debugf("[PostgreSQL] Insert => no columns => skip")
 		return false, nil
 	}
 
@@ -664,35 +664,27 @@ func (s *PostgreSQLSyncer) handleInsertV2(
 		strings.Join(colNames, ", "),
 		strings.Join(colVals, ", "),
 	)
-	s.logger.Debugf("[PostgreSQL] [INSERT] SQL => %s", sqlStr)
-	err := s.replicateQuery(st.replicaConn, sqlStr)
+	err := s.replicateQuery(st.replicaConn, sqlStr, "INSERT", fmt.Sprintf("%s.%s", rel.Namespace, rel.RelationName))
 	return false, err
 }
 
-func (s *PostgreSQLSyncer) handleUpdateV2(
+func (s *PostgreSQLSyncer) handleUpdate(
 	msg *pglogrepl.UpdateMessageV2,
 	st *replicationState,
 ) (bool, error) {
 	rel, ok := st.relations[msg.RelationID]
 	if !ok || rel == nil {
-		log.Printf("[PostgreSQL] Unknown or nil relation for Update, relationID=%d", msg.RelationID)
+		s.logger.Warnf("[PostgreSQL][UPDATE] Unknown relationID=%d => skip", msg.RelationID)
 		return false, nil
 	}
-	if len(rel.Columns) == 0 {
-		s.logger.Warnf("[PostgreSQL] relationID=%d has no columns => skip update", msg.RelationID)
-		return false, nil
-	}
-
 	if msg.NewTuple == nil {
-		s.logger.Warnf("[PostgreSQL] UpdateMessageV2 => newTuple is nil, relationID=%d => skip update", msg.RelationID)
+		s.logger.Debugf("[PostgreSQL][UPDATE] newTuple is nil => skip, relID=%d", msg.RelationID)
 		return false, nil
 	}
 
-	// Prepare set clauses
 	var setClauses []string
 	for idx, col := range msg.NewTuple.Columns {
 		if idx >= len(rel.Columns) {
-			s.logger.Warnf("[PostgreSQL] Update new col idx=%d out of range for relID=%d", idx, msg.RelationID)
 			continue
 		}
 		colName := rel.Columns[idx].Name
@@ -707,16 +699,14 @@ func (s *PostgreSQLSyncer) handleUpdateV2(
 		}
 	}
 
-	// Prepare where from oldTuple if present, otherwise fallback to newTuple
 	var whereClauses []string
 	if msg.OldTuple == nil {
-		s.logger.Warnf("[PostgreSQL] UpdateMessageV2 => oldTuple is nil, relationID=%d => using newTuple for PK", msg.RelationID)
 		whereClauses = s.buildWhereClausesFromPK(rel, msg.NewTuple.Columns)
 	} else {
 		whereClauses = s.buildWhereClausesFromPK(rel, msg.OldTuple.Columns)
 	}
 	if len(whereClauses) == 0 {
-		s.logger.Debugf("[PostgreSQL] Update => no PK => skip update, relID=%d", msg.RelationID)
+		s.logger.Debugf("[PostgreSQL][UPDATE] No PK => skip, relID=%d", msg.RelationID)
 		return false, nil
 	}
 
@@ -726,8 +716,49 @@ func (s *PostgreSQLSyncer) handleUpdateV2(
 		strings.Join(setClauses, ", "),
 		strings.Join(whereClauses, " AND "),
 	)
-	s.logger.Debugf("[PostgreSQL] [UPDATE] SQL => %s", sqlStr)
-	err := s.replicateQuery(st.replicaConn, sqlStr)
+	err := s.replicateQuery(st.replicaConn, sqlStr, "UPDATE", fmt.Sprintf("%s.%s", rel.Namespace, rel.RelationName))
+	return false, err
+}
+
+func (s *PostgreSQLSyncer) handleDelete(
+	msg *pglogrepl.DeleteMessageV2,
+	st *replicationState,
+) (bool, error) {
+	rel, ok := st.relations[msg.RelationID]
+	if !ok || rel == nil {
+		s.logger.Warnf("[PostgreSQL][DELETE] Unknown relationID=%d => skip", msg.RelationID)
+		return false, nil
+	}
+	if msg.OldTuple == nil {
+		s.logger.Debugf("[PostgreSQL][DELETE] oldTuple is nil => skip, relID=%d", msg.RelationID)
+		return false, nil
+	}
+
+	var whereClauses []string
+	for idx, col := range msg.OldTuple.Columns {
+		if idx >= len(rel.Columns) {
+			continue
+		}
+		colName := rel.Columns[idx].Name
+		switch col.DataType {
+		case 'n':
+			whereClauses = append(whereClauses, fmt.Sprintf("%s IS NULL", colName))
+		case 't':
+			val := strings.ReplaceAll(string(col.Data), "'", "''")
+			whereClauses = append(whereClauses, fmt.Sprintf("%s='%s'", colName, val))
+		default:
+			whereClauses = append(whereClauses, fmt.Sprintf("%s IS NULL", colName))
+		}
+	}
+	if len(whereClauses) == 0 {
+		return false, nil
+	}
+	sqlStr := fmt.Sprintf("DELETE FROM %s.%s WHERE %s",
+		rel.Namespace,
+		rel.RelationName,
+		strings.Join(whereClauses, " AND "),
+	)
+	err := s.replicateQuery(st.replicaConn, sqlStr, "DELETE", fmt.Sprintf("%s.%s", rel.Namespace, rel.RelationName))
 	return false, err
 }
 
@@ -757,64 +788,20 @@ func (s *PostgreSQLSyncer) buildWhereClausesFromPK(
 	return clauses
 }
 
-func (s *PostgreSQLSyncer) handleDeleteV2(
-	msg *pglogrepl.DeleteMessageV2,
-	st *replicationState,
-) (bool, error) {
-	rel, ok := st.relations[msg.RelationID]
-	if !ok || rel == nil {
-		log.Printf("[PostgreSQL] Unknown or nil relation for Delete, relationID=%d", msg.RelationID)
-		return false, nil
-	}
-	if len(rel.Columns) == 0 {
-		s.logger.Warnf("[PostgreSQL] relationID=%d has no columns => skip delete", msg.RelationID)
-		return false, nil
-	}
-	if msg.OldTuple == nil {
-		s.logger.Warnf("[PostgreSQL] DeleteMessageV2 => oldTuple is nil => skip, relationID=%d", msg.RelationID)
-		return false, nil
-	}
+func (s *PostgreSQLSyncer) replicateQuery(db *sql.DB, query, opType, tableName string) error {
+	s.logger.Debugf("[PostgreSQL][%s] table=%s query=%s", opType, tableName, query)
 
-	var whereClauses []string
-	for idx, col := range msg.OldTuple.Columns {
-		if idx >= len(rel.Columns) {
-			s.logger.Warnf("[PostgreSQL] Delete old col idx=%d out of range for relID=%d", idx, msg.RelationID)
-			continue
-		}
-		colName := rel.Columns[idx].Name
-		switch col.DataType {
-		case 'n':
-			whereClauses = append(whereClauses, fmt.Sprintf("%s IS NULL", colName))
-		case 't':
-			val := strings.ReplaceAll(string(col.Data), "'", "''")
-			whereClauses = append(whereClauses, fmt.Sprintf("%s='%s'", colName, val))
-		default:
-			whereClauses = append(whereClauses, fmt.Sprintf("%s IS NULL", colName))
-		}
-	}
-
-	if len(whereClauses) == 0 {
-		s.logger.Debugf("[PostgreSQL] Delete => no old key => skip")
-		return false, nil
-	}
-	sqlStr := fmt.Sprintf("DELETE FROM %s.%s WHERE %s",
-		rel.Namespace,
-		rel.RelationName,
-		strings.Join(whereClauses, " AND "),
-	)
-	s.logger.Debugf("[PostgreSQL] [DELETE] SQL => %s", sqlStr)
-	err := s.replicateQuery(st.replicaConn, sqlStr)
-	return false, err
-}
-
-func (s *PostgreSQLSyncer) replicateQuery(db *sql.DB, query string) error {
-	s.logger.Debugf("[PostgreSQL] replicateQuery => %s", query)
-	_, err := db.Exec(query)
+	res, err := db.Exec(query)
 	if err != nil {
-		s.logger.Warnf("[PostgreSQL] replicateQuery fail => ignoring => %s => error: %v", query, err)
+		s.logger.Errorf("[PostgreSQL][%s] table=%s error=%v", opType, tableName, err)
 		atomic.StoreInt32(&s.lastExecError, 1)
+		return err
 	}
-	return err
+	atomic.StoreInt32(&s.lastExecError, 0)
+
+	rowsAff, _ := res.RowsAffected()
+	s.logger.Infof("[PostgreSQL][%s] table=%s rowsAffected=%d", opType, tableName, rowsAff)
+	return nil
 }
 
 func (s *PostgreSQLSyncer) loadPosition(path string) (pglogrepl.LSN, error) {

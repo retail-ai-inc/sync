@@ -6,184 +6,146 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/retail-ai-inc/sync/pkg/config"
+	"github.com/retail-ai-inc/sync/pkg/syncer/common"
+	"github.com/retail-ai-inc/sync/pkg/utils"
 	"github.com/sirupsen/logrus"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
-	"strings"
 )
 
 type bufferedChange struct {
-	token bson.Raw
-	model mongo.WriteModel
+	token  bson.Raw
+	model  mongo.WriteModel
+	opType string
 }
 
 type MongoDBSyncer struct {
 	sourceClient  *mongo.Client
 	targetClient  *mongo.Client
-	syncConfig    config.SyncConfig
-	logger        *logrus.Logger
-	lastSyncedAt  time.Time
-	resumeTokens  map[string]bson.Raw // Key: "database.collection"
+	cfg           config.SyncConfig
+	logger        logrus.FieldLogger
+	resumeTokens  map[string]bson.Raw
 	resumeTokensM sync.RWMutex
 }
 
-func NewMongoDBSyncer(syncCfg config.SyncConfig, logger *logrus.Logger) *MongoDBSyncer {
-	sourceClient, err := mongo.Connect(context.Background(), options.Client().ApplyURI(syncCfg.SourceConnection))
+func NewMongoDBSyncer(cfg config.SyncConfig, logger *logrus.Logger) *MongoDBSyncer {
+	var err error
+	var sourceClient *mongo.Client
+	err = utils.Retry(5, 2*time.Second, 2.0, func() error {
+		var connErr error
+		sourceClient, connErr = mongo.Connect(context.Background(), options.Client().ApplyURI(cfg.SourceConnection))
+		return connErr
+	})
 	if err != nil {
-		logger.Fatalf("[MongoDB] Failed to connect to source: %v", err)
+		logger.Errorf("[MongoDB] Failed to connect to source after retries: %v", err)
+		return nil
 	}
 
-	targetClient, err := mongo.Connect(context.Background(), options.Client().ApplyURI(syncCfg.TargetConnection))
+	var targetClient *mongo.Client
+	err = utils.Retry(5, 2*time.Second, 2.0, func() error {
+		var connErr error
+		targetClient, connErr = mongo.Connect(context.Background(), options.Client().ApplyURI(cfg.TargetConnection))
+		return connErr
+	})
 	if err != nil {
-		logger.Fatalf("[MongoDB] Failed to connect to target: %v", err)
+		logger.Errorf("[MongoDB] Failed to connect to target after retries: %v", err)
+		return nil
 	}
 
-	resumeTokens := make(map[string]bson.Raw)
-	if syncCfg.MongoDBResumeTokenPath != "" {
-		err := os.MkdirAll(syncCfg.MongoDBResumeTokenPath, os.ModePerm)
-		if err != nil {
-			logger.Fatalf("[MongoDB] Failed to create resume token directory %s: %v", syncCfg.MongoDBResumeTokenPath, err)
+	resumeMap := make(map[string]bson.Raw)
+	if cfg.MongoDBResumeTokenPath != "" {
+		if e2 := os.MkdirAll(cfg.MongoDBResumeTokenPath, os.ModePerm); e2 != nil {
+			logger.Warnf("[MongoDB] Failed to create resume token dir %s: %v", cfg.MongoDBResumeTokenPath, e2)
 		}
 	}
 
 	return &MongoDBSyncer{
 		sourceClient: sourceClient,
 		targetClient: targetClient,
-		syncConfig:   syncCfg,
-		logger:       logger,
-		lastSyncedAt: time.Now().Add(-10 * time.Minute),
-		resumeTokens: resumeTokens,
+		cfg:          cfg,
+		logger:       logger.WithField("sync_task_id", cfg.ID),
+		resumeTokens: resumeMap,
 	}
-}
-
-// getResumeTokenPath constructs the resume token file path based on database and collection
-func (s *MongoDBSyncer) getResumeTokenPath(db string, collection string) string {
-	if s.syncConfig.MongoDBResumeTokenPath == "" {
-		return ""
-	}
-	fileName := fmt.Sprintf("%s_%s.json", db, collection)
-	return filepath.Join(s.syncConfig.MongoDBResumeTokenPath, fileName)
-}
-
-func (s *MongoDBSyncer) loadMongoDBResumeToken(db string, collection string) bson.Raw {
-	path := s.getResumeTokenPath(db, collection)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		s.logger.Infof("[MongoDB] No previous resume token for %s.%s at %s: %v", db, collection, path, err)
-		return nil
-	}
-	if len(data) <= 1 {
-		s.logger.Infof("[MongoDB] Resume token file for %s.%s is empty: %s", db, collection, path)
-		return nil
-	}
-	var token bson.Raw
-	if err := json.Unmarshal(data, &token); err != nil {
-		s.logger.Errorf("[MongoDB] Failed to unmarshal resume token for %s.%s: %v", db, collection, err)
-		return nil
-	}
-	s.logger.Infof("[MongoDB] Loaded resume token for %s.%s from %s", db, collection, path)
-	return token
-}
-
-func (s *MongoDBSyncer) saveMongoDBResumeToken(db string, collection string, token bson.Raw) {
-	if s.syncConfig.MongoDBResumeTokenPath == "" {
-		return
-	}
-	path := s.getResumeTokenPath(db, collection)
-	data, err := json.Marshal(token)
-	if err != nil {
-		s.logger.Errorf("[MongoDB] Failed to marshal resume token for %s.%s: %v", db, collection, err)
-		return
-	}
-	if err := os.WriteFile(path, data, 0644); err != nil {
-		s.logger.Errorf("[MongoDB] Failed to write resume token for %s.%s to file %s: %v", db, collection, path, err)
-	} else {
-		s.logger.Debugf("[MongoDB] Saved resume token for %s.%s to %s", db, collection, path)
-	}
-}
-
-func (s *MongoDBSyncer) removeMongoDBResumeToken(db string, collection string) {
-	if s.syncConfig.MongoDBResumeTokenPath == "" {
-		return
-	}
-	path := s.getResumeTokenPath(db, collection)
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		s.logger.Errorf("[MongoDB] Failed to remove invalid resume token file %s for %s.%s: %v", path, db, collection, err)
-	} else {
-		s.logger.Infof("[MongoDB] Removed invalid resume token file %s for %s.%s", path, db, collection)
-	}
-	s.resumeTokensM.Lock()
-	delete(s.resumeTokens, fmt.Sprintf("%s.%s", db, collection))
-	s.resumeTokensM.Unlock()
 }
 
 func (s *MongoDBSyncer) Start(ctx context.Context) {
-	var wg sync.WaitGroup
+	if s.sourceClient == nil || s.targetClient == nil {
+		s.logger.Error("[MongoDB] MongoDBSyncer Start aborted: source/target client is nil.")
+		return
+	}
+	s.logger.Info("[MongoDB] Starting synchronization...")
 
-	for _, mapping := range s.syncConfig.Mappings {
+	var wg sync.WaitGroup
+	sourceDBName := common.GetDatabaseName(s.cfg.Type, s.cfg.SourceConnection)
+	targetDBName := common.GetDatabaseName(s.cfg.Type, s.cfg.TargetConnection)
+
+	for _, mapping := range s.cfg.Mappings {
 		wg.Add(1)
-		go func(mapping config.DatabaseMapping) {
+		go func(m config.DatabaseMapping) {
 			defer wg.Done()
-			s.syncDatabase(ctx, mapping)
+			s.syncDatabase(ctx, m, sourceDBName, targetDBName)
 		}(mapping)
 	}
-
 	wg.Wait()
-	s.logger.Info("[MongoDB] Synchronization completed.")
+
+	s.logger.Info("[MongoDB] All database mappings have been processed.")
 }
 
-func (s *MongoDBSyncer) syncDatabase(ctx context.Context, mapping config.DatabaseMapping) {
-	sourceDB := s.sourceClient.Database(mapping.SourceDatabase)
-	targetDB := s.targetClient.Database(mapping.TargetDatabase)
-	s.logger.Infof("[MongoDB] Processing database mapping: %s -> %s", mapping.SourceDatabase, mapping.TargetDatabase)
+func (s *MongoDBSyncer) syncDatabase(ctx context.Context, mapping config.DatabaseMapping, sourceDBName, targetDBName string) {
+	sourceDB := s.sourceClient.Database(sourceDBName)
+	targetDB := s.targetClient.Database(targetDBName)
+	s.logger.Infof("[MongoDB] Processing database mapping: %s -> %s", sourceDBName, targetDBName)
 
 	for _, tableMap := range mapping.Tables {
-		sourceColl := sourceDB.Collection(tableMap.SourceTable)
-		targetColl := targetDB.Collection(tableMap.TargetTable)
+		srcColl := sourceDB.Collection(tableMap.SourceTable)
+		tgtColl := targetDB.Collection(tableMap.TargetTable)
 		s.logger.Infof("[MongoDB] Processing collection mapping: %s -> %s", tableMap.SourceTable, tableMap.TargetTable)
 
-		// If the target collection does not exist, create it first (MongoDB write operations can automatically create collections, but we explicitly do it here)
-		if err := s.createCollectionIfNotExists(ctx, targetDB, tableMap.TargetTable); err != nil {
-			s.logger.Errorf("[MongoDB] Failed to create target collection %s.%s: %v", mapping.TargetDatabase, tableMap.TargetTable, err)
+		// Ensure target collection exists
+		if err := s.ensureCollectionExists(ctx, targetDB, tableMap.TargetTable); err != nil {
+			s.logger.Errorf("[MongoDB] Failed to create target collection %s.%s: %v", targetDBName, tableMap.TargetTable, err)
 			continue
 		}
 
-		if err := s.syncIndexes(ctx, sourceColl, targetColl); err != nil {
-			s.logger.Errorf("[MongoDB] Failed to sync indexes for %s.%s: %v", mapping.TargetDatabase, tableMap.TargetTable, err)
+		// Copy indexes from source to target
+		if errIdx := s.copyIndexes(ctx, srcColl, tgtColl); errIdx != nil {
+			s.logger.Warnf("[MongoDB] Failed to copy indexes for %s -> %s: %v", tableMap.SourceTable, tableMap.TargetTable, errIdx)
 		}
 
-		err := s.initialSync(ctx, sourceColl, targetColl, mapping.SourceDatabase, mapping.TargetDatabase)
+		// Perform initial sync if target has no data
+		err := s.doInitialSync(ctx, srcColl, tgtColl, sourceDBName, targetDBName)
 		if err != nil {
-			s.logger.Errorf("[MongoDB] Initial sync failed for %s.%s: %v", mapping.SourceDatabase, tableMap.SourceTable, err)
+			s.logger.Errorf("[MongoDB] doInitialSync failed => %v", err)
 			continue
 		}
 
-		go s.watchChangesForCollection(ctx, sourceColl, targetColl, mapping.SourceDatabase, mapping.TargetDatabase)
+		// Start watching changes
+		go s.watchChanges(ctx, srcColl, tgtColl, sourceDBName, tableMap.TargetTable)
 	}
 }
 
-// If the target collection does not exist, create it
-func (s *MongoDBSyncer) createCollectionIfNotExists(ctx context.Context, db *mongo.Database, collName string) error {
+func (s *MongoDBSyncer) ensureCollectionExists(ctx context.Context, db *mongo.Database, collName string) error {
 	collections, err := db.ListCollectionNames(ctx, bson.M{"name": collName})
 	if err != nil {
+		s.logger.Errorf("[MongoDB] ListCollectionNames failed => %v", err)
 		return err
 	}
 	if len(collections) == 0 {
-		s.logger.Infof("[MongoDB] Target collection not found, creating => %s.%s", db.Name(), collName)
-		if err2 := db.CreateCollection(ctx, collName); err2 != nil {
-			return err2
+		s.logger.Infof("[MongoDB] Creating collection => %s.%s", db.Name(), collName)
+		if createErr := db.CreateCollection(ctx, collName); createErr != nil {
+			return createErr
 		}
 	}
 	return nil
 }
 
-// Sync indexes: Copy all indexes from sourceColl to targetColl
-func (s *MongoDBSyncer) syncIndexes(ctx context.Context, sourceColl, targetColl *mongo.Collection) error {
+func (s *MongoDBSyncer) copyIndexes(ctx context.Context, sourceColl, targetColl *mongo.Collection) error {
 	cursor, err := sourceColl.Indexes().List(ctx)
 	if err != nil {
 		return fmt.Errorf("list source indexes fail: %w", err)
@@ -191,8 +153,8 @@ func (s *MongoDBSyncer) syncIndexes(ctx context.Context, sourceColl, targetColl 
 	defer cursor.Close(ctx)
 
 	var indexDocs []bson.M
-	if err = cursor.All(ctx, &indexDocs); err != nil {
-		return fmt.Errorf("read indexes fail: %w", err)
+	if err2 := cursor.All(ctx, &indexDocs); err2 != nil {
+		return fmt.Errorf("read indexes fail: %w", err2)
 	}
 
 	for _, idx := range indexDocs {
@@ -200,239 +162,349 @@ func (s *MongoDBSyncer) syncIndexes(ctx context.Context, sourceColl, targetColl 
 		if !ok {
 			continue
 		}
-		indexModel := mongo.IndexModel{
-			Keys: keys,
-		}
+		indexModel := mongo.IndexModel{Keys: keys}
 		if uniqueVal, hasUnique := idx["unique"]; hasUnique {
 			if uv, isBool := uniqueVal.(bool); isBool && uv {
 				indexModel.Options = options.Index().SetUnique(true)
 			}
 		}
-		_, errCreate := targetColl.Indexes().CreateOne(ctx, indexModel)
-		if errCreate != nil && !strings.Contains(errCreate.Error(), "already exists") {
-			s.logger.Warnf("[MongoDB] create index fail => %v", errCreate)
+		_, errC := targetColl.Indexes().CreateOne(ctx, indexModel)
+		if errC != nil && !strings.Contains(errC.Error(), "already exists") {
+			s.logger.Warnf("[MongoDB] create index fail => %v", errC)
 		}
 	}
 	return nil
 }
 
-func (s *MongoDBSyncer) initialSync(ctx context.Context, sourceColl, targetColl *mongo.Collection, sourceDB, targetDB string) error {
+func (s *MongoDBSyncer) doInitialSync(ctx context.Context, sourceColl, targetColl *mongo.Collection, sourceDB, targetDB string) error {
 	count, err := targetColl.EstimatedDocumentCount(ctx)
 	if err != nil {
-		return fmt.Errorf("[MongoDB] Failed to check target collection %s.%s: %v", targetDB, targetColl.Name(), err)
+		return fmt.Errorf("check target collection %s.%s fail: %v", targetDB, targetColl.Name(), err)
 	}
-
 	if count > 0 {
-		s.logger.Infof("[MongoDB] Skipping initial sync for %s.%s -> %s.%s, target has data", sourceDB, sourceColl.Name(), targetDB, targetColl.Name())
+		s.logger.Infof("[MongoDB] %s.%s has data => skip initial sync", targetDB, targetColl.Name())
 		return nil
 	}
 
-	s.logger.Infof("[MongoDB] Starting initial sync for collection %s.%s -> %s.%s", sourceDB, sourceColl.Name(), targetDB, targetColl.Name())
+	s.logger.Infof("[MongoDB] Starting initial sync for %s.%s -> %s.%s", sourceDB, sourceColl.Name(), targetDB, targetColl.Name())
+
 	cursor, err := sourceColl.Find(ctx, bson.M{})
 	if err != nil {
-		return fmt.Errorf("[MongoDB] Failed to query source %s.%s for initial sync: %v", sourceDB, sourceColl.Name(), err)
+		return fmt.Errorf("source find fail => %v", err)
 	}
 	defer cursor.Close(ctx)
 
 	batchSize := 100
 	var batch []interface{}
+	inserted := 0
 
 	for cursor.Next(ctx) {
 		var doc bson.M
-		if err := cursor.Decode(&doc); err != nil {
-			return fmt.Errorf("Failed to decode document during initial sync: %v", err)
+		if errD := cursor.Decode(&doc); errD != nil {
+			return fmt.Errorf("decode doc fail => %v", errD)
 		}
 		batch = append(batch, doc)
-
 		if len(batch) >= batchSize {
-			_, err := targetColl.InsertMany(ctx, batch)
-			if err != nil {
-				return fmt.Errorf("[MongoDB] Failed to insert documents into %s.%s: %v", targetDB, targetColl.Name(), err)
+			res, errI := targetColl.InsertMany(ctx, batch)
+			if errI != nil {
+				return fmt.Errorf("insertMany fail => %v", errI)
 			}
+			inserted += len(res.InsertedIDs)
 			batch = batch[:0]
 		}
 	}
-
 	if len(batch) > 0 {
-		_, err := targetColl.InsertMany(ctx, batch)
-		if err != nil {
-			return fmt.Errorf("[MongoDB] Failed to insert remaining documents into %s.%s: %v", targetDB, targetColl.Name(), err)
+		res, errI := targetColl.InsertMany(ctx, batch)
+		if errI != nil {
+			return fmt.Errorf("insertMany fail => %v", errI)
 		}
+		inserted += len(res.InsertedIDs)
 	}
-
-	s.logger.Infof("[MongoDB] Initial sync completed for %s.%s -> %s.%s", sourceDB, sourceColl.Name(), targetDB, targetColl.Name())
+	s.logger.Infof("[MongoDB] doInitialSync => %s.%s => %s.%s inserted=%d docs",
+		sourceDB, sourceColl.Name(), targetDB, targetColl.Name(), inserted)
 	return nil
 }
 
-func (s *MongoDBSyncer) watchChangesForCollection(ctx context.Context, sourceColl, targetColl *mongo.Collection, sourceDB, targetDB string) {
-	collectionName := sourceColl.Name()
-	pipeline := mongo.Pipeline{
-		{{Key: "$match", Value: bson.D{
-			{Key: "ns.db", Value: sourceDB},
-			{Key: "ns.coll", Value: collectionName},
-			{Key: "operationType", Value: bson.M{"$in": []string{"insert", "update", "replace", "delete"}}},
-		}}},
-	}
-	opts := options.ChangeStream().SetFullDocument(options.UpdateLookup)
+func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl *mongo.Collection, sourceDB, collectionName string) {
+	// Outer loop to re-establish the change stream if needed
+	for {
+		pipeline := mongo.Pipeline{
+			{{Key: "$match", Value: bson.D{
+				{Key: "ns.db", Value: sourceDB},
+				{Key: "ns.coll", Value: collectionName},
+				{Key: "operationType", Value: bson.M{"$in": []string{"insert", "update", "replace", "delete"}}},
+			}}},
+		}
+		opts := options.ChangeStream().SetFullDocument(options.UpdateLookup)
+		resumeToken := s.loadMongoDBResumeToken(sourceDB, collectionName)
+		if resumeToken != nil {
+			opts.SetResumeAfter(resumeToken)
+			s.logger.Infof("[MongoDB] Resume token found => %s.%s", sourceDB, collectionName)
+		}
 
-	resumeToken := s.loadMongoDBResumeToken(sourceDB, collectionName)
-	if resumeToken != nil {
-		opts.SetResumeAfter(resumeToken)
-		s.logger.Infof("[MongoDB] Resuming change stream for %s.%s from saved resume token", sourceDB, collectionName)
-	}
-
-	cs, err := sourceColl.Watch(ctx, pipeline, opts)
-	if err != nil && resumeToken != nil {
-		s.logger.Errorf("[MongoDB] Failed to resume with token for %s.%s: %v, retrying without token", sourceDB, collectionName, err)
-		s.removeMongoDBResumeToken(sourceDB, collectionName)
-		opts = options.ChangeStream().SetFullDocument(options.UpdateLookup)
-		cs, err = sourceColl.Watch(ctx, pipeline, opts)
-	}
-
-	if err != nil {
-		s.logger.Errorf("[MongoDB] Failed to watch changes for %s.%s: %v", sourceDB, collectionName, err)
-		return
-	}
-	defer cs.Close(ctx)
-
-	s.logger.Infof("[MongoDB] Watching changes in %s.%s", sourceDB, collectionName)
-
-	var buffer []bufferedChange
-	const batchSize = 200
-	flushInterval := time.Second * 1
-	timer := time.NewTimer(flushInterval)
-	defer timer.Stop()
-
-	var bufferMutex sync.Mutex
-
-	go func() {
-		for {
+		cs, err := sourceColl.Watch(ctx, pipeline, opts)
+		if err != nil {
+			s.logger.Errorf("[MongoDB] Failed to establish change stream for %s.%s: %v", sourceDB, collectionName, err)
 			select {
 			case <-ctx.Done():
 				return
-			case <-timer.C:
-				bufferMutex.Lock()
-				if len(buffer) > 0 {
-					s.logger.Debugf("[MongoDB] Flush timer for %s.%s triggered, flushing %d ops", sourceDB, collectionName, len(buffer))
-					s.flushBuffer(ctx, targetColl, &buffer, targetDB, sourceDB, collectionName)
-				}
-				bufferMutex.Unlock()
-				timer.Reset(flushInterval)
+			case <-time.After(5 * time.Second):
+				continue
 			}
 		}
-	}()
+		s.logger.Infof("[MongoDB] Watching changes => %s.%s", sourceDB, collectionName)
 
-	for {
+		var buffer []bufferedChange
+		const batchSize = 200
+		flushInterval := time.Second * 1
+		timer := time.NewTimer(flushInterval)
+		var bufferMutex sync.Mutex
+		done := false
+
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-timer.C:
+					bufferMutex.Lock()
+					if len(buffer) > 0 {
+						s.logger.Debugf("[MongoDB] flush timer => %s.%s => flushing %d ops", sourceDB, collectionName, len(buffer))
+						s.flushBuffer(ctx, targetColl, &buffer, sourceDB, collectionName)
+					}
+					bufferMutex.Unlock()
+					timer.Reset(flushInterval)
+				}
+			}
+		}()
+
+		for {
+			select {
+			case <-ctx.Done():
+				bufferMutex.Lock()
+				if len(buffer) > 0 {
+					s.logger.Infof("[MongoDB] context done => flush %d ops for %s.%s", len(buffer), sourceDB, collectionName)
+					s.flushBuffer(ctx, targetColl, &buffer, sourceDB, collectionName)
+				}
+				bufferMutex.Unlock()
+				cs.Close(ctx)
+				return
+			default:
+				if cs.Next(ctx) {
+					var changeEvent bson.M
+					if errDec := cs.Decode(&changeEvent); errDec != nil {
+						s.logger.Errorf("[MongoDB] decode event fail => %v", errDec)
+						continue
+					}
+					opType, _ := changeEvent["operationType"].(string)
+					token := cs.ResumeToken()
+					model := s.prepareWriteModel(changeEvent, sourceDB, collectionName, opType)
+					if model != nil {
+						bufferMutex.Lock()
+						buffer = append(buffer, bufferedChange{
+							token:  token,
+							model:  model,
+							opType: opType,
+						})
+						bufferMutex.Unlock()
+
+						queryStr := describeWriteModel(model, opType)
+						s.logger.Debugf("[MongoDB][%s] table=%s.%s query=%s",
+							strings.ToUpper(opType),
+							targetColl.Database().Name(),
+							targetColl.Name(),
+							queryStr,
+						)
+						s.logger.Infof("[MongoDB][%s] table=%s.%s rowsAffected=1",
+							strings.ToUpper(opType),
+							targetColl.Database().Name(),
+							targetColl.Name(),
+						)
+
+						bufferMutex.Lock()
+						buffSize := len(buffer)
+						if buffSize >= batchSize {
+							s.logger.Infof("[MongoDB] buffer reached %d => flush now => %s.%s", batchSize, sourceDB, collectionName)
+							s.flushBuffer(ctx, targetColl, &buffer, sourceDB, collectionName)
+							timer.Reset(flushInterval)
+						}
+						bufferMutex.Unlock()
+					}
+				} else {
+					if errCS := cs.Err(); errCS != nil {
+						s.logger.Errorf("[MongoDB] changeStream error => %v", errCS)
+						done = true
+						break
+					}
+					done = true
+					break
+				}
+			}
+			if done {
+				break
+			}
+		}
+		cs.Close(ctx)
+		s.logger.Infof("[MongoDB] Change stream closed, will re-establish after delay.")
+
 		select {
 		case <-ctx.Done():
-			bufferMutex.Lock()
-			if len(buffer) > 0 {
-				s.logger.Infof("[MongoDB] Context done, flushing remaining %d ops for %s.%s", len(buffer), sourceDB, collectionName)
-				s.flushBuffer(ctx, targetColl, &buffer, targetDB, sourceDB, collectionName)
-			}
-			bufferMutex.Unlock()
 			return
-		default:
-			if cs.Next(ctx) {
-				var changeEvent bson.M
-				if err := cs.Decode(&changeEvent); err != nil {
-					s.logger.Errorf("[MongoDB] Failed to decode change event for %s.%s: %v", sourceDB, collectionName, err)
-					continue
-				}
-
-				operationType, _ := changeEvent["operationType"].(string)
-				s.logger.Debugf("[MongoDB] [OP: %s] {db: %s, coll: %s} Event: %+v", operationType, sourceDB, collectionName, changeEvent)
-
-				token := cs.ResumeToken()
-				model := s.prepareWriteModel(changeEvent, sourceDB, collectionName)
-				if model != nil {
-					bufferMutex.Lock()
-					buffer = append(buffer, bufferedChange{
-						token: token,
-						model: model,
-					})
-					bufferSize := len(buffer)
-					bufferMutex.Unlock()
-
-					if bufferSize >= batchSize {
-						bufferMutex.Lock()
-						s.logger.Infof("[MongoDB] Buffer reached %d for %s.%s, flushing", batchSize, sourceDB, collectionName)
-						s.flushBuffer(ctx, targetColl, &buffer, targetDB, sourceDB, collectionName)
-						bufferMutex.Unlock()
-						timer.Reset(flushInterval)
-					}
-				}
-			} else {
-				if err := cs.Err(); err != nil {
-					s.logger.Errorf("[MongoDB] ChangeStream error for %s.%s: %v", sourceDB, collectionName, err)
-					return
-				}
-			}
+		case <-time.After(5 * time.Second):
 		}
 	}
 }
 
-func (s *MongoDBSyncer) prepareWriteModel(changeEvent bson.M, sourceDB, collectionName string) mongo.WriteModel {
-	operationType, _ := changeEvent["operationType"].(string)
-	fullDocument, _ := changeEvent["fullDocument"].(bson.M)
-	documentKey, _ := changeEvent["documentKey"].(bson.M)
-	filter := documentKey
-
-	switch operationType {
+func (s *MongoDBSyncer) prepareWriteModel(changeEvent bson.M, sourceDB, collectionName, opType string) mongo.WriteModel {
+	fullDoc, _ := changeEvent["fullDocument"].(bson.M)
+	docKey, _ := changeEvent["documentKey"].(bson.M)
+	switch opType {
 	case "insert":
-		if fullDocument != nil {
-			s.logger.Debugf("[MongoDB] [INSERT] {db: %s, coll: %s} Doc: %+v", sourceDB, collectionName, fullDocument)
-			return mongo.NewInsertOneModel().SetDocument(fullDocument)
+		if fullDoc != nil {
+			return mongo.NewInsertOneModel().SetDocument(fullDoc)
 		}
 	case "update", "replace":
-		if fullDocument != nil {
-			s.logger.Debugf("[MongoDB] [UPDATE] {db: %s, coll: %s} Filter: %+v, Doc: %+v", sourceDB, collectionName, filter, fullDocument)
-			return mongo.NewReplaceOneModel().SetFilter(filter).SetReplacement(fullDocument).SetUpsert(true)
+		if fullDoc != nil && docKey != nil {
+			return mongo.NewReplaceOneModel().
+				SetFilter(docKey).
+				SetReplacement(fullDoc).
+				SetUpsert(true)
 		}
 	case "delete":
-		s.logger.Debugf("[MongoDB] [DELETE] {db: %s, coll: %s} Filter: %+v", sourceDB, collectionName, filter)
-		return mongo.NewDeleteOneModel().SetFilter(filter)
-	default:
-		s.logger.Warnf("[MongoDB] Unhandled operation type: %s for %s.%s", operationType, sourceDB, collectionName)
+		if docKey != nil {
+			return mongo.NewDeleteOneModel().SetFilter(docKey)
+		}
 	}
 	return nil
 }
 
-func (s *MongoDBSyncer) flushBuffer(
-	ctx context.Context,
-	targetColl *mongo.Collection,
-	buffer *[]bufferedChange,
-	targetDB, sourceDB, collectionName string,
-) {
+func describeWriteModel(m mongo.WriteModel, opType string) string {
+	switch opType {
+	case "insert":
+		if ins, ok := m.(*mongo.InsertOneModel); ok {
+			return fmt.Sprintf("INSERT doc=%s", toJSONString(ins.Document))
+		}
+	case "update", "replace":
+		if rep, ok := m.(*mongo.ReplaceOneModel); ok {
+			return fmt.Sprintf("UPDATE filter=%s, doc=%s", toJSONString(rep.Filter), toJSONString(rep.Replacement))
+		}
+	case "delete":
+		if del, ok := m.(*mongo.DeleteOneModel); ok {
+			return fmt.Sprintf("DELETE filter=%s", toJSONString(del.Filter))
+		}
+	}
+	return "(unknown)"
+}
+
+func toJSONString(doc interface{}) string {
+	if doc == nil {
+		return "null"
+	}
+	data, err := json.Marshal(doc)
+	if err != nil {
+		return fmt.Sprintf("json_error:%v", err)
+	}
+	return string(data)
+}
+
+func (s *MongoDBSyncer) flushBuffer(ctx context.Context, targetColl *mongo.Collection, buffer *[]bufferedChange, sourceDB, collectionName string) {
 	if len(*buffer) == 0 {
 		return
 	}
 
-	writeModels := make([]mongo.WriteModel, len(*buffer))
+	writeModels := make([]mongo.WriteModel, 0, len(*buffer))
 	var lastToken bson.Raw
-	for i, bc := range *buffer {
-		writeModels[i] = bc.model
+
+	var insertCount, updateCount, deleteCount int
+
+	for _, bc := range *buffer {
+		writeModels = append(writeModels, bc.model)
 		lastToken = bc.token
+
+		switch bc.opType {
+		case "insert":
+			insertCount++
+		case "update", "replace":
+			updateCount++
+		case "delete":
+			deleteCount++
+		}
 	}
 
-	opts := options.BulkWrite().SetOrdered(false)
-	result, err := targetColl.BulkWrite(ctx, writeModels, opts)
+	res, err := targetColl.BulkWrite(ctx, writeModels, options.BulkWrite().SetOrdered(false))
 	if err != nil {
-		s.logger.Errorf("[MongoDB] Bulk write failed for %s.%s: %v", targetDB, targetColl.Name(), err)
+		s.logger.Errorf("[MongoDB] BulkWrite fail => %v", err)
 	} else {
-		s.logger.Debugf("[MongoDB] Bulk write result for %s.%s => Inserted: %d, Matched: %d, Modified: %d, Upserted: %d, Deleted: %d",
-			targetDB, targetColl.Name(),
-			result.InsertedCount,
-			result.MatchedCount,
-			result.ModifiedCount,
-			result.UpsertedCount,
-			result.DeletedCount,
+		s.logger.Infof(
+			"[MongoDB] BulkWrite => table=%s.%s inserted=%d matched=%d modified=%d upserted=%d deleted=%d (opTotals=>insert=%d, update=%d, delete=%d)",
+			targetColl.Database().Name(),
+			targetColl.Name(),
+			res.InsertedCount,
+			res.MatchedCount,
+			res.ModifiedCount,
+			res.UpsertedCount,
+			res.DeletedCount,
+			insertCount,
+			updateCount,
+			deleteCount,
 		)
 		if lastToken != nil {
 			s.saveMongoDBResumeToken(sourceDB, collectionName, lastToken)
 		}
 	}
-
 	*buffer = (*buffer)[:0]
-	s.logger.Debugf("[MongoDB] Cleared buffer for %s.%s after flush", sourceDB, collectionName)
+}
+
+func (s *MongoDBSyncer) loadMongoDBResumeToken(db, coll string) bson.Raw {
+	if s.cfg.MongoDBResumeTokenPath == "" {
+		return nil
+	}
+	path := s.getResumeTokenPath(db, coll)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		s.logger.Debugf("[MongoDB] no resume token file => %s => %v", path, err)
+		return nil
+	}
+	if len(data) <= 1 {
+		s.logger.Debugf("[MongoDB] empty resume token file => %s", path)
+		return nil
+	}
+	var token bson.Raw
+	if errU := json.Unmarshal(data, &token); errU != nil {
+		s.logger.Errorf("[MongoDB] unmarshal resume token fail => %v", errU)
+		return nil
+	}
+	return token
+}
+
+func (s *MongoDBSyncer) saveMongoDBResumeToken(db, coll string, token bson.Raw) {
+	if s.cfg.MongoDBResumeTokenPath == "" {
+		return
+	}
+	path := s.getResumeTokenPath(db, coll)
+	data, err := json.Marshal(token)
+	if err != nil {
+		s.logger.Errorf("[MongoDB] marshal resume token fail => %v", err)
+		return
+	}
+	if errW := os.WriteFile(path, data, 0644); errW != nil {
+		s.logger.Errorf("[MongoDB] write resume token file => %v", errW)
+	}
+}
+
+func (s *MongoDBSyncer) removeMongoDBResumeToken(db, coll string) {
+	if s.cfg.MongoDBResumeTokenPath == "" {
+		return
+	}
+	path := s.getResumeTokenPath(db, coll)
+	_ = os.Remove(path)
+	s.resumeTokensM.Lock()
+	delete(s.resumeTokens, fmt.Sprintf("%s.%s", db, coll))
+	s.resumeTokensM.Unlock()
+	s.logger.Infof("[MongoDB] removed invalid resume token => %s", path)
+}
+
+func (s *MongoDBSyncer) getResumeTokenPath(db, coll string) string {
+	fileName := fmt.Sprintf("%s_%s.json", db, coll)
+	return filepath.Join(s.cfg.MongoDBResumeTokenPath, fileName)
 }

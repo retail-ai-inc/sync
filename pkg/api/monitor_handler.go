@@ -1,0 +1,224 @@
+package api
+
+import (
+	"database/sql"
+	"errors"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+)
+
+// GET /api/sync/{id}/monitor => {status, progress, tps, ...}
+func SyncMonitorHandler(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+
+	db, err := openLocalDB()
+	if err != nil {
+		errorJSON(w, "db fail", err)
+		return
+	}
+	defer db.Close()
+
+	var enableInt sql.NullInt32
+	err = db.QueryRow(`SELECT enable FROM sync_tasks WHERE id=?`, id).Scan(&enableInt)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeJSON(w, map[string]interface{}{"success": false, "data": map[string]interface{}{}})
+			return
+		}
+		errorJSON(w, "select fail", err)
+		return
+	}
+
+	status := "Stopped"
+	if enableInt.Int32 == 1 {
+		status = "Running"
+	}
+
+	writeJSON(w, map[string]interface{}{
+		"success": true,
+		"data": map[string]interface{}{
+			"progress": 85,
+			"tps":      500,
+			"delay":    0.2,
+			"status":   status,
+		},
+	})
+}
+
+// GET /api/sync/{id}/metrics
+func SyncMetricsHandler(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	rangeStr := r.URL.Query().Get("range")
+
+	sinceTime := parseRangeToSince(rangeStr)
+
+	db, err := openLocalDB()
+	if err != nil {
+		errorJSON(w, "db fail", err)
+		return
+	}
+	defer db.Close()
+
+	// "YYYY-MM-DD HH:MM:SS"
+	timeFormat := "2006-01-02 15:04:05"
+
+	var rows *sql.Rows
+	if !sinceTime.IsZero() {
+		query := `
+SELECT logged_at, tgt_table, src_row_count, tgt_row_count
+FROM monitoring_log
+WHERE sync_task_id=?
+  AND logged_at >= ?
+ORDER BY logged_at ASC
+LIMIT 1000
+`
+		utcSince := sinceTime.UTC().Format(timeFormat)
+		rows, err = db.Query(query, id, utcSince)
+	} else {
+		query := `
+SELECT logged_at, tgt_table, src_row_count, tgt_row_count
+FROM monitoring_log
+WHERE sync_task_id=?
+ORDER BY logged_at ASC
+LIMIT 1000
+`
+		rows, err = db.Query(query, id)
+	}
+
+	if err != nil {
+		errorJSON(w, "query monitoring_log fail", err)
+		return
+	}
+	defer rows.Close()
+
+	var rowCountTrend []map[string]interface{}
+	for rows.Next() {
+		var t, tbl string
+		var src, tgt int64
+		if err := rows.Scan(&t, &tbl, &src, &tgt); err != nil {
+			errorJSON(w, "scan monitoring_log fail", err)
+			return
+		}
+		diff := src - tgt
+		if diff < 0 {
+			diff = -diff
+		}
+
+		rowCountTrend = append(rowCountTrend,
+			map[string]interface{}{"time": t, "table": tbl, "type": "source", "value": src},
+			map[string]interface{}{"time": t, "table": tbl, "type": "target", "value": tgt},
+			map[string]interface{}{"time": t, "table": tbl, "type": "diff", "value": diff},
+		)
+	}
+
+	if err := rows.Err(); err != nil {
+		errorJSON(w, "monitoring_log iteration error", err)
+		return
+	}
+
+	writeJSON(w, map[string]interface{}{
+		"success": true,
+		"data": map[string]interface{}{
+			"rowCountTrend":  rowCountTrend,
+			"syncEventStats": []interface{}{},
+		},
+	})
+}
+
+// GET /api/sync/{id}/logs
+func SyncLogsHandler(w http.ResponseWriter, r *http.Request) {
+	taskID := chi.URLParam(r, "id")
+	levelParam := r.URL.Query().Get("level")
+	search := r.URL.Query().Get("search")
+
+	db, err := openLocalDB()
+	if err != nil {
+		errorJSON(w, "open db fail", err)
+		return
+	}
+	defer db.Close()
+
+	rows, err := db.Query(`
+SELECT log_time, level, message
+FROM sync_log
+WHERE sync_task_id=?
+ORDER BY log_time DESC
+LIMIT 500
+`, taskID)
+	if err != nil {
+		errorJSON(w, "query sync_log fail", err)
+		return
+	}
+	defer rows.Close()
+
+	var logs []map[string]interface{}
+	for rows.Next() {
+		var t, lvl, msg string
+		if err := rows.Scan(&t, &lvl, &msg); err != nil {
+			errorJSON(w, "scan sync_log fail", err)
+			return
+		}
+		logs = append(logs, map[string]interface{}{
+			"time":    t,
+			"level":   lvl,
+			"message": msg,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		errorJSON(w, "sync_log iteration error", err)
+		return
+	}
+
+	var filtered []map[string]interface{}
+	for _, l := range logs {
+		if levelParam != "" && !strings.EqualFold(l["level"].(string), levelParam) {
+			continue
+		}
+		if search != "" && !strings.Contains(
+			strings.ToLower(l["message"].(string)),
+			strings.ToLower(search),
+		) {
+			continue
+		}
+		filtered = append(filtered, l)
+	}
+
+	writeJSON(w, map[string]interface{}{
+		"success": true,
+		"data":    filtered,
+	})
+}
+
+// 1h, 2h, 3h, 6h, 12h, 1d, 2d, 7d，default: -10h
+func parseRangeToSince(rangeStr string) (since time.Time) {
+	if rangeStr == "" {
+		return time.Time{}
+	}
+
+	now := time.Now().UTC()
+	lower := strings.ToLower(rangeStr)
+
+	switch lower {
+	case "1h":
+		return now.Add(-1 * time.Hour)
+	case "2h":
+		return now.Add(-2 * time.Hour)
+	case "3h":
+		return now.Add(-3 * time.Hour)
+	case "6h":
+		return now.Add(-6 * time.Hour)
+	case "12h":
+		return now.Add(-12 * time.Hour)
+	case "1d":
+		return now.AddDate(0, 0, -1)
+	case "2d":
+		return now.AddDate(0, 0, -2)
+	case "7d":
+		return now.AddDate(0, 0, -7)
+	default:
+		return now.Add(-10 * time.Hour)
+	}
+}

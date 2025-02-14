@@ -12,3 +12,11 @@ CREATE TABLE IF NOT EXISTS users (
 );
 insert into users (id, name, email) values (1, 'John', 'John@mail' );
 
+CREATE TABLE IF NOT EXISTS orders (
+    id INT PRIMARY KEY,
+    user_id INT,
+    product VARCHAR(100),
+    quantity INT,
+    order_date DATETIME
+);
+

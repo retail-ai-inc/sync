@@ -4,17 +4,19 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
+	goredis "github.com/redis/go-redis/v9"
 	"github.com/retail-ai-inc/sync/pkg/config"
+	"github.com/retail-ai-inc/sync/pkg/syncer/common"
 	"github.com/sirupsen/logrus"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
-
-	goredis "github.com/redis/go-redis/v9"
 )
 
+// StartRowCountMonitoring periodically logs row counts to console + DB
 func StartRowCountMonitoring(ctx context.Context, cfg *config.Config, log *logrus.Logger, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	go func() {
@@ -34,7 +36,6 @@ func StartRowCountMonitoring(ctx context.Context, cfg *config.Config, log *logru
 		}
 	}()
 }
-
 
 func countAndLogTables(ctx context.Context, sc config.SyncConfig, log *logrus.Logger) {
 	switch strings.ToLower(sc.Type) {
@@ -69,19 +70,19 @@ func countAndLogMySQLOrMariaDB(ctx context.Context, sc config.SyncConfig, log *l
 	}
 	defer db2.Close()
 
-	dbType := strings.ToUpper(sc.Type) // "MYSQL" or "MARIADB"
+	dbType := strings.ToUpper(sc.Type)
+	srcDBName := common.GetDatabaseName(sc.Type, sc.SourceConnection)
+	tgtDBName := common.GetDatabaseName(sc.Type, sc.TargetConnection)
+
 	for _, mapping := range sc.Mappings {
-		srcDBName := mapping.SourceDatabase
-		tgtDBName := mapping.TargetDatabase
 		for _, tblMap := range mapping.Tables {
 			srcName := tblMap.SourceTable
 			tgtName := tblMap.TargetTable
 
-			// Source table
 			srcCount := getRowCount(db, fmt.Sprintf("%s.%s", srcDBName, srcName))
-			// Target table
 			tgtCount := getRowCount(db2, fmt.Sprintf("%s.%s", tgtDBName, tgtName))
 
+			// 1) Log output
 			log.WithFields(logrus.Fields{
 				"db_type":        dbType,
 				"src_db":         srcDBName,
@@ -92,6 +93,9 @@ func countAndLogMySQLOrMariaDB(ctx context.Context, sc config.SyncConfig, log *l
 				"tgt_row_count":  tgtCount,
 				"monitor_action": "row_count_minutely",
 			}).Info("row_count_minutely")
+
+			// 2) Insert into database monitoring_log with sync_task_id
+			storeMonitoringLog(sc.ID, dbType, srcDBName, srcName, srcCount, tgtDBName, tgtName, tgtCount, "row_count_minutely")
 		}
 	}
 }
@@ -114,9 +118,11 @@ func countAndLogPostgreSQL(ctx context.Context, sc config.SyncConfig, log *logru
 	}
 	defer db2.Close()
 
+	dbType := strings.ToUpper(sc.Type)
+	srcDBName := common.GetDatabaseName(sc.Type, sc.SourceConnection)
+	tgtDBName := common.GetDatabaseName(sc.Type, sc.TargetConnection)
+
 	for _, mapping := range sc.Mappings {
-		srcDBName := mapping.SourceDatabase
-		tgtDBName := mapping.TargetDatabase
 		srcSchema := mapping.SourceSchema
 		if srcSchema == "" {
 			srcSchema = "public"
@@ -137,7 +143,7 @@ func countAndLogPostgreSQL(ctx context.Context, sc config.SyncConfig, log *logru
 			tgtCount := getRowCount(db2, fullTgt)
 
 			log.WithFields(logrus.Fields{
-				"db_type":        "POSTGRESQL",
+				"db_type":        dbType,
 				"src_schema":     srcSchema,
 				"src_table":      srcName,
 				"src_db":         srcDBName,
@@ -148,6 +154,9 @@ func countAndLogPostgreSQL(ctx context.Context, sc config.SyncConfig, log *logru
 				"tgt_row_count":  tgtCount,
 				"monitor_action": "row_count_minutely",
 			}).Info("row_count_minutely")
+
+			// Insert into database monitoring_log with sync_task_id
+			storeMonitoringLog(sc.ID, dbType, srcDBName, srcName, srcCount, tgtDBName, tgtName, tgtCount, "row_count_minutely")
 		}
 	}
 }
@@ -174,24 +183,23 @@ func countAndLogMongoDB(ctx context.Context, sc config.SyncConfig, log *logrus.L
 		_ = tgtClient.Disconnect(ctx)
 	}()
 
-	for _, mapping := range sc.Mappings {
-		srcDBName := mapping.SourceDatabase
-		tgtDBName := mapping.TargetDatabase
-		for _, tblMap := range mapping.Tables {
-			srcName := tblMap.SourceTable
-			tgtName := tblMap.TargetTable
+	dbType := strings.ToUpper(sc.Type)
+	srcDBName := common.GetDatabaseName(sc.Type, sc.SourceConnection)
+	tgtDBName := common.GetDatabaseName(sc.Type, sc.TargetConnection)
 
-			srcColl := srcClient.Database(srcDBName).Collection(srcName)
-			tgtColl := tgtClient.Database(tgtDBName).Collection(tgtName)
+	for _, mapping := range sc.Mappings {
+		for _, tblMap := range mapping.Tables {
+			srcColl := srcClient.Database(srcDBName).Collection(tblMap.SourceTable)
+			tgtColl := tgtClient.Database(tgtDBName).Collection(tblMap.TargetTable)
 
 			srcCount, err := srcColl.EstimatedDocumentCount(ctx)
 			if err != nil {
 				log.WithError(err).WithFields(logrus.Fields{
-					"db_type":   "MONGODB",
+					"db_type":   dbType,
 					"src_db":    srcDBName,
-					"src_coll":  srcName,
+					"src_coll":  tblMap.SourceTable,
 					"tgt_db":    tgtDBName,
-					"tgt_coll":  tgtName,
+					"tgt_coll":  tblMap.TargetTable,
 					"operation": "source_count",
 				}).Error("Failed to get source collection count")
 				srcCount = -1
@@ -200,28 +208,30 @@ func countAndLogMongoDB(ctx context.Context, sc config.SyncConfig, log *logrus.L
 			tgtCount, err := tgtColl.EstimatedDocumentCount(ctx)
 			if err != nil {
 				log.WithError(err).WithFields(logrus.Fields{
-					"db_type":   "MONGODB",
+					"db_type":   dbType,
 					"tgt_db":    tgtDBName,
-					"tgt_coll":  tgtName,
+					"tgt_coll":  tblMap.TargetTable,
 					"operation": "target_count",
 				}).Error("Failed to get target collection count")
 				tgtCount = -1
 			}
 
 			log.WithFields(logrus.Fields{
-				"db_type":        "MONGODB",
+				"db_type":        dbType,
 				"src_db":         srcDBName,
-				"src_coll":       srcName,
+				"src_coll":       tblMap.SourceTable,
 				"src_row_count":  srcCount,
 				"tgt_db":         tgtDBName,
-				"tgt_coll":       tgtName,
+				"tgt_coll":       tblMap.TargetTable,
 				"tgt_row_count":  tgtCount,
 				"monitor_action": "row_count_minutely",
 			}).Info("row_count_minutely")
+
+			// Insert into database monitoring_log with sync_task_id
+			storeMonitoringLog(sc.ID, dbType, srcDBName, tblMap.SourceTable, srcCount, tgtDBName, tblMap.TargetTable, tgtCount, "row_count_minutely")
 		}
 	}
 }
-
 
 func countAndLogRedis(ctx context.Context, sc config.SyncConfig, log *logrus.Logger) {
 	dbType := strings.ToUpper(sc.Type)
@@ -256,6 +266,9 @@ func countAndLogRedis(ctx context.Context, sc config.SyncConfig, log *logrus.Log
 		return
 	}
 
+	srcDBName := common.GetDatabaseName(sc.Type, sc.SourceConnection)
+	tgtDBName := common.GetDatabaseName(sc.Type, sc.TargetConnection)
+
 	srcCount, err := srcClient.DBSize(ctx).Result()
 	if err != nil {
 		log.WithError(err).WithField("db_type", dbType).
@@ -270,10 +283,7 @@ func countAndLogRedis(ctx context.Context, sc config.SyncConfig, log *logrus.Log
 		tgtCount = -1
 	}
 
-	for _, mapping := range sc.Mappings {
-		srcDBName := mapping.SourceDatabase
-		tgtDBName := mapping.TargetDatabase
-
+	for range sc.Mappings {
 		log.WithFields(logrus.Fields{
 			"db_type":        dbType,
 			"src_db":         srcDBName,
@@ -282,9 +292,13 @@ func countAndLogRedis(ctx context.Context, sc config.SyncConfig, log *logrus.Log
 			"tgt_row_count":  tgtCount,
 			"monitor_action": "row_count_minutely",
 		}).Info("row_count_minutely")
+
+		// Insert into database monitoring_log with sync_task_id
+		storeMonitoringLog(sc.ID, dbType, srcDBName, "", srcCount, tgtDBName, "", tgtCount, "row_count_minutely")
 	}
 }
 
+// getRowCount is used by MySQL / MariaDB / PostgreSQL
 func getRowCount(db *sql.DB, table string) int64 {
 	query := fmt.Sprintf("SELECT COUNT(*) FROM %s", table)
 	var cnt int64
@@ -292,4 +306,52 @@ func getRowCount(db *sql.DB, table string) int64 {
 		return -1
 	}
 	return cnt
+}
+
+// ------------------------------------------------------------------
+// Added function: Insert monitoring results into the monitoring_log table
+func storeMonitoringLog(syncTaskID int, dbType, srcDB, srcTable string, srcCount int64,
+	tgtDB, tgtTable string, tgtCount int64, action string) {
+
+	// Preferably read the DB path from environment variables
+	dbPath := os.Getenv("SYNC_DB_PATH")
+	if dbPath == "" {
+		dbPath = "sync.db"
+	}
+
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		// If it fails, just ignore
+		logrus.Errorf("Failed to open local DB for monitoring_log: %v", err)
+		return
+	}
+	defer db.Close()
+
+	const insSQL = `
+INSERT INTO monitoring_log (
+	sync_task_id,
+	db_type,
+	src_db,
+	src_table,
+	src_row_count,
+	tgt_db,
+	tgt_table,
+	tgt_row_count,
+	monitor_action
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+`
+	_, err = db.Exec(insSQL,
+		syncTaskID,
+		dbType,
+		srcDB,
+		srcTable,
+		srcCount,
+		tgtDB,
+		tgtTable,
+		tgtCount,
+		action,
+	)
+	if err != nil {
+		logrus.Errorf("Failed to insert into monitoring_log: %v", err)
+	}
 }
