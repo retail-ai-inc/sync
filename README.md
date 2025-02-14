@@ -104,12 +104,15 @@ cd sync
 # 2. Install dependencies
 go mod tidy
 
-# 3. Build the binary
+# 3. Run the application
+go run cmd/sync/main.go
+
+# 4. Build the binary
 go build -o sync cmd/sync/main.go
 
-# 4. Build the Docker image
+# 5. Build the Docker image
 docker build -t sync .
-docker run -v sync
+docker run -d -p 8080:8080 sync
 ```
 
 ## Real-Time Synchronization
