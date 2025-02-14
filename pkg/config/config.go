@@ -70,7 +70,7 @@ func NewConfig() *Config {
 	if dbPath == "" {
 		dbPath = "sync.db"
 	}
-	
+
 	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
 		log.Fatalf("Failed opening DB: %v", err)

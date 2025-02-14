@@ -78,7 +78,7 @@ func TestSyncIntegration(t *testing.T) {
 	os.Setenv("SYNC_DB_PATH", "../../../sync.db")
 
 	dbPath := os.Getenv("SYNC_DB_PATH")
-	testTC01ConfigUpdate(dbPath);
+	testTC01ConfigUpdate(dbPath)
 
 	cfg := config.NewConfig()
 	log := logger.InitLogger(cfg.LogLevel)
