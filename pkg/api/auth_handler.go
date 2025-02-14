@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"github.com/sirupsen/logrus"
 	"net/http"
 	"strconv"
 	"time"
@@ -192,7 +191,6 @@ func TestConnectionHandler(w http.ResponseWriter, r *http.Request) {
 		} else {
 			uri = fmt.Sprintf("mongodb://%s:%s/?directConnection=true", req.Host, req.Port)
 		}
-		logrus.Infof("Connection => uri=%s", uri)
 
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
