@@ -84,8 +84,7 @@ Create standalone databases outside of your production database servers with the
 ## Quick start
 
 This is a demo for macOS on amd64. For other operating systems and architectures, you need to replace the download link with the appropriate binary URL for your system.
-**Please note:** Currently, the functionality for various operating systems is not fully implemented. 
-
+**Please note:** Currently, the functionality for various operating systems is not fully implemented. In order to run the application on different platforms, appropriate code signing for each operating system is required.
 ```
 curl -L -o sync.tar.gz https://github.com/retail-ai-inc/sync/releases/download/v3.0.1/sync_3.0.1_darwin_amd64.tar.gz
 tar -xzf sync.tar.gz
