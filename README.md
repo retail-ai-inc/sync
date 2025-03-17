@@ -64,7 +64,8 @@ Create standalone databases outside of your production database servers with the
   - These logs are then forwarded via **Log Router** to **GCP BigQuery**.<br>Finally, **Grafana** is used to visualize this data, providing users with insights into the synchronization process.
   - This integration is part of a temporary transition phase, and future development will focus on using a more flexible database solution for direct display and synchronization.
 - **UI Interface**:  
-  The tool has added a **UI interface**, making it easier to operate and monitor the synchronization process. For detailed UI documentation and usage guide, please see [READMEUI.md](READMEUI.md).
+  - The tool has added a **UI interface**, making it easier to operate and monitor the synchronization process. For detailed UI documentation and usage guide, please see [READMEUI.md](READMEUI.md).
+  - [Online Demo](http://34.85.13.66:8080): (login: admin/admin) is for demonstration only. Data will be cleared periodically. Avoid entering important info. For long - term, stable testing & dev, download the project locally.
 
 ## Prerequisites
 - For MongoDB sources:
