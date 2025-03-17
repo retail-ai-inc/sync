@@ -51,18 +51,19 @@ func main() {
 	router := chi.NewRouter()
 	router.Mount("/api", api.NewRouter())
 
-	fileServer := http.FileServer(http.Dir("ui/dist"))
-	router.Get("/static/*", func(w http.ResponseWriter, r *http.Request) {
-		http.StripPrefix("/static/", fileServer).ServeHTTP(w, r)
-	})
-	router.Get("/assets/*", func(w http.ResponseWriter, r *http.Request) {
-		fileServer.ServeHTTP(w, r)
-	})
-	router.Get("/favicon.ico", func(w http.ResponseWriter, r *http.Request) {
-		fileServer.ServeHTTP(w, r)
-	})
-
 	router.Get("/*", func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+
+		filePath := "ui/dist" + path
+
+		_, err := os.Stat(filePath)
+		fileExists := !os.IsNotExist(err)
+
+		if fileExists {
+			http.StripPrefix("/", http.FileServer(http.Dir("ui/dist"))).ServeHTTP(w, r)
+			return
+		}
+
 		http.ServeFile(w, r, "ui/dist/index.html")
 	})
 
