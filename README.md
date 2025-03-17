@@ -11,7 +11,7 @@ Synchronize Production NOSQL and SQL data to Standalone instances for Data scien
 > Sync now supports MongoDB, MySQL, PostgreSQL, MariaDB, and Redis. Next, `Sync` will support Elasticsearch. We also plan to make `Sync` as **PII** proof.
 
 ## What is the problem
-Let’s assume you have a mid to big-size SaaS platform or service with multiple tech teams and stakeholders. Different teams have different requirements for analyzing the production data independently. However, the tech team doesn’t want to allow all these stakeholders direct access to the production databases due to security and stability issues.
+Let's assume you have a mid to big-size SaaS platform or service with multiple tech teams and stakeholders. Different teams have different requirements for analyzing the production data independently. However, the tech team doesn't want to allow all these stakeholders direct access to the production databases due to security and stability issues.
 
 ## A simple one-way solution
 Create standalone databases outside of your production database servers with the same name as production and sync the production data of the specific tables or collections to the standalone database. **Sync** will do this for you.
@@ -64,7 +64,7 @@ Create standalone databases outside of your production database servers with the
   - These logs are then forwarded via **Log Router** to **GCP BigQuery**.<br>Finally, **Grafana** is used to visualize this data, providing users with insights into the synchronization process.
   - This integration is part of a temporary transition phase, and future development will focus on using a more flexible database solution for direct display and synchronization.
 - **UI Interface**:  
-  The tool has added a **UI interface**, making it easier to operate and monitor the synchronization process.
+  The tool has added a **UI interface**, making it easier to operate and monitor the synchronization process. For detailed UI documentation and usage guide, please see [READMEUI.md](READMEUI.md).
 
 ## Prerequisites
 - For MongoDB sources:
@@ -81,21 +81,15 @@ Create standalone databases outside of your production database servers with the
   - Redis Streams and Keyspace Notifications enabled.
   - A target Redis instance with write permissions.
 
-## Quick start
 
-This is a demo for macOS on amd64. For other operating systems and architectures, you need to replace the download link with the appropriate binary URL for your system.
-**Please note:** Currently, the functionality for various operating systems is not fully implemented. In order to run the application on different platforms, appropriate code signing for each operating system is required.
-```
-curl -L -o sync.tar.gz https://github.com/retail-ai-inc/sync/releases/download/v3.0.1/sync_3.0.1_darwin_amd64.tar.gz
-tar -xzf sync.tar.gz
-./sync
-```
+
+## Installation(For development)
+
 After running `./sync`, the application will output a browser address:
 - URL: [http://localhost:8080](http://localhost:8080)
 - Username: `admin`
 - Password: `admin`
 
-## Installation(For development)
 
 ```
 # 1. Clone the repository:
@@ -115,6 +109,7 @@ go build -o sync cmd/sync/main.go
 docker build -t sync .
 docker run -d -p 8080:8080 sync
 ```
+
 
 ## Real-Time Synchronization
 
