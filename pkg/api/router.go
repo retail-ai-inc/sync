@@ -17,6 +17,15 @@ func NewRouter() http.Handler {
 	r.Get("/currentUser", AuthCurrentUserHandler)     // GET /api/currentUser
 	r.Post("/logout", AuthLogoutHandler)              // POST /api/logout
 	r.Post("/test-connection", TestConnectionHandler) // GET /api/test-connection
+	r.Post("/login/google/callback", AuthGoogleCallbackHandler)
+	r.Put("/updatePassword", UpdatePasswordHandler)             // PUT /api/updatePassword
+	r.Put("/updateAdminPassword", UpdateAdminPasswordHandler)   // PUT /api/updateAdminPassword
+	r.Get("/getAdminToken", GetAdminTokenHandler)               // GET /api/getAdminToken
+	r.Get("/oauth/{provider}/config", GetOAuthConfigHandler)    // GET /api/oauth/{provider}/config
+	r.Put("/oauth/{provider}/config", UpdateOAuthConfigHandler) // PUT /oauth/{provider}/config
+	r.Get("/users", GetUsersHandler)                            // GET /api/users
+	r.Put("/users/access", UpdateUserAccessHandler)             // PUT /api/users/access
+	r.Delete("/users", DeleteUserHandler)                       // DELETE /api/users
 
 	// 2) Sync related
 	r.Get("/sync", SyncListHandler)             // GET /api/sync
@@ -30,6 +39,10 @@ func NewRouter() http.Handler {
 	r.Get("/sync/{id}/monitor", SyncMonitorHandler) // GET /api/sync/{taskID}/monitor
 	r.Get("/sync/{id}/metrics", SyncMetricsHandler) // GET /api/sync/{taskID}/metrics
 	r.Get("/sync/{id}/logs", SyncLogsHandler)       // GET /api/sync/{taskID}/logs
+
+	r.Post("/tables/schema", GetTableSchemaHandler)
+
+	r.Post("/sql/execute", ExecuteSQLHandler) // POST /api/sql/execute
 
 	return r
 }

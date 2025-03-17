@@ -12,6 +12,7 @@ import (
 
 	"github.com/retail-ai-inc/sync/pkg/config"
 	"github.com/retail-ai-inc/sync/pkg/syncer/common"
+	"github.com/retail-ai-inc/sync/pkg/syncer/security"
 	"github.com/retail-ai-inc/sync/pkg/utils"
 	"github.com/sirupsen/logrus"
 	"go.mongodb.org/mongo-driver/bson"
@@ -86,11 +87,16 @@ func (s *MongoDBSyncer) Start(ctx context.Context) {
 	targetDBName := common.GetDatabaseName(s.cfg.Type, s.cfg.TargetConnection)
 
 	for _, mapping := range s.cfg.Mappings {
-		wg.Add(1)
-		go func(m config.DatabaseMapping) {
-			defer wg.Done()
-			s.syncDatabase(ctx, m, sourceDBName, targetDBName)
-		}(mapping)
+		if len(mapping.Tables) > 0 {
+			wg.Add(1)
+			go func(m config.DatabaseMapping) {
+				defer wg.Done()
+				s.syncDatabase(ctx, m, sourceDBName, targetDBName)
+			}(mapping)
+		} else {
+			s.logger.Warn("[MongoDB] Table mappings are empty, skipping processing")
+			continue
+		}
 	}
 	wg.Wait()
 
@@ -355,26 +361,84 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 	}
 }
 
-func (s *MongoDBSyncer) prepareWriteModel(changeEvent bson.M, sourceDB, collectionName, opType string) mongo.WriteModel {
-	fullDoc, _ := changeEvent["fullDocument"].(bson.M)
-	docKey, _ := changeEvent["documentKey"].(bson.M)
+func (s *MongoDBSyncer) prepareWriteModel(doc bson.M, sourceDB, collName, opType string) mongo.WriteModel {
+	tableSecurity := security.FindTableSecurityFromMappings(collName, s.cfg.Mappings)
+
 	switch opType {
 	case "insert":
-		if fullDoc != nil {
+		if fullDoc, ok := doc["fullDocument"].(bson.M); ok {
+			if tableSecurity.SecurityEnabled && len(tableSecurity.FieldSecurity) > 0 {
+				for field, value := range fullDoc {
+					processedValue := security.ProcessValue(value, field, tableSecurity)
+					fullDoc[field] = processedValue
+				}
+			}
 			return mongo.NewInsertOneModel().SetDocument(fullDoc)
 		}
+
 	case "update", "replace":
-		if fullDoc != nil && docKey != nil {
-			return mongo.NewReplaceOneModel().
-				SetFilter(docKey).
-				SetReplacement(fullDoc).
-				SetUpsert(true)
+		var docID interface{}
+		if id, ok := doc["documentKey"].(bson.M)["_id"]; ok {
+			docID = id
+		} else {
+			s.logger.Warnf("[MongoDB] cannot find _id in documentKey => %v", doc)
+			return nil
 		}
+
+		if opType == "replace" {
+			if fullDoc, ok := doc["fullDocument"].(bson.M); ok {
+				if tableSecurity.SecurityEnabled && len(tableSecurity.FieldSecurity) > 0 {
+					for field, value := range fullDoc {
+						processedValue := security.ProcessValue(value, field, tableSecurity)
+						fullDoc[field] = processedValue
+					}
+				}
+				return mongo.NewReplaceOneModel().
+					SetFilter(bson.M{"_id": docID}).
+					SetReplacement(fullDoc).
+					SetUpsert(true)
+			}
+		} else { // "update"
+			if updateDesc, ok := doc["updateDescription"].(bson.M); ok {
+				var updateDoc bson.M = make(bson.M)
+
+				if updatedFields, ok := updateDesc["updatedFields"].(bson.M); ok && len(updatedFields) > 0 {
+					if tableSecurity.SecurityEnabled && len(tableSecurity.FieldSecurity) > 0 {
+						for field, value := range updatedFields {
+							processedValue := security.ProcessValue(value, field, tableSecurity)
+							updatedFields[field] = processedValue
+						}
+					}
+					updateDoc["$set"] = updatedFields
+				}
+
+				if removedFields, ok := updateDesc["removedFields"].(bson.A); ok && len(removedFields) > 0 {
+					unsetDoc := make(bson.M)
+					for _, field := range removedFields {
+						if fieldStr, ok := field.(string); ok {
+							unsetDoc[fieldStr] = ""
+						}
+					}
+					if len(unsetDoc) > 0 {
+						updateDoc["$unset"] = unsetDoc
+					}
+				}
+
+				if len(updateDoc) > 0 {
+					return mongo.NewUpdateOneModel().
+						SetFilter(bson.M{"_id": docID}).
+						SetUpdate(updateDoc).
+						SetUpsert(true)
+				}
+			}
+		}
+
 	case "delete":
-		if docKey != nil {
-			return mongo.NewDeleteOneModel().SetFilter(docKey)
+		if docID, ok := doc["documentKey"].(bson.M)["_id"]; ok {
+			return mongo.NewDeleteOneModel().SetFilter(bson.M{"_id": docID})
 		}
 	}
+
 	return nil
 }
 
@@ -507,4 +571,66 @@ func (s *MongoDBSyncer) removeMongoDBResumeToken(db, coll string) {
 func (s *MongoDBSyncer) getResumeTokenPath(db, coll string) string {
 	fileName := fmt.Sprintf("%s_%s.json", db, coll)
 	return filepath.Join(s.cfg.MongoDBResumeTokenPath, fileName)
+}
+
+func (s *MongoDBSyncer) handleStreamDocument(
+	doc bson.M,
+	buffer *[]bufferedChange,
+	token bson.Raw,
+	targetColl *mongo.Collection,
+	sourceColl *mongo.Collection,
+	sourceDB, collName string,
+) {
+	if doc == nil {
+		return
+	}
+
+	tableSecurity := security.FindTableSecurityFromMappings(collName, s.cfg.Mappings)
+
+	s.logger.Debugf("[MongoDB] Collection=%s security config: enabled=%v, rules=%d",
+		collName, tableSecurity.SecurityEnabled, len(tableSecurity.FieldSecurity))
+
+	operationType, ok := doc["operationType"].(string)
+	if !ok {
+		s.logger.Warnf("[MongoDB] Missing operationType in stream doc: %v", doc)
+		return
+	}
+
+	if tableSecurity.SecurityEnabled && len(tableSecurity.FieldSecurity) > 0 {
+		switch operationType {
+		case "insert", "replace", "update":
+			var documentData bson.M
+			if operationType == "insert" || operationType == "replace" {
+				if fullDoc, ok := doc["fullDocument"].(bson.M); ok {
+					documentData = fullDoc
+				}
+			} else if operationType == "update" {
+				if updateDesc, ok := doc["updateDescription"].(bson.M); ok {
+					if updatedFields, ok := updateDesc["updatedFields"].(bson.M); ok {
+						documentData = updatedFields
+					}
+				}
+			}
+
+			s.logger.Debugf("[MongoDB][%s] Data before processing: %v", operationType, documentData)
+
+			if documentData != nil {
+				for field, value := range documentData {
+					processedValue := security.ProcessValue(value, field, tableSecurity)
+					documentData[field] = processedValue
+				}
+			}
+
+			s.logger.Debugf("[MongoDB][%s] Data after processing: %v", operationType, documentData)
+		}
+	}
+
+	model := s.prepareWriteModel(doc, sourceDB, collName, operationType)
+	if model != nil {
+		*buffer = append(*buffer, bufferedChange{
+			token:  token,
+			model:  model,
+			opType: operationType,
+		})
+	}
 }

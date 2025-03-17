@@ -1,26 +1,23 @@
 package test
 
 import (
-	"database/sql"
-	"os"
+	// "database/sql"
+	// "os"
 	"testing"
 	// "github.com/retail-ai-inc/sync/pkg/config"
+	"github.com/retail-ai-inc/sync/pkg/db"
 	"time"
 )
 
 func testTC10LogHookWriting(t *testing.T) {
-	dbPath := os.Getenv("SYNC_DB_PATH")
-	if dbPath == "" {
-		dbPath = "sync.db"
-	}
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := db.OpenSQLiteDB()
 	if err != nil {
 		t.Fatalf("open sqlite fail: %v", err)
 	}
 	defer db.Close()
 
 	t.Log("[TC10] Triggering some ops to produce logs...")
-	time.Sleep(5 * time.Second)
+	time.Sleep(2 * time.Second)
 
 	var c int
 	err = db.QueryRow("SELECT COUNT(*) FROM sync_log").Scan(&c)

@@ -4,12 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
 	goredis "github.com/redis/go-redis/v9"
 	"github.com/retail-ai-inc/sync/pkg/config"
+	"github.com/retail-ai-inc/sync/pkg/db"
 	"github.com/retail-ai-inc/sync/pkg/syncer/common"
 	"github.com/sirupsen/logrus"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -313,15 +313,9 @@ func getRowCount(db *sql.DB, table string) int64 {
 func storeMonitoringLog(syncTaskID int, dbType, srcDB, srcTable string, srcCount int64,
 	tgtDB, tgtTable string, tgtCount int64, action string) {
 
-	// Preferably read the DB path from environment variables
-	dbPath := os.Getenv("SYNC_DB_PATH")
-	if dbPath == "" {
-		dbPath = "sync.db"
-	}
-
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := db.OpenSQLiteDB()
 	if err != nil {
-		// If it fails, just ignore
+		// If failed, just log the error
 		logrus.Errorf("Failed to open local DB for monitoring_log: %v", err)
 		return
 	}

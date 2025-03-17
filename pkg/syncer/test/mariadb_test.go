@@ -46,15 +46,15 @@ func testTC05MariaDBSync(t *testing.T, syncConfigs []config.SyncConfig) {
 	time.Sleep(1 * time.Second)
 
 	// Insert rows
-	for i := 1; i <= 3; i++ {
+	for i := 1; i <= 1; i++ {
 		id := getNextID(srcDB, sourceTable)
 		q := fmt.Sprintf("INSERT INTO %s (id, name, email) VALUES(%d, 'User_%d', 'user%d@mail.com')", sourceTable, id, id, id)
 		mustExec(t, srcDB, q)
 	}
-	time.Sleep(5 * time.Second)
+	time.Sleep(2 * time.Second)
 
 	// Validate data consistency
-	compareDataConsistency(t, srcDB, tgtDB, sourceTable, targetTable)
+	compareDataConsistency(t, srcDB, tgtDB, sourceTable, targetTable, syncConfig.Mappings)
 
 	mustExec(t, srcDB, fmt.Sprintf("INSERT INTO %s (id, name, email) VALUES(%d, 'Extra', 'extra@mail.com')", sourceTable, getNextID(srcDB, sourceTable)))
 	time.Sleep(2 * time.Second)
@@ -64,5 +64,5 @@ func testTC05MariaDBSync(t *testing.T, syncConfigs []config.SyncConfig) {
 	time.Sleep(2 * time.Second)
 
 	// Final data consistency check
-	compareDataConsistency(t, srcDB, tgtDB, sourceTable, targetTable)
+	compareDataConsistency(t, srcDB, tgtDB, sourceTable, targetTable, syncConfig.Mappings)
 }

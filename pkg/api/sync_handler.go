@@ -6,11 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/retail-ai-inc/sync/pkg/db"
 	"github.com/sirupsen/logrus"
 )
 
@@ -73,10 +73,17 @@ ORDER BY id ASC
 			MysqlPositionPath      string                   `json:"mysql_position_path"`
 			MongodbResumeTokenPath string                   `json:"mongodb_resume_token_path"`
 			RedisPositionPath      string                   `json:"redis_position_path"`
+			SecurityEnabled        bool                     `json:"securityEnabled"`
 		}
 
+		logrus.Debugf("Configuration JSON from database: %s", cfgJSON)
+
 		if cfgJSON != "" {
-			_ = json.Unmarshal([]byte(cfgJSON), &extra)
+			if err := json.Unmarshal([]byte(cfgJSON), &extra); err != nil {
+				logrus.Warnf("Failed to parse configuration JSON: %v", err)
+			}
+			extraJSON, _ := json.Marshal(extra)
+			logrus.Debugf("Parsed extra structure: %s", string(extraJSON))
 		}
 		if extra.Status != "" {
 			status = extra.Status
@@ -105,7 +112,12 @@ ORDER BY id ASC
 			"mysql_position_path":       extra.MysqlPositionPath,
 			"mongodb_resume_token_path": extra.MongodbResumeTokenPath,
 			"redis_position_path":       extra.RedisPositionPath,
+			"securityEnabled":           extra.SecurityEnabled,
 		}
+
+		itemJSON, _ := json.Marshal(item)
+		logrus.Debugf("Returned item: %s", string(itemJSON))
+
 		result = append(result, item)
 	}
 	if err := rows.Err(); err != nil {
@@ -145,6 +157,7 @@ func SyncCreateHandler(w http.ResponseWriter, r *http.Request) {
 		MysqlPositionPath      string                   `json:"mysql_position_path"`
 		MongodbResumeTokenPath string                   `json:"mongodb_resume_token_path"`
 		RedisPositionPath      string                   `json:"redis_position_path"`
+		SecurityEnabled        bool                     `json:"securityEnabled"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		errorJSON(w, "decode fail", err)
@@ -178,6 +191,7 @@ func SyncCreateHandler(w http.ResponseWriter, r *http.Request) {
 		MysqlPositionPath      string                   `json:"mysql_position_path"`
 		MongodbResumeTokenPath string                   `json:"mongodb_resume_token_path"`
 		RedisPositionPath      string                   `json:"redis_position_path"`
+		SecurityEnabled        bool                     `json:"securityEnabled"`
 	}{
 		Type:                   req.Type,
 		TaskName:               req.TaskName,
@@ -192,6 +206,7 @@ func SyncCreateHandler(w http.ResponseWriter, r *http.Request) {
 		MysqlPositionPath:      req.MysqlPositionPath,
 		MongodbResumeTokenPath: req.MongodbResumeTokenPath,
 		RedisPositionPath:      req.RedisPositionPath,
+		SecurityEnabled:        req.SecurityEnabled,
 	}
 	cfgBytes, _ := json.Marshal(cfgJSONStruct)
 
@@ -225,6 +240,7 @@ VALUES(?, ?, ?, ?)
 		"mysql_position_path":       req.MysqlPositionPath,
 		"mongodb_resume_token_path": req.MongodbResumeTokenPath,
 		"redis_position_path":       req.RedisPositionPath,
+		"securityEnabled":           req.SecurityEnabled,
 	}
 
 	writeJSON(w, map[string]interface{}{
@@ -292,6 +308,7 @@ func SyncUpdateHandler(w http.ResponseWriter, r *http.Request) {
 		MysqlPositionPath      string                   `json:"mysql_position_path"`
 		MongodbResumeTokenPath string                   `json:"mongodb_resume_token_path"`
 		RedisPositionPath      string                   `json:"redis_position_path"`
+		SecurityEnabled        bool                     `json:"securityEnabled"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		errorJSON(w, "decode fail", err)
@@ -325,6 +342,7 @@ func SyncUpdateHandler(w http.ResponseWriter, r *http.Request) {
 		MysqlPositionPath      string                   `json:"mysql_position_path"`
 		MongodbResumeTokenPath string                   `json:"mongodb_resume_token_path"`
 		RedisPositionPath      string                   `json:"redis_position_path"`
+		SecurityEnabled        bool                     `json:"securityEnabled"`
 	}{
 		Type:                   req.SourceType,
 		TaskName:               req.TaskName,
@@ -339,6 +357,7 @@ func SyncUpdateHandler(w http.ResponseWriter, r *http.Request) {
 		MysqlPositionPath:      req.MysqlPositionPath,
 		MongodbResumeTokenPath: req.MongodbResumeTokenPath,
 		RedisPositionPath:      req.RedisPositionPath,
+		SecurityEnabled:        req.SecurityEnabled,
 	}
 	cfgBytes, _ := json.Marshal(cfgJSONStruct)
 
@@ -375,6 +394,7 @@ WHERE id=?
 				"mysql_position_path":       req.MysqlPositionPath,
 				"mongodb_resume_token_path": req.MongodbResumeTokenPath,
 				"redis_position_path":       req.RedisPositionPath,
+				"securityEnabled":           req.SecurityEnabled,
 			},
 		},
 	})
@@ -415,11 +435,7 @@ func SyncDeleteHandler(w http.ResponseWriter, r *http.Request) {
 // -------------------------
 
 func openLocalDB() (*sql.DB, error) {
-	dbPath := os.Getenv("SYNC_DB_PATH")
-	if dbPath == "" {
-		dbPath = "sync.db"
-	}
-	return sql.Open("sqlite3", dbPath)
+	return db.OpenSQLiteDB()
 }
 
 func updateTaskStatus(id string, toStart bool) error {

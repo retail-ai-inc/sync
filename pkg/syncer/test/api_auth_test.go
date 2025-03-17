@@ -71,7 +71,7 @@ func testConnection(t *testing.T, r http.Handler, dbType, host, port, user, pass
 	req.Header.Set("Content-Type", "application/json")
 	resp := httptest.NewRecorder()
 	r.ServeHTTP(resp, req)
-	t.Logf("INFO decoding response: %v", resp)
+	// t.Logf("INFO decoding response: %v", resp)
 
 	return resp
 }

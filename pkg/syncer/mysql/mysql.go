@@ -17,6 +17,7 @@ import (
 	"github.com/go-mysql-org/go-mysql/schema"
 	"github.com/retail-ai-inc/sync/pkg/config"
 	"github.com/retail-ai-inc/sync/pkg/syncer/common"
+	"github.com/retail-ai-inc/sync/pkg/syncer/security"
 	"github.com/retail-ai-inc/sync/pkg/utils"
 	"github.com/sirupsen/logrus"
 
@@ -315,6 +316,24 @@ func (s *MySQLSyncer) batchInsert(
 	if len(rows) == 0 {
 		return nil
 	}
+
+	tableSecurity := security.FindTableSecurityFromMappings(tableName, s.cfg.Mappings)
+
+	s.logger.Debugf("[MySQL] Table=%s security configuration: enabled=%v, rules=%d",
+		tableName, tableSecurity.SecurityEnabled, len(tableSecurity.FieldSecurity))
+
+	if tableSecurity.SecurityEnabled && len(tableSecurity.FieldSecurity) > 0 {
+		s.logger.Debugf("[MySQL] Row data before processing: %v", rows)
+		for i, row := range rows {
+			for j, val := range row {
+				if j < len(cols) {
+					rows[i][j] = security.ProcessValue(val, cols[j], tableSecurity)
+				}
+			}
+		}
+		s.logger.Debugf("[MySQL] Row data after processing: %v", rows)
+	}
+
 	insertSQL := fmt.Sprintf("INSERT INTO %s.%s (%s) VALUES", dbName, tableName, strings.Join(cols, ", "))
 	singleRowPlaceholder := fmt.Sprintf("(%s)", strings.Join(makeQuestionMarks(len(cols)), ","))
 	var allPlaceholder []string
@@ -480,8 +499,9 @@ func (h *MyEventHandler) handleDML(
 	newRow []interface{},
 	oldRow []interface{},
 ) {
-	var query string
+	tableSecurity := security.FindTableSecurityFromMappings(tgtTable, h.mappings)
 
+	var query string
 	switch opType {
 	case "INSERT":
 		placeholders := make([]string, len(cols))
@@ -495,7 +515,37 @@ func (h *MyEventHandler) handleDML(
 		)
 		h.logger.Debugf("[MySQL][INSERT] table=%s.%s query=%s", tgtDB, tgtTable, query)
 
-		res, err := h.targetDB.Exec(query, newRow...)
+		var processedValues []interface{}
+		if tableSecurity.SecurityEnabled && len(tableSecurity.FieldSecurity) > 0 {
+			processedValues = make([]interface{}, len(newRow))
+			for i, val := range newRow {
+				if i < len(cols) {
+					processedValues[i] = security.ProcessValue(val, cols[i], tableSecurity)
+				} else {
+					processedValues[i] = val
+				}
+			}
+		} else {
+			processedValues = newRow
+		}
+
+		h.logger.Debugf("[MySQL] Table=%s security configuration: enabled=%v, rules=%d",
+			tgtTable, tableSecurity.SecurityEnabled, len(tableSecurity.FieldSecurity))
+
+		if tableSecurity.SecurityEnabled && len(tableSecurity.FieldSecurity) > 0 {
+			h.logger.Debugf("[MySQL][%s] Before processing: %v", opType, newRow)
+
+			for i, colName := range cols {
+				if i < len(newRow) {
+					h.logger.Debugf("   Column[%d]: %s = %v", i, colName, newRow[i])
+				}
+			}
+
+			// Add after assigning processedValues
+			h.logger.Debugf("[MySQL][%s] After processing: %v", opType, processedValues)
+		}
+
+		res, err := h.targetDB.Exec(query, processedValues...)
 		if err != nil {
 			h.logger.Errorf("[MySQL][INSERT] table=%s.%s error=%v", tgtDB, tgtTable, err)
 			atomic.StoreInt32(&h.lastExecError, 1)
@@ -526,7 +576,24 @@ func (h *MyEventHandler) handleDML(
 		)
 		h.logger.Debugf("[MySQL][UPDATE] table=%s.%s query=%s", tgtDB, tgtTable, query)
 
-		args := append(newRow, whereVals...)
+		// Apply security processing
+		var processedValues []interface{}
+		if tableSecurity.SecurityEnabled && len(tableSecurity.FieldSecurity) > 0 {
+			processedValues = make([]interface{}, len(newRow))
+			for i, val := range newRow {
+				if i < len(cols) {
+					processedValues[i] = security.ProcessValue(val, cols[i], tableSecurity)
+				} else {
+					processedValues[i] = val
+				}
+			}
+		} else {
+			processedValues = newRow
+		}
+
+		// Merge updated values and WHERE clause values
+		args := append(processedValues, whereVals...)
+
 		res, err := h.targetDB.Exec(query, args...)
 		if err != nil {
 			h.logger.Errorf("[MySQL][UPDATE] table=%s.%s error=%v", tgtDB, tgtTable, err)
@@ -538,19 +605,25 @@ func (h *MyEventHandler) handleDML(
 		}
 	case "DELETE":
 		var whereClauses []string
-		var whereVals []interface{}
 		for _, pkIndex := range table.PKColumns {
 			whereClauses = append(whereClauses, fmt.Sprintf("%s = ?", cols[pkIndex]))
-			whereVals = append(whereVals, newRow[pkIndex])
 		}
 		if len(whereClauses) == 0 {
 			h.logger.Warnf("[MySQL][DELETE] table=%s.%s no PK => skip", tgtDB, tgtTable)
 			return
 		}
-		query = fmt.Sprintf("DELETE FROM %s.%s WHERE %s", tgtDB, tgtTable, strings.Join(whereClauses, " AND "))
+		query = fmt.Sprintf("DELETE FROM %s.%s WHERE %s",
+			tgtDB, tgtTable,
+			strings.Join(whereClauses, " AND "),
+		)
 		h.logger.Debugf("[MySQL][DELETE] table=%s.%s query=%s", tgtDB, tgtTable, query)
 
-		res, err := h.targetDB.Exec(query, whereVals...)
+		var args []interface{}
+		for _, pkIndex := range table.PKColumns {
+			args = append(args, newRow[pkIndex])
+		}
+
+		res, err := h.targetDB.Exec(query, args...)
 		if err != nil {
 			h.logger.Errorf("[MySQL][DELETE] table=%s.%s error=%v", tgtDB, tgtTable, err)
 			atomic.StoreInt32(&h.lastExecError, 1)

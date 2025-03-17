@@ -1,7 +1,6 @@
 package logger
 
 import (
-	"database/sql"
 	"fmt"
 	"os"
 	"sort"
@@ -9,6 +8,7 @@ import (
 	"strings"
 
 	_ "github.com/mattn/go-sqlite3" // for sqlite
+	"github.com/retail-ai-inc/sync/pkg/db"
 	"github.com/sirupsen/logrus"
 )
 
@@ -80,11 +80,7 @@ func NewSQLiteHook() *SQLiteHook {
 }
 
 func (h *SQLiteHook) Fire(entry *logrus.Entry) error {
-	dbPath := os.Getenv("SYNC_DB_PATH")
-	if dbPath == "" {
-		dbPath = "sync.db"
-	}
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := db.OpenSQLiteDB()
 	if err != nil {
 		return nil
 	}

@@ -57,4 +57,9 @@ dist/
 
 sync
 cloudbuild.yaml
-# sync.db
+docker-compose-demo.yml
+sync.db-wal
+sync.db-shm
+CLAUDE.md
+.cursorrules
+decrypt

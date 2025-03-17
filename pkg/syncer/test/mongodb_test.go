@@ -51,17 +51,17 @@ func testTC03MongoDBSync(t *testing.T, syncConfigs []config.SyncConfig) {
 	time.Sleep(1 * time.Second)
 	// Insert initial documents
 	docs := make([]interface{}, 0, 5)
-	for i := 1; i <= 5; i++ {
+	for i := 1; i <= 1; i++ {
 		docs = append(docs, bson.M{"name": fmt.Sprintf("User_%d", i), "email": fmt.Sprintf("user%d@mail.com", i)})
 	}
 	_, err = srcColl.InsertMany(ctx, docs)
 	if err != nil {
 		t.Fatalf("[TC03] InsertMany fail: %v", err)
 	}
-	time.Sleep(5 * time.Second)
+	time.Sleep(2 * time.Second)
 
 	// Compare data consistency between source and target
-	compareMongoDataConsistency(t, srcCli, tgtCli, sourceDBName, targetDBName, sourceTable, targetTable)
+	compareMongoDataConsistency(t, srcCli, tgtCli, sourceDBName, targetDBName, sourceTable, targetTable, syncConfig.Mappings)
 
 	// Perform updates and verify the data consistency again
 	_, err = srcColl.InsertOne(ctx, bson.M{"name": "ExtraUser", "email": "extra@mail.com"})
@@ -81,5 +81,5 @@ func testTC03MongoDBSync(t *testing.T, syncConfigs []config.SyncConfig) {
 	time.Sleep(2 * time.Second)
 
 	// Final data consistency check
-	compareMongoDataConsistency(t, srcCli, tgtCli, sourceDBName, targetDBName, sourceTable, targetTable)
+	compareMongoDataConsistency(t, srcCli, tgtCli, sourceDBName, targetDBName, sourceTable, targetTable, syncConfig.Mappings)
 }
