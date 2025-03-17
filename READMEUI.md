@@ -2,16 +2,10 @@
 
 Sync Data Platform provides an intuitive interface for managing and monitoring data synchronization tasks. This guide covers the core UI features and usage instructions.
 
-## Table of Contents
-- [Login Interface](#login-interface)
-- [Main Features](#main-features)
-- [Operation Guide](#operation-guide)
-- [SQL Debugging Tool](#sql-debugging-tool)
-- [System Settings](#system-settings)
-- [Monitoring and Logs](#monitoring-and-logs)
 
 ## Login Interface
-![Login Interface](images/login.png)
+<img width="800" alt="image" src="https://github.com/user-attachments/assets/7437b947-e615-4308-8362-83cf76cb75dc" />
+
 
 - **Authentication Methods**:
   - Admin account (default: `admin` / `admin`)
@@ -20,7 +14,7 @@ Sync Data Platform provides an intuitive interface for managing and monitoring d
 ## Main Features
 
 ### Task Management
-![Task Management Interface](images/task_list.png)
+<img width="800" alt="image" src="https://github.com/user-attachments/assets/443e82dd-b4ef-4079-9f0b-cbf309f91aa1" />
 
 - View task status and details
 - Search for specific tasks
@@ -28,7 +22,8 @@ Sync Data Platform provides an intuitive interface for managing and monitoring d
 - Operate tasks (start/stop/monitor)
 
 ### Monitoring Dashboard
-![Monitoring Dashboard](images/dashboard.png)
+<img width="800" alt="image" src="https://github.com/user-attachments/assets/2a1bd9f1-0d46-4961-868f-80dab83b3705" />
+<img width="800" alt="image" src="https://github.com/user-attachments/assets/a38eed54-96ac-4bda-9191-29bc25cdef06" />
 
 - **Key Metrics**:
   - Sync status and progress
@@ -36,26 +31,8 @@ Sync Data Platform provides an intuitive interface for managing and monitoring d
   - Rows synced today
   - Table row trend chart
 
-## Operation Guide
-
-### Creating a Sync Task
-1. On the task list page, click "Add new sync task"
-2. Configure:
-   - Data source type (MongoDB/MySQL/PostgreSQL/Redis)
-   - Source and target database connections
-   - Table/collection mappings
-   - Sync options and security settings
-
-### Monitoring Task Status
-![Task Monitoring](images/task_monitor.png)
-
-- Real-time status display
-- Data trends (selectable time ranges)
-- Source, target, and difference data comparison
-- Auto-refresh
-
 ## SQL Debugging Tool
-![SQL Debugging Tool](images/sql_debug.png)
+<img width="800" alt="image" src="https://github.com/user-attachments/assets/3f310171-68b7-462b-aae6-66ce3169b46a" />
 
 - Select a sync task
 - Query templates (Query/Insert/Update/Delete)
@@ -65,18 +42,9 @@ Sync Data Platform provides an intuitive interface for managing and monitoring d
 ## System Settings
 
 ### Authentication Settings
-![Authentication Settings](images/auth_settings.png)
+<img width="800" alt="image" src="https://github.com/user-attachments/assets/7df4b816-86ae-456e-95e5-0c64a053737d" />
 
 - Enable/disable Google login
 - Upload OAuth configuration
 - Restart prompt
 
-## Monitoring and Logs
-
-### Log Management
-![Log Management](images/log_management.png)
-
-- Filter by level (INFO/WARN/ERROR/DEBUG)
-- Log search
-- Real-time refresh
-- Timestamp and formatted messages
