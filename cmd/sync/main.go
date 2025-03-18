@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -55,13 +54,7 @@ func main() {
 
 	router.Get("/*", func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
-
-		cleanPath := filepath.Clean(path)
-		if strings.Contains(cleanPath, "..") || strings.HasPrefix(cleanPath, "/") {
-			http.Error(w, "invaild path", http.StatusBadRequest)
-			return
-		}
-		filePath := filepath.Join("ui/dist", cleanPath)
+		filePath := filepath.Join("ui/dist", path)
 
 		_, err := os.Stat(filePath)
 		fileExists := !os.IsNotExist(err)
