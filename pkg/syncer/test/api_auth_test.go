@@ -88,7 +88,6 @@ func testConnection(t *testing.T, r http.Handler, dbType, host, port, user, pass
 	return resp
 }
 
-// executeSql 测试SQL执行API
 func executeSql(t *testing.T, r http.Handler, taskId int, sql string, target bool) *httptest.ResponseRecorder {
 	bodyContent := map[string]interface{}{
 		"taskId": taskId,
@@ -110,7 +109,6 @@ func executeSql(t *testing.T, r http.Handler, taskId int, sql string, target boo
 	return resp
 }
 
-// getTableSchema 测试表结构API
 func getTableSchema(t *testing.T, r http.Handler, sourceType, host, port, user, password, database, tableName string) *httptest.ResponseRecorder {
 	connection := map[string]string{
 		"host":     host,
@@ -140,7 +138,6 @@ func getTableSchema(t *testing.T, r http.Handler, sourceType, host, port, user, 
 	return resp
 }
 
-// testGoogleCallback 测试Google OAuth回调API
 func testGoogleCallback(t *testing.T, r http.Handler) *httptest.ResponseRecorder {
 	bodyContent := map[string]string{
 		"code": "4/0AQSTgQEIZp9_oJnehA1zx6UBAXnAQ5n4zKzkIbBL9O6QkNuGw4OEnZNwHTa9ACJdUq7Bmw",
