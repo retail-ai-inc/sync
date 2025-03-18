@@ -68,8 +68,6 @@ func ExtractTokenFromHeader(authHeader string) string {
 
 // ValidateUserToken validates if user token is valid and returns username and access level
 func ValidateUserToken(token string) (bool, string, string) {
-	fmt.Println("Validating token:", token[:10]+"...") // Debug: Display first 10 characters of token (to prevent full token leak)
-
 	// Get all users from database
 	users, err := GetAllUsers()
 	if err != nil {
