@@ -5,16 +5,19 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"os"
 	"strings"
 
+	"github.com/retail-ai-inc/sync/pkg/db"
 	"github.com/sirupsen/logrus"
 )
 
 type TableMapping struct {
-	SourceTable string
-	TargetTable string
+	SourceTable     string
+	TargetTable     string
+	SecurityEnabled bool
+	FieldSecurity   []interface{}
 }
+
 type DatabaseMapping struct {
 	SourceDatabase string
 	SourceSchema   string
@@ -65,21 +68,38 @@ type globalConfig struct {
 	LogLevel                      string
 }
 
-func NewConfig() *Config {
-	dbPath := os.Getenv("SYNC_DB_PATH")
-	if dbPath == "" {
-		dbPath = "sync.db"
-	}
+type FieldSecurityItem struct {
+	Field        string `json:"field"`
+	SecurityType string `json:"securityType"`
+}
 
-	db, err := sql.Open("sqlite3", dbPath)
+type TableMappingJSON struct {
+	SourceTable     string              `json:"sourceTable"`
+	TargetTable     string              `json:"targetTable"`
+	SecurityEnabled bool                `json:"securityEnabled"`
+	FieldSecurity   []FieldSecurityItem `json:"fieldSecurity"`
+}
+
+type jsonMapping struct {
+	SourceDatabase string `json:"sourceDatabase"`
+	SourceSchema   string `json:"sourceSchema"`
+	TargetDatabase string `json:"targetDatabase"`
+	TargetSchema   string `json:"targetSchema"`
+	Tables         []struct {
+		SourceTable   string `json:"sourceTable"`
+		TargetTable   string `json:"targetTable"`
+		FieldSecurity []struct {
+			Field        string `json:"field"`
+			SecurityType string `json:"securityType"`
+		} `json:"fieldSecurity"`
+	} `json:"tables"`
+}
+
+func NewConfig() *Config {
+	db, err := db.OpenSQLiteDB()
 	if err != nil {
 		log.Fatalf("Failed opening DB: %v", err)
 	}
-	if err := db.Ping(); err != nil {
-		log.Fatalf("Failed pinging DB: %v", err)
-	}
-
-	EnsureSchema(db)
 
 	gcfg := loadGlobalConfig(db)
 	syncCfgs := loadSyncTasks(db)
@@ -162,6 +182,7 @@ ORDER BY id ASC
 				PGPositionPath         *string           `json:"pg_position_path"`
 				PGPublicationNames     *string           `json:"pg_publication_names"`
 				RedisPositionPath      *string           `json:"redis_position_path"`
+				SecurityEnabled        *bool             `json:"securityEnabled"`
 			}
 			if errJ := json.Unmarshal([]byte(js), &extra); errJ != nil {
 				log.Printf("[WARN] parse config_json for id=%d => %v", id, errJ)
@@ -194,10 +215,47 @@ ORDER BY id ASC
 				if extra.RedisPositionPath != nil {
 					sc.RedisPositionPath = *extra.RedisPositionPath
 				}
+
 				sc.Mappings = extra.Mappings
+
+				securityEnabled := false
+				if extra.SecurityEnabled != nil && *extra.SecurityEnabled {
+					securityEnabled = true
+				}
+
+				for i := range sc.Mappings {
+					for j := range sc.Mappings[i].Tables {
+						sc.Mappings[i].Tables[j].SecurityEnabled = securityEnabled
+
+						var rootData map[string]interface{}
+						if err := json.Unmarshal([]byte(js), &rootData); err == nil {
+							if mappings, ok := rootData["mappings"].([]interface{}); ok && i < len(mappings) {
+								if mapping, ok := mappings[i].(map[string]interface{}); ok {
+									if tables, ok := mapping["tables"].([]interface{}); ok && j < len(tables) {
+										if table, ok := tables[j].(map[string]interface{}); ok {
+											if fieldSecurity, ok := table["fieldSecurity"].([]interface{}); ok {
+												sc.Mappings[i].Tables[j].FieldSecurity = fieldSecurity
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+				}
 
 				sc.SourceConnection = buildDSNByType(sc.Type, extra.SourceConn)
 				sc.TargetConnection = buildDSNByType(sc.Type, extra.TargetConn)
+
+				if len(sc.Mappings) == 0 {
+					sc.Mappings = []DatabaseMapping{
+						{
+							SourceDatabase: "",
+							TargetDatabase: "",
+							Tables:         []TableMapping{},
+						},
+					}
+				}
 			}
 		}
 

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	// "github.com/sirupsen/logrus"
 )
 
 // GET /api/sync/{id}/monitor => {status, progress, tps, ...}
@@ -66,26 +67,56 @@ func SyncMetricsHandler(w http.ResponseWriter, r *http.Request) {
 	timeFormat := "2006-01-02 15:04:05"
 
 	var rows *sql.Rows
-	if !sinceTime.IsZero() {
-		query := `
-SELECT logged_at, tgt_table, src_row_count, tgt_row_count
+	var query string
+	var queryParams []interface{}
+
+	if id == "0" {
+		if !sinceTime.IsZero() {
+			query = `
+SELECT logged_at, tgt_table, src_row_count, tgt_row_count, sync_task_id
+FROM monitoring_log
+WHERE logged_at >= ?
+ORDER BY logged_at ASC
+LIMIT 1000
+`
+			utcSince := sinceTime.UTC().Format(timeFormat)
+			queryParams = []interface{}{utcSince}
+		} else {
+			query = `
+SELECT logged_at, tgt_table, src_row_count, tgt_row_count, sync_task_id
+FROM monitoring_log
+ORDER BY logged_at ASC
+LIMIT 1000
+`
+		}
+	} else {
+		if !sinceTime.IsZero() {
+			query = `
+SELECT logged_at, tgt_table, src_row_count, tgt_row_count, sync_task_id
 FROM monitoring_log
 WHERE sync_task_id=?
   AND logged_at >= ?
 ORDER BY logged_at ASC
 LIMIT 1000
 `
-		utcSince := sinceTime.UTC().Format(timeFormat)
-		rows, err = db.Query(query, id, utcSince)
-	} else {
-		query := `
-SELECT logged_at, tgt_table, src_row_count, tgt_row_count
+			utcSince := sinceTime.UTC().Format(timeFormat)
+			queryParams = []interface{}{id, utcSince}
+		} else {
+			query = `
+SELECT logged_at, tgt_table, src_row_count, tgt_row_count, sync_task_id
 FROM monitoring_log
 WHERE sync_task_id=?
 ORDER BY logged_at ASC
 LIMIT 1000
 `
-		rows, err = db.Query(query, id)
+			queryParams = []interface{}{id}
+		}
+	}
+
+	if len(queryParams) > 0 {
+		rows, err = db.Query(query, queryParams...)
+	} else {
+		rows, err = db.Query(query)
 	}
 
 	if err != nil {
@@ -98,7 +129,8 @@ LIMIT 1000
 	for rows.Next() {
 		var t, tbl string
 		var src, tgt int64
-		if err := rows.Scan(&t, &tbl, &src, &tgt); err != nil {
+		var taskID string
+		if err := rows.Scan(&t, &tbl, &src, &tgt, &taskID); err != nil {
 			errorJSON(w, "scan monitoring_log fail", err)
 			return
 		}
@@ -107,11 +139,76 @@ LIMIT 1000
 			diff = -diff
 		}
 
+		tableName := tbl
+		if id == "0" {
+			tableName = "taskID:" + taskID + "_" + tbl
+		}
+
+		formattedTime := t
+		if parsedTime, err := time.Parse(time.RFC3339, t); err == nil {
+			formattedTime = parsedTime.Format("2006-01-02T15:04Z")
+		}
+
 		rowCountTrend = append(rowCountTrend,
-			map[string]interface{}{"time": t, "table": tbl, "type": "source", "value": src},
-			map[string]interface{}{"time": t, "table": tbl, "type": "target", "value": tgt},
-			map[string]interface{}{"time": t, "table": tbl, "type": "diff", "value": diff},
+			map[string]interface{}{"time": formattedTime, "table": tableName, "type": "source", "value": src},
+			map[string]interface{}{"time": formattedTime, "table": tableName, "type": "target", "value": tgt},
+			map[string]interface{}{"time": formattedTime, "table": tableName, "type": "diff", "value": diff},
 		)
+	}
+
+	if len(rowCountTrend) == 0 && !sinceTime.IsZero() {
+		rows.Close()
+
+		if id == "0" {
+			query = `
+SELECT logged_at, tgt_table, src_row_count, tgt_row_count, sync_task_id
+FROM monitoring_log
+ORDER BY logged_at ASC
+LIMIT 1000
+`
+			rows, err = db.Query(query)
+		} else {
+			query = `
+SELECT logged_at, tgt_table, src_row_count, tgt_row_count, sync_task_id
+FROM monitoring_log
+WHERE sync_task_id=?
+ORDER BY logged_at ASC
+LIMIT 1000
+`
+			rows, err = db.Query(query, id)
+		}
+
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var t, tbl string
+				var src, tgt int64
+				var taskID string
+				if err := rows.Scan(&t, &tbl, &src, &tgt, &taskID); err != nil {
+					continue
+				}
+				diff := src - tgt
+				if diff < 0 {
+					diff = -diff
+				}
+
+				tableName := tbl
+				if id == "0" {
+					tableName = "taskID:" + taskID + "_" + tbl
+				}
+
+				formattedTime := t
+				if parsedTime, err := time.Parse(time.RFC3339, t); err == nil {
+					formattedTime = parsedTime.Format("2006-01-02T15:04Z")
+				}
+
+				rowCountTrend = append(rowCountTrend,
+					map[string]interface{}{"time": formattedTime, "table": tableName, "type": "source", "value": src},
+					map[string]interface{}{"time": formattedTime, "table": tableName, "type": "target", "value": tgt},
+					map[string]interface{}{"time": formattedTime, "table": tableName, "type": "diff", "value": diff},
+				)
+			}
+		}
 	}
 
 	if err := rows.Err(); err != nil {

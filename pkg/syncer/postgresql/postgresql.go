@@ -19,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5/pgproto3"
 	_ "github.com/lib/pq"
 	"github.com/retail-ai-inc/sync/pkg/config"
+	"github.com/retail-ai-inc/sync/pkg/syncer/security"
 	"github.com/retail-ai-inc/sync/pkg/utils"
 	"github.com/sirupsen/logrus"
 )
@@ -219,36 +220,41 @@ func (s *PostgreSQLSyncer) prepareTargetSchema(ctx context.Context) error {
 		if tgtSchema == "" {
 			tgtSchema = "public"
 		}
-		for _, tbl := range dbmap.Tables {
-			exist, errCheck := s.checkTableExist(ctx, tgtSchema, tbl.TargetTable)
-			if errCheck != nil {
-				s.logger.Warnf("[PostgreSQL] check table exist error: %v", errCheck)
-				continue
-			}
-			if !exist {
-				createSQL, seqs, errGen := s.generateCreateTableSQL(ctx, srcSchema, tbl.SourceTable, tgtSchema, tbl.TargetTable)
-				if errGen != nil {
-					s.logger.Warnf("[PostgreSQL] generateCreateTableSQL fail => %v", errGen)
+		if len(dbmap.Tables) > 0 {
+			for _, tbl := range dbmap.Tables {
+				exist, errCheck := s.checkTableExist(ctx, tgtSchema, tbl.TargetTable)
+				if errCheck != nil {
+					s.logger.Warnf("[PostgreSQL] check table exist error: %v", errCheck)
 					continue
 				}
-				for _, seqSQL := range seqs {
-					s.logger.Debugf("[PostgreSQL] Creating sequence => %s", seqSQL)
-					if _, errSeq := s.targetDB.ExecContext(ctx, seqSQL); errSeq != nil {
-						s.logger.Warnf("[PostgreSQL] Create sequence fail => %v", errSeq)
+				if !exist {
+					createSQL, seqs, errGen := s.generateCreateTableSQL(ctx, srcSchema, tbl.SourceTable, tgtSchema, tbl.TargetTable)
+					if errGen != nil {
+						s.logger.Warnf("[PostgreSQL] generateCreateTableSQL fail => %v", errGen)
 						continue
 					}
-				}
-				s.logger.Infof("[PostgreSQL] Creating table => %s", createSQL)
-				if _, err2 := s.targetDB.ExecContext(ctx, createSQL); err2 != nil {
-					s.logger.Errorf("[PostgreSQL] Create table fail => %v", err2)
-					continue
-				}
-				if err3 := s.copyIndexes(ctx, srcSchema, tbl.SourceTable, tgtSchema, tbl.TargetTable); err3 != nil {
-					s.logger.Warnf("[PostgreSQL] copyIndexes fail => %v", err3)
-				} else {
-					s.logger.Infof("[PostgreSQL] Created table and indexes for %s.%s", tgtSchema, tbl.TargetTable)
+					for _, seqSQL := range seqs {
+						s.logger.Debugf("[PostgreSQL] Creating sequence => %s", seqSQL)
+						if _, errSeq := s.targetDB.ExecContext(ctx, seqSQL); errSeq != nil {
+							s.logger.Warnf("[PostgreSQL] Create sequence fail => %v", errSeq)
+							continue
+						}
+					}
+					s.logger.Infof("[PostgreSQL] Creating table => %s", createSQL)
+					if _, err2 := s.targetDB.ExecContext(ctx, createSQL); err2 != nil {
+						s.logger.Errorf("[PostgreSQL] Create table fail => %v", err2)
+						continue
+					}
+					if err3 := s.copyIndexes(ctx, srcSchema, tbl.SourceTable, tgtSchema, tbl.TargetTable); err3 != nil {
+						s.logger.Warnf("[PostgreSQL] copyIndexes fail => %v", err3)
+					} else {
+						s.logger.Infof("[PostgreSQL] Created table and indexes for %s.%s", tgtSchema, tbl.TargetTable)
+					}
 				}
 			}
+		} else {
+			s.logger.Warn("[PostgreSQL] Table mappings are empty, skipping processing")
+			continue
 		}
 	}
 	return nil
@@ -403,70 +409,75 @@ func (s *PostgreSQLSyncer) doInitialSync(ctx context.Context) error {
 		if tgtSchema == "" {
 			tgtSchema = "public"
 		}
-		for _, tbl := range dbmap.Tables {
-			checkSQL := fmt.Sprintf("SELECT COUNT(*) FROM %s.%s", tgtSchema, tbl.TargetTable)
-			var cnt int
-			if err := s.targetDB.QueryRow(checkSQL).Scan(&cnt); err != nil {
-				s.logger.Warnf("[PostgreSQL] Could not check table %s.%s: %v", tgtSchema, tbl.TargetTable, err)
-				continue
-			}
-			if cnt > 0 {
-				s.logger.Infof("[PostgreSQL] Table %s.%s has %d rows, skip initial sync", tgtSchema, tbl.TargetTable, cnt)
-				continue
-			}
+		if len(dbmap.Tables) > 0 {
+			for _, tbl := range dbmap.Tables {
+				checkSQL := fmt.Sprintf("SELECT COUNT(*) FROM %s.%s", tgtSchema, tbl.TargetTable)
+				var cnt int
+				if err := s.targetDB.QueryRow(checkSQL).Scan(&cnt); err != nil {
+					s.logger.Warnf("[PostgreSQL] Could not check table %s.%s: %v", tgtSchema, tbl.TargetTable, err)
+					continue
+				}
+				if cnt > 0 {
+					s.logger.Infof("[PostgreSQL] Table %s.%s has %d rows, skip initial sync", tgtSchema, tbl.TargetTable, cnt)
+					continue
+				}
 
-			selectSQL := fmt.Sprintf("SELECT * FROM %s.%s", srcSchema, tbl.SourceTable)
-			rows, errQ := s.sourceConnNormal.Query(ctx, selectSQL)
-			if errQ != nil {
-				return fmt.Errorf("query source %s.%s => %w", srcSchema, tbl.SourceTable, errQ)
-			}
-			fds := rows.FieldDescriptions()
-			colNames := make([]string, len(fds))
-			phArr := make([]string, len(fds))
-			for i, fd := range fds {
-				colNames[i] = string(fd.Name)
-				phArr[i] = fmt.Sprintf("$%d", i+1)
-			}
-			insertSQL := fmt.Sprintf("INSERT INTO %s.%s (%s) VALUES (%s) ON CONFLICT DO NOTHING",
-				tgtSchema, tbl.TargetTable,
-				strings.Join(colNames, ", "),
-				strings.Join(phArr, ", "),
-			)
+				selectSQL := fmt.Sprintf("SELECT * FROM %s.%s", srcSchema, tbl.SourceTable)
+				rows, errQ := s.sourceConnNormal.Query(ctx, selectSQL)
+				if errQ != nil {
+					return fmt.Errorf("query source %s.%s => %w", srcSchema, tbl.SourceTable, errQ)
+				}
+				fds := rows.FieldDescriptions()
+				colNames := make([]string, len(fds))
+				phArr := make([]string, len(fds))
+				for i, fd := range fds {
+					colNames[i] = string(fd.Name)
+					phArr[i] = fmt.Sprintf("$%d", i+1)
+				}
+				insertSQL := fmt.Sprintf("INSERT INTO %s.%s (%s) VALUES (%s) ON CONFLICT DO NOTHING",
+					tgtSchema, tbl.TargetTable,
+					strings.Join(colNames, ", "),
+					strings.Join(phArr, ", "),
+				)
 
-			tx, errB := s.targetDB.Begin()
-			if errB != nil {
+				tx, errB := s.targetDB.Begin()
+				if errB != nil {
+					rows.Close()
+					return errB
+				}
+				count := 0
+				for rows.Next() {
+					vals, errVal := rows.Values()
+					if errVal != nil {
+						_ = tx.Rollback()
+						rows.Close()
+						return errVal
+					}
+					res, errExec := tx.Exec(insertSQL, vals...)
+					if errExec != nil {
+						_ = tx.Rollback()
+						rows.Close()
+						return errExec
+					}
+					af, _ := res.RowsAffected()
+					if af > 0 {
+						count++
+					}
+				}
 				rows.Close()
-				return errB
-			}
-			count := 0
-			for rows.Next() {
-				vals, errVal := rows.Values()
-				if errVal != nil {
+				if errRows := rows.Err(); errRows != nil {
 					_ = tx.Rollback()
-					rows.Close()
-					return errVal
+					return errRows
 				}
-				res, errExec := tx.Exec(insertSQL, vals...)
-				if errExec != nil {
-					_ = tx.Rollback()
-					rows.Close()
-					return errExec
+				if cErr := tx.Commit(); cErr != nil {
+					return cErr
 				}
-				af, _ := res.RowsAffected()
-				if af > 0 {
-					count++
-				}
+				s.logger.Infof("[PostgreSQL] Initial sync => %s.%s => %s.%s, inserted %d rows",
+					srcSchema, tbl.SourceTable, tgtSchema, tbl.TargetTable, count)
 			}
-			rows.Close()
-			if errRows := rows.Err(); errRows != nil {
-				_ = tx.Rollback()
-				return errRows
-			}
-			if cErr := tx.Commit(); cErr != nil {
-				return cErr
-			}
-			s.logger.Infof("[PostgreSQL] Initial sync => %s.%s => %s.%s, inserted %d rows",
-				srcSchema, tbl.SourceTable, tgtSchema, tbl.TargetTable, count)
+		} else {
+			s.logger.Warn("[PostgreSQL] Table mappings are empty, skipping processing")
+			continue
 		}
 	}
 	return nil
@@ -634,35 +645,75 @@ func (s *PostgreSQLSyncer) handleInsert(
 		return false, nil
 	}
 	if msg.Tuple == nil {
-		s.logger.Debugf("[PostgreSQL][INSERT] msg.Tuple is nil => skip, relID=%d", msg.RelationID)
-		return false, nil
-	}
-	var colNames, colVals []string
-	for idx, col := range msg.Tuple.Columns {
-		if idx >= len(rel.Columns) {
-			s.logger.Warnf("[PostgreSQL][INSERT] col idx=%d out of range => skip", idx)
-			continue
-		}
-		colName := rel.Columns[idx].Name
-		switch col.DataType {
-		case 'n':
-			colVals = append(colVals, "NULL")
-		case 't':
-			val := strings.ReplaceAll(string(col.Data), "'", "''")
-			colVals = append(colVals, fmt.Sprintf("'%s'", val))
-		default:
-			colVals = append(colVals, "NULL")
-		}
-		colNames = append(colNames, colName)
-	}
-	if len(colNames) == 0 {
+		s.logger.Debugf("[PostgreSQL][INSERT] newTuple is nil => skip, relID=%d", msg.RelationID)
 		return false, nil
 	}
 
-	sqlStr := fmt.Sprintf("INSERT INTO %s.%s (%s) VALUES (%s) ON CONFLICT DO NOTHING",
-		rel.Namespace, rel.RelationName,
+	// Get table security configuration
+	tableSecurity := security.FindTableSecurityFromMappings(rel.RelationName, s.cfg.Mappings)
+
+	// Print security configuration
+	s.logger.Debugf("[PostgreSQL] Table=%s security configuration: enabled=%v, rules=%d",
+		rel.RelationName, tableSecurity.SecurityEnabled, len(tableSecurity.FieldSecurity))
+
+	colNames := make([]string, len(msg.Tuple.Columns))
+	colValues := make([]string, len(msg.Tuple.Columns))
+
+	// Print data before processing
+	if tableSecurity.SecurityEnabled && len(tableSecurity.FieldSecurity) > 0 {
+		s.logger.Debugf("[PostgreSQL][INSERT] Data before processing: table=%s", rel.RelationName)
+		for i, col := range msg.Tuple.Columns {
+			if i < len(rel.Columns) {
+				colName := rel.Columns[i].Name
+				colNames[i] = colName
+				s.logger.Debugf("  Column[%d]: %s = %v", i, colName, string(col.Data))
+			}
+		}
+	}
+
+	for i, col := range msg.Tuple.Columns {
+		if i >= len(rel.Columns) {
+			continue
+		}
+		colName := rel.Columns[i].Name
+		colNames[i] = colName
+
+		// Apply security processing
+		var value string
+		switch col.DataType {
+		case 'n':
+			value = "NULL"
+		case 't':
+			value = string(col.Data)
+			// Apply security processing to values
+			if tableSecurity.SecurityEnabled {
+				processed := security.ProcessValue(value, colName, tableSecurity)
+				if processedStr, ok := processed.(string); ok {
+					value = processedStr
+				}
+			}
+			value = "'" + strings.ReplaceAll(value, "'", "''") + "'"
+		default:
+			value = "NULL"
+		}
+		colValues[i] = value
+	}
+
+	// Print data after processing
+	if tableSecurity.SecurityEnabled && len(tableSecurity.FieldSecurity) > 0 {
+		s.logger.Debugf("[PostgreSQL][INSERT] Data after processing: table=%s", rel.RelationName)
+		for i, value := range colValues {
+			if i < len(colNames) {
+				s.logger.Debugf("  Column[%d]: %s = %v", i, colNames[i], value)
+			}
+		}
+	}
+
+	sqlStr := fmt.Sprintf("INSERT INTO %s.%s (%s) VALUES (%s)",
+		rel.Namespace,
+		rel.RelationName,
 		strings.Join(colNames, ", "),
-		strings.Join(colVals, ", "),
+		strings.Join(colValues, ", "),
 	)
 	err := s.replicateQuery(st.replicaConn, sqlStr, "INSERT", fmt.Sprintf("%s.%s", rel.Namespace, rel.RelationName))
 	return false, err
@@ -734,6 +785,66 @@ func (s *PostgreSQLSyncer) handleDelete(
 		return false, nil
 	}
 
+	primaryKeys, err := s.getPrimaryKeyColumns(rel.Namespace, rel.RelationName)
+	if err != nil {
+		s.logger.Warnf("[PostgreSQL][DELETE] Failed to get primary keys: %v", err)
+		return s.handleDeleteWithAllColumns(msg, st, rel)
+	}
+
+	if len(primaryKeys) == 0 {
+		s.logger.Debugf("[PostgreSQL][DELETE] No primary keys found, using all columns")
+		return s.handleDeleteWithAllColumns(msg, st, rel)
+	}
+
+	var whereClauses []string
+	for idx, col := range msg.OldTuple.Columns {
+		if idx >= len(rel.Columns) {
+			continue
+		}
+		colName := rel.Columns[idx].Name
+
+		isPK := false
+		for _, pk := range primaryKeys {
+			if pk == colName {
+				isPK = true
+				break
+			}
+		}
+
+		if !isPK {
+			continue
+		}
+
+		switch col.DataType {
+		case 'n':
+			whereClauses = append(whereClauses, fmt.Sprintf("%s IS NULL", colName))
+		case 't':
+			val := strings.ReplaceAll(string(col.Data), "'", "''")
+			whereClauses = append(whereClauses, fmt.Sprintf("%s='%s'", colName, val))
+		default:
+			whereClauses = append(whereClauses, fmt.Sprintf("%s IS NULL", colName))
+		}
+	}
+
+	if len(whereClauses) == 0 {
+		s.logger.Warnf("[PostgreSQL][DELETE] No WHERE conditions could be built with primary keys, using all columns")
+		return s.handleDeleteWithAllColumns(msg, st, rel)
+	}
+
+	sqlStr := fmt.Sprintf("DELETE FROM %s.%s WHERE %s",
+		rel.Namespace,
+		rel.RelationName,
+		strings.Join(whereClauses, " AND "),
+	)
+	err = s.replicateQuery(st.replicaConn, sqlStr, "DELETE", fmt.Sprintf("%s.%s", rel.Namespace, rel.RelationName))
+	return false, err
+}
+
+func (s *PostgreSQLSyncer) handleDeleteWithAllColumns(
+	msg *pglogrepl.DeleteMessageV2,
+	st *replicationState,
+	rel *pglogrepl.RelationMessageV2,
+) (bool, error) {
 	var whereClauses []string
 	for idx, col := range msg.OldTuple.Columns {
 		if idx >= len(rel.Columns) {
@@ -760,6 +871,37 @@ func (s *PostgreSQLSyncer) handleDelete(
 	)
 	err := s.replicateQuery(st.replicaConn, sqlStr, "DELETE", fmt.Sprintf("%s.%s", rel.Namespace, rel.RelationName))
 	return false, err
+}
+
+func (s *PostgreSQLSyncer) getPrimaryKeyColumns(schema, tableName string) ([]string, error) {
+	query := `
+		SELECT a.attname
+		FROM pg_index i
+		JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+		WHERE i.indrelid = ($1 || '.' || $2)::regclass
+		AND i.indisprimary
+	`
+
+	var primaryKeys []string
+	rows, err := s.sourceConnNormal.Query(context.Background(), query, schema, tableName)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var columnName string
+		if err := rows.Scan(&columnName); err != nil {
+			return nil, err
+		}
+		primaryKeys = append(primaryKeys, columnName)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return primaryKeys, nil
 }
 
 func (s *PostgreSQLSyncer) buildWhereClausesFromPK(

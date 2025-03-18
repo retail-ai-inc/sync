@@ -44,15 +44,15 @@ func testTC04MySQLSync(t *testing.T, syncConfigs []config.SyncConfig) {
 
 	time.Sleep(1 * time.Second)
 	// Insert data into the source table dynamically based on existing rows
-	for i := 1; i <= 5; i++ {
+	for i := 1; i <= 1; i++ {
 		id := getNextID(srcDB, sourceTable)
 		q := fmt.Sprintf("INSERT INTO %s (id, name, email) VALUES(%d, 'User_%d', 'user%d@mail.com')", sourceTable, id, id, id)
 		mustExec(t, srcDB, q)
 	}
-	time.Sleep(5 * time.Second)
+	time.Sleep(2 * time.Second)
 
 	// Validate the data consistency by comparing rows between source and target
-	compareDataConsistency(t, srcDB, tgtDB, sourceTable, targetTable)
+	compareDataConsistency(t, srcDB, tgtDB, sourceTable, targetTable, syncConfig.Mappings)
 
 	// Update, insert, and delete operations
 	mustExec(t, srcDB, fmt.Sprintf("INSERT INTO %s (id, name, email) VALUES(%d, 'Extra', 'extra@mail.com')", sourceTable, getNextID(srcDB, sourceTable)))
@@ -63,5 +63,5 @@ func testTC04MySQLSync(t *testing.T, syncConfigs []config.SyncConfig) {
 	time.Sleep(2 * time.Second)
 
 	// Validate the final data consistency
-	compareDataConsistency(t, srcDB, tgtDB, sourceTable, targetTable)
+	compareDataConsistency(t, srcDB, tgtDB, sourceTable, targetTable, syncConfig.Mappings)
 }

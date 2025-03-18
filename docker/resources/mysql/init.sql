@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS users (
     email VARCHAR(100)
 );
 insert into users (id, name, email) values (1, 'John', 'John@mail' );
+ALTER TABLE users MODIFY COLUMN id INT NOT NULL AUTO_INCREMENT;
 
 CREATE TABLE IF NOT EXISTS orders (
     id INT PRIMARY KEY,

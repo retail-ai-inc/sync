@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -50,7 +51,21 @@ func main() {
 
 	router := chi.NewRouter()
 	router.Mount("/api", api.NewRouter())
-	router.Handle("/*", http.StripPrefix("/", http.FileServer(http.Dir("ui/dist"))))
+
+	router.Get("/*", func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		filePath := filepath.Join("ui/dist", path)
+
+		_, err := os.Stat(filePath)
+		fileExists := !os.IsNotExist(err)
+
+		if fileExists {
+			http.StripPrefix("/", http.FileServer(http.Dir("ui/dist"))).ServeHTTP(w, r)
+			return
+		}
+
+		http.ServeFile(w, r, "ui/dist/index.html")
+	})
 
 	server := &http.Server{
 		Addr:    ":8080",

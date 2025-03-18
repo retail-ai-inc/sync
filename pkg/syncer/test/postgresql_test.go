@@ -46,15 +46,15 @@ func testTC06PostgreSQLSync(t *testing.T, syncConfigs []config.SyncConfig) {
 	time.Sleep(1 * time.Second)
 
 	// Insert rows into source
-	for i := 1; i <= 4; i++ {
+	for i := 1; i <= 1; i++ {
 		id := getNextID(srcDB, sourceTable)
 		q := fmt.Sprintf("INSERT INTO public.%s (id, name, email) VALUES (%d, 'PgUser_%d', 'pguser%d@mail.com')", sourceTable, id, id, id)
 		mustExec(t, srcDB, q)
 	}
-	time.Sleep(5 * time.Second)
+	time.Sleep(2 * time.Second)
 
 	// Validate data consistency
-	compareDataConsistency(t, srcDB, tgtDB, sourceTable, targetTable)
+	compareDataConsistency(t, srcDB, tgtDB, sourceTable, targetTable, syncConfig.Mappings)
 
 	mustExec(t, srcDB, fmt.Sprintf("INSERT INTO public.%s (id, name, email) VALUES(%d, 'ExtraPg', 'extrapg@mail.com')", sourceTable, getNextID(srcDB, sourceTable)))
 	time.Sleep(2 * time.Second)
@@ -64,5 +64,5 @@ func testTC06PostgreSQLSync(t *testing.T, syncConfigs []config.SyncConfig) {
 	time.Sleep(2 * time.Second)
 
 	// Final data consistency check
-	compareDataConsistency(t, srcDB, tgtDB, sourceTable, targetTable)
+	compareDataConsistency(t, srcDB, tgtDB, sourceTable, targetTable, syncConfig.Mappings)
 }

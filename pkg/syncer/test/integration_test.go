@@ -2,14 +2,12 @@ package test
 
 import (
 	"context"
-	// "database/sql"
 	// "encoding/json"
 	// "fmt"
-	"log"
 	// "math/rand"
-	"os"
 	// "strings"
 	// "sync"
+	"os"
 	"testing"
 	"time"
 	// "bytes"
@@ -74,10 +72,8 @@ var ctx = context.Background()
 // TestSyncIntegration
 // -------------------------------------------------------------------
 func TestSyncIntegration(t *testing.T) {
-	log.Println("[TEST] Starting sync as child process...")
-	os.Setenv("SYNC_DB_PATH", "../../../sync.db")
-
 	dbPath := os.Getenv("SYNC_DB_PATH")
+
 	testTC01ConfigUpdate(dbPath)
 
 	cfg := config.NewConfig()
@@ -112,55 +108,87 @@ func TestSyncIntegration(t *testing.T) {
 	// 	testTC02ConfigHotReload(tt, sqlitePath)
 	// })
 
-	t.Run("TC03_MongoDBSync", func(tt *testing.T) {
-		testTC03MongoDBSync(tt, cfg.SyncConfigs)
+	t.Run("TC03_MongoDBSync", func(t *testing.T) {
+		t.Parallel()
+		testTC03MongoDBSync(t, cfg.SyncConfigs)
 	})
-	t.Run("TC04_MySQLSync", func(tt *testing.T) {
-		testTC04MySQLSync(tt, cfg.SyncConfigs)
+	t.Run("TC04_MySQLSync", func(t *testing.T) {
+		t.Parallel()
+		testTC04MySQLSync(t, cfg.SyncConfigs)
 	})
-	t.Run("TC05_MariaDBSync", func(tt *testing.T) {
-		testTC05MariaDBSync(tt, cfg.SyncConfigs)
+	t.Run("TC05_MariaDBSync", func(t *testing.T) {
+		t.Parallel()
+		testTC05MariaDBSync(t, cfg.SyncConfigs)
 	})
-	t.Run("TC06_PostgreSQLSync", func(tt *testing.T) {
-		testTC06PostgreSQLSync(tt, cfg.SyncConfigs)
+	t.Run("TC06_PostgreSQLSync", func(t *testing.T) {
+		t.Parallel()
+		testTC06PostgreSQLSync(t, cfg.SyncConfigs)
+	})
+	t.Run("TC07_RedisSync", func(t *testing.T) {
+		t.Parallel()
+		testTC07RedisSync(t, cfg.SyncConfigs)
 	})
 
-	t.Run("TC07_RedisSync", func(tt *testing.T) {
-		testTC07RedisSync(tt, cfg.SyncConfigs)
+	t.Run("TC09_RowCountMonitoring", func(t *testing.T) {
+		monitorCtx, cancel := context.WithCancel(ctx)
+		utils.StartRowCountMonitoring(monitorCtx, cfg, log, 100*time.Millisecond)
+		time.Sleep(time.Millisecond * 100)
+		cancel()
+		time.Sleep(time.Millisecond * 50)
 	})
-	// t.Run("TC08_ErrorHandlingAndRetry", func(tt *testing.T) {
-	// 	tt.Log("[Manual Test] Temporarily stop some target DB to see if sync logs show retry.")
+
+	t.Run("TC10_LogHookWriting", func(t *testing.T) {
+		testTC10LogHookWriting(t)
+	})
+
+	t.Run("TC12_StateStore_SaveLoad", func(t *testing.T) {
+		testTC12StateStore_SaveLoad(t)
+	})
+
+	t.Run("TC13_Utils", func(t *testing.T) {
+		testTC13Utils(t)
+	})
+
+	t.Run("TC14_AuthApi", func(t *testing.T) {
+		t.Parallel()
+		testTC14AuthApi(t)
+	})
+
+	t.Run("TC15_SyncApi", func(t *testing.T) {
+		testTC15SyncApi(t)
+	})
+
+	t.Run("TC16_MonitorApi", func(t *testing.T) {
+		testTC16MonitorApi(t)
+	})
+
+	t.Run("TC17_OAuthConfig", func(t *testing.T) {
+		testOAuthConfig(t)
+	})
+
+	t.Run("TC18_UserManagement", func(t *testing.T) {
+		testUserManagementApi(t)
+	})
+
+	// t.Run("TC19_DBConnections", func(t *testing.T) {
+	// 	testDBConnections(t)
 	// })
 
-	t.Run("TC09_RowCountMonitoring", func(tt *testing.T) {
-		utils.StartRowCountMonitoring(ctx, cfg, log, time.Second*1)
+	t.Run("TC25_DBUtils", func(t *testing.T) {
+		testDBUtils(t)
 	})
 
-	t.Run("TC10_LogHookWriting", func(tt *testing.T) {
-		testTC10LogHookWriting(tt)
-	})
-	// t.Run("TC11_MultiTaskConcurrency", func(tt *testing.T) {
-	// 	testTC11MultiTaskConcurrency(tt, tasks)
+	// t.Run("TC20_ErrorHandling", func(t *testing.T) {
+	// testTC20ErrorHandling(t, cfg.SyncConfigs)
 	// })
-
-	t.Run("TC12_StateStore_SaveLoad", func(tt *testing.T) {
-		testTC12StateStore_SaveLoad(tt)
+	t.Run("TC21_Performance", func(t *testing.T) {
+		testTC21Performance(t, cfg.SyncConfigs)
 	})
-
-	t.Run("TC13_Utils", func(tt *testing.T) {
-		testTC13Utils(tt)
+	t.Run("TC22_DataConsistency", func(t *testing.T) {
+		testTC22DataConsistency(t, cfg.SyncConfigs)
 	})
-
-	t.Run("TC14_AuthApi", func(tt *testing.T) {
-		testTC14AuthApi(tt)
-	})
-
-	t.Run("TC15_SyncApi", func(tt *testing.T) {
-		testTC15SyncApi(tt)
-	})
-
-	t.Run("TC16_MonitorApi", func(tt *testing.T) {
-		testTC16MonitorApi(tt)
+	t.Run("TC23_ConfigurationChanges", func(t *testing.T) {
+		testTC23ConfigurationChanges(t, cfg.SyncConfigs)
 	})
 
 	time.Sleep(3 * time.Second)
