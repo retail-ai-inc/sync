@@ -3,11 +3,12 @@ package test
 import (
 	"bytes"
 	"encoding/json"
-	"github.com/retail-ai-inc/sync/pkg/api"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"testing"
+
+	"github.com/retail-ai-inc/sync/pkg/api"
 )
 
 type ResponseType struct {
@@ -36,6 +37,7 @@ func listSyncs(t *testing.T, r http.Handler) *httptest.ResponseRecorder {
 	req, _ := http.NewRequest("GET", "/sync", nil)
 	resp := httptest.NewRecorder()
 	r.ServeHTTP(resp, req)
+	t.Logf("listSyncs response: %d", resp.Code)
 	return resp
 }
 
@@ -43,6 +45,7 @@ func stopSync(t *testing.T, r http.Handler) *httptest.ResponseRecorder {
 	req, _ := http.NewRequest("PUT", "/sync/1/stop", nil)
 	resp := httptest.NewRecorder()
 	r.ServeHTTP(resp, req)
+	t.Logf("stopSync response: %d", resp.Code)
 	return resp
 }
 
@@ -50,6 +53,7 @@ func startSync(t *testing.T, r http.Handler) *httptest.ResponseRecorder {
 	req, _ := http.NewRequest("PUT", "/sync/1/start", nil)
 	resp := httptest.NewRecorder()
 	r.ServeHTTP(resp, req)
+	t.Logf("startSync response: %d", resp.Code)
 	return resp
 }
 
@@ -66,6 +70,7 @@ func createSync(t *testing.T, r http.Handler) (ResponseType, *httptest.ResponseR
 		t.Fatalf("Error decoding response: %v", err)
 	}
 
+	t.Logf("createSync response: %d", resp.Code)
 	return respBody, resp
 }
 
@@ -75,6 +80,7 @@ func updateSync(t *testing.T, r http.Handler, taskID int) *httptest.ResponseReco
 	req.Header.Set("Content-Type", "application/json")
 	resp := httptest.NewRecorder()
 	r.ServeHTTP(resp, req)
+	t.Logf("updateSync response: %d", resp.Code)
 	return resp
 }
 
@@ -82,5 +88,6 @@ func deleteSync(t *testing.T, r http.Handler, taskID int) *httptest.ResponseReco
 	req, _ := http.NewRequest("DELETE", "/sync/"+strconv.Itoa(taskID), nil)
 	resp := httptest.NewRecorder()
 	r.ServeHTTP(resp, req)
+	t.Logf("deleteSync response: %d", resp.Code)
 	return resp
 }
