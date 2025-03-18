@@ -294,12 +294,27 @@ func buildDSNByType(dbType string, c map[string]string) string {
 		return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", user, pwd, host, port, dbn)
 
 	case "mongodb":
-		// MongoDB => mongodb://host:port/database
-		// e.g. "mongodb://localhost:27017/source_db"
+		// MongoDB => mongodb://username:password@host:port/database
 		host := c["host"]
 		port := c["port"]
 		dbn := c["database"]
-		return fmt.Sprintf("mongodb://%s:%s/%s?directConnection=true", host, port, dbn)
+		user := c["user"]
+		pass := c["password"]
+
+		var uri string
+		if user != "" && pass != "" {
+			uri = fmt.Sprintf("mongodb://%s:%s@%s:%s/%s", user, pass, host, port, dbn)
+		} else {
+			uri = fmt.Sprintf("mongodb://%s:%s/%s", host, port, dbn)
+		}
+
+		if strings.Contains(uri, "@") && !strings.Contains(uri, "authSource=") {
+			uri += "?directConnection=true&authSource=admin"
+		} else {
+			uri += "?directConnection=true"
+		}
+
+		return uri
 
 	case "redis":
 		// Redis => redis://:pwd@host:port/db
