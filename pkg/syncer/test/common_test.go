@@ -230,11 +230,11 @@ func compareMongoDoc(srcDoc, tgtDoc bson.M, srcCollection string, mappings []con
 
 func buildMongoDSN(conn ConnDetail) string {
 	if conn.User != "" && conn.Password != "" {
-		return fmt.Sprintf("mongodb://%s:%s@%s:%s/%s?directConnection=true&authSource=admin", 
+		return fmt.Sprintf("mongodb://%s:%s@%s:%s/%s?directConnection=true&authSource=admin",
 			conn.User, conn.Password, conn.Host, conn.Port, conn.Database)
 	}
-	
-	return fmt.Sprintf("mongodb://%s:%s/%s?directConnection=true", 
+
+	return fmt.Sprintf("mongodb://%s:%s/%s?directConnection=true",
 		conn.Host, conn.Port, conn.Database)
 }
 func buildMySQLDSN(conn ConnDetail) string {
