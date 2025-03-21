@@ -75,8 +75,6 @@ func ValidateUserToken(token string) (bool, string, string) {
 		return false, "", ""
 	}
 
-	fmt.Println("Found", len(users), "users to check against") // Debug
-
 	// Check if token matches any user's valid token for today
 	for _, user := range users {
 		username := user["username"].(string)
