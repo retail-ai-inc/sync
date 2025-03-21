@@ -152,7 +152,6 @@ func (s *MongoDBSyncer) ensureCollectionExists(ctx context.Context, db *mongo.Da
 }
 
 func (s *MongoDBSyncer) copyIndexes(ctx context.Context, sourceColl, targetColl *mongo.Collection) error {
-	// 获取源集合索引
 	cursor, err := sourceColl.Indexes().List(ctx)
 	if err != nil {
 		return fmt.Errorf("list source indexes fail: %w", err)
@@ -164,7 +163,6 @@ func (s *MongoDBSyncer) copyIndexes(ctx context.Context, sourceColl, targetColl 
 		return fmt.Errorf("read indexes fail: %w", err2)
 	}
 
-	// 获取目标集合现有索引
 	targetCursor, err := targetColl.Indexes().List(ctx)
 	if err != nil {
 		s.logger.Warnf("[MongoDB] Failed to list existing indexes: %v", err)
@@ -187,19 +185,16 @@ func (s *MongoDBSyncer) copyIndexes(ctx context.Context, sourceColl, targetColl 
 	indexesSkipped := 0
 
 	for _, idx := range indexDocs {
-		// 跳过_id_索引
 		if name, ok := idx["name"].(string); ok && name == "_id_" {
 			continue
 		}
 
-		// 检查索引是否已存在
 		if name, ok := idx["name"].(string); ok && existingIndexes[name] {
 			s.logger.Debugf("[MongoDB] Index %s already exists, skipping", name)
 			indexesSkipped++
 			continue
 		}
 
-		// 创建索引
 		keyDoc := bson.D{}
 		if keys, ok := idx["key"].(bson.M); ok {
 			for field, direction := range keys {
@@ -212,14 +207,11 @@ func (s *MongoDBSyncer) copyIndexes(ctx context.Context, sourceColl, targetColl 
 
 		indexOptions := options.Index()
 
-		// 设置索引选项
 		if uniqueVal, hasUnique := idx["unique"]; hasUnique {
 			if uv, isBool := uniqueVal.(bool); isBool && uv {
 				indexOptions.SetUnique(true)
 			}
 		}
-
-		// 设置其他选项...
 
 		indexModel := mongo.IndexModel{
 			Keys:    keyDoc,

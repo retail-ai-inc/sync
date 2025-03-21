@@ -180,7 +180,6 @@ func (s *MySQLSyncer) doInitialSync(ctx context.Context, c *canal.Canal, targetD
 				continue
 			}
 			if !exists {
-				// 创建表前先获取源表索引数量信息
 				countQuery := fmt.Sprintf("SHOW INDEX FROM %s.%s", sourceDBName, tableMap.SourceTable)
 				rows, err := sourceDB.QueryContext(ctx, countQuery)
 				var indexCount int
@@ -191,13 +190,11 @@ func (s *MySQLSyncer) doInitialSync(ctx context.Context, c *canal.Canal, targetD
 					rows.Close()
 				}
 
-				// 创建表和索引
 				if errCreate := s.createTargetTableAndIndexes(ctx, sourceDB, targetDB, sourceDBName, tableMap.SourceTable, targetDBName, tableMap.TargetTable); errCreate != nil {
 					s.logger.Errorf("[MySQL] Failed to create target table %s.%s: %v", targetDBName, tableMap.TargetTable, errCreate)
 					continue
 				}
 
-				// 验证创建的索引
 				countQuery = fmt.Sprintf("SHOW INDEX FROM %s.%s", targetDBName, tableMap.TargetTable)
 				rows, err = targetDB.QueryContext(ctx, countQuery)
 				var createdCount int
