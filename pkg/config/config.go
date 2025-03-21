@@ -337,3 +337,7 @@ func buildDSNByType(dbType string, c map[string]string) string {
 		return c["host"] // or something
 	}
 }
+
+func BuildDSNByType(dbType string, c map[string]string) string {
+	return buildDSNByType(dbType, c)
+}

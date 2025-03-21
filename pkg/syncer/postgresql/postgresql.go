@@ -367,22 +367,50 @@ func (s *PostgreSQLSyncer) checkTableExist(ctx context.Context, schemaName, tabl
 
 func (s *PostgreSQLSyncer) copyIndexes(ctx context.Context, srcSchema, srcTable, tgtSchema, tgtTable string) error {
 	sqlIdx := `
-SELECT indexname, indexdef
-FROM pg_indexes
-WHERE schemaname=$1 
-  AND tablename=$2
-`
+	SELECT indexname, indexdef
+	FROM pg_indexes
+	WHERE schemaname=$1 
+	  AND tablename=$2
+	`
 	rows, err := s.sourceConnNormal.Query(ctx, sqlIdx, srcSchema, srcTable)
 	if err != nil {
 		return fmt.Errorf("query source indexes fail: %w", err)
 	}
 	defer rows.Close()
 
+	// First check existing indexes in target
+	sqlExistingIdx := `
+	SELECT indexname 
+	FROM pg_indexes
+	WHERE schemaname=$1 
+	  AND tablename=$2
+	`
+	existingRows, err := s.targetDB.QueryContext(ctx, sqlExistingIdx, tgtSchema, tgtTable)
+	if err != nil {
+		s.logger.Warnf("[PostgreSQL] Failed to query existing indexes: %v", err)
+		// Continue anyway to attempt creation
+	}
+
+	existingIndexes := make(map[string]bool)
+	if existingRows != nil {
+		for existingRows.Next() {
+			var idxName string
+			if err := existingRows.Scan(&idxName); err == nil {
+				existingIndexes[idxName] = true
+			}
+		}
+		existingRows.Close()
+	}
+
+	indexesCreated := 0
+	indexesSkipped := 0
+
 	for rows.Next() {
 		var idxName, idxDef string
 		if err2 := rows.Scan(&idxName, &idxDef); err2 != nil {
 			return fmt.Errorf("scan idx fail: %w", err2)
 		}
+
 		newIdxDef := idxDef
 		oldName := fmt.Sprintf("%s.%s", srcSchema, srcTable)
 		newName := fmt.Sprintf("%s.%s", tgtSchema, tgtTable)
@@ -390,12 +418,31 @@ WHERE schemaname=$1
 		newIdxName := fmt.Sprintf("%s_%s", tgtTable, idxName)
 		newIdxDef = strings.Replace(newIdxDef, idxName, newIdxName, 1)
 
+		// Check if this index already exists
+		if existingIndexes[newIdxName] {
+			s.logger.Debugf("[PostgreSQL] Index %s already exists, skipping", newIdxName)
+			indexesSkipped++
+			continue
+		}
+
 		s.logger.Debugf("[PostgreSQL] Creating index => %s", newIdxDef)
 		_, errExec := s.targetDB.ExecContext(ctx, newIdxDef)
-		if errExec != nil && !strings.Contains(errExec.Error(), "already exists") {
-			s.logger.Warnf("[PostgreSQL] Create index fail => %v", errExec)
+		if errExec != nil {
+			if strings.Contains(errExec.Error(), "already exists") {
+				s.logger.Debugf("[PostgreSQL] Index %s already exists", newIdxName)
+				indexesSkipped++
+			} else {
+				s.logger.Warnf("[PostgreSQL] Create index %s fail => %v", newIdxName, errExec)
+			}
+		} else {
+			s.logger.Infof("[PostgreSQL] Successfully created index %s", newIdxName)
+			indexesCreated++
 		}
 	}
+
+	s.logger.Infof("[PostgreSQL] Index creation summary for %s.%s: created=%d, skipped=%d",
+		tgtSchema, tgtTable, indexesCreated, indexesSkipped)
+
 	return rows.Err()
 }
 
