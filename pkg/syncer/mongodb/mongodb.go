@@ -163,22 +163,122 @@ func (s *MongoDBSyncer) copyIndexes(ctx context.Context, sourceColl, targetColl 
 		return fmt.Errorf("read indexes fail: %w", err2)
 	}
 
-	for _, idx := range indexDocs {
-		keys, ok := idx["key"].(bson.M)
-		if !ok {
-			continue
-		}
-		indexModel := mongo.IndexModel{Keys: keys}
-		if uniqueVal, hasUnique := idx["unique"]; hasUnique {
-			if uv, isBool := uniqueVal.(bool); isBool && uv {
-				indexModel.Options = options.Index().SetUnique(true)
+	targetCursor, err := targetColl.Indexes().List(ctx)
+	if err != nil {
+		s.logger.Warnf("[MongoDB] Failed to list existing indexes: %v", err)
+	}
+
+	existingIndexes := make(map[string]bool)
+	if targetCursor != nil {
+		var targetIdxDocs []bson.M
+		if err := targetCursor.All(ctx, &targetIdxDocs); err == nil {
+			for _, idx := range targetIdxDocs {
+				if name, ok := idx["name"].(string); ok {
+					existingIndexes[name] = true
+				}
 			}
 		}
+		targetCursor.Close(ctx)
+	}
+
+	indexesCreated := 0
+	indexesSkipped := 0
+
+	for _, idx := range indexDocs {
+		if name, ok := idx["name"].(string); ok && name == "_id_" {
+			continue
+		}
+
+		if name, ok := idx["name"].(string); ok && existingIndexes[name] {
+			s.logger.Debugf("[MongoDB] Index %s already exists, skipping", name)
+			indexesSkipped++
+			continue
+		}
+
+		keyDoc := bson.D{}
+		if keys, ok := idx["key"].(bson.M); ok {
+			for field, direction := range keys {
+				keyDoc = append(keyDoc, bson.E{Key: field, Value: direction})
+			}
+		} else {
+			s.logger.Warnf("[MongoDB] Invalid index key format: %v", idx["key"])
+			continue
+		}
+
+		indexOptions := options.Index()
+
+		if uniqueVal, hasUnique := idx["unique"]; hasUnique {
+			if uv, isBool := uniqueVal.(bool); isBool && uv {
+				indexOptions.SetUnique(true)
+			}
+		}
+
+		indexModel := mongo.IndexModel{
+			Keys:    keyDoc,
+			Options: indexOptions,
+		}
+
+		name := ""
+		if nameVal, hasName := idx["name"]; hasName {
+			if nameStr, ok := nameVal.(string); ok {
+				name = nameStr
+			}
+		}
+
 		_, errC := targetColl.Indexes().CreateOne(ctx, indexModel)
-		if errC != nil && !strings.Contains(errC.Error(), "already exists") {
-			s.logger.Warnf("[MongoDB] create index fail => %v", errC)
+		if errC != nil {
+			if strings.Contains(errC.Error(), "already exists") {
+				s.logger.Debugf("[MongoDB] Index %s already exists", name)
+				indexesSkipped++
+			} else {
+				s.logger.Warnf("[MongoDB] Create index %s fail: %v", name, errC)
+			}
+		} else {
+			s.logger.Infof("[MongoDB] Successfully created index %s for %s", name, targetColl.Name())
+			indexesCreated++
 		}
 	}
+
+	s.logger.Infof("[MongoDB] Index creation summary for %s: created=%d, skipped=%d",
+		targetColl.Name(), indexesCreated, indexesSkipped)
+
+	return nil
+}
+
+// CreateIndex creates a single field index on the collection
+func createIndex(ctx context.Context, collection *mongo.Collection, field string, unique bool) error {
+	indexModel := mongo.IndexModel{
+		Keys:    bson.D{{Key: field, Value: 1}},
+		Options: options.Index().SetUnique(unique),
+	}
+
+	_, err := collection.Indexes().CreateOne(ctx, indexModel)
+	if err != nil {
+		return fmt.Errorf("create index fail: %w", err)
+	}
+
+	return nil
+}
+
+// CreateCompositeIndex creates a multi-field index on the collection
+// fields is a map of field names to index direction (1 for ascending, -1 for descending)
+func createCompositeIndex(ctx context.Context, collection *mongo.Collection, fields map[string]int, unique bool) error {
+	// Convert map to bson.D for ordered keys
+	indexKeys := bson.D{}
+	for field, direction := range fields {
+		indexKeys = append(indexKeys, bson.E{Key: field, Value: direction})
+	}
+
+	indexModel := mongo.IndexModel{
+		Keys:    indexKeys,
+		Options: options.Index().SetUnique(unique),
+	}
+
+	_, err := collection.Indexes().CreateOne(ctx, indexModel)
+	if err != nil {
+		return fmt.Errorf("create composite index fail: %w", err)
+	}
+
 	return nil
 }
 

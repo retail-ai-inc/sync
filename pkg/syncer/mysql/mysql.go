@@ -180,11 +180,33 @@ func (s *MySQLSyncer) doInitialSync(ctx context.Context, c *canal.Canal, targetD
 				continue
 			}
 			if !exists {
+				countQuery := fmt.Sprintf("SHOW INDEX FROM %s.%s", sourceDBName, tableMap.SourceTable)
+				rows, err := sourceDB.QueryContext(ctx, countQuery)
+				var indexCount int
+				if err == nil {
+					for rows.Next() {
+						indexCount++
+					}
+					rows.Close()
+				}
+
 				if errCreate := s.createTargetTableAndIndexes(ctx, sourceDB, targetDB, sourceDBName, tableMap.SourceTable, targetDBName, tableMap.TargetTable); errCreate != nil {
 					s.logger.Errorf("[MySQL] Failed to create target table %s.%s: %v", targetDBName, tableMap.TargetTable, errCreate)
 					continue
 				}
-				s.logger.Infof("[MySQL] Created table %s.%s from source %s.%s", targetDBName, tableMap.TargetTable, sourceDBName, tableMap.SourceTable)
+
+				countQuery = fmt.Sprintf("SHOW INDEX FROM %s.%s", targetDBName, tableMap.TargetTable)
+				rows, err = targetDB.QueryContext(ctx, countQuery)
+				var createdCount int
+				if err == nil {
+					for rows.Next() {
+						createdCount++
+					}
+					rows.Close()
+				}
+
+				s.logger.Infof("[MySQL] Created table %s.%s from source %s.%s with %d indexes",
+					targetDBName, tableMap.TargetTable, sourceDBName, tableMap.SourceTable, createdCount)
 			}
 
 			targetCountQuery := fmt.Sprintf("SELECT COUNT(1) FROM %s.%s", targetDBName, tableMap.TargetTable)
@@ -276,10 +298,24 @@ func (s *MySQLSyncer) createTargetTableAndIndexes(
 			s.logger.Warnf("[MySQL] create sequence fail => %v", errExec)
 		}
 	}
+
+	// Check if table already exists
+	exists, err := s.targetTableExists(ctx, targetDB, tgtDBName, tgtTableName)
+	if err != nil {
+		s.logger.Warnf("[MySQL] Error checking if table exists: %v", err)
+	}
+
+	if exists {
+		s.logger.Infof("[MySQL] Table %s.%s already exists, skipping creation", tgtDBName, tgtTableName)
+		return nil
+	}
+
 	s.logger.Infof("[MySQL] Creating table => %s", createStmt)
 	if _, errExec := targetDB.ExecContext(ctx, createStmt); errExec != nil {
 		return fmt.Errorf("create table fail: %w", errExec)
 	}
+
+	s.logger.Infof("[MySQL] Successfully created table %s.%s with indexes", tgtDBName, tgtTableName)
 	return nil
 }
 

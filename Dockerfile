@@ -1,5 +1,4 @@
-# Use Go 1.22 as the build stage
-FROM golang:1.22-alpine AS builder
+FROM golang:1.23-alpine AS builder
 
 # Install unzip tool for extracting the UI files
 RUN apk add --no-cache unzip

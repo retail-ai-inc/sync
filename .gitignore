@@ -62,4 +62,5 @@ sync.db-wal
 sync.db-shm
 CLAUDE.md
 .cursorrules
+.cursor
 decrypt

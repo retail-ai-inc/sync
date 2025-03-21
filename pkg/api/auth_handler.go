@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"bytes"
+	"strings"
+
 	"github.com/go-chi/chi"
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/lib/pq"
@@ -22,7 +24,6 @@ import (
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
-	"strings"
 )
 
 var (
@@ -81,39 +82,29 @@ func AuthLoginHandler(w http.ResponseWriter, r *http.Request) {
 
 // AuthCurrentUserHandler  GET /api/currentUser
 func AuthCurrentUserHandler(w http.ResponseWriter, r *http.Request) {
-	// First try to get token from Authorization header
 	username := ""
-	// userAccess := ""
 	authHeader := r.Header.Get("Authorization")
 
 	if authHeader != "" {
 		token := ExtractTokenFromHeader(authHeader)
-
 		valid, tokenUsername, _ := ValidateUserToken(token)
-
 		if valid {
 			username = tokenUsername
-			// userAccess = tokenAccess
 		}
 	}
 
-	// If token validation fails, check if user is logged in
 	if username == "" {
-		if access == "" || access == "guest" || currentUsername == "" {
-			w.WriteHeader(http.StatusUnauthorized)
-			resp := map[string]interface{}{
-				"data": map[string]interface{}{
-					"isLogin": false,
-				},
-				"errorCode":    "401",
-				"errorMessage": "Please log in first or provide a valid token!",
-				"success":      true,
-			}
-			_ = json.NewEncoder(w).Encode(resp)
-			return
+		w.WriteHeader(http.StatusUnauthorized)
+		resp := map[string]interface{}{
+			"data": map[string]interface{}{
+				"isLogin": false,
+			},
+			"errorCode":    "401",
+			"errorMessage": "Please log in first or provide a valid token!",
+			"success":      true,
 		}
-		username = currentUsername
-		// userAccess = access
+		_ = json.NewEncoder(w).Encode(resp)
+		return
 	}
 
 	userData, err := GetUserData(username)
@@ -124,7 +115,7 @@ func AuthCurrentUserHandler(w http.ResponseWriter, r *http.Request) {
 				"isLogin": false,
 			},
 			"errorCode":    "500",
-			"errorMessage": "Failed to get user data",
+			"errorMessage": "Failed to obtain user data.",
 			"success":      false,
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -150,6 +141,7 @@ func AuthCurrentUserHandler(w http.ResponseWriter, r *http.Request) {
 func AuthLogoutHandler(w http.ResponseWriter, r *http.Request) {
 	access = ""
 	currentUsername = ""
+
 	resp := map[string]interface{}{
 		"data":    map[string]interface{}{},
 		"success": true,

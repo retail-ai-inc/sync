@@ -45,10 +45,6 @@ func main() {
 		cancel()
 	}()
 
-	if cfg.EnableTableRowCountMonitoring {
-		utils.StartRowCountMonitoring(ctx, cfg, log, monitorInterval)
-	}
-
 	router := chi.NewRouter()
 	router.Mount("/api", api.NewRouter())
 
@@ -105,7 +101,13 @@ func runSyncTasks(parentCtx context.Context, log *logrus.Logger, cfg *config.Con
 
 	// Monitor for config changes and restart row count monitoring if needed
 	var rowCountMonitorCancel context.CancelFunc
-	var rowCountMonitorCtx context.Context // Declare the context variable here
+	var rowCountMonitorCtx context.Context
+
+	// Initialize row count monitoring (if enabled)
+	if currentConfig.EnableTableRowCountMonitoring {
+		rowCountMonitorCtx, rowCountMonitorCancel = context.WithCancel(parentCtx)
+		utils.StartRowCountMonitoring(rowCountMonitorCtx, currentConfig, log, monitorInterval)
+	}
 
 	for {
 		select {
@@ -123,9 +125,10 @@ func runSyncTasks(parentCtx context.Context, log *logrus.Logger, cfg *config.Con
 				syncCancel()
 				wg.Wait()
 
-				// Stop the row count monitoring if it was started
+				// Stop existing row count monitoring
 				if rowCountMonitorCancel != nil {
 					rowCountMonitorCancel()
+					rowCountMonitorCancel = nil
 				}
 
 				currentConfig = newConfig
@@ -133,13 +136,8 @@ func runSyncTasks(parentCtx context.Context, log *logrus.Logger, cfg *config.Con
 				wg = sync.WaitGroup{}
 				startSyncTasks(syncCtx, currentConfig, &wg, log)
 
-				// Restart row count monitoring if needed
+				// Restart row count monitoring (if enabled)
 				if currentConfig.EnableTableRowCountMonitoring {
-					// Cancel the previous row count monitoring context (if any)
-					if rowCountMonitorCancel != nil {
-						rowCountMonitorCancel()
-					}
-					// Start a new row count monitoring with a fresh context
 					rowCountMonitorCtx, rowCountMonitorCancel = context.WithCancel(parentCtx)
 					utils.StartRowCountMonitoring(rowCountMonitorCtx, currentConfig, log, monitorInterval)
 				}

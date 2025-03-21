@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"sort"
 	"time"
 
@@ -117,11 +118,13 @@ func sortFieldsByName(schema *SchemaResponse) {
 
 // getMongoDBSchema gets MongoDB collection structure
 func getMongoDBSchema(c context.Context, req SchemaRequest) (SchemaResponse, error) {
-	// Build MongoDB connection URI
 	uri := fmt.Sprintf("mongodb://%s:%s/%s", req.Connection.Host, req.Connection.Port, req.Connection.Database)
 	if req.Connection.User != "" && req.Connection.Password != "" {
-		uri = fmt.Sprintf("mongodb://%s:%s@%s:%s/%s",
-			req.Connection.User, req.Connection.Password,
+		escapedUser := url.QueryEscape(req.Connection.User)
+		escapedPassword := url.QueryEscape(req.Connection.Password)
+
+		uri = fmt.Sprintf("mongodb://%s:%s@%s:%s/%s?authSource=admin",
+			escapedUser, escapedPassword,
 			req.Connection.Host, req.Connection.Port, req.Connection.Database)
 	}
 

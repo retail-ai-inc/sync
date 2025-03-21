@@ -1,14 +1,15 @@
 module github.com/retail-ai-inc/sync
 
-go 1.22.5
-toolchain go1.24.1
+go 1.23.0
+
+toolchain go1.23.5
 
 require (
 	github.com/go-chi/chi v1.5.5
 	github.com/go-chi/chi/v5 v5.2.0
 	github.com/go-mysql-org/go-mysql v1.10.0
 	github.com/go-sql-driver/mysql v1.8.1
-	github.com/jackc/pglogrepl v0.0.0-20240307033717-828fbfe908e9
+	github.com/jackc/pglogrepl v0.0.0-20250315193731-29dcedd74728
 	github.com/jackc/pgx/v5 v5.7.1
 	github.com/lib/pq v1.10.9
 	github.com/mattn/go-sqlite3 v1.14.24
