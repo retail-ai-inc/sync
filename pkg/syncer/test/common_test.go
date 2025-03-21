@@ -30,16 +30,6 @@ func mustExec(t *testing.T, db *sql.DB, query string) {
 	}
 }
 
-// Query row count from database
-func queryCount(t *testing.T, db *sql.DB, query string) int {
-	var cnt int
-	t.Logf("executing count query: %s", query)
-	if err := db.QueryRow(query).Scan(&cnt); err != nil {
-		t.Fatalf("scan count => %v", err)
-	}
-	return cnt
-}
-
 // Compare the data consistency between source and target databases
 func compareDataConsistency(t *testing.T, srcDB, tgtDB *sql.DB, sourceTable, targetTable string, mappings []config.DatabaseMapping) {
 	srcRows := queryRows(t, srcDB, fmt.Sprintf("SELECT * FROM %s", sourceTable))
@@ -160,6 +150,8 @@ func compareMongoDataConsistency(t *testing.T, srcClient, tgtClient *mongo.Clien
 		}
 	}
 }
+
+//lint:ignore U1000 Kept for future test expansion
 func doRandomMySQLInserts(t *testing.T, dsn string, task SyncTaskRow) {
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
@@ -188,6 +180,7 @@ func doRandomMySQLInserts(t *testing.T, dsn string, task SyncTaskRow) {
 	t.Logf("[doRandomMySQLInserts] inserted %d random rows => task=%s", loopCount, task.Parsed.TaskName)
 }
 
+//lint:ignore U1000 Kept for future test expansion
 func doRandomMongoInserts(t *testing.T, dsn string, task SyncTaskRow) {
 	client, err := connectMongo(dsn)
 	if err != nil {
@@ -228,6 +221,7 @@ func compareMongoDoc(srcDoc, tgtDoc bson.M, srcCollection string, mappings []con
 	return true
 }
 
+//lint:ignore U1000 Kept for future test expansion
 func buildMongoDSN(conn ConnDetail) string {
 	if conn.User != "" && conn.Password != "" {
 		return fmt.Sprintf("mongodb://%s:%s@%s:%s/%s?directConnection=true&authSource=admin",
@@ -237,12 +231,14 @@ func buildMongoDSN(conn ConnDetail) string {
 	return fmt.Sprintf("mongodb://%s:%s/%s?directConnection=true",
 		conn.Host, conn.Port, conn.Database)
 }
+
+//lint:ignore U1000 Kept for future test expansion
 func buildMySQLDSN(conn ConnDetail) string {
 	return fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?charset=utf8mb4",
 		conn.User, conn.Password, conn.Host, conn.Port, conn.Database)
 }
 
-func compareRedisDataConsistency(t *testing.T, srcClient, tgtClient *goredis.Client, sourceTable, targetTable string) {
+func compareRedisDataConsistency(t *testing.T, srcClient, tgtClient *goredis.Client, _ string, _ string) {
 	cursor := uint64(0)
 	for {
 		keys, newCursor, err := srcClient.Scan(ctx, cursor, "*", 0).Result()
@@ -389,7 +385,7 @@ func connectMongo(uri string) (*mongo.Client, error) {
 	return cl, nil
 }
 
-func testTC01ConfigUpdate(dbPath string) {
+func testTC01ConfigUpdate(_ string) {
 	db, err := db.OpenSQLiteDB()
 	if err != nil {
 		log.Fatal(err)

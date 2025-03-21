@@ -62,6 +62,16 @@ func countAndLogMySQLOrMariaDB(ctx context.Context, sc config.SyncConfig, log *l
 	}
 	defer db.Close()
 
+	db.SetConnMaxLifetime(time.Minute * 3)
+	db.SetMaxOpenConns(10)
+	db.SetMaxIdleConns(10)
+
+	if err := db.PingContext(ctx); err != nil {
+		log.WithError(err).WithField("db_type", sc.Type).
+			Error("[Monitor] Fail to ping source database")
+		return
+	}
+
 	db2, err := sql.Open("mysql", sc.TargetConnection)
 	if err != nil {
 		log.WithError(err).WithField("db_type", sc.Type).
@@ -69,6 +79,16 @@ func countAndLogMySQLOrMariaDB(ctx context.Context, sc config.SyncConfig, log *l
 		return
 	}
 	defer db2.Close()
+
+	db2.SetConnMaxLifetime(time.Minute * 3)
+	db2.SetMaxOpenConns(10)
+	db2.SetMaxIdleConns(10)
+
+	if err := db2.PingContext(ctx); err != nil {
+		log.WithError(err).WithField("db_type", sc.Type).
+			Error("[Monitor] Fail to ping target database")
+		return
+	}
 
 	dbType := strings.ToUpper(sc.Type)
 	srcDBName := common.GetDatabaseName(sc.Type, sc.SourceConnection)
@@ -79,8 +99,8 @@ func countAndLogMySQLOrMariaDB(ctx context.Context, sc config.SyncConfig, log *l
 			srcName := tblMap.SourceTable
 			tgtName := tblMap.TargetTable
 
-			srcCount := getRowCount(db, fmt.Sprintf("%s.%s", srcDBName, srcName))
-			tgtCount := getRowCount(db2, fmt.Sprintf("%s.%s", tgtDBName, tgtName))
+			srcCount := getRowCountWithContext(ctx, db, fmt.Sprintf("%s.%s", srcDBName, srcName))
+			tgtCount := getRowCountWithContext(ctx, db2, fmt.Sprintf("%s.%s", tgtDBName, tgtName))
 
 			// 1) Log output
 			log.WithFields(logrus.Fields{
@@ -110,6 +130,16 @@ func countAndLogPostgreSQL(ctx context.Context, sc config.SyncConfig, log *logru
 	}
 	defer db.Close()
 
+	db.SetConnMaxLifetime(time.Minute * 3)
+	db.SetMaxOpenConns(10)
+	db.SetMaxIdleConns(10)
+
+	if err := db.PingContext(ctx); err != nil {
+		log.WithError(err).WithField("db_type", "POSTGRESQL").
+			Error("[Monitor] Fail to ping source database")
+		return
+	}
+
 	db2, err := sql.Open("postgres", sc.TargetConnection)
 	if err != nil {
 		log.WithError(err).WithField("db_type", "POSTGRESQL").
@@ -117,6 +147,16 @@ func countAndLogPostgreSQL(ctx context.Context, sc config.SyncConfig, log *logru
 		return
 	}
 	defer db2.Close()
+
+	db2.SetConnMaxLifetime(time.Minute * 3)
+	db2.SetMaxOpenConns(10)
+	db2.SetMaxIdleConns(10)
+
+	if err := db2.PingContext(ctx); err != nil {
+		log.WithError(err).WithField("db_type", "POSTGRESQL").
+			Error("[Monitor] Fail to ping target database")
+		return
+	}
 
 	dbType := strings.ToUpper(sc.Type)
 	srcDBName := common.GetDatabaseName(sc.Type, sc.SourceConnection)
@@ -139,8 +179,8 @@ func countAndLogPostgreSQL(ctx context.Context, sc config.SyncConfig, log *logru
 			fullSrc := fmt.Sprintf("%s.%s", srcSchema, srcName)
 			fullTgt := fmt.Sprintf("%s.%s", tgtSchema, tgtName)
 
-			srcCount := getRowCount(db, fullSrc)
-			tgtCount := getRowCount(db2, fullTgt)
+			srcCount := getRowCountWithContext(ctx, db, fullSrc)
+			tgtCount := getRowCountWithContext(ctx, db2, fullTgt)
 
 			log.WithFields(logrus.Fields{
 				"db_type":        dbType,
@@ -299,10 +339,20 @@ func countAndLogRedis(ctx context.Context, sc config.SyncConfig, log *logrus.Log
 }
 
 // getRowCount is used by MySQL / MariaDB / PostgreSQL
-func getRowCount(db *sql.DB, table string) int64 {
+// func getRowCount(db *sql.DB, table string) int64 {
+// 	query := fmt.Sprintf("SELECT COUNT(*) FROM %s", table)
+// 	var cnt int64
+// 	if err := db.QueryRow(query).Scan(&cnt); err != nil {
+// 		return -1
+// 	}
+// 	return cnt
+// }
+
+// getRowCountWithContext is used by MySQL / MariaDB / PostgreSQL
+func getRowCountWithContext(ctx context.Context, db *sql.DB, table string) int64 {
 	query := fmt.Sprintf("SELECT COUNT(*) FROM %s", table)
 	var cnt int64
-	if err := db.QueryRow(query).Scan(&cnt); err != nil {
+	if err := db.QueryRowContext(ctx, query).Scan(&cnt); err != nil {
 		return -1
 	}
 	return cnt

@@ -17,7 +17,7 @@ func testOAuthConfig(t *testing.T) {
 	getOAuthConfig(t, r, "google")
 
 	// Test updating OAuth config
-	// updateOAuthConfig(t, r, "google")
+	updateOAuthConfig(t, r, "google")
 }
 
 func getOAuthConfig(t *testing.T, r http.Handler, provider string) *httptest.ResponseRecorder {

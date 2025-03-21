@@ -83,7 +83,7 @@ func (s *MySQLSyncer) Start(ctx context.Context) {
 	}
 
 	// Perform initial sync if target is empty
-	s.doInitialSync(ctx, c, targetDB)
+	s.doInitialSync(ctx, targetDB)
 
 	h := &MyEventHandler{
 		targetDB:          targetDB,
@@ -158,7 +158,7 @@ func (s *MySQLSyncer) Start(ctx context.Context) {
 	s.logger.Info("[MySQL] Synchronization stopped.")
 }
 
-func (s *MySQLSyncer) doInitialSync(ctx context.Context, c *canal.Canal, targetDB *sql.DB) {
+func (s *MySQLSyncer) doInitialSync(ctx context.Context, targetDB *sql.DB) {
 	s.logger.Info("[MySQL] Checking if initial full sync is needed...")
 
 	sourceDB, err := sql.Open("mysql", s.cfg.SourceConnection)
@@ -512,30 +512,33 @@ func (h *MyEventHandler) OnRow(e *canal.RowsEvent) error {
 	switch e.Action {
 	case canal.InsertAction:
 		for _, row := range e.Rows {
-			h.handleDML("INSERT", sourceDB, tableName, targetDBName, targetTableName, columnNames, table, row, nil)
+			h.handleDML("INSERT", targetDBName, targetTableName, columnNames, table, row, nil)
 		}
 	case canal.UpdateAction:
 		for i := 0; i < len(e.Rows); i += 2 {
 			oldRow := e.Rows[i]
 			newRow := e.Rows[i+1]
-			h.handleDML("UPDATE", sourceDB, tableName, targetDBName, targetTableName, columnNames, table, newRow, oldRow)
+			h.handleDML("UPDATE", targetDBName, targetTableName, columnNames, table, newRow, oldRow)
 		}
 	case canal.DeleteAction:
 		for _, row := range e.Rows {
-			h.handleDML("DELETE", sourceDB, tableName, targetDBName, targetTableName, columnNames, table, row, nil)
+			h.handleDML("DELETE", targetDBName, targetTableName, columnNames, table, row, nil)
 		}
 	}
 	return nil
 }
 
 func (h *MyEventHandler) handleDML(
-	opType, srcDB, srcTable, tgtDB, tgtTable string,
+	opType, tgtDB, tgtTable string,
 	cols []string,
 	table *schema.Table,
 	newRow []interface{},
 	oldRow []interface{},
 ) {
 	tableSecurity := security.FindTableSecurityFromMappings(tgtTable, h.mappings)
+
+	h.logger.Debugf("[MySQL][%s] Syncing from %s.%s to %s.%s",
+		opType, tgtDB, tgtTable, tgtDB, tgtTable)
 
 	var query string
 	switch opType {

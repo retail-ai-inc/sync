@@ -245,43 +245,6 @@ func (s *MongoDBSyncer) copyIndexes(ctx context.Context, sourceColl, targetColl 
 	return nil
 }
 
-// CreateIndex creates a single field index on the collection
-func createIndex(ctx context.Context, collection *mongo.Collection, field string, unique bool) error {
-	indexModel := mongo.IndexModel{
-		Keys:    bson.D{{Key: field, Value: 1}},
-		Options: options.Index().SetUnique(unique),
-	}
-
-	_, err := collection.Indexes().CreateOne(ctx, indexModel)
-	if err != nil {
-		return fmt.Errorf("create index fail: %w", err)
-	}
-
-	return nil
-}
-
-// CreateCompositeIndex creates a multi-field index on the collection
-// fields is a map of field names to index direction (1 for ascending, -1 for descending)
-func createCompositeIndex(ctx context.Context, collection *mongo.Collection, fields map[string]int, unique bool) error {
-	// Convert map to bson.D for ordered keys
-	indexKeys := bson.D{}
-	for field, direction := range fields {
-		indexKeys = append(indexKeys, bson.E{Key: field, Value: direction})
-	}
-
-	indexModel := mongo.IndexModel{
-		Keys:    indexKeys,
-		Options: options.Index().SetUnique(unique),
-	}
-
-	_, err := collection.Indexes().CreateOne(ctx, indexModel)
-	if err != nil {
-		return fmt.Errorf("create composite index fail: %w", err)
-	}
-
-	return nil
-}
-
 func (s *MongoDBSyncer) doInitialSync(ctx context.Context, sourceColl, targetColl *mongo.Collection, sourceDB, targetDB string) error {
 	count, err := targetColl.EstimatedDocumentCount(ctx)
 	if err != nil {
@@ -332,7 +295,6 @@ func (s *MongoDBSyncer) doInitialSync(ctx context.Context, sourceColl, targetCol
 }
 
 func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl *mongo.Collection, sourceDB, collectionName string) {
-	// Outer loop to re-establish the change stream if needed
 	for {
 		pipeline := mongo.Pipeline{
 			{{Key: "$match", Value: bson.D{
@@ -365,7 +327,8 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 		flushInterval := time.Second * 1
 		timer := time.NewTimer(flushInterval)
 		var bufferMutex sync.Mutex
-		done := false
+
+		changeStreamActive := true
 
 		go func() {
 			for {
@@ -384,7 +347,7 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 			}
 		}()
 
-		for {
+		for changeStreamActive {
 			select {
 			case <-ctx.Done():
 				bufferMutex.Lock()
@@ -404,7 +367,7 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 					}
 					opType, _ := changeEvent["operationType"].(string)
 					token := cs.ResumeToken()
-					model := s.prepareWriteModel(changeEvent, sourceDB, collectionName, opType)
+					model := s.prepareWriteModel(changeEvent, collectionName, opType)
 					if model != nil {
 						bufferMutex.Lock()
 						buffer = append(buffer, bufferedChange{
@@ -439,17 +402,12 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 				} else {
 					if errCS := cs.Err(); errCS != nil {
 						s.logger.Errorf("[MongoDB] changeStream error => %v", errCS)
-						done = true
-						break
 					}
-					done = true
-					break
+					changeStreamActive = false
 				}
 			}
-			if done {
-				break
-			}
 		}
+
 		cs.Close(ctx)
 		s.logger.Infof("[MongoDB] Change stream closed, will re-establish after delay.")
 
@@ -461,7 +419,7 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 	}
 }
 
-func (s *MongoDBSyncer) prepareWriteModel(doc bson.M, sourceDB, collName, opType string) mongo.WriteModel {
+func (s *MongoDBSyncer) prepareWriteModel(doc bson.M, collName, opType string) mongo.WriteModel {
 	tableSecurity := security.FindTableSecurityFromMappings(collName, s.cfg.Mappings)
 
 	switch opType {
@@ -598,6 +556,9 @@ func (s *MongoDBSyncer) flushBuffer(ctx context.Context, targetColl *mongo.Colle
 	res, err := targetColl.BulkWrite(ctx, writeModels, options.BulkWrite().SetOrdered(false))
 	if err != nil {
 		s.logger.Errorf("[MongoDB] BulkWrite fail => %v", err)
+		if strings.Contains(err.Error(), "resume token") {
+			s.removeMongoDBResumeToken(sourceDB, collectionName)
+		}
 	} else {
 		s.logger.Infof(
 			"[MongoDB] BulkWrite => table=%s.%s inserted=%d matched=%d modified=%d upserted=%d deleted=%d (opTotals=>insert=%d, update=%d, delete=%d)",
@@ -620,9 +581,19 @@ func (s *MongoDBSyncer) flushBuffer(ctx context.Context, targetColl *mongo.Colle
 }
 
 func (s *MongoDBSyncer) loadMongoDBResumeToken(db, coll string) bson.Raw {
+	key := fmt.Sprintf("%s.%s", db, coll)
+
+	s.resumeTokensM.RLock()
+	if token, exists := s.resumeTokens[key]; exists {
+		s.resumeTokensM.RUnlock()
+		return token
+	}
+	s.resumeTokensM.RUnlock()
+
 	if s.cfg.MongoDBResumeTokenPath == "" {
 		return nil
 	}
+
 	path := s.getResumeTokenPath(db, coll)
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -633,18 +604,35 @@ func (s *MongoDBSyncer) loadMongoDBResumeToken(db, coll string) bson.Raw {
 		s.logger.Debugf("[MongoDB] empty resume token file => %s", path)
 		return nil
 	}
+
 	var token bson.Raw
 	if errU := json.Unmarshal(data, &token); errU != nil {
 		s.logger.Errorf("[MongoDB] unmarshal resume token fail => %v", errU)
+		s.removeMongoDBResumeToken(db, coll)
 		return nil
 	}
+
+	s.resumeTokensM.Lock()
+	s.resumeTokens[key] = token
+	s.resumeTokensM.Unlock()
+
 	return token
 }
 
 func (s *MongoDBSyncer) saveMongoDBResumeToken(db, coll string, token bson.Raw) {
+	if token == nil {
+		return
+	}
+
+	key := fmt.Sprintf("%s.%s", db, coll)
+	s.resumeTokensM.Lock()
+	s.resumeTokens[key] = token
+	s.resumeTokensM.Unlock()
+
 	if s.cfg.MongoDBResumeTokenPath == "" {
 		return
 	}
+
 	path := s.getResumeTokenPath(db, coll)
 	data, err := json.Marshal(token)
 	if err != nil {
@@ -671,66 +659,4 @@ func (s *MongoDBSyncer) removeMongoDBResumeToken(db, coll string) {
 func (s *MongoDBSyncer) getResumeTokenPath(db, coll string) string {
 	fileName := fmt.Sprintf("%s_%s.json", db, coll)
 	return filepath.Join(s.cfg.MongoDBResumeTokenPath, fileName)
-}
-
-func (s *MongoDBSyncer) handleStreamDocument(
-	doc bson.M,
-	buffer *[]bufferedChange,
-	token bson.Raw,
-	targetColl *mongo.Collection,
-	sourceColl *mongo.Collection,
-	sourceDB, collName string,
-) {
-	if doc == nil {
-		return
-	}
-
-	tableSecurity := security.FindTableSecurityFromMappings(collName, s.cfg.Mappings)
-
-	s.logger.Debugf("[MongoDB] Collection=%s security config: enabled=%v, rules=%d",
-		collName, tableSecurity.SecurityEnabled, len(tableSecurity.FieldSecurity))
-
-	operationType, ok := doc["operationType"].(string)
-	if !ok {
-		s.logger.Warnf("[MongoDB] Missing operationType in stream doc: %v", doc)
-		return
-	}
-
-	if tableSecurity.SecurityEnabled && len(tableSecurity.FieldSecurity) > 0 {
-		switch operationType {
-		case "insert", "replace", "update":
-			var documentData bson.M
-			if operationType == "insert" || operationType == "replace" {
-				if fullDoc, ok := doc["fullDocument"].(bson.M); ok {
-					documentData = fullDoc
-				}
-			} else if operationType == "update" {
-				if updateDesc, ok := doc["updateDescription"].(bson.M); ok {
-					if updatedFields, ok := updateDesc["updatedFields"].(bson.M); ok {
-						documentData = updatedFields
-					}
-				}
-			}
-
-			s.logger.Debugf("[MongoDB][%s] Data before processing: %v", operationType, documentData)
-
-			if documentData != nil {
-				for field, value := range documentData {
-					processedValue := security.ProcessValue(value, field, tableSecurity)
-					documentData[field] = processedValue
-				}
-			}
-
-			s.logger.Debugf("[MongoDB][%s] Data after processing: %v", operationType, documentData)
-		}
-	}
-
-	model := s.prepareWriteModel(doc, sourceDB, collName, operationType)
-	if model != nil {
-		*buffer = append(*buffer, bufferedChange{
-			token:  token,
-			model:  model,
-			opType: operationType,
-		})
-	}
 }

@@ -1542,7 +1542,7 @@ func ExecuteSQLHandler(w http.ResponseWriter, r *http.Request) {
 
 					// Find the maximum ID currently in the collection
 					var maxIDDoc bson.M
-					opts := options.FindOne().SetSort(bson.D{{"id", -1}})
+					opts := options.FindOne().SetSort(bson.D{{Key: "id", Value: -1}})
 					err := collection.FindOne(ctx, bson.M{}, opts).Decode(&maxIDDoc)
 
 					var maxID int = 0
@@ -1632,7 +1632,7 @@ func ExecuteSQLHandler(w http.ResponseWriter, r *http.Request) {
 						}
 
 						// Execute update operation, update the most recent 5 records
-						cursor, err := collection.Find(ctx, bson.M{}, options.Find().SetSort(bson.D{{"_id", -1}}).SetLimit(5))
+						cursor, err := collection.Find(ctx, bson.M{}, options.Find().SetSort(bson.D{{Key: "_id", Value: -1}}).SetLimit(5))
 						if err != nil {
 							http.Error(w, fmt.Sprintf("Failed to find documents to update: %v", err), http.StatusInternalServerError)
 							return
@@ -1690,7 +1690,7 @@ func ExecuteSQLHandler(w http.ResponseWriter, r *http.Request) {
 					// Example: db.users.deleteMany({_id: {$in: ids}});
 
 					// Find the most recent 5 records
-					cursor, err := collection.Find(ctx, bson.M{}, options.Find().SetSort(bson.D{{"_id", -1}}).SetLimit(5))
+					cursor, err := collection.Find(ctx, bson.M{}, options.Find().SetSort(bson.D{{Key: "_id", Value: -1}}).SetLimit(5))
 					if err != nil {
 						http.Error(w, fmt.Sprintf("Failed to find documents to delete: %v", err), http.StatusInternalServerError)
 						return
@@ -1736,7 +1736,7 @@ func ExecuteSQLHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		} else {
 			// For query operations, return result data
-			cursor, err := collection.Find(ctx, bson.M{}, options.Find().SetSort(bson.M{"_id": -1}))
+			cursor, err := collection.Find(ctx, bson.M{}, options.Find().SetSort(bson.D{{Key: "_id", Value: -1}}))
 			if err != nil {
 				http.Error(w, fmt.Sprintf("MongoDB query execution failed: %v", err), http.StatusInternalServerError)
 				return
