@@ -20,6 +20,7 @@ func NewRouter() http.Handler {
 	r.Get("/sync/{id}/monitor", SyncMonitorHandler) // GET /api/sync/{taskID}/monitor
 	r.Get("/sync/{id}/metrics", SyncMetricsHandler) // GET /api/sync/{taskID}/metrics
 	r.Get("/sync/{id}/logs", SyncLogsHandler)       // GET /api/sync/{taskID}/logs
+	r.Get("/sync/{id}/tables", SyncTablesHandler)   // GET /api/sync/{taskID}/tables
 
 	// 3) api_oauth_test
 	r.Get("/oauth/{provider}/config", GetOAuthConfigHandler)    // GET /api/oauth/{provider}/config

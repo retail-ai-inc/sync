@@ -104,35 +104,28 @@ func (s *MySQLSyncer) Start(ctx context.Context) {
 		}
 	}
 
+	// Add connection health check
+	connCheckTicker := time.NewTicker(5 * time.Minute)
+	defer connCheckTicker.Stop()
+
 	go func() {
-		ticker := time.NewTicker(3 * time.Second)
-		defer ticker.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case <-ticker.C:
-				pos := c.SyncedPosition()
-				if atomic.LoadInt32(&h.lastExecError) == 0 {
-					data, errPos := json.Marshal(pos)
-					if errPos != nil {
-						s.logger.Errorf("[MySQL] Failed to marshal binlog position: %v", errPos)
-						continue
-					}
-					if h.positionSaverPath != "" {
-						positionDir := filepath.Dir(h.positionSaverPath)
-						if errMk := os.MkdirAll(positionDir, os.ModePerm); errMk != nil {
-							s.logger.Errorf("[MySQL] Failed to create dir for binlog position => %s: %v", s.cfg.MySQLPositionPath, errMk)
-							continue
+			case <-connCheckTicker.C:
+				if err := utils.CheckSQLConnection(ctx, targetDB); err != nil {
+					s.logger.Warnf("[MySQL] Target connection check failed: %v", err)
+					if newDB, err := utils.ReopenSQLConnection(ctx, s.logger, s.cfg.TargetConnection, "mysql"); err == nil {
+						oldDB := targetDB
+						targetDB = newDB
+						h.targetDB = newDB // Update handler's DB reference
+
+						if oldDB != nil {
+							_ = oldDB.Close()
 						}
-						if errWrite := os.WriteFile(h.positionSaverPath, data, 0644); errWrite != nil {
-							s.logger.Errorf("[MySQL] Failed to write binlog position to %s: %v", h.positionSaverPath, errWrite)
-						} else {
-							s.logger.Debugf("[MySQL] Timer => saved position %v", pos)
-						}
+						s.logger.Info("[MySQL] Successfully reconnected to target database")
 					}
-				} else {
-					s.logger.Warn("[MySQL] Timer => lastExecError != 0, skip saving binlog position")
 				}
 			}
 		}
@@ -584,14 +577,22 @@ func (h *MyEventHandler) handleDML(
 			h.logger.Debugf("[MySQL][%s] After processing: %v", opType, processedValues)
 		}
 
-		res, err := h.targetDB.Exec(query, processedValues...)
+		err := utils.RetryDBOperation(context.Background(), h.logger,
+			fmt.Sprintf("INSERT on %s.%s", tgtDB, tgtTable),
+			func() error {
+				res, err := h.targetDB.Exec(query, processedValues...)
+				if err != nil {
+					return err
+				}
+				ra, _ := res.RowsAffected()
+				h.logger.Infof("[MySQL][INSERT] table=%s.%s rowsAffected=%d", tgtDB, tgtTable, ra)
+				atomic.StoreInt32(&h.lastExecError, 0)
+				return nil
+			})
+
 		if err != nil {
 			h.logger.Errorf("[MySQL][INSERT] table=%s.%s error=%v", tgtDB, tgtTable, err)
 			atomic.StoreInt32(&h.lastExecError, 1)
-		} else {
-			ra, _ := res.RowsAffected()
-			h.logger.Infof("[MySQL][INSERT] table=%s.%s rowsAffected=%d", tgtDB, tgtTable, ra)
-			atomic.StoreInt32(&h.lastExecError, 0)
 		}
 	case "UPDATE":
 		setClauses := make([]string, len(cols))
@@ -633,14 +634,22 @@ func (h *MyEventHandler) handleDML(
 		// Merge updated values and WHERE clause values
 		args := append(processedValues, whereVals...)
 
-		res, err := h.targetDB.Exec(query, args...)
+		err := utils.RetryDBOperation(context.Background(), h.logger,
+			fmt.Sprintf("UPDATE on %s.%s", tgtDB, tgtTable),
+			func() error {
+				res, err := h.targetDB.Exec(query, args...)
+				if err != nil {
+					return err
+				}
+				ra, _ := res.RowsAffected()
+				h.logger.Infof("[MySQL][UPDATE] table=%s.%s rowsAffected=%d", tgtDB, tgtTable, ra)
+				atomic.StoreInt32(&h.lastExecError, 0)
+				return nil
+			})
+
 		if err != nil {
 			h.logger.Errorf("[MySQL][UPDATE] table=%s.%s error=%v", tgtDB, tgtTable, err)
 			atomic.StoreInt32(&h.lastExecError, 1)
-		} else {
-			ra, _ := res.RowsAffected()
-			h.logger.Infof("[MySQL][UPDATE] table=%s.%s rowsAffected=%d", tgtDB, tgtTable, ra)
-			atomic.StoreInt32(&h.lastExecError, 0)
 		}
 	case "DELETE":
 		var whereClauses []string
@@ -662,14 +671,22 @@ func (h *MyEventHandler) handleDML(
 			args = append(args, newRow[pkIndex])
 		}
 
-		res, err := h.targetDB.Exec(query, args...)
+		err := utils.RetryDBOperation(context.Background(), h.logger,
+			fmt.Sprintf("DELETE on %s.%s", tgtDB, tgtTable),
+			func() error {
+				res, err := h.targetDB.Exec(query, args...)
+				if err != nil {
+					return err
+				}
+				ra, _ := res.RowsAffected()
+				h.logger.Infof("[MySQL][DELETE] table=%s.%s rowsAffected=%d", tgtDB, tgtTable, ra)
+				atomic.StoreInt32(&h.lastExecError, 0)
+				return nil
+			})
+
 		if err != nil {
 			h.logger.Errorf("[MySQL][DELETE] table=%s.%s error=%v", tgtDB, tgtTable, err)
 			atomic.StoreInt32(&h.lastExecError, 1)
-		} else {
-			ra, _ := res.RowsAffected()
-			h.logger.Infof("[MySQL][DELETE] table=%s.%s rowsAffected=%d", tgtDB, tgtTable, ra)
-			atomic.StoreInt32(&h.lastExecError, 0)
 		}
 	}
 }

@@ -430,6 +430,80 @@ func SyncDeleteHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// GET /api/sync/{id}/tables => returns tables info and sync stats for today
+func SyncTablesHandler(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	logrus.Infof("[SyncTables] Fetching tables data for task: %s", id)
+
+	db, err := openLocalDB()
+	if err != nil {
+		errorJSON(w, "open db fail", err)
+		return
+	}
+	defer db.Close()
+
+	// Get today's date range
+	todayStart := time.Now().Format("2006-01-02") + " 00:00:00"
+	todayEnd := time.Now().Format("2006-01-02") + " 23:59:59"
+
+	// Use a SQL query to get all tables and sync data volume for today
+	rows, err := db.Query(`
+		SELECT 
+			tgt_table,
+			MAX(tgt_row_count) - MIN(tgt_row_count) AS synced_today,
+			MAX(tgt_row_count) AS total_rows,
+			MAX(logged_at) AS last_sync_time
+		FROM monitoring_log
+		WHERE sync_task_id = ?
+		AND logged_at BETWEEN ? AND ?
+		GROUP BY tgt_table
+	`, id, todayStart, todayEnd)
+
+	if err != nil {
+		errorJSON(w, "query monitoring_log fail", err)
+		return
+	}
+	defer rows.Close()
+
+	// Process query results
+	tableStats := make([]map[string]interface{}, 0)
+	for rows.Next() {
+		var (
+			tableName    string
+			syncedToday  int64
+			totalRows    int64
+			lastSyncTime string
+		)
+		if err := rows.Scan(&tableName, &syncedToday, &totalRows, &lastSyncTime); err != nil {
+			logrus.Warnf("[SyncTables] Error scanning row: %v", err)
+			continue
+		}
+
+		// Correct potentially negative sync amounts
+		if syncedToday < 0 {
+			syncedToday = 0
+		}
+
+		tableStats = append(tableStats, map[string]interface{}{
+			"tableName":    tableName,
+			"syncedToday":  syncedToday,
+			"totalRows":    totalRows,
+			"lastSyncTime": lastSyncTime,
+		})
+	}
+
+	// Return the results
+	writeJSON(w, map[string]interface{}{
+		"success": true,
+		"data": map[string]interface{}{
+			"taskId":     id,
+			"tableCount": len(tableStats),
+			"syncDate":   time.Now().Format("2006-01-02"),
+			"tables":     tableStats,
+		},
+	})
+}
+
 // -------------------------
 // Helpers & Common Utilities
 // -------------------------
