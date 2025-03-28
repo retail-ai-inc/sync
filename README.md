@@ -38,9 +38,6 @@ Create standalone databases outside of your production database servers with the
 
 ![image](https://github.com/user-attachments/assets/65b23a4c-56db-4833-89a1-0f802af878bd)
 
-### Grafana Integration (temporary transition phase)
-![image](https://github.com/user-attachments/assets/cdc8e57b-8aa4-4386-8aa8-de5028698fd0)
-
 
 ## Features
 
@@ -59,11 +56,6 @@ Create standalone databases outside of your production database servers with the
 - **Restart Resilience**: 
   Stores MongoDB resume tokens, MySQL binlog positions, PostgreSQL replication positions, and Redis stream offsets in configurable state files, allowing the tool to resume synchronization from the last known position after a restart.
   - **Note for Redis**: Redis does not support resuming from the last state after a sync interruption. If `Sync` is interrupted or crashes, it will restart the synchronization process by executing the initial sync method to retrieve all keys and sync them to the target database. This is due to limitations in Redis Streams and Keyspace Notifications, which do not provide a built-in mechanism to persist and resume stream offsets across restarts. As a result, the tool cannot accurately determine the last synced state and must perform a full resync to ensure data consistency.
-- **Grafana Integration**:
-  - For data visualization, this tool integrates with **Grafana** using data from **GCP Logging** and **GCP BigQuery**.
-  - When **`enable_table_row_count_monitoring`** is enabled, the tool records data changes, including table row counts, in **GCP Logging**.
-  - These logs are then forwarded via **Log Router** to **GCP BigQuery**.<br>Finally, **Grafana** is used to visualize this data, providing users with insights into the synchronization process.
-  - This integration is part of a temporary transition phase, and future development will focus on using a more flexible database solution for direct display and synchronization.
 - **UI Interface**:  
   - The tool has added a **UI interface**, making it easier to operate and monitor the synchronization process. For detailed UI documentation and usage guide, please see [READMEUI.md](READMEUI.md).
 
