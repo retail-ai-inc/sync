@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -70,7 +72,22 @@ func compareValues(srcValue, tgtValue interface{}) bool {
 		if tgt, ok := tgtValue.([]uint8); ok {
 			return bytes.Equal(src, tgt)
 		}
+	case map[string]interface{}, bson.M, bson.D:
+		// Use reflection for map-like types (including MongoDB documents)
+		return reflect.DeepEqual(srcValue, tgtValue)
 	default:
+		// If it's a primitive.M, bson.M or any other map type, use reflection
+		if reflect.TypeOf(srcValue) != nil && reflect.TypeOf(tgtValue) != nil {
+			srcKind := reflect.TypeOf(srcValue).Kind()
+			tgtKind := reflect.TypeOf(tgtValue).Kind()
+
+			// If both are maps or both are special mongo types, use DeepEqual
+			if (srcKind == reflect.Map || tgtKind == reflect.Map) ||
+				strings.Contains(reflect.TypeOf(srcValue).String(), "primitive") ||
+				strings.Contains(reflect.TypeOf(tgtValue).String(), "primitive") {
+				return reflect.DeepEqual(srcValue, tgtValue)
+			}
+		}
 		return srcValue == tgtValue
 	}
 	return false

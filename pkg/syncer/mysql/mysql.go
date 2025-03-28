@@ -692,6 +692,33 @@ func (h *MyEventHandler) handleDML(
 }
 
 func (h *MyEventHandler) OnPosSynced(header *replication.EventHeader, pos mysql.Position, gs mysql.GTIDSet, force bool) error {
+	if h.positionSaverPath == "" {
+		return nil
+	}
+
+	h.logger.Debugf("[MySQL] Syncing position: %v, force: %v", pos, force)
+
+	// Create directory if it doesn't exist
+	positionDir := filepath.Dir(h.positionSaverPath)
+	if err := os.MkdirAll(positionDir, os.ModePerm); err != nil {
+		h.logger.Errorf("[MySQL] Failed to create directory for position file: %v", err)
+		return err
+	}
+
+	// Marshal position to JSON
+	data, err := json.Marshal(pos)
+	if err != nil {
+		h.logger.Errorf("[MySQL] Failed to marshal position: %v", err)
+		return err
+	}
+
+	// Write to file
+	if err := os.WriteFile(h.positionSaverPath, data, 0644); err != nil {
+		h.logger.Errorf("[MySQL] Failed to write position file: %v", err)
+		return err
+	}
+
+	h.logger.Infof("[MySQL] Successfully saved binlog position: %v", pos)
 	return nil
 }
 

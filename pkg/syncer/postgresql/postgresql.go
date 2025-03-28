@@ -1051,15 +1051,28 @@ func (s *PostgreSQLSyncer) replicateQuery(db *sql.DB, query, opType, tableName s
 
 // loadPosition loads position from file
 func (s *PostgreSQLSyncer) loadPosition(path string) (pglogrepl.LSN, error) {
+	s.logger.Debugf("[PostgreSQL] Loading LSN from file: %s", path)
+
 	data, err := os.ReadFile(path)
 	if err != nil {
+		s.logger.Warnf("[PostgreSQL] Failed to read position file: %v", err)
 		return 0, err
 	}
+
 	str := strings.TrimSpace(string(data))
 	if len(str) < 3 {
+		s.logger.Warnf("[PostgreSQL] Position file content too short: '%s'", str)
 		return 0, fmt.Errorf("empty position file")
 	}
-	return parseLSNFromString(str)
+
+	lsn, err := parseLSNFromString(str)
+	if err != nil {
+		s.logger.Warnf("[PostgreSQL] Failed to parse LSN from string '%s': %v", str, err)
+		return 0, err
+	}
+
+	s.logger.Debugf("[PostgreSQL] Successfully parsed LSN: %s (%X)", str, lsn)
+	return lsn, nil
 }
 
 // writeWALPosition writes WAL position to file
@@ -1068,32 +1081,70 @@ func (s *PostgreSQLSyncer) writeWALPosition(lsn pglogrepl.LSN) error {
 	if path == "" {
 		return nil
 	}
+
+	// 验证LSN
+	if lsn <= 0 {
+		s.logger.Warn("[PostgreSQL] Attempting to write invalid LSN (zero or negative)")
+		return fmt.Errorf("invalid LSN value: %d", lsn)
+	}
+
+	lsnStr := lsn.String()
+	if lsnStr == "" || !strings.Contains(lsnStr, "/") {
+		s.logger.Warn("[PostgreSQL] LSN.String() returned invalid format")
+		return fmt.Errorf("LSN string format invalid: %s", lsnStr)
+	}
+
+	s.logger.Debugf("[PostgreSQL] Writing LSN to file: %s => %s", path, lsnStr)
+
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0755); err != nil {
+		s.logger.Errorf("[PostgreSQL] Failed to create directory for position file: %v", err)
 		return err
 	}
-	return os.WriteFile(path, []byte(lsn.String()), 0644)
+
+	if err := os.WriteFile(path, []byte(lsnStr), 0644); err != nil {
+		s.logger.Errorf("[PostgreSQL] Failed to write position to file: %v", err)
+		return err
+	}
+
+	s.logger.Debugf("[PostgreSQL] Successfully wrote LSN position to file")
+	return nil
 }
 
 // parseLSNFromString parses LSN from string
 func parseLSNFromString(lsnStr string) (pglogrepl.LSN, error) {
+	lsnStr = strings.TrimSpace(lsnStr)
+	if lsnStr == "" {
+		return 0, fmt.Errorf("empty LSN string")
+	}
+
 	parts := strings.Split(lsnStr, "/")
 	if len(parts) != 2 {
 		return 0, fmt.Errorf("invalid LSN format: %s", lsnStr)
 	}
+
+	// 检查每个部分是否为空
+	if parts[0] == "" || parts[1] == "" {
+		return 0, fmt.Errorf("invalid LSN format (empty part): %s", lsnStr)
+	}
+
 	hi, err := hexStrToUint32(parts[0])
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("invalid high bits in LSN %s: %w", lsnStr, err)
 	}
 	lo, err2 := hexStrToUint32(parts[1])
 	if err2 != nil {
-		return 0, err2
+		return 0, fmt.Errorf("invalid low bits in LSN %s: %w", lsnStr, err2)
 	}
 	return pglogrepl.LSN(uint64(hi)<<32 + uint64(lo)), nil
 }
 
 // hexStrToUint32 converts hex string to uint32
 func hexStrToUint32(s string) (uint32, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, fmt.Errorf("empty hex string")
+	}
 	val, err := strconv.ParseUint(s, 16, 32)
 	if err != nil {
 		return 0, err
