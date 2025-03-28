@@ -96,8 +96,8 @@ ORDER BY id ASC
 			"id":             id,
 			"enable":         (enableInt != 0),
 			"status":         status,
-			"lastUpdateTime": lastUpdate,
-			"lastRunTime":    lastRun,
+			"lastUpdateTime": convertTimeToJST(lastUpdate),
+			"lastRunTime":    convertTimeToJST(lastRun),
 			"taskName":       extra.TaskName,
 			"sourceType":     extra.Type,
 			"sourceConn":     extra.SourceConn,
@@ -442,9 +442,10 @@ func SyncTablesHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer db.Close()
 
-	// Get today's date range
-	todayStart := time.Now().Format("2006-01-02") + " 00:00:00"
-	todayEnd := time.Now().Format("2006-01-02") + " 23:59:59"
+	// Get today's date range in UTC
+	now := time.Now().UTC()
+	todayStart := now.Format("2006-01-02") + " 00:00:00"
+	todayEnd := now.Format("2006-01-02") + " 23:59:59"
 
 	// Use a SQL query to get all tables and sync data volume for today
 	rows, err := db.Query(`
@@ -488,9 +489,13 @@ func SyncTablesHandler(w http.ResponseWriter, r *http.Request) {
 			"tableName":    tableName,
 			"syncedToday":  syncedToday,
 			"totalRows":    totalRows,
-			"lastSyncTime": lastSyncTime,
+			"lastSyncTime": convertTimeToJST(lastSyncTime),
 		})
 	}
+
+	// Get JST date for display purposes only
+	jst := time.FixedZone("JST", 9*60*60)
+	jstDate := now.In(jst).Format("2006-01-02")
 
 	// Return the results
 	writeJSON(w, map[string]interface{}{
@@ -498,7 +503,7 @@ func SyncTablesHandler(w http.ResponseWriter, r *http.Request) {
 		"data": map[string]interface{}{
 			"taskId":     id,
 			"tableCount": len(tableStats),
-			"syncDate":   time.Now().Format("2006-01-02"),
+			"syncDate":   jstDate,
 			"tables":     tableStats,
 		},
 	})
@@ -567,6 +572,34 @@ func writeJSON(w http.ResponseWriter, data interface{}) {
 	_ = json.NewEncoder(w).Encode(data)
 }
 
+// timeNowStr returns the current time formatted as a string in UTC timezone
+// for database storage purposes
 func timeNowStr() string {
-	return time.Now().Format("2006-01-02 15:04:05")
+	return time.Now().UTC().Format("2006-01-02 15:04:05")
+}
+
+// convertTimeToJST converts a time string from UTC to JST timezone for SQL time format
+// This handles the specific format used in the database "2006-01-02 15:04:05"
+func convertTimeToJST(input string) string {
+	if input == "" {
+		return ""
+	}
+
+	// First try parsing with standard SQL format
+	layout := "2006-01-02 15:04:05"
+	t, err := time.Parse(layout, input)
+	if err == nil {
+		jst := time.FixedZone("JST", 9*60*60)
+		return t.In(jst).Format(layout)
+	}
+
+	// If that fails, try RFC3339 format
+	t, err = time.Parse(time.RFC3339, input)
+	if err == nil {
+		jst := time.FixedZone("JST", 9*60*60)
+		return t.In(jst).Format(layout)
+	}
+
+	// Return original if we can't parse
+	return input
 }
