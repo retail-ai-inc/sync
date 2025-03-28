@@ -1082,7 +1082,6 @@ func (s *PostgreSQLSyncer) writeWALPosition(lsn pglogrepl.LSN) error {
 		return nil
 	}
 
-	// 验证LSN
 	if lsn <= 0 {
 		s.logger.Warn("[PostgreSQL] Attempting to write invalid LSN (zero or negative)")
 		return fmt.Errorf("invalid LSN value: %d", lsn)
@@ -1123,7 +1122,6 @@ func parseLSNFromString(lsnStr string) (pglogrepl.LSN, error) {
 		return 0, fmt.Errorf("invalid LSN format: %s", lsnStr)
 	}
 
-	// 检查每个部分是否为空
 	if parts[0] == "" || parts[1] == "" {
 		return 0, fmt.Errorf("invalid LSN format (empty part): %s", lsnStr)
 	}
