@@ -47,5 +47,14 @@ func NewRouter() http.Handler {
 	r.Post("/tables/schema", GetTableSchemaHandler)
 	r.Post("/sql/execute", ExecuteSQLHandler) // POST /api/sql/execute
 
+	// 7) Backup related
+	r.Get("/backup", BackupListHandler)
+	r.Post("/backup", BackupCreateHandler)
+	r.Delete("/backup/{id}", BackupDeleteHandler)
+	r.Put("/backup/{id}/pause", BackupPauseHandler)
+	r.Put("/backup/{id}/resume", BackupResumeHandler)
+	r.Post("/backup/{id}/run", BackupRunHandler)
+	r.Put("/backup/{id}", BackupUpdateHandler)
+
 	return r
 }
