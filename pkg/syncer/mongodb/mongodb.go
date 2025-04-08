@@ -94,7 +94,7 @@ func NewMongoDBSyncer(cfg config.SyncConfig, logger *logrus.Logger) *MongoDBSync
 	}
 
 	// Default processing rate: 1000 changes per second (increased from 100)
-	processRate := 1000
+	processRate := 3000
 	// Custom configured rate can be implemented in the future by expanding the SyncConfig struct
 
 	return &MongoDBSyncer{
