@@ -26,6 +26,17 @@ type bufferedChange struct {
 	opType string
 }
 
+// persistedChange represents a change that will be saved to disk
+type persistedChange struct {
+	ID         string          `json:"id"`
+	Token      bson.Raw        `json:"token"`
+	Doc        json.RawMessage `json:"doc"`
+	OpType     string          `json:"op_type"`
+	SourceDB   string          `json:"source_db"`
+	SourceColl string          `json:"source_coll"`
+	Timestamp  time.Time       `json:"timestamp"`
+}
+
 type MongoDBSyncer struct {
 	sourceClient  *mongo.Client
 	targetClient  *mongo.Client
@@ -33,6 +44,10 @@ type MongoDBSyncer struct {
 	logger        logrus.FieldLogger
 	resumeTokens  map[string]bson.Raw
 	resumeTokensM sync.RWMutex
+	// New fields for persistent buffer
+	bufferDir     string
+	bufferEnabled bool
+	processRate   int // Changes per second to process
 }
 
 func NewMongoDBSyncer(cfg config.SyncConfig, logger *logrus.Logger) *MongoDBSyncer {
@@ -66,12 +81,31 @@ func NewMongoDBSyncer(cfg config.SyncConfig, logger *logrus.Logger) *MongoDBSync
 		}
 	}
 
+	// Create buffer directory for persistent storage
+	bufferDir := cfg.MongoDBResumeTokenPath
+	if bufferDir == "" {
+		bufferDir = "./mongodb_buffer"
+	} else {
+		bufferDir = filepath.Join(bufferDir, "buffer")
+	}
+
+	if err := os.MkdirAll(bufferDir, os.ModePerm); err != nil {
+		logger.Warnf("[MongoDB] Failed to create buffer dir %s: %v", bufferDir, err)
+	}
+
+	// Default processing rate: 1000 changes per second (increased from 100)
+	processRate := 1000
+	// Custom configured rate can be implemented in the future by expanding the SyncConfig struct
+
 	return &MongoDBSyncer{
-		sourceClient: sourceClient,
-		targetClient: targetClient,
-		cfg:          cfg,
-		logger:       logger.WithField("sync_task_id", cfg.ID),
-		resumeTokens: resumeMap,
+		sourceClient:  sourceClient,
+		targetClient:  targetClient,
+		cfg:           cfg,
+		logger:        logger.WithField("sync_task_id", cfg.ID),
+		resumeTokens:  resumeMap,
+		bufferDir:     bufferDir,
+		bufferEnabled: true, // Enable by default
+		processRate:   processRate,
 	}
 }
 
@@ -369,6 +403,9 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 		s.logger.Infof("[MongoDB] Resume token found => %s.%s", sourceDB, collectionName)
 	}
 
+	// Process any existing buffered changes before starting the change stream
+	s.processBufferedChanges(ctx, targetColl, sourceDB, collectionName)
+
 	cs, err := sourceColl.Watch(ctx, pipeline, opts)
 	if err != nil {
 		s.logger.Errorf("[MongoDB] Failed to establish change stream for %s.%s: %v", sourceDB, collectionName, err)
@@ -381,14 +418,16 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 	}
 	s.logger.Infof("[MongoDB] Watching changes => %s.%s", sourceDB, collectionName)
 
+	// Increase buffer size and flush interval to handle high throughput
 	var buffer []bufferedChange
-	const batchSize = 200
-	flushInterval := time.Second * 1
+	const batchSize = 500            // Increased from 200
+	flushInterval := time.Second * 5 // Increased from 1 second
 	timer := time.NewTimer(flushInterval)
 	var bufferMutex sync.Mutex
 
 	changeStreamActive := true
 
+	// Separate goroutine for buffer flushing
 	go func() {
 		for {
 			select {
@@ -397,8 +436,13 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 			case <-timer.C:
 				bufferMutex.Lock()
 				if len(buffer) > 0 {
-					s.logger.Debugf("[MongoDB] flush timer => %s.%s => flushing %d ops", sourceDB, collectionName, len(buffer))
-					s.flushBuffer(ctx, targetColl, &buffer, sourceDB, collectionName)
+					if s.bufferEnabled {
+						// Store to persistent buffer instead of directly flushing
+						s.storeToBuffer(ctx, &buffer, sourceDB, collectionName)
+					} else {
+						s.logger.Debugf("[MongoDB] flush timer => %s.%s => flushing %d ops", sourceDB, collectionName, len(buffer))
+						s.flushBuffer(ctx, targetColl, &buffer, sourceDB, collectionName)
+					}
 				}
 				bufferMutex.Unlock()
 				timer.Reset(flushInterval)
@@ -406,13 +450,23 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 		}
 	}()
 
+	// Start a separate goroutine for processing the persistent buffer
+	if s.bufferEnabled {
+		go s.processPersistentBuffer(ctx, targetColl, sourceDB, collectionName)
+	}
+
 	for changeStreamActive {
 		select {
 		case <-ctx.Done():
 			bufferMutex.Lock()
 			if len(buffer) > 0 {
-				s.logger.Infof("[MongoDB] context done => flush %d ops for %s.%s", len(buffer), sourceDB, collectionName)
-				s.flushBuffer(ctx, targetColl, &buffer, sourceDB, collectionName)
+				if s.bufferEnabled {
+					s.logger.Infof("[MongoDB] context done => storing %d ops to buffer for %s.%s", len(buffer), sourceDB, collectionName)
+					s.storeToBuffer(ctx, &buffer, sourceDB, collectionName)
+				} else {
+					s.logger.Infof("[MongoDB] context done => flush %d ops for %s.%s", len(buffer), sourceDB, collectionName)
+					s.flushBuffer(ctx, targetColl, &buffer, sourceDB, collectionName)
+				}
 			}
 			bufferMutex.Unlock()
 			cs.Close(ctx)
@@ -452,8 +506,13 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 					bufferMutex.Lock()
 					buffSize := len(buffer)
 					if buffSize >= batchSize {
-						s.logger.Infof("[MongoDB] buffer reached %d => flush now => %s.%s", batchSize, sourceDB, collectionName)
-						s.flushBuffer(ctx, targetColl, &buffer, sourceDB, collectionName)
+						if s.bufferEnabled {
+							s.logger.Infof("[MongoDB] buffer reached %d => storing to persistent buffer => %s.%s", batchSize, sourceDB, collectionName)
+							s.storeToBuffer(ctx, &buffer, sourceDB, collectionName)
+						} else {
+							s.logger.Infof("[MongoDB] buffer reached %d => flush now => %s.%s", batchSize, sourceDB, collectionName)
+							s.flushBuffer(ctx, targetColl, &buffer, sourceDB, collectionName)
+						}
 						timer.Reset(flushInterval)
 					}
 					bufferMutex.Unlock()
@@ -731,4 +790,231 @@ func (s *MongoDBSyncer) removeMongoDBResumeToken(db, coll string) {
 func (s *MongoDBSyncer) getResumeTokenPath(db, coll string) string {
 	fileName := fmt.Sprintf("%s_%s.json", db, coll)
 	return filepath.Join(s.cfg.MongoDBResumeTokenPath, fileName)
+}
+
+// storeToBuffer persists the buffered changes to disk
+func (s *MongoDBSyncer) storeToBuffer(ctx context.Context, buffer *[]bufferedChange, sourceDB, collectionName string) {
+	if len(*buffer) == 0 {
+		return
+	}
+
+	bufferPath := s.getBufferPath(sourceDB, collectionName)
+
+	// Ensure buffer directory exists
+	if err := os.MkdirAll(bufferPath, os.ModePerm); err != nil {
+		s.logger.Errorf("[MongoDB] Failed to create buffer directory %s: %v", bufferPath, err)
+		return
+	}
+
+	// Store each change as a separate file for better concurrency
+	for i, change := range *buffer {
+		// Serialize the model
+		var docBytes []byte
+		var err error
+
+		// Convert different model types to JSON
+		switch change.opType {
+		case "insert":
+			if ins, ok := change.model.(*mongo.InsertOneModel); ok {
+				docBytes, err = json.Marshal(ins.Document)
+			}
+		case "update", "replace":
+			if rep, ok := change.model.(*mongo.ReplaceOneModel); ok {
+				docBytes, err = json.Marshal(map[string]interface{}{
+					"filter":      rep.Filter,
+					"replacement": rep.Replacement,
+				})
+			} else if upd, ok := change.model.(*mongo.UpdateOneModel); ok {
+				docBytes, err = json.Marshal(map[string]interface{}{
+					"filter": upd.Filter,
+					"update": upd.Update,
+				})
+			}
+		case "delete":
+			if del, ok := change.model.(*mongo.DeleteOneModel); ok {
+				docBytes, err = json.Marshal(map[string]interface{}{
+					"filter": del.Filter,
+				})
+			}
+		}
+
+		if err != nil {
+			s.logger.Errorf("[MongoDB] Failed to marshal document: %v", err)
+			continue
+		}
+
+		// Create persisted change
+		persistedChange := persistedChange{
+			ID:         fmt.Sprintf("%d_%s", time.Now().UnixNano(), fmt.Sprintf("%d", i)),
+			Token:      change.token,
+			Doc:        docBytes,
+			OpType:     change.opType,
+			SourceDB:   sourceDB,
+			SourceColl: collectionName,
+			Timestamp:  time.Now(),
+		}
+
+		// Save to file
+		changeFilePath := filepath.Join(bufferPath, persistedChange.ID+".json")
+		changeBytes, err := json.Marshal(persistedChange)
+		if err != nil {
+			s.logger.Errorf("[MongoDB] Failed to marshal persisted change: %v", err)
+			continue
+		}
+
+		if err := os.WriteFile(changeFilePath, changeBytes, 0644); err != nil {
+			s.logger.Errorf("[MongoDB] Failed to write buffer file %s: %v", changeFilePath, err)
+		}
+	}
+
+	s.logger.Infof("[MongoDB] Stored %d changes to buffer for %s.%s", len(*buffer), sourceDB, collectionName)
+
+	// Clear in-memory buffer
+	*buffer = (*buffer)[:0]
+
+	// Save latest token
+	if len(*buffer) > 0 && (*buffer)[len(*buffer)-1].token != nil {
+		s.saveMongoDBResumeToken(sourceDB, collectionName, (*buffer)[len(*buffer)-1].token)
+	}
+}
+
+// processPersistentBuffer reads from the persistent buffer and applies changes at a controlled rate
+func (s *MongoDBSyncer) processPersistentBuffer(ctx context.Context, targetColl *mongo.Collection, sourceDB, collectionName string) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			// Process up to processRate files per second
+			s.processBufferedChanges(ctx, targetColl, sourceDB, collectionName)
+		}
+	}
+}
+
+// processBufferedChanges processes a batch of buffered changes
+func (s *MongoDBSyncer) processBufferedChanges(ctx context.Context, targetColl *mongo.Collection, sourceDB, collectionName string) {
+	bufferPath := s.getBufferPath(sourceDB, collectionName)
+
+	// Ensure buffer directory exists
+	if _, err := os.Stat(bufferPath); os.IsNotExist(err) {
+		return // No buffer directory yet
+	}
+
+	// List files in buffer directory
+	files, err := os.ReadDir(bufferPath)
+	if err != nil {
+		s.logger.Errorf("[MongoDB] Failed to read buffer directory %s: %v", bufferPath, err)
+		return
+	}
+
+	if len(files) == 0 {
+		return // No files to process
+	}
+
+	// Sort files by name (which includes timestamp)
+	// We're just using the filesystem's natural ordering here
+
+	// Process up to processRate files
+	filesToProcess := s.processRate
+	if filesToProcess > len(files) {
+		filesToProcess = len(files)
+	}
+
+	s.logger.Infof("[MongoDB] Processing %d/%d buffered changes for %s.%s", filesToProcess, len(files), sourceDB, collectionName)
+
+	var batch []bufferedChange
+	var processedToken bson.Raw
+
+	// Read and process files
+	for i := 0; i < filesToProcess; i++ {
+		filePath := filepath.Join(bufferPath, files[i].Name())
+
+		// Read file
+		fileData, err := os.ReadFile(filePath)
+		if err != nil {
+			s.logger.Errorf("[MongoDB] Failed to read buffer file %s: %v", filePath, err)
+			continue
+		}
+
+		// Parse persisted change
+		var persistedChange persistedChange
+		if err := json.Unmarshal(fileData, &persistedChange); err != nil {
+			s.logger.Errorf("[MongoDB] Failed to unmarshal persisted change: %v", err)
+			// Remove corrupted file
+			_ = os.Remove(filePath)
+			continue
+		}
+
+		// Convert back to WriteModel
+		var model mongo.WriteModel
+
+		switch persistedChange.OpType {
+		case "insert":
+			var doc bson.M
+			if err := json.Unmarshal(persistedChange.Doc, &doc); err != nil {
+				s.logger.Errorf("[MongoDB] Failed to unmarshal insert document: %v", err)
+				continue
+			}
+			model = mongo.NewInsertOneModel().SetDocument(doc)
+
+		case "update", "replace":
+			var updateData map[string]interface{}
+			if err := json.Unmarshal(persistedChange.Doc, &updateData); err != nil {
+				s.logger.Errorf("[MongoDB] Failed to unmarshal update document: %v", err)
+				continue
+			}
+
+			if persistedChange.OpType == "replace" {
+				model = mongo.NewReplaceOneModel().
+					SetFilter(updateData["filter"].(map[string]interface{})).
+					SetReplacement(updateData["replacement"]).
+					SetUpsert(true)
+			} else {
+				model = mongo.NewUpdateOneModel().
+					SetFilter(updateData["filter"].(map[string]interface{})).
+					SetUpdate(updateData["update"]).
+					SetUpsert(true)
+			}
+
+		case "delete":
+			var deleteData map[string]interface{}
+			if err := json.Unmarshal(persistedChange.Doc, &deleteData); err != nil {
+				s.logger.Errorf("[MongoDB] Failed to unmarshal delete document: %v", err)
+				continue
+			}
+			model = mongo.NewDeleteOneModel().SetFilter(deleteData["filter"].(map[string]interface{}))
+		}
+
+		if model != nil {
+			batch = append(batch, bufferedChange{
+				token:  persistedChange.Token,
+				model:  model,
+				opType: persistedChange.OpType,
+			})
+			processedToken = persistedChange.Token
+		}
+
+		// Delete processed file
+		if err := os.Remove(filePath); err != nil {
+			s.logger.Warnf("[MongoDB] Failed to remove processed buffer file %s: %v", filePath, err)
+		}
+	}
+
+	// Apply batch to target collection
+	if len(batch) > 0 {
+		s.flushBuffer(ctx, targetColl, &batch, sourceDB, collectionName)
+
+		// Save the last processed token
+		if processedToken != nil {
+			s.saveMongoDBResumeToken(sourceDB, collectionName, processedToken)
+		}
+	}
+}
+
+// getBufferPath returns the path to the buffer directory for a collection
+func (s *MongoDBSyncer) getBufferPath(db, coll string) string {
+	return filepath.Join(s.bufferDir, fmt.Sprintf("%s_%s", db, coll))
 }
