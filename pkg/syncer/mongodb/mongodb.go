@@ -443,7 +443,7 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 						targetColl.Name(),
 						queryStr,
 					)
-					s.logger.Infof("[MongoDB][%s] table=%s.%s rowsAffected=1",
+					s.logger.Debugf("[MongoDB][%s] table=%s.%s rowsAffected=1",
 						strings.ToUpper(opType),
 						targetColl.Database().Name(),
 						targetColl.Name(),

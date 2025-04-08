@@ -585,7 +585,7 @@ func (h *MyEventHandler) handleDML(
 					return err
 				}
 				ra, _ := res.RowsAffected()
-				h.logger.Infof("[MySQL][INSERT] table=%s.%s rowsAffected=%d", tgtDB, tgtTable, ra)
+				h.logger.Debugf("[MySQL][INSERT] table=%s.%s rowsAffected=%d", tgtDB, tgtTable, ra)
 				atomic.StoreInt32(&h.lastExecError, 0)
 				return nil
 			})
@@ -642,7 +642,7 @@ func (h *MyEventHandler) handleDML(
 					return err
 				}
 				ra, _ := res.RowsAffected()
-				h.logger.Infof("[MySQL][UPDATE] table=%s.%s rowsAffected=%d", tgtDB, tgtTable, ra)
+				h.logger.Debugf("[MySQL][UPDATE] table=%s.%s rowsAffected=%d", tgtDB, tgtTable, ra)
 				atomic.StoreInt32(&h.lastExecError, 0)
 				return nil
 			})
@@ -679,7 +679,7 @@ func (h *MyEventHandler) handleDML(
 					return err
 				}
 				ra, _ := res.RowsAffected()
-				h.logger.Infof("[MySQL][DELETE] table=%s.%s rowsAffected=%d", tgtDB, tgtTable, ra)
+				h.logger.Debugf("[MySQL][DELETE] table=%s.%s rowsAffected=%d", tgtDB, tgtTable, ra)
 				atomic.StoreInt32(&h.lastExecError, 0)
 				return nil
 			})

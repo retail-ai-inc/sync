@@ -1036,7 +1036,7 @@ func (s *PostgreSQLSyncer) replicateQuery(db *sql.DB, query, opType, tableName s
 			}
 
 			rowsAff, _ := res.RowsAffected()
-			s.logger.Infof("[PostgreSQL][%s] table=%s rowsAffected=%d", opType, tableName, rowsAff)
+			s.logger.Debugf("[PostgreSQL][%s] table=%s rowsAffected=%d", opType, tableName, rowsAff)
 			atomic.StoreInt32(&s.lastExecError, 0)
 			return nil
 		})
