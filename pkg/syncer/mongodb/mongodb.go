@@ -28,13 +28,13 @@ type bufferedChange struct {
 
 // persistedChange represents a change that will be saved to disk
 type persistedChange struct {
-	ID         string          `json:"id"`
-	Token      bson.Raw        `json:"token"`
-	Doc        json.RawMessage `json:"doc"`
-	OpType     string          `json:"op_type"`
-	SourceDB   string          `json:"source_db"`
-	SourceColl string          `json:"source_coll"`
-	Timestamp  time.Time       `json:"timestamp"`
+	ID         string    `json:"id"`
+	Token      bson.Raw  `json:"token"`
+	Doc        []byte    `json:"doc"` // Changed to []byte to store raw BSON data
+	OpType     string    `json:"op_type"`
+	SourceDB   string    `json:"source_db"`
+	SourceColl string    `json:"source_coll"`
+	Timestamp  time.Time `json:"timestamp"`
 }
 
 type MongoDBSyncer struct {
@@ -808,38 +808,38 @@ func (s *MongoDBSyncer) storeToBuffer(ctx context.Context, buffer *[]bufferedCha
 
 	// Store each change as a separate file for better concurrency
 	for i, change := range *buffer {
-		// Serialize the model
+		// Serialize the model using BSON instead of JSON to preserve MongoDB types
 		var docBytes []byte
 		var err error
 
-		// Convert different model types to JSON
+		// Convert different model types to BSON
 		switch change.opType {
 		case "insert":
 			if ins, ok := change.model.(*mongo.InsertOneModel); ok {
-				docBytes, err = json.Marshal(ins.Document)
+				docBytes, err = bson.Marshal(ins.Document)
 			}
 		case "update", "replace":
 			if rep, ok := change.model.(*mongo.ReplaceOneModel); ok {
-				docBytes, err = json.Marshal(map[string]interface{}{
+				docBytes, err = bson.Marshal(map[string]interface{}{
 					"filter":      rep.Filter,
 					"replacement": rep.Replacement,
 				})
 			} else if upd, ok := change.model.(*mongo.UpdateOneModel); ok {
-				docBytes, err = json.Marshal(map[string]interface{}{
+				docBytes, err = bson.Marshal(map[string]interface{}{
 					"filter": upd.Filter,
 					"update": upd.Update,
 				})
 			}
 		case "delete":
 			if del, ok := change.model.(*mongo.DeleteOneModel); ok {
-				docBytes, err = json.Marshal(map[string]interface{}{
+				docBytes, err = bson.Marshal(map[string]interface{}{
 					"filter": del.Filter,
 				})
 			}
 		}
 
 		if err != nil {
-			s.logger.Errorf("[MongoDB] Failed to marshal document: %v", err)
+			s.logger.Errorf("[MongoDB] Failed to marshal document to BSON: %v", err)
 			continue
 		}
 
@@ -948,44 +948,65 @@ func (s *MongoDBSyncer) processBufferedChanges(ctx context.Context, targetColl *
 			continue
 		}
 
-		// Convert back to WriteModel
+		// Convert back to WriteModel using BSON to preserve MongoDB types
 		var model mongo.WriteModel
 
 		switch persistedChange.OpType {
 		case "insert":
-			var doc bson.M
-			if err := json.Unmarshal(persistedChange.Doc, &doc); err != nil {
-				s.logger.Errorf("[MongoDB] Failed to unmarshal insert document: %v", err)
+			var doc bson.D
+			if err := bson.Unmarshal(persistedChange.Doc, &doc); err != nil {
+				s.logger.Errorf("[MongoDB] Failed to unmarshal insert document from BSON: %v", err)
 				continue
 			}
 			model = mongo.NewInsertOneModel().SetDocument(doc)
 
 		case "update", "replace":
-			var updateData map[string]interface{}
-			if err := json.Unmarshal(persistedChange.Doc, &updateData); err != nil {
-				s.logger.Errorf("[MongoDB] Failed to unmarshal update document: %v", err)
+			var updateData bson.M
+			if err := bson.Unmarshal(persistedChange.Doc, &updateData); err != nil {
+				s.logger.Errorf("[MongoDB] Failed to unmarshal update document from BSON: %v", err)
 				continue
 			}
 
 			if persistedChange.OpType == "replace" {
+				filter, ok := updateData["filter"].(bson.M)
+				if !ok || updateData["replacement"] == nil {
+					s.logger.Errorf("[MongoDB] Invalid replace data structure")
+					continue
+				}
+
 				model = mongo.NewReplaceOneModel().
-					SetFilter(updateData["filter"].(map[string]interface{})).
+					SetFilter(filter).
 					SetReplacement(updateData["replacement"]).
 					SetUpsert(true)
 			} else {
+				filter, ok := updateData["filter"].(bson.M)
+				if !ok || updateData["update"] == nil {
+					s.logger.Errorf("[MongoDB] Invalid update data structure")
+					continue
+				}
+
 				model = mongo.NewUpdateOneModel().
-					SetFilter(updateData["filter"].(map[string]interface{})).
+					SetFilter(filter).
 					SetUpdate(updateData["update"]).
 					SetUpsert(true)
 			}
 
 		case "delete":
-			var deleteData map[string]interface{}
-			if err := json.Unmarshal(persistedChange.Doc, &deleteData); err != nil {
-				s.logger.Errorf("[MongoDB] Failed to unmarshal delete document: %v", err)
+			var deleteData bson.M
+			if err := bson.Unmarshal(persistedChange.Doc, &deleteData); err != nil {
+				s.logger.Errorf("[MongoDB] Failed to unmarshal delete document from BSON: %v", err)
 				continue
 			}
-			model = mongo.NewDeleteOneModel().SetFilter(deleteData["filter"].(map[string]interface{}))
+
+			filter, ok := deleteData["filter"].(bson.M)
+			if !ok {
+				s.logger.Errorf("[MongoDB] Invalid delete filter structure")
+				continue
+			}
+
+			model = mongo.NewDeleteOneModel().SetFilter(filter)
+			// Add debug logging for delete operations
+			s.logger.Debugf("[MongoDB] Delete filter: %+v", filter)
 		}
 
 		if model != nil {
@@ -1005,6 +1026,8 @@ func (s *MongoDBSyncer) processBufferedChanges(ctx context.Context, targetColl *
 
 	// Apply batch to target collection
 	if len(batch) > 0 {
+		s.logger.Debugf("[MongoDB] Flushing %d operations (%d deletes) for %s.%s",
+			len(batch), countDeleteOps(batch), sourceDB, collectionName)
 		s.flushBuffer(ctx, targetColl, &batch, sourceDB, collectionName)
 
 		// Save the last processed token
@@ -1012,6 +1035,17 @@ func (s *MongoDBSyncer) processBufferedChanges(ctx context.Context, targetColl *
 			s.saveMongoDBResumeToken(sourceDB, collectionName, processedToken)
 		}
 	}
+}
+
+// Helper function to count delete operations in a batch
+func countDeleteOps(batch []bufferedChange) int {
+	count := 0
+	for _, change := range batch {
+		if change.opType == "delete" {
+			count++
+		}
+	}
+	return count
 }
 
 // getBufferPath returns the path to the buffer directory for a collection
