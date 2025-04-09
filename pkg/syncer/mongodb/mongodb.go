@@ -93,8 +93,8 @@ func NewMongoDBSyncer(cfg config.SyncConfig, logger *logrus.Logger) *MongoDBSync
 		logger.Warnf("[MongoDB] Failed to create buffer dir %s: %v", bufferDir, err)
 	}
 
-	// Default processing rate: 1000 changes per second (increased from 100)
-	processRate := 3000
+	// Default processing rate: 10000 changes per second (increased from 3000)
+	processRate := 10000
 	// Custom configured rate can be implemented in the future by expanding the SyncConfig struct
 
 	return &MongoDBSyncer{
@@ -420,8 +420,8 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 
 	// Increase buffer size and flush interval to handle high throughput
 	var buffer []bufferedChange
-	const batchSize = 500            // Increased from 200
-	flushInterval := time.Second * 5 // Increased from 1 second
+	const batchSize = 2000           // Increased from 500
+	flushInterval := time.Second * 1 // Increased from 5 seconds
 	timer := time.NewTimer(flushInterval)
 	var bufferMutex sync.Mutex
 
@@ -806,68 +806,85 @@ func (s *MongoDBSyncer) storeToBuffer(ctx context.Context, buffer *[]bufferedCha
 		return
 	}
 
-	// Store each change as a separate file for better concurrency
-	for i, change := range *buffer {
-		// Serialize the model using BSON instead of JSON to preserve MongoDB types
-		var docBytes []byte
-		var err error
+	// Batch file writing optimization
+	batchSize := 100 // Number of files per batch
+	timestamp := time.Now().UnixNano()
 
-		// Convert different model types to BSON
-		switch change.opType {
-		case "insert":
-			if ins, ok := change.model.(*mongo.InsertOneModel); ok {
-				docBytes, err = bson.Marshal(ins.Document)
-			}
-		case "update", "replace":
-			if rep, ok := change.model.(*mongo.ReplaceOneModel); ok {
-				docBytes, err = bson.Marshal(map[string]interface{}{
-					"filter":      rep.Filter,
-					"replacement": rep.Replacement,
-				})
-			} else if upd, ok := change.model.(*mongo.UpdateOneModel); ok {
-				docBytes, err = bson.Marshal(map[string]interface{}{
-					"filter": upd.Filter,
-					"update": upd.Update,
-				})
-			}
-		case "delete":
-			if del, ok := change.model.(*mongo.DeleteOneModel); ok {
-				docBytes, err = bson.Marshal(map[string]interface{}{
-					"filter": del.Filter,
-				})
-			}
+	for i := 0; i < len(*buffer); i += batchSize {
+		end := i + batchSize
+		if end > len(*buffer) {
+			end = len(*buffer)
 		}
 
+		batchChanges := make([]persistedChange, 0, end-i)
+
+		// Prepare batch changes
+		for j := i; j < end; j++ {
+			change := (*buffer)[j]
+
+			// Serialize model to BSON
+			var docBytes []byte
+			var err error
+
+			switch change.opType {
+			case "insert":
+				if ins, ok := change.model.(*mongo.InsertOneModel); ok {
+					docBytes, err = bson.Marshal(ins.Document)
+				}
+			case "update", "replace":
+				if rep, ok := change.model.(*mongo.ReplaceOneModel); ok {
+					docBytes, err = bson.Marshal(map[string]interface{}{
+						"filter":      rep.Filter,
+						"replacement": rep.Replacement,
+					})
+				} else if upd, ok := change.model.(*mongo.UpdateOneModel); ok {
+					docBytes, err = bson.Marshal(map[string]interface{}{
+						"filter": upd.Filter,
+						"update": upd.Update,
+					})
+				}
+			case "delete":
+				if del, ok := change.model.(*mongo.DeleteOneModel); ok {
+					docBytes, err = bson.Marshal(map[string]interface{}{
+						"filter": del.Filter,
+					})
+				}
+			}
+
+			if err != nil {
+				s.logger.Errorf("[MongoDB] Failed to marshal document to BSON: %v", err)
+				continue
+			}
+
+			// Create persisted change
+			persistedChange := persistedChange{
+				ID:         fmt.Sprintf("%d_%d", timestamp, j),
+				Token:      change.token,
+				Doc:        docBytes,
+				OpType:     change.opType,
+				SourceDB:   sourceDB,
+				SourceColl: collectionName,
+				Timestamp:  time.Now(),
+			}
+
+			batchChanges = append(batchChanges, persistedChange)
+		}
+
+		// Write batch to single file
+		batchFilePath := filepath.Join(bufferPath, fmt.Sprintf("batch_%d_%d.json", timestamp, i))
+		batchBytes, err := json.Marshal(batchChanges)
 		if err != nil {
-			s.logger.Errorf("[MongoDB] Failed to marshal document to BSON: %v", err)
+			s.logger.Errorf("[MongoDB] Failed to marshal batch changes: %v", err)
 			continue
 		}
 
-		// Create persisted change
-		persistedChange := persistedChange{
-			ID:         fmt.Sprintf("%d_%s", time.Now().UnixNano(), fmt.Sprintf("%d", i)),
-			Token:      change.token,
-			Doc:        docBytes,
-			OpType:     change.opType,
-			SourceDB:   sourceDB,
-			SourceColl: collectionName,
-			Timestamp:  time.Now(),
-		}
-
-		// Save to file
-		changeFilePath := filepath.Join(bufferPath, persistedChange.ID+".json")
-		changeBytes, err := json.Marshal(persistedChange)
-		if err != nil {
-			s.logger.Errorf("[MongoDB] Failed to marshal persisted change: %v", err)
-			continue
-		}
-
-		if err := os.WriteFile(changeFilePath, changeBytes, 0644); err != nil {
-			s.logger.Errorf("[MongoDB] Failed to write buffer file %s: %v", changeFilePath, err)
+		if err := os.WriteFile(batchFilePath, batchBytes, 0644); err != nil {
+			s.logger.Errorf("[MongoDB] Failed to write batch file %s: %v", batchFilePath, err)
 		}
 	}
 
-	s.logger.Infof("[MongoDB] Stored %d changes to buffer for %s.%s", len(*buffer), sourceDB, collectionName)
+	s.logger.Infof("[MongoDB] Stored %d changes to buffer for %s.%s using batch optimization",
+		len(*buffer), sourceDB, collectionName)
 
 	// Clear in-memory buffer
 	*buffer = (*buffer)[:0]
@@ -914,11 +931,8 @@ func (s *MongoDBSyncer) processBufferedChanges(ctx context.Context, targetColl *
 		return // No files to process
 	}
 
-	// Sort files by name (which includes timestamp)
-	// We're just using the filesystem's natural ordering here
-
-	// Process up to processRate files
-	filesToProcess := s.processRate
+	// Process limit increased to twice the original for faster buffer emptying
+	filesToProcess := s.processRate * 2
 	if filesToProcess > len(files) {
 		filesToProcess = len(files)
 	}
@@ -930,92 +944,58 @@ func (s *MongoDBSyncer) processBufferedChanges(ctx context.Context, targetColl *
 
 	// Read and process files
 	for i := 0; i < filesToProcess; i++ {
-		filePath := filepath.Join(bufferPath, files[i].Name())
+		if i >= len(files) {
+			break
+		}
 
-		// Read file
+		filePath := filepath.Join(bufferPath, files[i].Name())
 		fileData, err := os.ReadFile(filePath)
 		if err != nil {
 			s.logger.Errorf("[MongoDB] Failed to read buffer file %s: %v", filePath, err)
 			continue
 		}
 
-		// Parse persisted change
-		var persistedChange persistedChange
-		if err := json.Unmarshal(fileData, &persistedChange); err != nil {
-			s.logger.Errorf("[MongoDB] Failed to unmarshal persisted change: %v", err)
-			// Remove corrupted file
-			_ = os.Remove(filePath)
-			continue
-		}
-
-		// Convert back to WriteModel using BSON to preserve MongoDB types
-		var model mongo.WriteModel
-
-		switch persistedChange.OpType {
-		case "insert":
-			var doc bson.D
-			if err := bson.Unmarshal(persistedChange.Doc, &doc); err != nil {
-				s.logger.Errorf("[MongoDB] Failed to unmarshal insert document from BSON: %v", err)
-				continue
-			}
-			model = mongo.NewInsertOneModel().SetDocument(doc)
-
-		case "update", "replace":
-			var updateData bson.M
-			if err := bson.Unmarshal(persistedChange.Doc, &updateData); err != nil {
-				s.logger.Errorf("[MongoDB] Failed to unmarshal update document from BSON: %v", err)
+		// Check if it's a batch processing file
+		if strings.HasPrefix(filepath.Base(filePath), "batch_") {
+			// Parse batch changes
+			var batchChanges []persistedChange
+			if err := json.Unmarshal(fileData, &batchChanges); err != nil {
+				s.logger.Errorf("[MongoDB] Failed to unmarshal batch changes: %v", err)
+				_ = os.Remove(filePath)
 				continue
 			}
 
-			if persistedChange.OpType == "replace" {
-				filter, ok := updateData["filter"].(bson.M)
-				if !ok || updateData["replacement"] == nil {
-					s.logger.Errorf("[MongoDB] Invalid replace data structure")
-					continue
+			// Process each change in the batch
+			for _, persistedChange := range batchChanges {
+				// Convert to WriteModel
+				model := s.convertToWriteModel(persistedChange)
+				if model != nil {
+					batch = append(batch, bufferedChange{
+						token:  persistedChange.Token,
+						model:  model,
+						opType: persistedChange.OpType,
+					})
+					processedToken = persistedChange.Token
 				}
-
-				model = mongo.NewReplaceOneModel().
-					SetFilter(filter).
-					SetReplacement(updateData["replacement"]).
-					SetUpsert(true)
-			} else {
-				filter, ok := updateData["filter"].(bson.M)
-				if !ok || updateData["update"] == nil {
-					s.logger.Errorf("[MongoDB] Invalid update data structure")
-					continue
-				}
-
-				model = mongo.NewUpdateOneModel().
-					SetFilter(filter).
-					SetUpdate(updateData["update"]).
-					SetUpsert(true)
 			}
-
-		case "delete":
-			var deleteData bson.M
-			if err := bson.Unmarshal(persistedChange.Doc, &deleteData); err != nil {
-				s.logger.Errorf("[MongoDB] Failed to unmarshal delete document from BSON: %v", err)
+		} else {
+			// Process old format single change file
+			var persistedChange persistedChange
+			if err := json.Unmarshal(fileData, &persistedChange); err != nil {
+				s.logger.Errorf("[MongoDB] Failed to unmarshal persisted change: %v", err)
+				_ = os.Remove(filePath)
 				continue
 			}
 
-			filter, ok := deleteData["filter"].(bson.M)
-			if !ok {
-				s.logger.Errorf("[MongoDB] Invalid delete filter structure")
-				continue
+			model := s.convertToWriteModel(persistedChange)
+			if model != nil {
+				batch = append(batch, bufferedChange{
+					token:  persistedChange.Token,
+					model:  model,
+					opType: persistedChange.OpType,
+				})
+				processedToken = persistedChange.Token
 			}
-
-			model = mongo.NewDeleteOneModel().SetFilter(filter)
-			// Add debug logging for delete operations
-			s.logger.Debugf("[MongoDB] Delete filter: %+v", filter)
-		}
-
-		if model != nil {
-			batch = append(batch, bufferedChange{
-				token:  persistedChange.Token,
-				model:  model,
-				opType: persistedChange.OpType,
-			})
-			processedToken = persistedChange.Token
 		}
 
 		// Delete processed file
@@ -1051,4 +1031,67 @@ func countDeleteOps(batch []bufferedChange) int {
 // getBufferPath returns the path to the buffer directory for a collection
 func (s *MongoDBSyncer) getBufferPath(db, coll string) string {
 	return filepath.Join(s.bufferDir, fmt.Sprintf("%s_%s", db, coll))
+}
+
+// convertToWriteModel converts persistedChange to WriteModel
+func (s *MongoDBSyncer) convertToWriteModel(persistedChange persistedChange) mongo.WriteModel {
+	var model mongo.WriteModel
+
+	switch persistedChange.OpType {
+	case "insert":
+		var doc bson.D
+		if err := bson.Unmarshal(persistedChange.Doc, &doc); err != nil {
+			s.logger.Errorf("[MongoDB] Failed to unmarshal insert document from BSON: %v", err)
+			return nil
+		}
+		model = mongo.NewInsertOneModel().SetDocument(doc)
+
+	case "update", "replace":
+		var updateData bson.M
+		if err := bson.Unmarshal(persistedChange.Doc, &updateData); err != nil {
+			s.logger.Errorf("[MongoDB] Failed to unmarshal update document from BSON: %v", err)
+			return nil
+		}
+
+		if persistedChange.OpType == "replace" {
+			filter, ok := updateData["filter"].(bson.M)
+			if !ok || updateData["replacement"] == nil {
+				s.logger.Errorf("[MongoDB] Invalid replace data structure")
+				return nil
+			}
+
+			model = mongo.NewReplaceOneModel().
+				SetFilter(filter).
+				SetReplacement(updateData["replacement"]).
+				SetUpsert(true)
+		} else {
+			filter, ok := updateData["filter"].(bson.M)
+			if !ok || updateData["update"] == nil {
+				s.logger.Errorf("[MongoDB] Invalid update data structure")
+				return nil
+			}
+
+			model = mongo.NewUpdateOneModel().
+				SetFilter(filter).
+				SetUpdate(updateData["update"]).
+				SetUpsert(true)
+		}
+
+	case "delete":
+		var deleteData bson.M
+		if err := bson.Unmarshal(persistedChange.Doc, &deleteData); err != nil {
+			s.logger.Errorf("[MongoDB] Failed to unmarshal delete document from BSON: %v", err)
+			return nil
+		}
+
+		filter, ok := deleteData["filter"].(bson.M)
+		if !ok {
+			s.logger.Errorf("[MongoDB] Invalid delete filter structure")
+			return nil
+		}
+
+		model = mongo.NewDeleteOneModel().SetFilter(filter)
+	}
+
+	return model
 }
