@@ -1,6 +1,7 @@
 package api
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/retail-ai-inc/sync/pkg/backup"
 	"github.com/sirupsen/logrus"
 )
 
@@ -196,6 +198,13 @@ VALUES(?, ?, ?, ?, ?)
 			"status": status,
 		},
 	})
+
+	// After successful creation, sync crontab
+	db, cronManager := getDbAndCronManager()
+	if err := cronManager.SyncCrontab(r.Context()); err != nil {
+		logrus.Warnf("[BackupCreateHandler] Failed to sync crontab: %v", err)
+		// Continue execution, don't interrupt response
+	}
 }
 
 func BackupDeleteHandler(w http.ResponseWriter, r *http.Request) {
@@ -228,6 +237,13 @@ func BackupDeleteHandler(w http.ResponseWriter, r *http.Request) {
 		"success": true,
 		"message": "Backup job deleted successfully",
 	})
+
+	// After successful deletion, sync crontab
+	db, cronManager := getDbAndCronManager()
+	if err := cronManager.SyncCrontab(r.Context()); err != nil {
+		logrus.Warnf("[BackupDeleteHandler] Failed to sync crontab: %v", err)
+		// Continue execution, don't interrupt response
+	}
 }
 
 func BackupPauseHandler(w http.ResponseWriter, r *http.Request) {
@@ -244,6 +260,13 @@ func BackupPauseHandler(w http.ResponseWriter, r *http.Request) {
 		"success": true,
 		"message": "Backup job paused successfully",
 	})
+
+	// After successful pause, sync crontab
+	_, cronManager := getDbAndCronManager()
+	if err := cronManager.SyncCrontab(r.Context()); err != nil {
+		logrus.Warnf("[BackupPauseHandler] Failed to sync crontab: %v", err)
+		// Continue execution, don't interrupt response
+	}
 }
 
 func BackupResumeHandler(w http.ResponseWriter, r *http.Request) {
@@ -260,6 +283,13 @@ func BackupResumeHandler(w http.ResponseWriter, r *http.Request) {
 		"success": true,
 		"message": "Backup job resumed successfully",
 	})
+
+	// After successful resume, sync crontab
+	_, cronManager := getDbAndCronManager()
+	if err := cronManager.SyncCrontab(r.Context()); err != nil {
+		logrus.Warnf("[BackupResumeHandler] Failed to sync crontab: %v", err)
+		// Continue execution, don't interrupt response
+	}
 }
 
 func BackupRunHandler(w http.ResponseWriter, r *http.Request) {
@@ -408,6 +438,13 @@ WHERE id=?
 		"success": true,
 		"message": "Backup job updated successfully",
 	})
+
+	// After successful update, sync crontab
+	db, cronManager := getDbAndCronManager()
+	if err := cronManager.SyncCrontab(r.Context()); err != nil {
+		logrus.Warnf("[BackupUpdateHandler] Failed to sync crontab: %v", err)
+		// Continue execution, don't interrupt response
+	}
 }
 
 func updateBackupStatus(id string, enable bool) error {
@@ -454,4 +491,16 @@ WHERE id=?
 func calculateNextBackupTime(cronExpr string) string {
 	tomorrow := time.Now().UTC().Add(24 * time.Hour)
 	return tomorrow.Format("2006-01-02 15:04:05")
+}
+
+// getDbAndCronManager Get database connection and crontab manager
+func getDbAndCronManager() (*sql.DB, *backup.CronManager) {
+	db, err := openLocalDB()
+	if err != nil {
+		logrus.Errorf("[CronManager] Failed to open database: %v", err)
+		return nil, nil
+	}
+	// Ensure API path correctly includes /api prefix
+	apiServer := "http://localhost:8080/api" // Should be obtained from configuration
+	return db, backup.NewCronManager(db, apiServer)
 }
