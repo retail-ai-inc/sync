@@ -11,6 +11,24 @@ import (
 	// "github.com/sirupsen/logrus"
 )
 
+// convertToJST converts a time string from UTC to JST (UTC+9)
+// It accepts RFC3339 format as input and returns a formatted JST time
+func convertToJST(timeStr string) string {
+	// Try to parse the time string
+	parsedTime, err := time.Parse(time.RFC3339, timeStr)
+	if err != nil {
+		// If parsing fails, return the original string
+		return timeStr
+	}
+
+	// Convert to JST (UTC+9)
+	jst := time.FixedZone("JST", 9*60*60)
+	jstTime := parsedTime.In(jst)
+
+	// Format the time in the desired format
+	return jstTime.Format("2006-01-02T15:04:05+09:00")
+}
+
 // GET /api/sync/{id}/monitor => {status, progress, tps, ...}
 func SyncMonitorHandler(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
@@ -144,15 +162,12 @@ LIMIT 1000
 			tableName = "taskID:" + taskID + "_" + tbl
 		}
 
-		formattedTime := t
-		if parsedTime, err := time.Parse(time.RFC3339, t); err == nil {
-			formattedTime = parsedTime.Format("2006-01-02T15:04Z")
-		}
+		jstTime := convertToJST(t)
 
 		rowCountTrend = append(rowCountTrend,
-			map[string]interface{}{"time": formattedTime, "table": tableName, "type": "source", "value": src},
-			map[string]interface{}{"time": formattedTime, "table": tableName, "type": "target", "value": tgt},
-			map[string]interface{}{"time": formattedTime, "table": tableName, "type": "diff", "value": diff},
+			map[string]interface{}{"time": jstTime, "table": tableName, "type": "source", "value": src},
+			map[string]interface{}{"time": jstTime, "table": tableName, "type": "target", "value": tgt},
+			map[string]interface{}{"time": jstTime, "table": tableName, "type": "diff", "value": diff},
 		)
 	}
 
@@ -197,15 +212,12 @@ LIMIT 1000
 					tableName = "taskID:" + taskID + "_" + tbl
 				}
 
-				formattedTime := t
-				if parsedTime, err := time.Parse(time.RFC3339, t); err == nil {
-					formattedTime = parsedTime.Format("2006-01-02T15:04Z")
-				}
+				jstTime := convertToJST(t)
 
 				rowCountTrend = append(rowCountTrend,
-					map[string]interface{}{"time": formattedTime, "table": tableName, "type": "source", "value": src},
-					map[string]interface{}{"time": formattedTime, "table": tableName, "type": "target", "value": tgt},
-					map[string]interface{}{"time": formattedTime, "table": tableName, "type": "diff", "value": diff},
+					map[string]interface{}{"time": jstTime, "table": tableName, "type": "source", "value": src},
+					map[string]interface{}{"time": jstTime, "table": tableName, "type": "target", "value": tgt},
+					map[string]interface{}{"time": jstTime, "table": tableName, "type": "diff", "value": diff},
 				)
 			}
 		}
@@ -230,6 +242,9 @@ func SyncLogsHandler(w http.ResponseWriter, r *http.Request) {
 	taskID := chi.URLParam(r, "id")
 	levelParam := r.URL.Query().Get("level")
 	search := r.URL.Query().Get("search")
+	rangeStr := r.URL.Query().Get("range")
+
+	sinceTime := parseRangeToSince(rangeStr)
 
 	db, err := openLocalDB()
 	if err != nil {
@@ -238,13 +253,36 @@ func SyncLogsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer db.Close()
 
-	rows, err := db.Query(`
+	var rows *sql.Rows
+	var query string
+	var queryParams []interface{}
+
+	// "YYYY-MM-DD HH:MM:SS"
+	timeFormat := "2006-01-02 15:04:05"
+
+	if !sinceTime.IsZero() {
+		query = `
+SELECT log_time, level, message
+FROM sync_log
+WHERE sync_task_id=?
+  AND log_time >= ?
+ORDER BY log_time DESC
+LIMIT 500
+`
+		utcSince := sinceTime.UTC().Format(timeFormat)
+		queryParams = []interface{}{taskID, utcSince}
+	} else {
+		query = `
 SELECT log_time, level, message
 FROM sync_log
 WHERE sync_task_id=?
 ORDER BY log_time DESC
 LIMIT 500
-`, taskID)
+`
+		queryParams = []interface{}{taskID}
+	}
+
+	rows, err = db.Query(query, queryParams...)
 	if err != nil {
 		errorJSON(w, "query sync_log fail", err)
 		return
@@ -258,8 +296,11 @@ LIMIT 500
 			errorJSON(w, "scan sync_log fail", err)
 			return
 		}
+
+		jstTime := convertToJST(t)
+
 		logs = append(logs, map[string]interface{}{
-			"time":    t,
+			"time":    jstTime,
 			"level":   lvl,
 			"message": msg,
 		})

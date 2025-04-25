@@ -141,7 +141,7 @@ func getMongoDBSchema(c context.Context, req SchemaRequest) (SchemaResponse, err
 
 	client, err := mongo.Connect(ctx, clientOptions)
 	if err != nil {
-		return SchemaResponse{}, fmt.Errorf("Failed to connect to MongoDB: %w", err)
+		return SchemaResponse{}, fmt.Errorf("failed to connect to MongoDB: %w", err)
 	}
 	defer func() {
 		if err := client.Disconnect(ctx); err != nil {
@@ -151,7 +151,7 @@ func getMongoDBSchema(c context.Context, req SchemaRequest) (SchemaResponse, err
 
 	// Validate connection
 	if err := client.Ping(ctx, nil); err != nil {
-		return SchemaResponse{}, fmt.Errorf("MongoDB connection test failed: %w", err)
+		return SchemaResponse{}, fmt.Errorf("mongoDB connection test failed: %w", err)
 	}
 
 	// Get collection document sample to infer structure
@@ -161,32 +161,32 @@ func getMongoDBSchema(c context.Context, req SchemaRequest) (SchemaResponse, err
 	var sampleDocs []bson.M
 	findCursor, err := collection.Find(ctx, bson.M{}, options.Find().SetLimit(10))
 	if err != nil {
-		return SchemaResponse{}, fmt.Errorf("Failed to query documents: %w", err)
+		return SchemaResponse{}, fmt.Errorf("failed to query documents: %w", err)
 	}
 	defer findCursor.Close(ctx)
 
 	if err := findCursor.All(ctx, &sampleDocs); err != nil {
-		return SchemaResponse{}, fmt.Errorf("Failed to decode documents: %w", err)
+		return SchemaResponse{}, fmt.Errorf("failed to decode documents: %w", err)
 	}
 
 	// Use aggregation query to get top-level fields
 	pipeline := bson.A{
-		bson.D{{"$limit", 100}},
-		bson.D{{"$project", bson.D{{"arrayofkeyvalue", bson.D{{"$objectToArray", "$$ROOT"}}}}}},
-		bson.D{{"$unwind", "$arrayofkeyvalue"}},
-		bson.D{{"$group", bson.D{
-			{"_id", nil},
-			{"fields", bson.D{{"$addToSet", "$arrayofkeyvalue.k"}}},
-			{"fieldTypes", bson.D{{"$push", bson.D{
-				{"field", "$arrayofkeyvalue.k"},
-				{"value", "$arrayofkeyvalue.v"},
+		bson.D{{Key: "$limit", Value: 100}},
+		bson.D{{Key: "$project", Value: bson.D{{Key: "arrayofkeyvalue", Value: bson.D{{Key: "$objectToArray", Value: "$$ROOT"}}}}}},
+		bson.D{{Key: "$unwind", Value: "$arrayofkeyvalue"}},
+		bson.D{{Key: "$group", Value: bson.D{
+			{Key: "_id", Value: nil},
+			{Key: "fields", Value: bson.D{{Key: "$addToSet", Value: "$arrayofkeyvalue.k"}}},
+			{Key: "fieldTypes", Value: bson.D{{Key: "$push", Value: bson.D{
+				{Key: "field", Value: "$arrayofkeyvalue.k"},
+				{Key: "value", Value: "$arrayofkeyvalue.v"},
 			}}}},
 		}}},
 	}
 
 	cursor, err := collection.Aggregate(ctx, pipeline)
 	if err != nil {
-		return SchemaResponse{}, fmt.Errorf("Failed to analyze collection structure: %w", err)
+		return SchemaResponse{}, fmt.Errorf("failed to analyze collection structure: %w", err)
 	}
 	defer cursor.Close(ctx)
 
@@ -200,7 +200,7 @@ func getMongoDBSchema(c context.Context, req SchemaRequest) (SchemaResponse, err
 
 	var results []AggResult
 	if err := cursor.All(ctx, &results); err != nil {
-		return SchemaResponse{}, fmt.Errorf("Failed to decode results: %w", err)
+		return SchemaResponse{}, fmt.Errorf("failed to decode results: %w", err)
 	}
 
 	// If collection is empty, return empty field list
@@ -319,7 +319,7 @@ func getMySQLSchema(c context.Context, req SchemaRequest) (SchemaResponse, error
 	// Connect to database
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
-		return SchemaResponse{}, fmt.Errorf("Failed to connect to MySQL: %w", err)
+		return SchemaResponse{}, fmt.Errorf("failed to connect to MySQL: %w", err)
 	}
 	defer db.Close()
 
@@ -334,7 +334,7 @@ func getMySQLSchema(c context.Context, req SchemaRequest) (SchemaResponse, error
 
 	// Validate connection
 	if err := db.PingContext(ctx); err != nil {
-		return SchemaResponse{}, fmt.Errorf("MySQL connection test failed: %w", err)
+		return SchemaResponse{}, fmt.Errorf("mySQL connection test failed: %w", err)
 	}
 
 	// Query table structure
@@ -346,7 +346,7 @@ func getMySQLSchema(c context.Context, req SchemaRequest) (SchemaResponse, error
 	`
 	rows, err := db.QueryContext(ctx, query, req.Connection.Database, req.TableName)
 	if err != nil {
-		return SchemaResponse{}, fmt.Errorf("Failed to query table structure: %w", err)
+		return SchemaResponse{}, fmt.Errorf("failed to query table structure: %w", err)
 	}
 	defer rows.Close()
 
@@ -354,7 +354,7 @@ func getMySQLSchema(c context.Context, req SchemaRequest) (SchemaResponse, error
 	for rows.Next() {
 		var name, colType, colKey string
 		if err := rows.Scan(&name, &colType, &colKey); err != nil {
-			return SchemaResponse{}, fmt.Errorf("Failed to scan results: %w", err)
+			return SchemaResponse{}, fmt.Errorf("failed to scan results: %w", err)
 		}
 
 		field := Field{
@@ -366,7 +366,7 @@ func getMySQLSchema(c context.Context, req SchemaRequest) (SchemaResponse, error
 	}
 
 	if err := rows.Err(); err != nil {
-		return SchemaResponse{}, fmt.Errorf("Failed to iterate through results: %w", err)
+		return SchemaResponse{}, fmt.Errorf("failed to iterate through results: %w", err)
 	}
 
 	// If no fields found, return empty array instead of error
@@ -388,7 +388,7 @@ func getPostgreSQLSchema(c context.Context, req SchemaRequest) (SchemaResponse, 
 	// Connect to database
 	db, err := sql.Open("postgres", connStr)
 	if err != nil {
-		return SchemaResponse{}, fmt.Errorf("Failed to connect to PostgreSQL: %w", err)
+		return SchemaResponse{}, fmt.Errorf("failed to connect to PostgreSQL: %w", err)
 	}
 	defer db.Close()
 
@@ -398,7 +398,7 @@ func getPostgreSQLSchema(c context.Context, req SchemaRequest) (SchemaResponse, 
 
 	// Validate connection
 	if err := db.PingContext(ctx); err != nil {
-		return SchemaResponse{}, fmt.Errorf("PostgreSQL connection test failed: %w", err)
+		return SchemaResponse{}, fmt.Errorf("postgreSQL connection test failed: %w", err)
 	}
 
 	// Query table structure
@@ -419,7 +419,7 @@ func getPostgreSQLSchema(c context.Context, req SchemaRequest) (SchemaResponse, 
 	`
 	rows, err := db.QueryContext(ctx, query, req.TableName)
 	if err != nil {
-		return SchemaResponse{}, fmt.Errorf("Failed to query table structure: %w", err)
+		return SchemaResponse{}, fmt.Errorf("failed to query table structure: %w", err)
 	}
 	defer rows.Close()
 
@@ -428,7 +428,7 @@ func getPostgreSQLSchema(c context.Context, req SchemaRequest) (SchemaResponse, 
 		var name, dataType string
 		var isPrimary bool
 		if err := rows.Scan(&name, &dataType, &isPrimary); err != nil {
-			return SchemaResponse{}, fmt.Errorf("Failed to scan results: %w", err)
+			return SchemaResponse{}, fmt.Errorf("failed to scan results: %w", err)
 		}
 
 		field := Field{
@@ -440,7 +440,7 @@ func getPostgreSQLSchema(c context.Context, req SchemaRequest) (SchemaResponse, 
 	}
 
 	if err := rows.Err(); err != nil {
-		return SchemaResponse{}, fmt.Errorf("Failed to iterate through results: %w", err)
+		return SchemaResponse{}, fmt.Errorf("failed to iterate through results: %w", err)
 	}
 
 	return SchemaResponse{Fields: fields}, nil

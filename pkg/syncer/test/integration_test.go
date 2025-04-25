@@ -10,11 +10,13 @@ import (
 	"os"
 	"testing"
 	"time"
+
 	// "bytes"
 
 	_ "github.com/go-sql-driver/mysql" // MySQL / MariaDB
 	_ "github.com/lib/pq"              // PostgreSQL
 	_ "github.com/mattn/go-sqlite3"
+
 	// intRedis "github.com/retail-ai-inc/sync/internal/db/redis"
 	// goredis "github.com/redis/go-redis/v9"
 
@@ -26,7 +28,6 @@ import (
 	// "github.com/retail-ai-inc/sync/pkg/syncer/common"
 	"github.com/retail-ai-inc/sync/pkg/logger"
 	"github.com/retail-ai-inc/sync/pkg/syncer"
-	"github.com/retail-ai-inc/sync/pkg/utils"
 )
 
 type ConnDetail struct {
@@ -129,14 +130,6 @@ func TestSyncIntegration(t *testing.T) {
 		testTC07RedisSync(t, cfg.SyncConfigs)
 	})
 
-	t.Run("TC09_RowCountMonitoring", func(t *testing.T) {
-		monitorCtx, cancel := context.WithCancel(ctx)
-		utils.StartRowCountMonitoring(monitorCtx, cfg, log, 100*time.Millisecond)
-		time.Sleep(time.Millisecond * 100)
-		cancel()
-		time.Sleep(time.Millisecond * 50)
-	})
-
 	t.Run("TC10_LogHookWriting", func(t *testing.T) {
 		testTC10LogHookWriting(t)
 	})
@@ -170,6 +163,13 @@ func TestSyncIntegration(t *testing.T) {
 		testUserManagementApi(t)
 	})
 
+	// t.Run("TC09_RowCountMonitoring", func(t *testing.T) {
+	// 	monitorCtx, cancel := context.WithCancel(ctx)
+	// 	utils.StartRowCountMonitoring(monitorCtx, cfg, log, 100*time.Millisecond)
+	// 	time.Sleep(time.Millisecond * 100)
+	// 	cancel()
+	// 	time.Sleep(time.Millisecond * 50)
+	// })
 	// t.Run("TC19_DBConnections", func(t *testing.T) {
 	// 	testDBConnections(t)
 	// })

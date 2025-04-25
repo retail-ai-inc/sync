@@ -4,12 +4,18 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"time"
 )
 
 // GetCurrentTime returns the current time
 func GetCurrentTime() time.Time {
 	return time.Now()
+}
+
+// ParseInt parses a string to an integer with error handling
+func ParseInt(s string) (int, error) {
+	return strconv.Atoi(s)
 }
 
 func UnzipDistFile(zipPath, destDir string) error {

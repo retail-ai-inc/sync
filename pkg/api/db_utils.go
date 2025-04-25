@@ -4,8 +4,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	_ "github.com/mattn/go-sqlite3" // SQLite driver
 	"time"
+
+	_ "github.com/mattn/go-sqlite3" // SQLite driver
 )
 
 // openLocalDB already defined in sync_handler.go
@@ -145,6 +146,9 @@ func SaveGoogleUser(email, name string) (string, string, error) {
 			name,
 			"https://gw.alipayobjects.com/zos/antfincdn/XAosXuNZyF/BiazfanxmamNRoxxVxka.png", // Default avatar
 			email)
+		if err != nil {
+			return "", "", err
+		}
 
 		// Get access level for existing user
 		err = db.QueryRow("SELECT username, access FROM users WHERE email = ?", email).Scan(&username, &access)

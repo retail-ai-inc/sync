@@ -29,7 +29,7 @@ RUN mkdir -p /app/ui && unzip -o /app/ui/dist.zip -d /app/ui/
 FROM alpine:latest
 
 # Install tzdata (optional)
-RUN apk add --no-cache tzdata
+RUN apk add --no-cache tzdata sqlite
 ENV TZ=Asia/Tokyo
 
 # Set the working directory

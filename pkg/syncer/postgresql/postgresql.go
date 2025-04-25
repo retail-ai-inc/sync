@@ -36,6 +36,7 @@ type replicationState struct {
 	replicaConn *sql.DB
 }
 
+// PostgreSQLSyncer implements PostgreSQL synchronization
 type PostgreSQLSyncer struct {
 	cfg    config.SyncConfig
 	logger logrus.FieldLogger
@@ -54,6 +55,7 @@ type PostgreSQLSyncer struct {
 	lastExecError int32
 }
 
+// NewPostgreSQLSyncer creates a new PostgreSQL synchronizer
 func NewPostgreSQLSyncer(cfg config.SyncConfig, logger *logrus.Logger) *PostgreSQLSyncer {
 	return &PostgreSQLSyncer{
 		cfg:    cfg,
@@ -61,6 +63,7 @@ func NewPostgreSQLSyncer(cfg config.SyncConfig, logger *logrus.Logger) *PostgreS
 	}
 }
 
+// Start begins the synchronization process
 func (s *PostgreSQLSyncer) Start(ctx context.Context) {
 	var err error
 
@@ -166,6 +169,7 @@ func (s *PostgreSQLSyncer) Start(ctx context.Context) {
 	s.logger.Info("[PostgreSQL] Synchronization tasks completed.")
 }
 
+// buildReplicationDSN constructs replication DSN
 func (s *PostgreSQLSyncer) buildReplicationDSN(normalDSN string) (string, error) {
 	u, err := url.Parse(normalDSN)
 	if err != nil {
@@ -177,6 +181,7 @@ func (s *PostgreSQLSyncer) buildReplicationDSN(normalDSN string) (string, error)
 	return u.String(), nil
 }
 
+// ensureReplicationSlot ensures the replication slot exists
 func (s *PostgreSQLSyncer) ensureReplicationSlot(ctx context.Context) error {
 	info, err := pglogrepl.IdentifySystem(ctx, s.sourceConnRepl)
 	if err != nil {
@@ -210,6 +215,7 @@ func (s *PostgreSQLSyncer) ensureReplicationSlot(ctx context.Context) error {
 	return nil
 }
 
+// prepareTargetSchema prepares the target database schema
 func (s *PostgreSQLSyncer) prepareTargetSchema(ctx context.Context) error {
 	for _, dbmap := range s.cfg.Mappings {
 		srcSchema := dbmap.SourceSchema
@@ -260,6 +266,7 @@ func (s *PostgreSQLSyncer) prepareTargetSchema(ctx context.Context) error {
 	return nil
 }
 
+// generateCreateTableSQL generates SQL statement for table creation
 func (s *PostgreSQLSyncer) generateCreateTableSQL(
 	ctx context.Context,
 	srcSchema, srcTable, tgtSchema, tgtTable string,
@@ -346,6 +353,7 @@ ORDER BY ordinal_position
 	return createSQL, seqSlice, nil
 }
 
+// extractSequenceName extracts sequence name
 func extractSequenceName(defaultVal string) string {
 	reg := regexp.MustCompile(`nextval\('([^']+)'::regclass\)`)
 	matches := reg.FindStringSubmatch(defaultVal)
@@ -355,6 +363,7 @@ func extractSequenceName(defaultVal string) string {
 	return ""
 }
 
+// checkTableExist checks if a table exists
 func (s *PostgreSQLSyncer) checkTableExist(ctx context.Context, schemaName, tableName string) (bool, error) {
 	query := `SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=$1 AND table_name=$2`
 	var cnt int
@@ -365,6 +374,7 @@ func (s *PostgreSQLSyncer) checkTableExist(ctx context.Context, schemaName, tabl
 	return cnt > 0, nil
 }
 
+// copyIndexes copies indexes from source to target
 func (s *PostgreSQLSyncer) copyIndexes(ctx context.Context, srcSchema, srcTable, tgtSchema, tgtTable string) error {
 	sqlIdx := `
 	SELECT indexname, indexdef
@@ -446,6 +456,7 @@ func (s *PostgreSQLSyncer) copyIndexes(ctx context.Context, srcSchema, srcTable,
 	return rows.Err()
 }
 
+// doInitialSync performs initial data synchronization
 func (s *PostgreSQLSyncer) doInitialSync(ctx context.Context) error {
 	for _, dbmap := range s.cfg.Mappings {
 		srcSchema := dbmap.SourceSchema
@@ -530,6 +541,7 @@ func (s *PostgreSQLSyncer) doInitialSync(ctx context.Context) error {
 	return nil
 }
 
+// startLogicalReplication starts logical replication process
 func (s *PostgreSQLSyncer) startLogicalReplication(ctx context.Context) error {
 	if s.publicationNames == "" {
 		s.publicationNames = "mypub"
@@ -544,6 +556,33 @@ func (s *PostgreSQLSyncer) startLogicalReplication(ctx context.Context) error {
 	if err := pglogrepl.StartReplication(ctx, s.sourceConnRepl, s.repSlot, s.currentLsn, opts); err != nil {
 		return err
 	}
+
+	connCheckTicker := time.NewTicker(5 * time.Minute)
+	defer connCheckTicker.Stop()
+
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-connCheckTicker.C:
+				if err := utils.CheckSQLConnection(ctx, s.targetDB); err != nil {
+					s.logger.Warnf("[PostgreSQL] Target connection check failed: %v", err)
+
+					if newDB, err := utils.ReopenSQLConnection(ctx, s.logger, s.cfg.TargetConnection, "postgres"); err == nil {
+						oldDB := s.targetDB
+						s.targetDB = newDB
+						s.state.replicaConn = newDB
+
+						if oldDB != nil {
+							_ = oldDB.Close()
+						}
+						s.logger.Info("[PostgreSQL] Successfully reconnected to target database")
+					}
+				}
+			}
+		}
+	}()
 
 	ticker := time.NewTicker(8 * time.Second)
 	defer ticker.Stop()
@@ -628,6 +667,7 @@ func (s *PostgreSQLSyncer) startLogicalReplication(ctx context.Context) error {
 	}
 }
 
+// processMessage processes replication messages
 func (s *PostgreSQLSyncer) processMessage(xld pglogrepl.XLogData, state *replicationState) (bool, error) {
 	walData := xld.WALData
 	logicalMsg, err := pglogrepl.ParseV2(walData, state.inStream)
@@ -682,6 +722,7 @@ func (s *PostgreSQLSyncer) processMessage(xld pglogrepl.XLogData, state *replica
 	return false, nil
 }
 
+// handleInsert handles insert operations
 func (s *PostgreSQLSyncer) handleInsert(
 	msg *pglogrepl.InsertMessageV2,
 	st *replicationState,
@@ -766,6 +807,7 @@ func (s *PostgreSQLSyncer) handleInsert(
 	return false, err
 }
 
+// handleUpdate handles update operations
 func (s *PostgreSQLSyncer) handleUpdate(
 	msg *pglogrepl.UpdateMessageV2,
 	st *replicationState,
@@ -818,6 +860,7 @@ func (s *PostgreSQLSyncer) handleUpdate(
 	return false, err
 }
 
+// handleDelete handles delete operations
 func (s *PostgreSQLSyncer) handleDelete(
 	msg *pglogrepl.DeleteMessageV2,
 	st *replicationState,
@@ -887,6 +930,7 @@ func (s *PostgreSQLSyncer) handleDelete(
 	return false, err
 }
 
+// handleDeleteWithAllColumns handles delete operations with all columns
 func (s *PostgreSQLSyncer) handleDeleteWithAllColumns(
 	msg *pglogrepl.DeleteMessageV2,
 	st *replicationState,
@@ -920,6 +964,7 @@ func (s *PostgreSQLSyncer) handleDeleteWithAllColumns(
 	return false, err
 }
 
+// getPrimaryKeyColumns retrieves primary key columns
 func (s *PostgreSQLSyncer) getPrimaryKeyColumns(schema, tableName string) ([]string, error) {
 	query := `
 		SELECT a.attname
@@ -951,6 +996,7 @@ func (s *PostgreSQLSyncer) getPrimaryKeyColumns(schema, tableName string) ([]str
 	return primaryKeys, nil
 }
 
+// buildWhereClausesFromPK builds WHERE clauses from primary key
 func (s *PostgreSQLSyncer) buildWhereClausesFromPK(
 	rel *pglogrepl.RelationMessageV2,
 	cols []*pglogrepl.TupleDataColumn,
@@ -977,63 +1023,126 @@ func (s *PostgreSQLSyncer) buildWhereClausesFromPK(
 	return clauses
 }
 
+// replicateQuery executes replication queries
 func (s *PostgreSQLSyncer) replicateQuery(db *sql.DB, query, opType, tableName string) error {
 	s.logger.Debugf("[PostgreSQL][%s] table=%s query=%s", opType, tableName, query)
 
-	res, err := db.Exec(query)
+	err := utils.RetryDBOperation(context.Background(), s.logger,
+		fmt.Sprintf("%s on %s", opType, tableName),
+		func() error {
+			res, err := db.Exec(query)
+			if err != nil {
+				return err
+			}
+
+			rowsAff, _ := res.RowsAffected()
+			s.logger.Debugf("[PostgreSQL][%s] table=%s rowsAffected=%d", opType, tableName, rowsAff)
+			atomic.StoreInt32(&s.lastExecError, 0)
+			return nil
+		})
+
 	if err != nil {
 		s.logger.Errorf("[PostgreSQL][%s] table=%s error=%v", opType, tableName, err)
 		atomic.StoreInt32(&s.lastExecError, 1)
-		return err
 	}
-	atomic.StoreInt32(&s.lastExecError, 0)
 
-	rowsAff, _ := res.RowsAffected()
-	s.logger.Infof("[PostgreSQL][%s] table=%s rowsAffected=%d", opType, tableName, rowsAff)
-	return nil
+	return err
 }
 
+// loadPosition loads position from file
 func (s *PostgreSQLSyncer) loadPosition(path string) (pglogrepl.LSN, error) {
+	s.logger.Debugf("[PostgreSQL] Loading LSN from file: %s", path)
+
 	data, err := os.ReadFile(path)
 	if err != nil {
+		s.logger.Warnf("[PostgreSQL] Failed to read position file: %v", err)
 		return 0, err
 	}
+
 	str := strings.TrimSpace(string(data))
 	if len(str) < 3 {
+		s.logger.Warnf("[PostgreSQL] Position file content too short: '%s'", str)
 		return 0, fmt.Errorf("empty position file")
 	}
-	return parseLSNFromString(str)
+
+	lsn, err := parseLSNFromString(str)
+	if err != nil {
+		s.logger.Warnf("[PostgreSQL] Failed to parse LSN from string '%s': %v", str, err)
+		return 0, err
+	}
+
+	s.logger.Debugf("[PostgreSQL] Successfully parsed LSN: %s (%X)", str, lsn)
+	return lsn, nil
 }
 
+// writeWALPosition writes WAL position to file
 func (s *PostgreSQLSyncer) writeWALPosition(lsn pglogrepl.LSN) error {
 	path := s.cfg.PGPositionPath
 	if path == "" {
 		return nil
 	}
+
+	if lsn <= 0 {
+		s.logger.Warn("[PostgreSQL] Attempting to write invalid LSN (zero or negative)")
+		return fmt.Errorf("invalid LSN value: %d", lsn)
+	}
+
+	lsnStr := lsn.String()
+	if lsnStr == "" || !strings.Contains(lsnStr, "/") {
+		s.logger.Warn("[PostgreSQL] LSN.String() returned invalid format")
+		return fmt.Errorf("LSN string format invalid: %s", lsnStr)
+	}
+
+	s.logger.Debugf("[PostgreSQL] Writing LSN to file: %s => %s", path, lsnStr)
+
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0755); err != nil {
+		s.logger.Errorf("[PostgreSQL] Failed to create directory for position file: %v", err)
 		return err
 	}
-	return os.WriteFile(path, []byte(lsn.String()), 0644)
+
+	if err := os.WriteFile(path, []byte(lsnStr), 0644); err != nil {
+		s.logger.Errorf("[PostgreSQL] Failed to write position to file: %v", err)
+		return err
+	}
+
+	s.logger.Debugf("[PostgreSQL] Successfully wrote LSN position to file")
+	return nil
 }
 
+// parseLSNFromString parses LSN from string
 func parseLSNFromString(lsnStr string) (pglogrepl.LSN, error) {
+	lsnStr = strings.TrimSpace(lsnStr)
+	if lsnStr == "" {
+		return 0, fmt.Errorf("empty LSN string")
+	}
+
 	parts := strings.Split(lsnStr, "/")
 	if len(parts) != 2 {
 		return 0, fmt.Errorf("invalid LSN format: %s", lsnStr)
 	}
+
+	if parts[0] == "" || parts[1] == "" {
+		return 0, fmt.Errorf("invalid LSN format (empty part): %s", lsnStr)
+	}
+
 	hi, err := hexStrToUint32(parts[0])
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("invalid high bits in LSN %s: %w", lsnStr, err)
 	}
 	lo, err2 := hexStrToUint32(parts[1])
 	if err2 != nil {
-		return 0, err2
+		return 0, fmt.Errorf("invalid low bits in LSN %s: %w", lsnStr, err2)
 	}
 	return pglogrepl.LSN(uint64(hi)<<32 + uint64(lo)), nil
 }
 
+// hexStrToUint32 converts hex string to uint32
 func hexStrToUint32(s string) (uint32, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, fmt.Errorf("empty hex string")
+	}
 	val, err := strconv.ParseUint(s, 16, 32)
 	if err != nil {
 		return 0, err
