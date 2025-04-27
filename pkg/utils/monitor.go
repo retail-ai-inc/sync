@@ -3,6 +3,7 @@ package utils
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/retail-ai-inc/sync/pkg/db"
 	"github.com/retail-ai-inc/sync/pkg/syncer/common"
 	"github.com/sirupsen/logrus"
+	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
@@ -227,33 +229,207 @@ func countAndLogMongoDB(ctx context.Context, sc config.SyncConfig, log *logrus.L
 	srcDBName := common.GetDatabaseName(sc.Type, sc.SourceConnection)
 	tgtDBName := common.GetDatabaseName(sc.Type, sc.TargetConnection)
 
-	for _, mapping := range sc.Mappings {
-		for _, tblMap := range mapping.Tables {
+	db, err := db.OpenSQLiteDB()
+	if err != nil {
+		log.WithError(err).Error("[Monitor] Failed to open SQLite DB to get original config")
+		return
+	}
+	defer db.Close()
+
+	var configJSON string
+	err = db.QueryRow("SELECT config_json FROM sync_tasks WHERE id = ?", sc.ID).Scan(&configJSON)
+	if err != nil {
+		log.WithError(err).WithField("sync_task_id", sc.ID).
+			Error("[Monitor] Failed to get original config JSON")
+		return
+	}
+
+	var rawConfig struct {
+		Mappings []struct {
+			Tables []struct {
+				SourceTable string `json:"sourceTable"`
+				TargetTable string `json:"targetTable"`
+				CountQuery  struct {
+					Enabled    bool `json:"enabled"`
+					Conditions []struct {
+						Field    string      `json:"field"`
+						Operator string      `json:"operator"`
+						Table    string      `json:"table"`
+						Value    interface{} `json:"value"`
+					} `json:"conditions"`
+				} `json:"countQuery"`
+			} `json:"tables"`
+		} `json:"mappings"`
+	}
+
+	if err := json.Unmarshal([]byte(configJSON), &rawConfig); err != nil {
+		log.WithError(err).Error("[Monitor] Failed to parse config JSON")
+		return
+	}
+
+	for mappingIdx, mapping := range sc.Mappings {
+		for tblIdx, tblMap := range mapping.Tables {
 			srcColl := srcClient.Database(srcDBName).Collection(tblMap.SourceTable)
 			tgtColl := tgtClient.Database(tgtDBName).Collection(tblMap.TargetTable)
 
-			srcCount, err := srcColl.EstimatedDocumentCount(ctx)
-			if err != nil {
-				log.WithError(err).WithFields(logrus.Fields{
-					"db_type":   dbType,
-					"src_db":    srcDBName,
-					"src_coll":  tblMap.SourceTable,
-					"tgt_db":    tgtDBName,
-					"tgt_coll":  tblMap.TargetTable,
-					"operation": "source_count",
-				}).Error("Failed to get source collection count")
-				srcCount = -1
+			var srcCount, tgtCount int64
+			var err error
+
+			countQueryEnabled := false
+			var countQueryConditions []interface{}
+
+			if mappingIdx < len(rawConfig.Mappings) && tblIdx < len(rawConfig.Mappings[mappingIdx].Tables) {
+				rawTableConfig := rawConfig.Mappings[mappingIdx].Tables[tblIdx]
+				if rawTableConfig.SourceTable == tblMap.SourceTable && rawTableConfig.TargetTable == tblMap.TargetTable {
+					countQueryEnabled = rawTableConfig.CountQuery.Enabled
+
+					if countQueryEnabled {
+						for _, cond := range rawTableConfig.CountQuery.Conditions {
+							countQueryConditions = append(countQueryConditions, map[string]interface{}{
+								"field":    cond.Field,
+								"operator": cond.Operator,
+								"table":    cond.Table,
+								"value":    cond.Value,
+							})
+						}
+					}
+				}
 			}
 
-			tgtCount, err := tgtColl.EstimatedDocumentCount(ctx)
-			if err != nil {
-				log.WithError(err).WithFields(logrus.Fields{
-					"db_type":   dbType,
-					"tgt_db":    tgtDBName,
-					"tgt_coll":  tblMap.TargetTable,
-					"operation": "target_count",
-				}).Error("Failed to get target collection count")
-				tgtCount = -1
+			log.Infof("[MongoDB] countQueryEnabled: %v, countQueryConditions: %v", countQueryEnabled, countQueryConditions)
+
+			// Source collection count
+			if countQueryEnabled && len(countQueryConditions) > 0 {
+				// Build filter for conditional query
+				filter := bson.M{}
+				for _, condIface := range countQueryConditions {
+					condition, ok := condIface.(map[string]interface{})
+					if !ok {
+						continue
+					}
+
+					field, fieldExists := condition["field"].(string)
+					operator, operatorExists := condition["operator"].(string)
+					table, tableExists := condition["table"].(string)
+					value, valueExists := condition["value"]
+
+					if !fieldExists || !operatorExists || !tableExists || !valueExists {
+						continue
+					}
+
+					// Only apply if this condition is for the current table
+					if table != tblMap.SourceTable {
+						continue
+					}
+
+					// Handle dateRange=daily special case
+					if operator == "dateRange" && value == "daily" {
+						today := time.Now()
+						startOfDay := time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, today.Location())
+						filter[field] = bson.M{"$gte": startOfDay}
+					} else if operator == "eq" {
+						// Handle simple equality
+						filter[field] = value
+					}
+					// Add more operators as needed
+				}
+
+				// Log the query filter for debugging
+				filterJSON, _ := json.Marshal(filter)
+				log.Infof("[MongoDB] Using filter for %s.%s: %s", srcDBName, tblMap.SourceTable, string(filterJSON))
+
+				// Execute count with filter
+				srcCount, err = srcColl.CountDocuments(ctx, filter)
+				if err != nil {
+					log.WithError(err).WithFields(logrus.Fields{
+						"db_type":   dbType,
+						"src_db":    srcDBName,
+						"src_coll":  tblMap.SourceTable,
+						"filter":    string(filterJSON),
+						"operation": "source_count",
+					}).Error("Failed to get source collection count with filter")
+					srcCount = -1
+				}
+			} else {
+				// Use estimated count for the entire collection
+				srcCount, err = srcColl.EstimatedDocumentCount(ctx)
+				if err != nil {
+					log.WithError(err).WithFields(logrus.Fields{
+						"db_type":   dbType,
+						"src_db":    srcDBName,
+						"src_coll":  tblMap.SourceTable,
+						"tgt_db":    tgtDBName,
+						"tgt_coll":  tblMap.TargetTable,
+						"operation": "source_count",
+					}).Error("Failed to get source collection count")
+					srcCount = -1
+				}
+			}
+
+			// Target collection count
+			if countQueryEnabled && len(countQueryConditions) > 0 {
+				// Build filter for conditional query
+				filter := bson.M{}
+				for _, condIface := range countQueryConditions {
+					condition, ok := condIface.(map[string]interface{})
+					if !ok {
+						continue
+					}
+
+					field, fieldExists := condition["field"].(string)
+					operator, operatorExists := condition["operator"].(string)
+					table, tableExists := condition["table"].(string)
+					value, valueExists := condition["value"]
+
+					if !fieldExists || !operatorExists || !tableExists || !valueExists {
+						continue
+					}
+
+					// Only apply if this condition is for the current table
+					if table != tblMap.TargetTable && table != tblMap.SourceTable {
+						continue
+					}
+
+					// Handle dateRange=daily special case
+					if operator == "dateRange" && value == "daily" {
+						today := time.Now()
+						startOfDay := time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, today.Location())
+						filter[field] = bson.M{"$gte": startOfDay}
+					} else if operator == "eq" {
+						// Handle simple equality
+						filter[field] = value
+					}
+					// Add more operators as needed
+				}
+
+				// Log the query filter for debugging
+				filterJSON, _ := json.Marshal(filter)
+				log.Infof("[MongoDB] Using filter for %s.%s: %s", tgtDBName, tblMap.TargetTable, string(filterJSON))
+
+				// Execute count with filter
+				tgtCount, err = tgtColl.CountDocuments(ctx, filter)
+				if err != nil {
+					log.WithError(err).WithFields(logrus.Fields{
+						"db_type":   dbType,
+						"tgt_db":    tgtDBName,
+						"tgt_coll":  tblMap.TargetTable,
+						"filter":    string(filterJSON),
+						"operation": "target_count",
+					}).Error("Failed to get target collection count with filter")
+					tgtCount = -1
+				}
+			} else {
+				// Use estimated count for the entire collection
+				tgtCount, err = tgtColl.EstimatedDocumentCount(ctx)
+				if err != nil {
+					log.WithError(err).WithFields(logrus.Fields{
+						"db_type":   dbType,
+						"tgt_db":    tgtDBName,
+						"tgt_coll":  tblMap.TargetTable,
+						"operation": "target_count",
+					}).Error("Failed to get target collection count")
+					tgtCount = -1
+				}
 			}
 
 			log.WithFields(logrus.Fields{
