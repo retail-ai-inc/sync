@@ -39,9 +39,9 @@ WORKDIR /app
 COPY --from=builder /app/sync .
 
 # Copy the configuration file
-COPY --from=builder /app/sync.db /mnt/sync.db
+COPY --from=builder /app/sync.db /mnt/state/sync.db
 
-ENV SYNC_DB_PATH=/mnt/sync.db
+ENV SYNC_DB_PATH=/mnt/state/sync.db
 
 # Copy the extracted UI files
 COPY --from=builder /app/ui /app/ui
