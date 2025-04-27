@@ -296,7 +296,7 @@ func countAndLogMongoDB(ctx context.Context, sc config.SyncConfig, log *logrus.L
 				}
 			}
 
-			log.Infof("[MongoDB] countQueryEnabled: %v, countQueryConditions: %v", countQueryEnabled, countQueryConditions)
+			log.Debugf("[MongoDB] countQueryEnabled: %v, countQueryConditions: %v", countQueryEnabled, countQueryConditions)
 
 			// Source collection count
 			if countQueryEnabled && len(countQueryConditions) > 0 {
@@ -336,7 +336,7 @@ func countAndLogMongoDB(ctx context.Context, sc config.SyncConfig, log *logrus.L
 
 				// Log the query filter for debugging
 				filterJSON, _ := json.Marshal(filter)
-				log.Infof("[MongoDB] Using filter for %s.%s: %s", srcDBName, tblMap.SourceTable, string(filterJSON))
+				log.Debugf("[MongoDB] Using filter for %s.%s: %s", srcDBName, tblMap.SourceTable, string(filterJSON))
 
 				// Execute count with filter
 				srcCount, err = srcColl.CountDocuments(ctx, filter)
@@ -404,7 +404,7 @@ func countAndLogMongoDB(ctx context.Context, sc config.SyncConfig, log *logrus.L
 
 				// Log the query filter for debugging
 				filterJSON, _ := json.Marshal(filter)
-				log.Infof("[MongoDB] Using filter for %s.%s: %s", tgtDBName, tblMap.TargetTable, string(filterJSON))
+				log.Debugf("[MongoDB] Using filter for %s.%s: %s", tgtDBName, tblMap.TargetTable, string(filterJSON))
 
 				// Execute count with filter
 				tgtCount, err = tgtColl.CountDocuments(ctx, filter)
