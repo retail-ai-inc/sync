@@ -223,16 +223,37 @@ func (s *MongoDBSyncer) copyIndexes(ctx context.Context, sourceColl, targetColl 
 			continue
 		}
 
-		if name, ok := idx["name"].(string); ok && existingIndexes[name] {
-			s.logger.Debugf("[MongoDB] Index %s already exists, skipping", name)
-			indexesSkipped++
-			continue
+		var name string
+		if nameStr, ok := idx["name"].(string); ok {
+			name = nameStr
+			if existingIndexes[name] {
+				s.logger.Debugf("[MongoDB] Index %s already exists, skipping", name)
+				indexesSkipped++
+				continue
+			}
 		}
 
 		keyDoc := bson.D{}
 		if keys, ok := idx["key"].(bson.M); ok {
 			for field, direction := range keys {
-				keyDoc = append(keyDoc, bson.E{Key: field, Value: direction})
+				fixedDirection := direction
+				if strVal, isString := direction.(string); isString {
+					if strVal == "1" {
+						fixedDirection = int32(1)
+						s.logger.Infof("[MongoDB] Converting string direction '1' to int32(1) for field %s", field)
+					} else if strVal == "-1" {
+						fixedDirection = int32(-1)
+						s.logger.Infof("[MongoDB] Converting string direction '-1' to int32(-1) for field %s", field)
+					}
+				} else if floatVal, isFloat := direction.(float64); isFloat {
+					fixedDirection = int32(floatVal)
+					s.logger.Debugf("[MongoDB] Converting float64 direction %f to int32(%d) for field %s",
+						floatVal, int32(floatVal), field)
+				}
+
+				keyDoc = append(keyDoc, bson.E{Key: field, Value: fixedDirection})
+				s.logger.Debugf("[MongoDB] Index key field=%s, value=%v, type=%T",
+					field, fixedDirection, fixedDirection)
 			}
 		} else {
 			s.logger.Warnf("[MongoDB] Invalid index key format: %v", idx["key"])
@@ -247,16 +268,21 @@ func (s *MongoDBSyncer) copyIndexes(ctx context.Context, sourceColl, targetColl 
 			}
 		}
 
-		indexModel := mongo.IndexModel{
-			Keys:    keyDoc,
-			Options: indexOptions,
-		}
-
-		name := ""
 		if nameVal, hasName := idx["name"]; hasName {
 			if nameStr, ok := nameVal.(string); ok {
 				name = nameStr
+				indexOptions.SetName(nameStr)
 			}
+		}
+
+		s.logger.Infof("[MongoDB] Creating index => collection=%s, keys=%v, options=%+v",
+			targetColl.Name(), keyDoc, indexOptions)
+
+		s.logger.Debugf("[MongoDB] Source index document: %+v", idx)
+
+		indexModel := mongo.IndexModel{
+			Keys:    keyDoc,
+			Options: indexOptions,
 		}
 
 		_, errC := targetColl.Indexes().CreateOne(ctx, indexModel)
@@ -265,10 +291,13 @@ func (s *MongoDBSyncer) copyIndexes(ctx context.Context, sourceColl, targetColl 
 				s.logger.Debugf("[MongoDB] Index %s already exists", name)
 				indexesSkipped++
 			} else {
-				s.logger.Warnf("[MongoDB] Create index %s fail: %v", name, errC)
+				s.logger.Warnf("[MongoDB] Create index %s fail: %v, keys=%v, options=%+v",
+					name, errC, keyDoc, indexOptions)
+				s.logger.Warnf("[MongoDB] Failed index details: name=%s, source_document=%+v",
+					name, idx)
 			}
 		} else {
-			s.logger.Infof("[MongoDB] Successfully created index %s for %s", name, targetColl.Name())
+			s.logger.Debugf("[MongoDB] Successfully created index %s for %s", name, targetColl.Name())
 			indexesCreated++
 		}
 	}
@@ -684,7 +713,7 @@ func (s *MongoDBSyncer) flushBuffer(ctx context.Context, targetColl *mongo.Colle
 				return err // If it's a connection error, RetryMongoOperation will retry
 			}
 
-			s.logger.Infof(
+			s.logger.Debugf(
 				"[MongoDB] BulkWrite => table=%s.%s inserted=%d matched=%d modified=%d upserted=%d deleted=%d (opTotals=>insert=%d, update=%d, delete=%d)",
 				targetColl.Database().Name(),
 				targetColl.Name(),
@@ -883,7 +912,7 @@ func (s *MongoDBSyncer) storeToBuffer(ctx context.Context, buffer *[]bufferedCha
 		}
 	}
 
-	s.logger.Infof("[MongoDB] Stored %d changes to buffer for %s.%s using batch optimization",
+	s.logger.Debugf("[MongoDB] Stored %d changes to buffer for %s.%s using batch optimization",
 		len(*buffer), sourceDB, collectionName)
 
 	// Clear in-memory buffer
@@ -937,7 +966,7 @@ func (s *MongoDBSyncer) processBufferedChanges(ctx context.Context, targetColl *
 		filesToProcess = len(files)
 	}
 
-	s.logger.Infof("[MongoDB] Processing %d/%d buffered changes for %s.%s", filesToProcess, len(files), sourceDB, collectionName)
+	s.logger.Debugf("[MongoDB] Processing %d/%d buffered changes for %s.%s", filesToProcess, len(files), sourceDB, collectionName)
 
 	var batch []bufferedChange
 	var processedToken bson.Raw
