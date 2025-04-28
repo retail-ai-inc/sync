@@ -26,7 +26,7 @@ func convertToJST(timeStr string) string {
 	jstTime := parsedTime.In(jst)
 
 	// Format the time in the desired format
-	return jstTime.Format("2006-01-02T15:04:05+09:00")
+	return jstTime.Format("2006-01-02T15:04+09:00")
 }
 
 // GET /api/sync/{id}/monitor => {status, progress, tps, ...}
