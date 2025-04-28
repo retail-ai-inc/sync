@@ -74,7 +74,8 @@ func testPostgreSQLConnection(t *testing.T) {
 func testMongoDBConnection(t *testing.T) {
 	// Test with valid connection string
 	uri := "mongodb://localhost:27017/source_db"
-	client, err := mongodb.GetMongoClient(uri)
+	ctx := context.Background()
+	client, err := mongodb.GetMongoClient(ctx, uri)
 	if err != nil {
 		// In a real environment, this might fail if MongoDB is not available
 		t.Logf("MongoDB connection failed (expected in test environment): %v", err)
@@ -85,7 +86,8 @@ func testMongoDBConnection(t *testing.T) {
 
 	// Test with invalid connection string
 	uri = "invalid_connection_string"
-	client, err = mongodb.GetMongoClient(uri)
+	ctx = context.Background()
+	client, err = mongodb.GetMongoClient(ctx, uri)
 	if err == nil {
 		defer client.Disconnect(context.Background())
 		t.Error("Expected error with invalid MongoDB connection string, but got none")

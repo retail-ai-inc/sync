@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/retail-ai-inc/sync/internal/db/mongodb"
 	"github.com/retail-ai-inc/sync/pkg/db"
 	"github.com/sirupsen/logrus"
 )
@@ -491,6 +492,39 @@ func SyncTablesHandler(w http.ResponseWriter, r *http.Request) {
 			"totalRows":    totalRows,
 			"lastSyncTime": convertTimeToJST(lastSyncTime),
 		})
+	}
+
+	var configJSON string
+	err = db.QueryRow("SELECT config_json FROM sync_tasks WHERE id = ?", id).Scan(&configJSON)
+	if err == nil && configJSON != "" {
+		var cfg struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal([]byte(configJSON), &cfg); err == nil {
+			if strings.ToLower(cfg.Type) == "mongodb" && len(tableStats) > 0 {
+				ctx := r.Context()
+
+				client, dbName, err := mongodb.ConnectMongoDBFromTaskID(ctx, id, logrus.StandardLogger())
+				if err != nil {
+					logrus.Warnf("[SyncTables] Failed to connect to MongoDB: %v", err)
+				} else {
+					defer client.Disconnect(ctx)
+
+					for i, stat := range tableStats {
+						tableName := stat["tableName"].(string)
+
+						collection := client.Database(dbName).Collection(tableName)
+						count, err := collection.EstimatedDocumentCount(ctx)
+						if err != nil {
+							logrus.Warnf("[SyncTables] Failed to get count for %s.%s: %v", dbName, tableName, err)
+						} else {
+							tableStats[i]["totalRows"] = count
+							logrus.Debugf("[SyncTables] Updated %s count to %d", tableName, count)
+						}
+					}
+				}
+			}
+		}
 	}
 
 	// Get JST date for display purposes only
