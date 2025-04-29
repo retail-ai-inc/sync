@@ -735,6 +735,28 @@ func (s *MongoDBSyncer) flushBuffer(ctx context.Context, targetColl *mongo.Colle
 
 	if err != nil {
 		s.logger.Errorf("[MongoDB] BulkWrite failed after retries: %v", err)
+
+		if strings.Contains(err.Error(), "Cannot create field") && strings.Contains(err.Error(), "in element") {
+			s.logger.Errorf("[MongoDB] Error details for debugging:")
+			for i, model := range writeModels {
+				switch m := model.(type) {
+				case *mongo.UpdateOneModel:
+					if m.Update != nil {
+						s.logger.Errorf("[MongoDB] Problem model[%d]: %s", i, toJSONString(m))
+						if updateDoc, ok := m.Update.(bson.M); ok {
+							if setDoc, hasSet := updateDoc["$set"]; hasSet {
+								s.logger.Errorf("[MongoDB] $set content: %s", toJSONString(setDoc))
+							}
+						}
+					}
+				case *mongo.ReplaceOneModel:
+					s.logger.Errorf("[MongoDB] Problem model[%d]: filter=%s, replacement=%s",
+						i, toJSONString(m.Filter), toJSONString(m.Replacement))
+				case *mongo.InsertOneModel:
+					s.logger.Errorf("[MongoDB] Problem model[%d]: document=%s", i, toJSONString(m.Document))
+				}
+			}
+		}
 	}
 
 	*buffer = (*buffer)[:0] // Clear buffer regardless of success or failure
