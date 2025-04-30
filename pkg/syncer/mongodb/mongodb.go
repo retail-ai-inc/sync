@@ -382,6 +382,13 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 	connCheckTicker := time.NewTicker(5 * time.Minute)
 	defer connCheckTicker.Stop()
 
+	// Register new ChangeStream
+	utils.RegisterChangeStream(sourceDB, collectionName)
+	s.logger.Debugf("[MongoDB] Registered ChangeStream tracker for %s.%s", sourceDB, collectionName)
+
+	// Ensure ChangeStream is deregistered when function exits
+	defer utils.DeactivateChangeStream(sourceDB, collectionName)
+
 	go func() {
 		for {
 			select {
@@ -438,6 +445,8 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 	cs, err := sourceColl.Watch(ctx, pipeline, opts)
 	if err != nil {
 		s.logger.Errorf("[MongoDB] Failed to establish change stream for %s.%s: %v", sourceDB, collectionName, err)
+		// Record ChangeStream creation failure
+		utils.RecordChangeStreamError(sourceDB, collectionName, fmt.Sprintf("Failed to establish: %v", err))
 		select {
 		case <-ctx.Done():
 			return
@@ -505,6 +514,7 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 				var changeEvent bson.M
 				if errDec := cs.Decode(&changeEvent); errDec != nil {
 					s.logger.Errorf("[MongoDB] decode event fail => %v", errDec)
+					utils.RecordChangeStreamError(sourceDB, collectionName, fmt.Sprintf("decode error: %v", errDec))
 					continue
 				}
 				opType, _ := changeEvent["operationType"].(string)
@@ -518,6 +528,9 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 						opType: opType,
 					})
 					bufferMutex.Unlock()
+
+					// Update ChangeStream activity status and record processed events
+					utils.UpdateChangeStreamActivity(sourceDB, collectionName, 1)
 
 					queryStr := describeWriteModel(model, opType)
 					s.logger.Debugf("[MongoDB][%s] table=%s.%s query=%s",
@@ -549,8 +562,41 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 			} else {
 				if errCS := cs.Err(); errCS != nil {
 					s.logger.Errorf("[MongoDB] changeStream error => %v", errCS)
+					// Record ChangeStream error
+					errorMsg := errCS.Error()
+					utils.RecordChangeStreamError(sourceDB, collectionName, errorMsg)
+
+					// Check for specific error types, such as ChangeStreamHistoryLost
+					if strings.Contains(errorMsg, "ChangeStreamHistoryLost") {
+						s.logger.Warnf("[MongoDB] History lost for %s.%s, removing resume token and rebuilding stream", sourceDB, collectionName)
+						s.removeMongoDBResumeToken(sourceDB, collectionName)
+
+						// Close the current ChangeStream
+						cs.Close(ctx)
+
+						// Directly rebuild ChangeStream without using resumeToken
+						newOpts := options.ChangeStream().SetFullDocument(options.UpdateLookup)
+						// Start monitoring from current time point rather than trying to resume
+						newOpts.SetStartAtOperationTime(nil)
+
+						newCs, newErr := sourceColl.Watch(ctx, pipeline, newOpts)
+						if newErr != nil {
+							s.logger.Errorf("[MongoDB] Failed to rebuild change stream after history lost: %v", newErr)
+							changeStreamActive = false
+						} else {
+							s.logger.Infof("[MongoDB] Successfully rebuilt change stream for %s.%s after history lost", sourceDB, collectionName)
+							cs = newCs
+							utils.UpdateChangeStreamActivity(sourceDB, collectionName, 0) // Reset activity status
+							// Continue monitoring without exiting the loop
+							continue
+						}
+					} else {
+						// Other types of errors, handle as usual
+						changeStreamActive = false
+					}
+				} else {
+					changeStreamActive = false
 				}
-				changeStreamActive = false
 			}
 		}
 	}

@@ -3,8 +3,10 @@ package utils
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	goredis "github.com/redis/go-redis/v9"
@@ -12,9 +14,94 @@ import (
 	"github.com/retail-ai-inc/sync/pkg/db"
 	"github.com/retail-ai-inc/sync/pkg/syncer/common"
 	"github.com/sirupsen/logrus"
+	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
+
+// ChangeStreamInfo tracks info about a single ChangeStream
+type ChangeStreamInfo struct {
+	Database      string    // Database name
+	Collection    string    // Collection name
+	Created       time.Time // Creation time
+	LastActivity  time.Time // Last activity time
+	EventCount    int64     // Number of processed events
+	ErrorCount    int       // Error count
+	Active        bool      // Whether it's active
+	LastErrorMsg  string    // Last error message
+	LastErrorTime time.Time // Last error time
+}
+
+var (
+	// changeStreamTracker stores information about all active ChangeStreams
+	changeStreamTracker = make(map[string]*ChangeStreamInfo)
+	csTrackerMutex      = &sync.RWMutex{}
+)
+
+// RegisterChangeStream registers a new ChangeStream
+func RegisterChangeStream(database, collection string) {
+	key := fmt.Sprintf("%s.%s", database, collection)
+	csTrackerMutex.Lock()
+	defer csTrackerMutex.Unlock()
+
+	changeStreamTracker[key] = &ChangeStreamInfo{
+		Database:     database,
+		Collection:   collection,
+		Created:      time.Now(),
+		LastActivity: time.Now(),
+		Active:       true,
+	}
+}
+
+// UpdateChangeStreamActivity updates ChangeStream activity information
+func UpdateChangeStreamActivity(database, collection string, eventsProcessed int64) {
+	key := fmt.Sprintf("%s.%s", database, collection)
+	csTrackerMutex.Lock()
+	defer csTrackerMutex.Unlock()
+
+	if cs, exists := changeStreamTracker[key]; exists {
+		cs.LastActivity = time.Now()
+		cs.EventCount += eventsProcessed
+		cs.Active = true
+	}
+}
+
+// RecordChangeStreamError records ChangeStream errors
+func RecordChangeStreamError(database, collection, errorMsg string) {
+	key := fmt.Sprintf("%s.%s", database, collection)
+	csTrackerMutex.Lock()
+	defer csTrackerMutex.Unlock()
+
+	if cs, exists := changeStreamTracker[key]; exists {
+		cs.ErrorCount++
+		cs.LastErrorMsg = errorMsg
+		cs.LastErrorTime = time.Now()
+	}
+}
+
+// DeactivateChangeStream marks a ChangeStream as inactive
+func DeactivateChangeStream(database, collection string) {
+	key := fmt.Sprintf("%s.%s", database, collection)
+	csTrackerMutex.Lock()
+	defer csTrackerMutex.Unlock()
+
+	if cs, exists := changeStreamTracker[key]; exists {
+		cs.Active = false
+	}
+}
+
+// GetActiveChangeStreams gets information about all active ChangeStreams
+func GetActiveChangeStreams() map[string]*ChangeStreamInfo {
+	csTrackerMutex.RLock()
+	defer csTrackerMutex.RUnlock()
+
+	// Create a copy to avoid concurrency issues
+	result := make(map[string]*ChangeStreamInfo, len(changeStreamTracker))
+	for k, v := range changeStreamTracker {
+		result[k] = v
+	}
+	return result
+}
 
 // StartRowCountMonitoring periodically logs row counts to console + DB
 func StartRowCountMonitoring(ctx context.Context, cfg *config.Config, log *logrus.Logger, interval time.Duration) {
@@ -271,6 +358,126 @@ func countAndLogMongoDB(ctx context.Context, sc config.SyncConfig, log *logrus.L
 			storeMonitoringLog(sc.ID, dbType, srcDBName, tblMap.SourceTable, srcCount, tgtDBName, tblMap.TargetTable, tgtCount, "row_count_minutely")
 		}
 	}
+
+	activeStreams := GetActiveChangeStreams()
+	csDetails := make([]string, 0, len(activeStreams))
+	activeCount := 0
+
+	for key, cs := range activeStreams {
+		if cs.Active {
+			activeCount++
+			details := fmt.Sprintf("%s[events:%d,errors:%d]", key, cs.EventCount, cs.ErrorCount)
+			csDetails = append(csDetails, details)
+		}
+	}
+
+	log.WithFields(logrus.Fields{
+		"db_type":              dbType,
+		"active_changestreams": activeCount,
+		"changestream_details": csDetails,
+		"total_tracked":        len(activeStreams),
+		"monitor_action":       "changestream_status",
+	}).Info("MongoDB active ChangeStreams status")
+
+	serverActiveStreams, serverCount, err := getMongoDBActiveChangeStreams(ctx, srcClient)
+	if err != nil {
+		log.WithError(err).WithField("db_type", dbType).
+			Debug("[Monitor] Failed to get server-side active ChangeStreams")
+	} else if serverCount > 0 {
+		log.WithFields(logrus.Fields{
+			"db_type":              dbType,
+			"server_changestreams": serverCount,
+			"server_details":       serverActiveStreams,
+			"monitor_action":       "changestream_server_status",
+		}).Debug("MongoDB server-side ChangeStreams")
+	}
+}
+
+func getMongoDBActiveChangeStreams(ctx context.Context, client *mongo.Client) ([]string, int, error) {
+	var fullResult bson.M
+	err := client.Database("admin").RunCommand(ctx, bson.D{{Key: "currentOp", Value: 1}, {Key: "active", Value: true}}).Decode(&fullResult)
+	if err != nil {
+		return nil, 0, fmt.Errorf("run full currentOp command failed: %w", err)
+	}
+
+	if data, err := json.Marshal(fullResult); err == nil {
+		logrus.Debugf("[MongoDB Monitor] Full currentOp result: %s", string(data))
+
+		if inprog, ok := fullResult["inprog"].(bson.A); ok && len(inprog) > 0 {
+			if first, ok := inprog[0].(bson.M); ok {
+				if firstData, err := json.Marshal(first); err == nil {
+					logrus.Debugf("[MongoDB Monitor] Sample operation: %s", string(firstData))
+				}
+
+				keys := make([]string, 0)
+				for k := range first {
+					keys = append(keys, k)
+				}
+				logrus.Debugf("[MongoDB Monitor] Available fields: %v", keys)
+			}
+		}
+	}
+
+	cmd := bson.D{
+		{Key: "currentOp", Value: 1},
+		{Key: "active", Value: true},
+		{Key: "$or", Value: bson.A{
+			bson.M{"desc": bson.M{"$regex": ".*[cC]hange[sS]tream.*"}},
+			bson.M{"command.pipeline": bson.M{"$exists": true}},
+			bson.M{"command.aggregate": bson.M{"$exists": true}},
+			bson.M{"op": "getmore"},
+		}},
+	}
+
+	var result bson.M
+	err = client.Database("admin").RunCommand(ctx, cmd).Decode(&result)
+	if err != nil {
+		return nil, 0, fmt.Errorf("run filtered currentOp command failed: %w", err)
+	}
+
+	activeStreams := []string{}
+	csCount := 0
+
+	if inprog, ok := result["inprog"].(bson.A); ok {
+		for _, op := range inprog {
+			if opDoc, ok := op.(bson.M); ok {
+				isChangeStream := false
+				changeStreamInfo := ""
+
+				if descStr, hasDesc := opDoc["desc"].(string); hasDesc &&
+					(strings.Contains(strings.ToLower(descStr), "changestream") ||
+						strings.Contains(strings.ToLower(descStr), "change stream")) {
+					isChangeStream = true
+					changeStreamInfo = descStr
+				} else if ns, hasNs := opDoc["ns"].(string); hasNs {
+					changeStreamInfo = ns
+					if command, hasCmd := opDoc["command"].(bson.M); hasCmd {
+						if _, hasPipeline := command["pipeline"]; hasPipeline {
+							isChangeStream = true
+						} else if _, hasAggregate := command["aggregate"]; hasAggregate {
+							isChangeStream = true
+						}
+					}
+				}
+
+				if isChangeStream {
+					csCount++
+					activeStreams = append(activeStreams, changeStreamInfo)
+
+					if csData, err := json.Marshal(opDoc); err == nil {
+						logrus.Debugf("[MongoDB Monitor] Found ChangeStream: %s", string(csData))
+					}
+				}
+			}
+		}
+	}
+
+	if csCount != len(activeStreams) {
+		logrus.Warnf("[MongoDB Monitor] Inconsistent ChangeStream count: detected=%d, listed=%d",
+			csCount, len(activeStreams))
+	}
+
+	return activeStreams, csCount, nil
 }
 
 func countAndLogRedis(ctx context.Context, sc config.SyncConfig, log *logrus.Logger) {
