@@ -782,6 +782,68 @@ func (s *MongoDBSyncer) flushBuffer(ctx context.Context, targetColl *mongo.Colle
 	if err != nil {
 		s.logger.Errorf("[MongoDB] BulkWrite failed after retries: %v", err)
 
+		if strings.Contains(err.Error(), "Document failed validation") {
+			s.logger.Errorf("[MongoDB] Document validation error detected for %s.%s. Error details: %v", sourceDB, collectionName, err)
+
+			var errDetails string
+			if strings.Contains(err.Error(), "failingDocumentId") {
+				parts := strings.Split(err.Error(), "Document failed validation:")
+				if len(parts) > 1 {
+					errDetails = parts[1]
+				}
+				s.logger.Errorf("[MongoDB] Validation failure details: %s", errDetails)
+			}
+
+			s.logger.Errorf("[MongoDB] === Source documents that caused validation errors: ===")
+			for i, bc := range *buffer {
+				var docContent string
+				switch bc.opType {
+				case "insert":
+					if ins, ok := bc.model.(*mongo.InsertOneModel); ok {
+						docContent = toJSONString(ins.Document)
+					}
+				case "update", "replace":
+					if rep, ok := bc.model.(*mongo.ReplaceOneModel); ok {
+						docContent = fmt.Sprintf("filter=%s, replacement=%s", toJSONString(rep.Filter), toJSONString(rep.Replacement))
+					} else if upd, ok := bc.model.(*mongo.UpdateOneModel); ok {
+						docContent = fmt.Sprintf("filter=%s, update=%s", toJSONString(upd.Filter), toJSONString(upd.Update))
+					}
+				case "delete":
+					if del, ok := bc.model.(*mongo.DeleteOneModel); ok {
+						docContent = fmt.Sprintf("filter=%s", toJSONString(del.Filter))
+					}
+				}
+				s.logger.Errorf("[MongoDB] Source doc [%d], type=%s: %s", i, bc.opType, docContent)
+
+				if bc.opType == "insert" || bc.opType == "replace" {
+					var doc bson.M
+					if ins, ok := bc.model.(*mongo.InsertOneModel); ok {
+						doc, _ = ins.Document.(bson.M)
+					} else if rep, ok := bc.model.(*mongo.ReplaceOneModel); ok {
+						doc, _ = rep.Replacement.(bson.M)
+					}
+
+					if doc != nil {
+						missingFields := []string{}
+						for _, fieldName := range []string{"reg_date", "created_at", "updated_at"} {
+							if _, exists := doc[fieldName]; !exists {
+								missingFields = append(missingFields, fieldName)
+							}
+						}
+
+						if len(missingFields) > 0 {
+							s.logger.Errorf("[MongoDB] Document [%d] missing common required fields: %v", i, missingFields)
+						}
+
+						if regDate, exists := doc["reg_date"]; exists {
+							s.logger.Errorf("[MongoDB] Document [%d] reg_date value: %v (type: %T)", i, regDate, regDate)
+						}
+					}
+				}
+			}
+			s.logger.Errorf("[MongoDB] === End of source documents ===")
+		}
+
 		if strings.Contains(err.Error(), "Cannot create field") && strings.Contains(err.Error(), "in element") {
 			s.logger.Errorf("[MongoDB] Error details for debugging:")
 			for i, model := range writeModels {
