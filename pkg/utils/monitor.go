@@ -21,15 +21,17 @@ import (
 
 // ChangeStreamInfo tracks info about a single ChangeStream
 type ChangeStreamInfo struct {
-	Database      string    // Database name
-	Collection    string    // Collection name
-	Created       time.Time // Creation time
-	LastActivity  time.Time // Last activity time
-	EventCount    int64     // Number of processed events
-	ErrorCount    int       // Error count
-	Active        bool      // Whether it's active
-	LastErrorMsg  string    // Last error message
-	LastErrorTime time.Time // Last error time
+	Database       string    // Database name
+	Collection     string    // Collection name
+	Created        time.Time // Creation time
+	LastActivity   time.Time // Last activity time
+	EventCount     int64     // Number of processed events
+	ErrorCount     int       // Error count
+	Active         bool      // Whether it's active
+	LastErrorMsg   string    // Last error message
+	LastErrorTime  time.Time // Last error time
+	ReceivedEvents int       // Number of received events
+	ExecutedEvents int       // Number of executed events
 }
 
 var (
@@ -54,15 +56,16 @@ func RegisterChangeStream(database, collection string) {
 }
 
 // UpdateChangeStreamActivity updates ChangeStream activity information
-func UpdateChangeStreamActivity(database, collection string, eventsProcessed int64) {
-	key := fmt.Sprintf("%s.%s", database, collection)
+func UpdateChangeStreamActivity(database, collection string, eventCount int, receivedEvents, executedEvents int) {
 	csTrackerMutex.Lock()
 	defer csTrackerMutex.Unlock()
 
-	if cs, exists := changeStreamTracker[key]; exists {
-		cs.LastActivity = time.Now()
-		cs.EventCount += eventsProcessed
-		cs.Active = true
+	key := fmt.Sprintf("%s.%s", database, collection)
+	if stream, exists := changeStreamTracker[key]; exists {
+		stream.LastActivity = time.Now()
+		stream.EventCount += eventCount
+		stream.ReceivedEvents = receivedEvents
+		stream.ExecutedEvents = executedEvents
 	}
 }
 

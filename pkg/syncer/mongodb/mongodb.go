@@ -48,6 +48,11 @@ type MongoDBSyncer struct {
 	bufferDir     string
 	bufferEnabled bool
 	processRate   int // Changes per second to process
+	// Counters for event statistics
+	receivedEvents      map[string]int
+	executedEvents      map[string]int
+	statisticsM         sync.RWMutex
+	lastCounterResetDay time.Time
 }
 
 func NewMongoDBSyncer(cfg config.SyncConfig, logger *logrus.Logger) *MongoDBSyncer {
@@ -98,14 +103,17 @@ func NewMongoDBSyncer(cfg config.SyncConfig, logger *logrus.Logger) *MongoDBSync
 	// Custom configured rate can be implemented in the future by expanding the SyncConfig struct
 
 	return &MongoDBSyncer{
-		sourceClient:  sourceClient,
-		targetClient:  targetClient,
-		cfg:           cfg,
-		logger:        logger.WithField("sync_task_id", cfg.ID),
-		resumeTokens:  resumeMap,
-		bufferDir:     bufferDir,
-		bufferEnabled: true, // Enable by default
-		processRate:   processRate,
+		sourceClient:        sourceClient,
+		targetClient:        targetClient,
+		cfg:                 cfg,
+		logger:              logger.WithField("sync_task_id", cfg.ID),
+		resumeTokens:        resumeMap,
+		bufferDir:           bufferDir,
+		bufferEnabled:       true, // Enable by default
+		processRate:         processRate,
+		receivedEvents:      make(map[string]int),
+		executedEvents:      make(map[string]int),
+		lastCounterResetDay: time.Now(),
 	}
 }
 
@@ -389,6 +397,20 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 	// Ensure ChangeStream is deregistered when function exits
 	defer utils.DeactivateChangeStream(sourceDB, collectionName)
 
+	// Initialize counters for this collection
+	collKey := fmt.Sprintf("%s.%s", sourceDB, collectionName)
+	s.statisticsM.Lock()
+	if s.receivedEvents[collKey] == 0 {
+		s.receivedEvents[collKey] = 0
+	}
+	if s.executedEvents[collKey] == 0 {
+		s.executedEvents[collKey] = 0
+	}
+	s.statisticsM.Unlock()
+
+	// Check for day change and reset counters if needed
+	s.checkAndResetDailyCounters()
+
 	go func() {
 		for {
 			select {
@@ -421,6 +443,9 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 						return // Exit current goroutine to let the main process restart the change stream
 					}
 				}
+
+				// Check for day change and reset counters
+				s.checkAndResetDailyCounters()
 			}
 		}
 	}()
@@ -517,6 +542,14 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 					utils.RecordChangeStreamError(sourceDB, collectionName, fmt.Sprintf("decode error: %v", errDec))
 					continue
 				}
+
+				// Increment received events counter
+				s.statisticsM.Lock()
+				s.receivedEvents[collKey]++
+				received := s.receivedEvents[collKey]
+				executed := s.executedEvents[collKey]
+				s.statisticsM.Unlock()
+
 				opType, _ := changeEvent["operationType"].(string)
 				token := cs.ResumeToken()
 				model := s.prepareWriteModel(changeEvent, collectionName, opType)
@@ -529,8 +562,8 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 					})
 					bufferMutex.Unlock()
 
-					// Update ChangeStream activity status and record processed events
-					utils.UpdateChangeStreamActivity(sourceDB, collectionName, 1)
+					// Update ChangeStream activity status and record processed events with additional stats
+					utils.UpdateChangeStreamActivity(sourceDB, collectionName, 1, received, executed)
 
 					queryStr := describeWriteModel(model, opType)
 					s.logger.Debugf("[MongoDB][%s] table=%s.%s query=%s",
@@ -758,6 +791,13 @@ func (s *MongoDBSyncer) flushBuffer(ctx context.Context, targetColl *mongo.Colle
 				}
 				return err // If it's a connection error, RetryMongoOperation will retry
 			}
+
+			// Update executed events counter
+			collKey := fmt.Sprintf("%s.%s", sourceDB, collectionName)
+			successCount := int(res.InsertedCount + res.ModifiedCount + res.DeletedCount)
+			s.statisticsM.Lock()
+			s.executedEvents[collKey] += successCount
+			s.statisticsM.Unlock()
 
 			s.logger.Debugf(
 				"[MongoDB] BulkWrite => table=%s.%s inserted=%d matched=%d modified=%d upserted=%d deleted=%d (opTotals=>insert=%d, update=%d, delete=%d)",
@@ -1253,4 +1293,32 @@ func (s *MongoDBSyncer) convertToWriteModel(persistedChange persistedChange) mon
 	}
 
 	return model
+}
+
+// checkAndResetDailyCounters checks if the day has changed and resets counters if needed
+func (s *MongoDBSyncer) checkAndResetDailyCounters() {
+	now := time.Now()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+
+	s.statisticsM.RLock()
+	lastResetDay := s.lastCounterResetDay
+	s.statisticsM.RUnlock()
+
+	if today.After(lastResetDay) {
+		s.statisticsM.Lock()
+		// Log final counts before reset
+		for collKey, received := range s.receivedEvents {
+			executed := s.executedEvents[collKey]
+			s.logger.Infof("[MongoDB] Daily statistics for %s: received=%d, executed=%d, day=%s",
+				collKey, received, executed, lastResetDay.Format("2006-01-02"))
+		}
+
+		// Reset all counters
+		s.receivedEvents = make(map[string]int)
+		s.executedEvents = make(map[string]int)
+		s.lastCounterResetDay = today
+		s.statisticsM.Unlock()
+
+		s.logger.Infof("[MongoDB] Daily counters reset at %s", today.Format("2006-01-02 15:04:05"))
+	}
 }
