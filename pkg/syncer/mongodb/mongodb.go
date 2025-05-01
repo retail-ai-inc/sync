@@ -161,10 +161,13 @@ func (s *MongoDBSyncer) syncDatabase(ctx context.Context, mapping config.Databas
 			continue
 		}
 
-		// Copy indexes from source to target
-		if errIdx := s.copyIndexes(ctx, srcColl, tgtColl); errIdx != nil {
-			s.logger.Warnf("[MongoDB] Failed to copy indexes for %s -> %s: %v", tableMap.SourceTable, tableMap.TargetTable, errIdx)
-		}
+		// Copy indexes from source to target (临时禁用索引复制功能)
+		/*
+			if errIdx := s.copyIndexes(ctx, srcColl, tgtColl); errIdx != nil {
+				s.logger.Warnf("[MongoDB] Failed to copy indexes for %s -> %s: %v", tableMap.SourceTable, tableMap.TargetTable, errIdx)
+			}
+		*/
+		s.logger.Infof("[MongoDB] Index copying is disabled, skipping index copy for %s -> %s", tableMap.SourceTable, tableMap.TargetTable)
 
 		// Perform initial sync if target has no data
 		err := s.doInitialSync(ctx, srcColl, tgtColl, sourceDBName, targetDBName)
