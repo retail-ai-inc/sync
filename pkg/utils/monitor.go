@@ -365,11 +365,16 @@ func countAndLogMongoDB(ctx context.Context, sc config.SyncConfig, log *logrus.L
 	activeStreams := GetActiveChangeStreams()
 	csDetails := make([]string, 0, len(activeStreams))
 	activeCount := 0
+	receivedTotal := 0
+	executedTotal := 0
 
 	for key, cs := range activeStreams {
 		if cs.Active {
 			activeCount++
-			details := fmt.Sprintf("%s[events:%d,errors:%d]", key, cs.EventCount, cs.ErrorCount)
+			receivedTotal += cs.ReceivedEvents
+			executedTotal += cs.ExecutedEvents
+			details := fmt.Sprintf("%s[events:%d,received:%d,executed:%d,errors:%d]",
+				key, cs.EventCount, cs.ReceivedEvents, cs.ExecutedEvents, cs.ErrorCount)
 			csDetails = append(csDetails, details)
 		}
 	}
@@ -379,6 +384,8 @@ func countAndLogMongoDB(ctx context.Context, sc config.SyncConfig, log *logrus.L
 		"active_changestreams": activeCount,
 		"changestream_details": csDetails,
 		"total_tracked":        len(activeStreams),
+		"received_events":      receivedTotal,
+		"executed_events":      executedTotal,
 		"monitor_action":       "changestream_status",
 	}).Info("MongoDB active ChangeStreams status")
 
