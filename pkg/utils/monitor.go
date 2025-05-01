@@ -63,7 +63,7 @@ func UpdateChangeStreamActivity(database, collection string, eventCount int, rec
 	key := fmt.Sprintf("%s.%s", database, collection)
 	if stream, exists := changeStreamTracker[key]; exists {
 		stream.LastActivity = time.Now()
-		stream.EventCount += eventCount
+		stream.EventCount += int64(eventCount)
 		stream.ReceivedEvents = receivedEvents
 		stream.ExecutedEvents = executedEvents
 	}

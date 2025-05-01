@@ -563,7 +563,7 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 					bufferMutex.Unlock()
 
 					// Update ChangeStream activity status and record processed events with additional stats
-					utils.UpdateChangeStreamActivity(sourceDB, collectionName, 1, received, executed)
+					utils.UpdateChangeStreamActivity(sourceDB, collectionName, 0, received, executed)
 
 					queryStr := describeWriteModel(model, opType)
 					s.logger.Debugf("[MongoDB][%s] table=%s.%s query=%s",
@@ -619,7 +619,7 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 						} else {
 							s.logger.Infof("[MongoDB] Successfully rebuilt change stream for %s.%s after history lost", sourceDB, collectionName)
 							cs = newCs
-							utils.UpdateChangeStreamActivity(sourceDB, collectionName, 0) // Reset activity status
+							utils.UpdateChangeStreamActivity(sourceDB, collectionName, 0, 0, 0) // Reset activity status
 							// Continue monitoring without exiting the loop
 							continue
 						}
