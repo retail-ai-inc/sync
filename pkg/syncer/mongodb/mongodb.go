@@ -53,6 +53,8 @@ type MongoDBSyncer struct {
 	executedEvents      map[string]int
 	statisticsM         sync.RWMutex
 	lastCounterResetDay time.Time
+	// Controls whether delete operations are synced
+	enableDeleteOps bool
 }
 
 func NewMongoDBSyncer(cfg config.SyncConfig, logger *logrus.Logger) *MongoDBSyncer {
@@ -114,6 +116,7 @@ func NewMongoDBSyncer(cfg config.SyncConfig, logger *logrus.Logger) *MongoDBSync
 		receivedEvents:      make(map[string]int),
 		executedEvents:      make(map[string]int),
 		lastCounterResetDay: time.Now(),
+		enableDeleteOps:     false, // Disable delete operations by default
 	}
 }
 
@@ -884,6 +887,12 @@ func (s *MongoDBSyncer) prepareWriteModel(doc bson.M, collName, opType string) m
 		}
 
 	case "delete":
+		// Skip delete operations if enableDeleteOps is false
+		if !s.enableDeleteOps {
+			s.logger.Debugf("[MongoDB] Delete operation skipped (enableDeleteOps=false) for document: %v", doc["documentKey"])
+			return nil
+		}
+
 		if docID, ok := doc["documentKey"].(bson.M)["_id"]; ok {
 			return mongo.NewDeleteOneModel().SetFilter(bson.M{"_id": docID})
 		}
