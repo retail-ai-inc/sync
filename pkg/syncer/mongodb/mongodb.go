@@ -737,7 +737,7 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 					}
 					bufferMutex.Unlock()
 				} else {
-					s.logger.Warnf("[MongoDB] Failed to prepare write model for event type %s, skipping", opType)
+					s.logger.Debugf("[MongoDB] Failed to prepare write model for event type %s, skipping", opType)
 				}
 			} else {
 				if errCS := cs.Err(); errCS != nil {
@@ -1083,7 +1083,15 @@ func (s *MongoDBSyncer) flushBuffer(ctx context.Context, targetColl *mongo.Colle
 		}
 	}
 
-	*buffer = (*buffer)[:0] // Clear buffer regardless of success or failure
+	// Save latest resume token before clearing buffer
+	if len(*buffer) > 0 {
+		lastToken := (*buffer)[len(*buffer)-1].token
+		if lastToken != nil {
+			s.saveMongoDBResumeToken(sourceDB, collectionName, lastToken)
+		}
+	}
+	// Clear in-memory buffer
+	*buffer = (*buffer)[:0]
 }
 
 func (s *MongoDBSyncer) loadMongoDBResumeToken(db, coll string) bson.Raw {
