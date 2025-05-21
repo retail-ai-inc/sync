@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 
 	"github.com/retail-ai-inc/sync/pkg/db"
 	"github.com/sirupsen/logrus"
@@ -16,6 +17,7 @@ type TableMapping struct {
 	TargetTable     string
 	SecurityEnabled bool
 	FieldSecurity   []interface{}
+	CountQuery      map[string]interface{} `json:"countQuery"`
 }
 
 type DatabaseMapping struct {
@@ -61,11 +63,13 @@ type Config struct {
 	LogLevel                      string
 	SyncConfigs                   []SyncConfig
 	Logger                        *logrus.Logger
+	MonitorInterval               time.Duration
 }
 
 type globalConfig struct {
 	EnableTableRowCountMonitoring bool
 	LogLevel                      string
+	MonitorInterval               time.Duration
 }
 
 type FieldSecurityItem struct {
@@ -74,10 +78,11 @@ type FieldSecurityItem struct {
 }
 
 type TableMappingJSON struct {
-	SourceTable     string              `json:"sourceTable"`
-	TargetTable     string              `json:"targetTable"`
-	SecurityEnabled bool                `json:"securityEnabled"`
-	FieldSecurity   []FieldSecurityItem `json:"fieldSecurity"`
+	SourceTable     string                 `json:"sourceTable"`
+	TargetTable     string                 `json:"targetTable"`
+	SecurityEnabled bool                   `json:"securityEnabled"`
+	FieldSecurity   []FieldSecurityItem    `json:"fieldSecurity"`
+	CountQuery      map[string]interface{} `json:"countQuery"`
 }
 
 type jsonMapping struct {
@@ -86,8 +91,9 @@ type jsonMapping struct {
 	TargetDatabase string `json:"targetDatabase"`
 	TargetSchema   string `json:"targetSchema"`
 	Tables         []struct {
-		SourceTable   string `json:"sourceTable"`
-		TargetTable   string `json:"targetTable"`
+		SourceTable   string                 `json:"sourceTable"`
+		TargetTable   string                 `json:"targetTable"`
+		CountQuery    map[string]interface{} `json:"countQuery"`
 		FieldSecurity []struct {
 			Field        string `json:"field"`
 			SecurityType string `json:"securityType"`
@@ -110,23 +116,26 @@ func NewConfig() *Config {
 		LogLevel:                      gcfg.LogLevel,
 		SyncConfigs:                   syncCfgs,
 		Logger:                        logrus.New(),
+		MonitorInterval:               gcfg.MonitorInterval,
 	}
 }
 
 func loadGlobalConfig(db *sql.DB) globalConfig {
 	var em int
 	var ll string
+	var mi int
 	err := db.QueryRow(`
-SELECT enable_table_row_count_monitoring, log_level
+SELECT enable_table_row_count_monitoring, log_level, monitor_interval
 FROM config_global
 WHERE id=1
-`).Scan(&em, &ll)
+`).Scan(&em, &ll, &mi)
 	if err != nil {
 		log.Fatalf("Failed to load config_global: %v", err)
 	}
 	return globalConfig{
 		EnableTableRowCountMonitoring: (em != 0),
 		LogLevel:                      ll,
+		MonitorInterval:               time.Duration(mi) * time.Second,
 	}
 }
 
@@ -235,6 +244,10 @@ ORDER BY id ASC
 										if table, ok := tables[j].(map[string]interface{}); ok {
 											if fieldSecurity, ok := table["fieldSecurity"].([]interface{}); ok {
 												sc.Mappings[i].Tables[j].FieldSecurity = fieldSecurity
+											}
+
+											if countQuery, ok := table["countQuery"].(map[string]interface{}); ok {
+												sc.Mappings[i].Tables[j].CountQuery = countQuery
 											}
 										}
 									}

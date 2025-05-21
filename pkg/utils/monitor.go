@@ -322,28 +322,87 @@ func countAndLogMongoDB(ctx context.Context, sc config.SyncConfig, log *logrus.L
 			srcColl := srcClient.Database(srcDBName).Collection(tblMap.SourceTable)
 			tgtColl := tgtClient.Database(tgtDBName).Collection(tblMap.TargetTable)
 
-			srcCount, err := srcColl.EstimatedDocumentCount(ctx)
-			if err != nil {
-				log.WithError(err).WithFields(logrus.Fields{
-					"db_type":   dbType,
-					"src_db":    srcDBName,
-					"src_coll":  tblMap.SourceTable,
-					"tgt_db":    tgtDBName,
-					"tgt_coll":  tblMap.TargetTable,
-					"operation": "source_count",
-				}).Error("Failed to get source collection count")
-				srcCount = -1
-			}
+			var srcCount int64
+			var tgtCount int64
+			var err error
 
-			tgtCount, err := tgtColl.EstimatedDocumentCount(ctx)
-			if err != nil {
-				log.WithError(err).WithFields(logrus.Fields{
-					"db_type":   dbType,
-					"tgt_db":    tgtDBName,
-					"tgt_coll":  tblMap.TargetTable,
-					"operation": "target_count",
-				}).Error("Failed to get target collection count")
-				tgtCount = -1
+			if tblMap.CountQuery != nil && len(tblMap.CountQuery) > 0 {
+				var countQuery *CountQuery
+				if conditions, ok := tblMap.CountQuery["conditions"]; ok {
+					conditionBytes, err := json.Marshal(conditions)
+					if err == nil {
+						var conditionsList []CountCondition
+						if err := json.Unmarshal(conditionBytes, &conditionsList); err == nil {
+							countQuery = &CountQuery{
+								Conditions: conditionsList,
+							}
+							log.Debugf("[Monitor] Using conditions for %s: %+v",
+								tblMap.SourceTable, countQuery.Conditions)
+						}
+					}
+				}
+
+				queryCounter := NewQueryCounter(log)
+
+				srcCount, err = queryCounter.CountMongoDBDocuments(
+					ctx,
+					srcClient,
+					srcDBName,
+					tblMap.SourceTable,
+					countQuery,
+				)
+				if err != nil {
+					log.WithError(err).WithFields(logrus.Fields{
+						"db_type":   dbType,
+						"src_db":    srcDBName,
+						"src_coll":  tblMap.SourceTable,
+						"tgt_db":    tgtDBName,
+						"tgt_coll":  tblMap.TargetTable,
+						"operation": "source_count",
+					}).Error("Failed to get source collection count")
+					srcCount = -1
+				}
+
+				tgtCount, err = queryCounter.CountMongoDBDocuments(
+					ctx,
+					tgtClient,
+					tgtDBName,
+					tblMap.TargetTable,
+					countQuery,
+				)
+				if err != nil {
+					log.WithError(err).WithFields(logrus.Fields{
+						"db_type":   dbType,
+						"tgt_db":    tgtDBName,
+						"tgt_coll":  tblMap.TargetTable,
+						"operation": "target_count",
+					}).Error("Failed to get target collection count")
+					tgtCount = -1
+				}
+			} else {
+				srcCount, err = srcColl.EstimatedDocumentCount(ctx)
+				if err != nil {
+					log.WithError(err).WithFields(logrus.Fields{
+						"db_type":   dbType,
+						"src_db":    srcDBName,
+						"src_coll":  tblMap.SourceTable,
+						"tgt_db":    tgtDBName,
+						"tgt_coll":  tblMap.TargetTable,
+						"operation": "source_count",
+					}).Error("Failed to get source collection count")
+					srcCount = -1
+				}
+
+				tgtCount, err = tgtColl.EstimatedDocumentCount(ctx)
+				if err != nil {
+					log.WithError(err).WithFields(logrus.Fields{
+						"db_type":   dbType,
+						"tgt_db":    tgtDBName,
+						"tgt_coll":  tblMap.TargetTable,
+						"operation": "target_count",
+					}).Error("Failed to get target collection count")
+					tgtCount = -1
+				}
 			}
 
 			log.WithFields(logrus.Fields{

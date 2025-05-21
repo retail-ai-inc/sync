@@ -21,8 +21,6 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-const monitorInterval = time.Second * 60
-
 func main() {
 	cfg := config.NewConfig()
 	log := logger.InitLogger(cfg.LogLevel)
@@ -106,7 +104,7 @@ func runSyncTasks(parentCtx context.Context, log *logrus.Logger, cfg *config.Con
 	// Initialize row count monitoring (if enabled)
 	if currentConfig.EnableTableRowCountMonitoring {
 		rowCountMonitorCtx, rowCountMonitorCancel = context.WithCancel(parentCtx)
-		utils.StartRowCountMonitoring(rowCountMonitorCtx, currentConfig, log, monitorInterval)
+		utils.StartRowCountMonitoring(rowCountMonitorCtx, currentConfig, log, currentConfig.MonitorInterval)
 	}
 
 	for {
@@ -139,7 +137,7 @@ func runSyncTasks(parentCtx context.Context, log *logrus.Logger, cfg *config.Con
 				// Restart row count monitoring (if enabled)
 				if currentConfig.EnableTableRowCountMonitoring {
 					rowCountMonitorCtx, rowCountMonitorCancel = context.WithCancel(parentCtx)
-					utils.StartRowCountMonitoring(rowCountMonitorCtx, currentConfig, log, monitorInterval)
+					utils.StartRowCountMonitoring(rowCountMonitorCtx, currentConfig, log, currentConfig.MonitorInterval)
 				}
 			}
 		}
