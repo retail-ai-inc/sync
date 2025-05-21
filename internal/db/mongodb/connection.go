@@ -48,7 +48,6 @@ func ConnectMongoDB(ctx context.Context, host string, port string, user string, 
 	// Build the connection URI
 	uri := fmt.Sprintf("mongodb://%s:%s@%s:%s/%s?authSource=admin", user, password, host, port, database)
 
-	logger.Infof("[MongoDB] Connection URI: %s", uri)
 	client, err := GetMongoClient(ctx, uri)
 	if err != nil {
 		logger.Errorf("[MongoDB] Connection failed: %v", err)
