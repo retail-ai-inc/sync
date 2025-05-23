@@ -695,26 +695,35 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 				token := cs.ResumeToken()
 				model := s.prepareWriteModel(changeEvent, collectionName, opType)
 				if model != nil {
+					// Determine the actual operation type based on the model type
+					actualOpType := opType
+					if opType == "update" {
+						if _, isReplace := model.(*mongo.ReplaceOneModel); isReplace {
+							actualOpType = "replace"
+							s.logger.Debugf("[MongoDB] Changed opType from 'update' to 'replace' for full document replacement")
+						}
+					}
+
 					bufferMutex.Lock()
 					buffer = append(buffer, bufferedChange{
 						token:  token,
 						model:  model,
-						opType: opType,
+						opType: actualOpType,
 					})
 					bufferMutex.Unlock()
 
 					// Update ChangeStream activity status and record processed events with additional stats
 					utils.UpdateChangeStreamActivity(sourceDB, collectionName, 0, received, executed)
 
-					queryStr := describeWriteModel(model, opType)
+					queryStr := describeWriteModel(model, actualOpType)
 					s.logger.Debugf("[MongoDB][%s] table=%s.%s query=%s",
-						strings.ToUpper(opType),
+						strings.ToUpper(actualOpType),
 						targetColl.Database().Name(),
 						targetColl.Name(),
 						queryStr,
 					)
 					s.logger.Debugf("[MongoDB][%s] table=%s.%s rowsAffected=1",
-						strings.ToUpper(opType),
+						strings.ToUpper(actualOpType),
 						targetColl.Database().Name(),
 						targetColl.Name(),
 					)
@@ -831,6 +840,7 @@ func (s *MongoDBSyncer) prepareWriteModel(doc bson.M, collName, opType string) m
 			}
 			return mongo.NewInsertOneModel().SetDocument(fullDoc)
 		}
+		s.logger.Errorf("[MongoDB] Insert operation failed: fullDocument not found in change event for %s", collName)
 
 	case "update", "replace":
 		var docID interface{}
@@ -841,52 +851,24 @@ func (s *MongoDBSyncer) prepareWriteModel(doc bson.M, collName, opType string) m
 			return nil
 		}
 
-		if opType == "replace" {
-			if fullDoc, ok := doc["fullDocument"].(bson.M); ok {
-				if tableSecurity.SecurityEnabled && len(tableSecurity.FieldSecurity) > 0 {
-					for field, value := range fullDoc {
-						processedValue := security.ProcessValue(value, field, tableSecurity)
-						fullDoc[field] = processedValue
-					}
-				}
-				return mongo.NewReplaceOneModel().
-					SetFilter(bson.M{"_id": docID}).
-					SetReplacement(fullDoc).
-					SetUpsert(true)
-			}
-		} else { // "update"
-			if updateDesc, ok := doc["updateDescription"].(bson.M); ok {
-				var updateDoc bson.M = make(bson.M)
+		s.logger.Debugf("[MongoDB] Processing update operation for %s, docID=%v", collName, docID)
 
-				if updatedFields, ok := updateDesc["updatedFields"].(bson.M); ok && len(updatedFields) > 0 {
-					if tableSecurity.SecurityEnabled && len(tableSecurity.FieldSecurity) > 0 {
-						for field, value := range updatedFields {
-							processedValue := security.ProcessValue(value, field, tableSecurity)
-							updatedFields[field] = processedValue
-						}
-					}
-					updateDoc["$set"] = updatedFields
-				}
-
-				if removedFields, ok := updateDesc["removedFields"].(bson.A); ok && len(removedFields) > 0 {
-					unsetDoc := make(bson.M)
-					for _, field := range removedFields {
-						if fieldStr, ok := field.(string); ok {
-							unsetDoc[fieldStr] = ""
-						}
-					}
-					if len(unsetDoc) > 0 {
-						updateDoc["$unset"] = unsetDoc
-					}
-				}
-
-				if len(updateDoc) > 0 {
-					return mongo.NewUpdateOneModel().
-						SetFilter(bson.M{"_id": docID}).
-						SetUpdate(updateDoc).
-						SetUpsert(true)
+		// Use full document replacement for all updates to ensure data consistency
+		if fullDoc, ok := doc["fullDocument"].(bson.M); ok {
+			if tableSecurity.SecurityEnabled && len(tableSecurity.FieldSecurity) > 0 {
+				for field, value := range fullDoc {
+					processedValue := security.ProcessValue(value, field, tableSecurity)
+					fullDoc[field] = processedValue
 				}
 			}
+			s.logger.Debugf("[MongoDB] Using full document replacement for update operation, docID=%v", docID)
+			return mongo.NewReplaceOneModel().
+				SetFilter(bson.M{"_id": docID}).
+				SetReplacement(fullDoc).
+				SetUpsert(true)
+		} else {
+			s.logger.Warnf("[MongoDB] fullDocument not available for update operation, skipping, docID=%v", docID)
+			return nil
 		}
 
 	case "delete":
@@ -897,10 +879,13 @@ func (s *MongoDBSyncer) prepareWriteModel(doc bson.M, collName, opType string) m
 		}
 
 		if docID, ok := doc["documentKey"].(bson.M)["_id"]; ok {
+			s.logger.Debugf("[MongoDB] Delete operation prepared for %s, docID=%v", collName, docID)
 			return mongo.NewDeleteOneModel().SetFilter(bson.M{"_id": docID})
 		}
+		s.logger.Errorf("[MongoDB] Delete operation failed: _id not found in documentKey for %s", collName)
 	}
 
+	s.logger.Warnf("[MongoDB] No write model created for opType=%s, collName=%s", opType, collName)
 	return nil
 }
 
@@ -1516,6 +1501,8 @@ func (s *MongoDBSyncer) getBufferPath(db, coll string) string {
 func (s *MongoDBSyncer) convertToWriteModel(persistedChange persistedChange) mongo.WriteModel {
 	var model mongo.WriteModel
 
+	s.logger.Debugf("[MongoDB] convertToWriteModel: opType=%s, id=%s", persistedChange.OpType, persistedChange.ID)
+
 	switch persistedChange.OpType {
 	case "insert":
 		var doc bson.D
@@ -1525,36 +1512,56 @@ func (s *MongoDBSyncer) convertToWriteModel(persistedChange persistedChange) mon
 		}
 		model = mongo.NewInsertOneModel().SetDocument(doc)
 
-	case "update", "replace":
+	case "update":
 		var updateData bson.M
 		if err := bson.Unmarshal(persistedChange.Doc, &updateData); err != nil {
 			s.logger.Errorf("[MongoDB] Failed to unmarshal update document from BSON: %v", err)
 			return nil
 		}
 
-		if persistedChange.OpType == "replace" {
-			filter, ok := updateData["filter"].(bson.M)
-			if !ok || updateData["replacement"] == nil {
-				s.logger.Errorf("[MongoDB] Invalid replace data structure")
-				return nil
-			}
+		filter, ok := updateData["filter"].(bson.M)
+		if !ok {
+			s.logger.Errorf("[MongoDB] Invalid update data structure: missing filter field")
+			s.logger.Errorf("[MongoDB] updateData content: %v", updateData)
+			return nil
+		}
 
+		// Check for new format (replacement) - this is what we want
+		if replacement, hasReplacement := updateData["replacement"]; hasReplacement && replacement != nil {
+			// New format: use ReplaceOneModel for full document replacement
+			s.logger.Debugf("[MongoDB] Processing update as full document replacement")
 			model = mongo.NewReplaceOneModel().
 				SetFilter(filter).
-				SetReplacement(updateData["replacement"]).
+				SetReplacement(replacement).
 				SetUpsert(true)
+		} else if updateData["update"] != nil {
+			// Legacy format detected - skip to avoid array index issues
+			s.logger.Warnf("[MongoDB] Skipping legacy update operation (partial update) for document %v to avoid array index issues. Please restart sync for full document replacement.", filter["_id"])
+			return nil
 		} else {
-			filter, ok := updateData["filter"].(bson.M)
-			if !ok || updateData["update"] == nil {
-				s.logger.Errorf("[MongoDB] Invalid update data structure")
-				return nil
-			}
-
-			model = mongo.NewUpdateOneModel().
-				SetFilter(filter).
-				SetUpdate(updateData["update"]).
-				SetUpsert(true)
+			s.logger.Errorf("[MongoDB] Invalid update data structure: missing both replacement and update fields")
+			s.logger.Errorf("[MongoDB] updateData content: %v", updateData)
+			return nil
 		}
+
+	case "replace":
+		var updateData bson.M
+		if err := bson.Unmarshal(persistedChange.Doc, &updateData); err != nil {
+			s.logger.Errorf("[MongoDB] Failed to unmarshal replace document from BSON: %v", err)
+			return nil
+		}
+
+		filter, ok := updateData["filter"].(bson.M)
+		if !ok || updateData["replacement"] == nil {
+			s.logger.Errorf("[MongoDB] Invalid replace data structure: missing filter or replacement field")
+			s.logger.Errorf("[MongoDB] updateData content: %v", updateData)
+			return nil
+		}
+
+		model = mongo.NewReplaceOneModel().
+			SetFilter(filter).
+			SetReplacement(updateData["replacement"]).
+			SetUpsert(true)
 
 	case "delete":
 		var deleteData bson.M
@@ -1570,6 +1577,14 @@ func (s *MongoDBSyncer) convertToWriteModel(persistedChange persistedChange) mon
 		}
 
 		model = mongo.NewDeleteOneModel().SetFilter(filter)
+
+	default:
+		s.logger.Errorf("[MongoDB] Unknown operation type in persisted change: %s", persistedChange.OpType)
+		return nil
+	}
+
+	if model != nil {
+		s.logger.Debugf("[MongoDB] Successfully converted persisted change %s to WriteModel", persistedChange.ID)
 	}
 
 	return model
