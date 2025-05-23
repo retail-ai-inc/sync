@@ -12,12 +12,18 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+type AdvancedSettings struct {
+	SyncIndexes     bool `json:"syncIndexes"`
+	IgnoreDeleteOps bool `json:"ignoreDeleteOps"`
+}
+
 type TableMapping struct {
-	SourceTable     string
-	TargetTable     string
-	SecurityEnabled bool
-	FieldSecurity   []interface{}
-	CountQuery      map[string]interface{} `json:"countQuery"`
+	SourceTable      string                 `json:"sourceTable"`
+	TargetTable      string                 `json:"targetTable"`
+	SecurityEnabled  bool                   `json:"securityEnabled"`
+	FieldSecurity    []interface{}          `json:"fieldSecurity"`
+	CountQuery       map[string]interface{} `json:"countQuery"`
+	AdvancedSettings AdvancedSettings       `json:"advancedSettings"`
 }
 
 type DatabaseMapping struct {
@@ -248,6 +254,16 @@ ORDER BY id ASC
 
 											if countQuery, ok := table["countQuery"].(map[string]interface{}); ok {
 												sc.Mappings[i].Tables[j].CountQuery = countQuery
+											}
+
+											// Parse advancedSettings
+											if advancedSettings, ok := table["advancedSettings"].(map[string]interface{}); ok {
+												if syncIndexes, ok := advancedSettings["syncIndexes"].(bool); ok {
+													sc.Mappings[i].Tables[j].AdvancedSettings.SyncIndexes = syncIndexes
+												}
+												if ignoreDeleteOps, ok := advancedSettings["ignoreDeleteOps"].(bool); ok {
+													sc.Mappings[i].Tables[j].AdvancedSettings.IgnoreDeleteOps = ignoreDeleteOps
+												}
 											}
 										}
 									}

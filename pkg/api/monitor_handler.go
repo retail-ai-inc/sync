@@ -2,6 +2,7 @@ package api
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -359,4 +360,186 @@ func parseRangeToSince(rangeStr string) (since time.Time) {
 	default:
 		return now.Add(-10 * time.Hour)
 	}
+}
+
+// GET /api/changestreams/status
+func ChangeStreamsStatusHandler(w http.ResponseWriter, r *http.Request) {
+	db, err := openLocalDB()
+	if err != nil {
+		errorJSON(w, "open db fail", err)
+		return
+	}
+	defer db.Close()
+
+	// Query recent 2 hours of Comprehensive ChangeStream Status logs
+	// Get the latest record for each sync_task_id
+	query := `
+SELECT t1.sync_task_id, t1.message, t1.log_time
+FROM sync_log t1
+WHERE t1.message LIKE '%[MongoDB] Comprehensive ChangeStream Status%'
+  AND t1.log_time >= datetime('now', '-2 hours')
+  AND t1.log_time = (
+    SELECT MAX(t2.log_time)
+    FROM sync_log t2
+    WHERE t2.sync_task_id = t1.sync_task_id
+      AND t2.message LIKE '%[MongoDB] Comprehensive ChangeStream Status%'
+      AND t2.log_time >= datetime('now', '-2 hours')
+  )
+ORDER BY t1.sync_task_id
+`
+
+	rows, err := db.Query(query)
+	if err != nil {
+		errorJSON(w, "query sync_log fail", err)
+		return
+	}
+	defer rows.Close()
+
+	// Track processed task IDs to avoid duplicates
+	processedTasks := make(map[string]bool)
+
+	// Aggregated data
+	totalReceived := 0
+	totalExecuted := 0
+	totalPending := 0
+	totalActiveStreams := 0
+	allChangeStreams := make([]map[string]interface{}, 0)
+	lastUpdated := ""
+
+	for rows.Next() {
+		var taskID, message, logTime string
+		if err := rows.Scan(&taskID, &message, &logTime); err != nil {
+			continue
+		}
+
+		// Skip if we've already processed this task (take only the latest)
+		if processedTasks[taskID] {
+			continue
+		}
+		processedTasks[taskID] = true
+
+		// Extract JSON from message
+		jsonStart := strings.Index(message, "{")
+		if jsonStart == -1 {
+			continue
+		}
+
+		// Find the end of JSON by counting braces
+		jsonStr := ""
+		braceCount := 0
+		inString := false
+		escaped := false
+
+		for i := jsonStart; i < len(message); i++ {
+			char := message[i]
+
+			if escaped {
+				escaped = false
+				continue
+			}
+
+			if char == '\\' {
+				escaped = true
+				continue
+			}
+
+			if char == '"' {
+				inString = !inString
+				continue
+			}
+
+			if !inString {
+				if char == '{' {
+					braceCount++
+				} else if char == '}' {
+					braceCount--
+					if braceCount == 0 {
+						jsonStr = message[jsonStart : i+1]
+						break
+					}
+				}
+			}
+		}
+
+		if jsonStr == "" {
+			continue
+		}
+
+		// Parse JSON
+		var statusData map[string]interface{}
+		if err := json.Unmarshal([]byte(jsonStr), &statusData); err != nil {
+			continue
+		}
+
+		// Extract summary data
+		if summary, ok := statusData["summary"].(map[string]interface{}); ok {
+			if received, ok := summary["total_received"].(float64); ok {
+				totalReceived += int(received)
+			}
+			if executed, ok := summary["total_executed"].(float64); ok {
+				totalExecuted += int(executed)
+			}
+			if pending, ok := summary["total_pending"].(float64); ok {
+				totalPending += int(pending)
+			}
+		}
+
+		// Extract changestreams data
+		if changestreams, ok := statusData["changestreams"].(map[string]interface{}); ok {
+			if activeCount, ok := changestreams["active_count"].(float64); ok {
+				totalActiveStreams += int(activeCount)
+			}
+
+			if details, ok := changestreams["details"].([]interface{}); ok {
+				for _, detail := range details {
+					if detailMap, ok := detail.(map[string]interface{}); ok {
+						// Add task_id to each changestream for identification
+						csDetail := make(map[string]interface{})
+						for k, v := range detailMap {
+							csDetail[k] = v
+						}
+						csDetail["task_id"] = taskID
+						allChangeStreams = append(allChangeStreams, csDetail)
+					}
+				}
+			}
+		}
+
+		// Update last updated time
+		if lastUpdated == "" || logTime > lastUpdated {
+			lastUpdated = logTime
+		}
+	}
+
+	if err := rows.Err(); err != nil {
+		errorJSON(w, "sync_log iteration error", err)
+		return
+	}
+
+	// Calculate processing rate (simplified calculation)
+	processingRate := "0/sec"
+	if totalActiveStreams > 0 && totalExecuted > 0 {
+		// This is a simplified rate calculation
+		// In a real scenario, you might want to calculate based on time windows
+		processingRate = "N/A" // We need time-based calculation for accurate rate
+	}
+
+	// Prepare response
+	response := map[string]interface{}{
+		"success": true,
+		"data": map[string]interface{}{
+			"summary": map[string]interface{}{
+				"total_received":  totalReceived,
+				"total_executed":  totalExecuted,
+				"total_pending":   totalPending,
+				"processing_rate": processingRate,
+				"active_streams":  totalActiveStreams,
+			},
+			"changestreams": allChangeStreams,
+			"last_updated":  lastUpdated,
+			"tasks_count":   len(processedTasks),
+		},
+	}
+
+	writeJSON(w, response)
 }

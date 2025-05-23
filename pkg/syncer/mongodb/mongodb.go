@@ -53,8 +53,6 @@ type MongoDBSyncer struct {
 	executedEvents      map[string]int
 	statisticsM         sync.RWMutex
 	lastCounterResetDay time.Time
-	// Controls whether delete operations are synced
-	enableDeleteOps bool
 }
 
 func NewMongoDBSyncer(cfg config.SyncConfig, logger *logrus.Logger) *MongoDBSyncer {
@@ -116,7 +114,6 @@ func NewMongoDBSyncer(cfg config.SyncConfig, logger *logrus.Logger) *MongoDBSync
 		receivedEvents:      make(map[string]int),
 		executedEvents:      make(map[string]int),
 		lastCounterResetDay: time.Now(),
-		enableDeleteOps:     false, // Disable delete operations by default
 	}
 }
 
@@ -164,12 +161,17 @@ func (s *MongoDBSyncer) syncDatabase(ctx context.Context, mapping config.Databas
 			continue
 		}
 
-		/*
+		// Copy indexes based on AdvancedSettings
+		s.logger.Infof("[MongoDB] SyncIndexes: %v", tableMap.AdvancedSettings.SyncIndexes)
+		if tableMap.AdvancedSettings.SyncIndexes {
 			if errIdx := s.copyIndexes(ctx, srcColl, tgtColl); errIdx != nil {
 				s.logger.Warnf("[MongoDB] Failed to copy indexes for %s -> %s: %v", tableMap.SourceTable, tableMap.TargetTable, errIdx)
+			} else {
+				s.logger.Infof("[MongoDB] Successfully copied indexes for %s -> %s", tableMap.SourceTable, tableMap.TargetTable)
 			}
-		*/
-		s.logger.Infof("[MongoDB] Index copying is disabled, skipping index copy for %s -> %s", tableMap.SourceTable, tableMap.TargetTable)
+		} else {
+			s.logger.Infof("[MongoDB] Index copying is disabled for %s -> %s (syncIndexes=false)", tableMap.SourceTable, tableMap.TargetTable)
+		}
 
 		// Perform initial sync if target has no data
 		err := s.doInitialSync(ctx, srcColl, tgtColl, sourceDBName, targetDBName)
@@ -816,6 +818,7 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 
 func (s *MongoDBSyncer) prepareWriteModel(doc bson.M, collName, opType string) mongo.WriteModel {
 	tableSecurity := security.FindTableSecurityFromMappings(collName, s.cfg.Mappings)
+	advancedSettings := s.findTableAdvancedSettings(collName)
 
 	switch opType {
 	case "insert":
@@ -887,9 +890,9 @@ func (s *MongoDBSyncer) prepareWriteModel(doc bson.M, collName, opType string) m
 		}
 
 	case "delete":
-		// Skip delete operations if enableDeleteOps is false
-		if !s.enableDeleteOps {
-			s.logger.Debugf("[MongoDB] Delete operation skipped (enableDeleteOps=false) for document: %v", doc["documentKey"])
+		// Use table-specific ignoreDeleteOps setting instead of global enableDeleteOps
+		if advancedSettings.IgnoreDeleteOps {
+			s.logger.Debugf("[MongoDB] Delete operation skipped (ignoreDeleteOps=true) for table %s, document: %v", collName, doc["documentKey"])
 			return nil
 		}
 
@@ -1563,5 +1566,21 @@ func (s *MongoDBSyncer) checkAndResetDailyCounters() {
 		s.statisticsM.Unlock()
 
 		s.logger.Infof("[MongoDB] Daily counters reset at %s", today.Format("2006-01-02 15:04:05"))
+	}
+}
+
+// findTableAdvancedSettings returns the AdvancedSettings for a given table name
+func (s *MongoDBSyncer) findTableAdvancedSettings(tableName string) config.AdvancedSettings {
+	for _, mapping := range s.cfg.Mappings {
+		for _, table := range mapping.Tables {
+			if table.SourceTable == tableName || table.TargetTable == tableName {
+				return table.AdvancedSettings
+			}
+		}
+	}
+	// Return default settings if table not found
+	return config.AdvancedSettings{
+		SyncIndexes:     false,
+		IgnoreDeleteOps: false, // Default to ignore delete operations
 	}
 }
