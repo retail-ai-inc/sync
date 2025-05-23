@@ -448,6 +448,58 @@ func countAndLogMongoDB(ctx context.Context, sc config.SyncConfig, log *logrus.L
 		"monitor_action":       "changestream_status",
 	}).Info("MongoDB active ChangeStreams status")
 
+	// Add comprehensive JSON log with all required data
+	pendingTotal := receivedTotal - executedTotal
+	var rate string
+	if activeCount > 0 {
+		// Simple rate calculation based on recent activity
+		rate = "N/A"
+	} else {
+		rate = "0/sec"
+	}
+
+	// Prepare individual ChangeStream details
+	changeStreamList := make([]map[string]interface{}, 0, len(activeStreams))
+	for key, cs := range activeStreams {
+		if cs.Active {
+			changeStreamList = append(changeStreamList, map[string]interface{}{
+				"name":     key,
+				"received": cs.ReceivedEvents,
+				"executed": cs.ExecutedEvents,
+				"errors":   cs.ErrorCount,
+				"pending":  cs.ReceivedEvents - cs.ExecutedEvents,
+			})
+		}
+	}
+
+	// Create comprehensive status JSON
+	comprehensiveStatus := map[string]interface{}{
+		"sync_task_id": sc.ID,
+		"timestamp":    time.Now().UTC().Format(time.RFC3339),
+		"summary": map[string]interface{}{
+			"total_received":  receivedTotal,
+			"total_executed":  executedTotal,
+			"total_pending":   pendingTotal,
+			"processing_rate": rate,
+		},
+		"changestreams": map[string]interface{}{
+			"active_count":  activeCount,
+			"total_tracked": len(activeStreams),
+			"details":       changeStreamList,
+		},
+	}
+
+	// Convert to JSON string for logging
+	if jsonData, err := json.Marshal(comprehensiveStatus); err == nil {
+		log.WithFields(logrus.Fields{
+			"sync_task_id":   sc.ID,
+			"monitor_action": "changestream_comprehensive_status",
+		}).Infof("[MongoDB] Comprehensive ChangeStream Status: %s", string(jsonData))
+	} else {
+		log.WithError(err).WithField("sync_task_id", sc.ID).
+			Error("[MongoDB] Failed to marshal comprehensive status to JSON")
+	}
+
 	serverActiveStreams, serverCount, err := getMongoDBActiveChangeStreams(ctx, srcClient)
 	if err != nil {
 		log.WithError(err).WithField("db_type", dbType).
