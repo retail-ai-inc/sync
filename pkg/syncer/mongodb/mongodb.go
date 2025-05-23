@@ -1064,23 +1064,57 @@ func (s *MongoDBSyncer) flushBuffer(ctx context.Context, targetColl *mongo.Colle
 		}
 
 		if strings.Contains(err.Error(), "Cannot create field") && strings.Contains(err.Error(), "in element") {
-			s.logger.Errorf("[MongoDB] Error details for debugging:")
-			for i, model := range writeModels {
+			s.logger.Errorf("[MongoDB] Cannot create field error detected for %s.%s", sourceDB, collectionName)
+			s.logger.Errorf("[MongoDB] Error details: %v", err)
+
+			for _, model := range writeModels {
 				switch m := model.(type) {
 				case *mongo.UpdateOneModel:
-					if m.Update != nil {
-						s.logger.Errorf("[MongoDB] Problem model[%d]: %s", i, toJSONString(m))
+					if m.Filter != nil && m.Update != nil {
+						// Extract _id from filter
+						var docID interface{}
+						if filter, ok := m.Filter.(bson.M); ok {
+							docID = filter["_id"]
+						}
+
+						s.logger.Errorf("[MongoDB] Problem document: database=%s, collection=%s, _id=%v",
+							sourceDB, collectionName, docID)
+
 						if updateDoc, ok := m.Update.(bson.M); ok {
 							if setDoc, hasSet := updateDoc["$set"]; hasSet {
-								s.logger.Errorf("[MongoDB] $set content: %s", toJSONString(setDoc))
+								if setFields, ok := setDoc.(bson.M); ok {
+									for fieldName, fieldValue := range setFields {
+										s.logger.Errorf("[MongoDB] Field update: field='%s', value=%v, value_type=%T",
+											fieldName, fieldValue, fieldValue)
+									}
+								}
+								s.logger.Errorf("[MongoDB] Full $set operation: %s", toJSONString(setDoc))
+							}
+							if unsetDoc, hasUnset := updateDoc["$unset"]; hasUnset {
+								s.logger.Errorf("[MongoDB] $unset operation: %s", toJSONString(unsetDoc))
 							}
 						}
+
+						s.logger.Errorf("[MongoDB] Complete update model: filter=%s, update=%s",
+							toJSONString(m.Filter), toJSONString(m.Update))
 					}
 				case *mongo.ReplaceOneModel:
-					s.logger.Errorf("[MongoDB] Problem model[%d]: filter=%s, replacement=%s",
-						i, toJSONString(m.Filter), toJSONString(m.Replacement))
+					var docID interface{}
+					if filter, ok := m.Filter.(bson.M); ok {
+						docID = filter["_id"]
+					}
+					s.logger.Errorf("[MongoDB] Problem document (replace): database=%s, collection=%s, _id=%v",
+						sourceDB, collectionName, docID)
+					s.logger.Errorf("[MongoDB] Replace operation: filter=%s, replacement=%s",
+						toJSONString(m.Filter), toJSONString(m.Replacement))
 				case *mongo.InsertOneModel:
-					s.logger.Errorf("[MongoDB] Problem model[%d]: document=%s", i, toJSONString(m.Document))
+					var docID interface{}
+					if doc, ok := m.Document.(bson.M); ok {
+						docID = doc["_id"]
+					}
+					s.logger.Errorf("[MongoDB] Problem document (insert): database=%s, collection=%s, _id=%v",
+						sourceDB, collectionName, docID)
+					s.logger.Errorf("[MongoDB] Insert document: %s", toJSONString(m.Document))
 				}
 			}
 		}
