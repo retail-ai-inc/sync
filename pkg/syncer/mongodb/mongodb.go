@@ -49,8 +49,12 @@ type MongoDBSyncer struct {
 	bufferEnabled bool
 	processRate   int // Changes per second to process
 	// Counters for event statistics
-	receivedEvents      map[string]int
-	executedEvents      map[string]int
+	receivedEvents map[string]int
+	executedEvents map[string]int
+	// Detailed operation counters
+	insertedEvents      map[string]int
+	updatedEvents       map[string]int
+	deletedEvents       map[string]int
 	statisticsM         sync.RWMutex
 	lastCounterResetDay time.Time
 }
@@ -113,6 +117,9 @@ func NewMongoDBSyncer(cfg config.SyncConfig, logger *logrus.Logger) *MongoDBSync
 		processRate:         processRate,
 		receivedEvents:      make(map[string]int),
 		executedEvents:      make(map[string]int),
+		insertedEvents:      make(map[string]int),
+		updatedEvents:       make(map[string]int),
+		deletedEvents:       make(map[string]int),
 		lastCounterResetDay: time.Now(),
 	}
 }
@@ -401,8 +408,8 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 	defer diagnosticTicker.Stop()
 
 	// Register new ChangeStream
-	utils.RegisterChangeStream(sourceDB, collectionName)
-	s.logger.Debugf("[MongoDB] Registered ChangeStream tracker for %s.%s", sourceDB, collectionName)
+	utils.RegisterChangeStream(s.cfg.ID, sourceDB, collectionName)
+	s.logger.Debugf("[MongoDB] Registered ChangeStream tracker for %s.%s with sync_task_id=%d", sourceDB, collectionName, s.cfg.ID)
 
 	// Ensure ChangeStream is deregistered when function exits
 	defer utils.DeactivateChangeStream(sourceDB, collectionName)
@@ -415,6 +422,15 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 	}
 	if s.executedEvents[collKey] == 0 {
 		s.executedEvents[collKey] = 0
+	}
+	if s.insertedEvents[collKey] == 0 {
+		s.insertedEvents[collKey] = 0
+	}
+	if s.updatedEvents[collKey] == 0 {
+		s.updatedEvents[collKey] = 0
+	}
+	if s.deletedEvents[collKey] == 0 {
+		s.deletedEvents[collKey] = 0
 	}
 	s.statisticsM.Unlock()
 
@@ -677,7 +693,6 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 				s.statisticsM.Lock()
 				s.receivedEvents[collKey]++
 				received := s.receivedEvents[collKey]
-				executed := s.executedEvents[collKey]
 				s.statisticsM.Unlock()
 
 				opType, _ := changeEvent["operationType"].(string)
@@ -712,8 +727,15 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 					})
 					bufferMutex.Unlock()
 
-					// Update ChangeStream activity status and record processed events with additional stats
-					utils.UpdateChangeStreamActivity(sourceDB, collectionName, 0, received, executed)
+					// Update ChangeStream activity status with current counts
+					// Detailed executed counts will be updated in flushBuffer when operations are actually processed
+					s.statisticsM.RLock()
+					currentExecuted := s.executedEvents[collKey]
+					currentInserted := s.insertedEvents[collKey]
+					currentUpdated := s.updatedEvents[collKey]
+					currentDeleted := s.deletedEvents[collKey]
+					s.statisticsM.RUnlock()
+					utils.UpdateChangeStreamDetailedActivity(sourceDB, collectionName, 0, received, currentExecuted, currentInserted, currentUpdated, currentDeleted)
 
 					queryStr := describeWriteModel(model, actualOpType)
 					s.logger.Debugf("[MongoDB][%s] table=%s.%s query=%s",
@@ -956,12 +978,25 @@ func (s *MongoDBSyncer) flushBuffer(ctx context.Context, targetColl *mongo.Colle
 				return err // If it's a connection error, RetryMongoOperation will retry
 			}
 
-			// Update executed events counter
+			// Update executed events counter and detailed operation counts
 			collKey := fmt.Sprintf("%s.%s", sourceDB, collectionName)
 			successCount := int(res.InsertedCount + res.ModifiedCount + res.DeletedCount)
+
 			s.statisticsM.Lock()
 			s.executedEvents[collKey] += successCount
+			s.insertedEvents[collKey] += int(res.InsertedCount)
+			s.updatedEvents[collKey] += int(res.ModifiedCount)
+			s.deletedEvents[collKey] += int(res.DeletedCount)
+
+			received := s.receivedEvents[collKey]
+			executed := s.executedEvents[collKey]
+			inserted := s.insertedEvents[collKey]
+			updated := s.updatedEvents[collKey]
+			deleted := s.deletedEvents[collKey]
 			s.statisticsM.Unlock()
+
+			// Update ChangeStream activity status with detailed counts
+			utils.UpdateChangeStreamDetailedActivity(sourceDB, collectionName, 0, received, executed, inserted, updated, deleted)
 
 			s.logger.Debugf(
 				"[MongoDB] BulkWrite => table=%s.%s inserted=%d matched=%d modified=%d upserted=%d deleted=%d (opTotals=>insert=%d, update=%d, delete=%d)",
@@ -1604,13 +1639,19 @@ func (s *MongoDBSyncer) checkAndResetDailyCounters() {
 		// Log final counts before reset
 		for collKey, received := range s.receivedEvents {
 			executed := s.executedEvents[collKey]
-			s.logger.Infof("[MongoDB] Daily statistics for %s: received=%d, executed=%d, day=%s",
-				collKey, received, executed, lastResetDay.Format("2006-01-02"))
+			inserted := s.insertedEvents[collKey]
+			updated := s.updatedEvents[collKey]
+			deleted := s.deletedEvents[collKey]
+			s.logger.Infof("[MongoDB] Daily statistics for %s: received=%d, executed=%d (inserted=%d, updated=%d, deleted=%d), day=%s",
+				collKey, received, executed, inserted, updated, deleted, lastResetDay.Format("2006-01-02"))
 		}
 
 		// Reset all counters
 		s.receivedEvents = make(map[string]int)
 		s.executedEvents = make(map[string]int)
+		s.insertedEvents = make(map[string]int)
+		s.updatedEvents = make(map[string]int)
+		s.deletedEvents = make(map[string]int)
 		s.lastCounterResetDay = today
 		s.statisticsM.Unlock()
 

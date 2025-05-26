@@ -21,6 +21,7 @@ import (
 
 // ChangeStreamInfo tracks info about a single ChangeStream
 type ChangeStreamInfo struct {
+	SyncTaskID     int       // Sync task ID this ChangeStream belongs to
 	Database       string    // Database name
 	Collection     string    // Collection name
 	Created        time.Time // Creation time
@@ -32,6 +33,10 @@ type ChangeStreamInfo struct {
 	LastErrorTime  time.Time // Last error time
 	ReceivedEvents int       // Number of received events
 	ExecutedEvents int       // Number of executed events
+	// Detailed operation counts
+	InsertedCount int // Number of insert operations
+	UpdatedCount  int // Number of update/replace operations
+	DeletedCount  int // Number of delete operations
 }
 
 var (
@@ -44,12 +49,13 @@ var (
 )
 
 // RegisterChangeStream registers a new ChangeStream
-func RegisterChangeStream(database, collection string) {
+func RegisterChangeStream(syncTaskID int, database, collection string) {
 	key := fmt.Sprintf("%s.%s", database, collection)
 	csTrackerMutex.Lock()
 	defer csTrackerMutex.Unlock()
 
 	changeStreamTracker[key] = &ChangeStreamInfo{
+		SyncTaskID:   syncTaskID,
 		Database:     database,
 		Collection:   collection,
 		Created:      time.Now(),
@@ -69,6 +75,23 @@ func UpdateChangeStreamActivity(database, collection string, eventCount int, rec
 		stream.EventCount += int64(eventCount)
 		stream.ReceivedEvents = receivedEvents
 		stream.ExecutedEvents = executedEvents
+	}
+}
+
+// UpdateChangeStreamDetailedActivity updates ChangeStream activity with detailed operation counts
+func UpdateChangeStreamDetailedActivity(database, collection string, eventCount int, receivedEvents, executedEvents, insertedCount, updatedCount, deletedCount int) {
+	csTrackerMutex.Lock()
+	defer csTrackerMutex.Unlock()
+
+	key := fmt.Sprintf("%s.%s", database, collection)
+	if stream, exists := changeStreamTracker[key]; exists {
+		stream.LastActivity = time.Now()
+		stream.EventCount += int64(eventCount)
+		stream.ReceivedEvents = receivedEvents
+		stream.ExecutedEvents = executedEvents
+		stream.InsertedCount = insertedCount
+		stream.UpdatedCount = updatedCount
+		stream.DeletedCount = deletedCount
 	}
 }
 
@@ -105,6 +128,21 @@ func GetActiveChangeStreams() map[string]*ChangeStreamInfo {
 	result := make(map[string]*ChangeStreamInfo, len(changeStreamTracker))
 	for k, v := range changeStreamTracker {
 		result[k] = v
+	}
+	return result
+}
+
+// GetActiveChangeStreamsByTaskID gets information about active ChangeStreams for a specific sync task
+func GetActiveChangeStreamsByTaskID(syncTaskID int) map[string]*ChangeStreamInfo {
+	csTrackerMutex.RLock()
+	defer csTrackerMutex.RUnlock()
+
+	// Create a copy filtering by sync task ID
+	result := make(map[string]*ChangeStreamInfo)
+	for k, v := range changeStreamTracker {
+		if v.SyncTaskID == syncTaskID && v.Active {
+			result[k] = v
+		}
 	}
 	return result
 }
@@ -401,32 +439,20 @@ func countAndLogMongoDB(ctx context.Context, sc config.SyncConfig, log *logrus.L
 
 	if shouldLog {
 
-		activeStreams := GetActiveChangeStreams()
+		activeStreams := GetActiveChangeStreamsByTaskID(sc.ID)
 		csDetails := make([]string, 0, len(activeStreams))
 		activeCount := 0
 		receivedTotal := 0
 		executedTotal := 0
 
 		for key, cs := range activeStreams {
-			if cs.Active {
-				activeCount++
-				receivedTotal += cs.ReceivedEvents
-				executedTotal += cs.ExecutedEvents
-				details := fmt.Sprintf("%s[events:%d,received:%d,executed:%d,errors:%d]",
-					key, cs.EventCount, cs.ReceivedEvents, cs.ExecutedEvents, cs.ErrorCount)
-				csDetails = append(csDetails, details)
-			}
+			activeCount++
+			receivedTotal += cs.ReceivedEvents
+			executedTotal += cs.ExecutedEvents
+			details := fmt.Sprintf("%s[events:%d,received:%d,executed:%d,errors:%d]",
+				key, cs.EventCount, cs.ReceivedEvents, cs.ExecutedEvents, cs.ErrorCount)
+			csDetails = append(csDetails, details)
 		}
-
-		log.WithFields(logrus.Fields{
-			"db_type":              dbType,
-			"active_changestreams": activeCount,
-			"changestream_details": csDetails,
-			"total_tracked":        len(activeStreams),
-			"received_events":      receivedTotal,
-			"executed_events":      executedTotal,
-			"monitor_action":       "changestream_status",
-		}).Info("MongoDB active ChangeStreams status")
 
 		// Add comprehensive JSON log with all required data
 		pendingTotal := receivedTotal - executedTotal
@@ -441,15 +467,18 @@ func countAndLogMongoDB(ctx context.Context, sc config.SyncConfig, log *logrus.L
 		// Prepare individual ChangeStream details
 		changeStreamList := make([]map[string]interface{}, 0, len(activeStreams))
 		for key, cs := range activeStreams {
-			if cs.Active {
-				changeStreamList = append(changeStreamList, map[string]interface{}{
-					"name":     key,
-					"received": cs.ReceivedEvents,
-					"executed": cs.ExecutedEvents,
-					"errors":   cs.ErrorCount,
-					"pending":  cs.ReceivedEvents - cs.ExecutedEvents,
-				})
-			}
+			changeStreamList = append(changeStreamList, map[string]interface{}{
+				"name":     key,
+				"received": cs.ReceivedEvents,
+				"executed": cs.ExecutedEvents,
+				"errors":   cs.ErrorCount,
+				"pending":  cs.ReceivedEvents - cs.ExecutedEvents,
+				"operations": map[string]interface{}{
+					"inserted": cs.InsertedCount,
+					"updated":  cs.UpdatedCount,
+					"deleted":  cs.DeletedCount,
+				},
+			})
 		}
 
 		// Create comprehensive status JSON with sync_task_id
