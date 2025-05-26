@@ -397,7 +397,7 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 	connCheckTicker := time.NewTicker(5 * time.Minute)
 	defer connCheckTicker.Stop()
 
-	diagnosticTicker := time.NewTicker(5 * time.Minute)
+	diagnosticTicker := time.NewTicker(1 * time.Hour)
 	defer diagnosticTicker.Stop()
 
 	// Register new ChangeStream
@@ -462,8 +462,8 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 				// Check for day change and reset counters
 				s.checkAndResetDailyCounters()
 			case <-diagnosticTicker.C:
-				s.logger.Infof("[MongoDB] =========== DIAGNOSTIC LOG BEGIN ===========")
-				s.logger.Infof("[MongoDB] ChangeStream monitoring %s.%s for %s", sourceDB, collectionName, time.Since(monitorStartTime))
+				s.logger.Debugf("[MongoDB] =========== DIAGNOSTIC LOG BEGIN ===========")
+				s.logger.Debugf("[MongoDB] ChangeStream monitoring %s.%s for %s", sourceDB, collectionName, time.Since(monitorStartTime))
 
 				var sourceCount, targetCount int64
 				var srcCountErr, tgtCountErr error
@@ -479,9 +479,9 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 					targetGrowth := targetCount - previousTargetCount
 					gapChange := currentGap - int64(previousEventGap)
 
-					s.logger.Infof("[MongoDB] Count stats: source=%d, target=%d, gap=%d",
+					s.logger.Debugf("[MongoDB] Count stats: source=%d, target=%d, gap=%d",
 						sourceCount, targetCount, currentGap)
-					s.logger.Infof("[MongoDB] Change since last check: source_growth=%d, target_growth=%d, gap_change=%d",
+					s.logger.Debugf("[MongoDB] Change since last check: source_growth=%d, target_growth=%d, gap_change=%d",
 						sourceGrowth, targetGrowth, gapChange)
 
 					if gapChange > 100000 && previousEventGap > 0 {
@@ -496,7 +496,7 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 				files, err := os.ReadDir(bufferPath)
 				if err == nil {
 					bufferSize := len(files)
-					s.logger.Infof("[MongoDB] Buffer status: files=%d", bufferSize)
+					s.logger.Debugf("[MongoDB] Buffer status: files=%d", bufferSize)
 
 					if bufferSize > 10000 {
 						s.logger.Warnf("[MongoDB] Buffer files exceeding 10000, possible processing backlog")
@@ -518,10 +518,10 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 						}
 
 						avgSize := totalSize / int64(sampleSize)
-						s.logger.Infof("[MongoDB] Buffer file sampling: avg_size=%d bytes from %d files", avgSize, sampleSize)
+						s.logger.Debugf("[MongoDB] Buffer file sampling: avg_size=%d bytes from %d files", avgSize, sampleSize)
 					}
 				} else {
-					s.logger.Infof("[MongoDB] Buffer directory not found or empty: %v", err)
+					s.logger.Debugf("[MongoDB] Buffer directory not found or empty: %v", err)
 				}
 
 				s.statisticsM.RLock()
@@ -530,12 +530,12 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 				processingGap := received - executed
 				s.statisticsM.RUnlock()
 
-				s.logger.Infof("[MongoDB] Event counters: received=%d, executed=%d, pending=%d",
+				s.logger.Debugf("[MongoDB] Event counters: received=%d, executed=%d, pending=%d",
 					received, executed, processingGap)
-				s.logger.Infof("[MongoDB] Event types: %v", filteredTypes)
+				s.logger.Debugf("[MongoDB] Event types: %v", filteredTypes)
 
 				currentProcessRate := s.processRate
-				s.logger.Infof("[MongoDB] Processing rate: %d changes/sec", currentProcessRate)
+				s.logger.Debugf("[MongoDB] Processing rate: %d changes/sec", currentProcessRate)
 
 				if previousEventGap > 0 {
 					gapDiff := processingGap - previousEventGap
@@ -545,7 +545,7 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 				}
 				previousEventGap = processingGap
 
-				s.logger.Infof("[MongoDB] =========== DIAGNOSTIC LOG END ===========")
+				s.logger.Debugf("[MongoDB] =========== DIAGNOSTIC LOG END ===========")
 			}
 		}
 	}()
@@ -685,8 +685,8 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 				filteredTypes[opType]++
 				eventsSinceLastLog++
 
-				if time.Since(lastLogTime) > time.Minute {
-					s.logger.Infof("[MongoDB] Received %d events in last minute for %s.%s, types: %v",
+				if time.Since(lastLogTime) > time.Hour {
+					s.logger.Infof("[MongoDB] Received %d events in last hour for %s.%s, types: %v",
 						eventsSinceLastLog, sourceDB, collectionName, filteredTypes)
 					lastLogTime = time.Now()
 					eventsSinceLastLog = 0
@@ -1340,7 +1340,7 @@ func (s *MongoDBSyncer) processPersistentBuffer(ctx context.Context, targetColl 
 					backlogCount = len(files)
 				}
 
-				s.logger.Infof("[MongoDB] Buffer processing stats: processed=%d, rate=%.2f/sec, backlog=%d files",
+				s.logger.Debugf("[MongoDB] Buffer processing stats: processed=%d, rate=%.2f/sec, backlog=%d files",
 					totalProcessed, rate, backlogCount)
 
 				if backlogCount > 5000 && rate < float64(s.processRate)/2 {
