@@ -43,9 +43,6 @@ var (
 	// changeStreamTracker stores information about all active ChangeStreams
 	changeStreamTracker = make(map[string]*ChangeStreamInfo)
 	csTrackerMutex      = &sync.RWMutex{}
-	// Flag to prevent duplicate ChangeStream status logging in the same monitoring cycle
-	changeStreamStatusLogged = false
-	changeStreamStatusMutex  = &sync.Mutex{}
 )
 
 // RegisterChangeStream registers a new ChangeStream
@@ -157,11 +154,6 @@ func StartRowCountMonitoring(ctx context.Context, cfg *config.Config, log *logru
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				// Reset the flag at the beginning of each monitoring cycle
-				changeStreamStatusMutex.Lock()
-				changeStreamStatusLogged = false
-				changeStreamStatusMutex.Unlock()
-
 				for _, sc := range cfg.SyncConfigs {
 					if !sc.Enable {
 						continue
@@ -429,17 +421,11 @@ func countAndLogMongoDB(ctx context.Context, sc config.SyncConfig, log *logrus.L
 		}
 	}
 
-	// Only log comprehensive ChangeStream status once per monitoring cycle
-	changeStreamStatusMutex.Lock()
-	shouldLog := !changeStreamStatusLogged
-	if shouldLog {
-		changeStreamStatusLogged = true
-	}
-	changeStreamStatusMutex.Unlock()
+	// Log comprehensive ChangeStream status for each sync task
+	activeStreams := GetActiveChangeStreamsByTaskID(sc.ID)
 
-	if shouldLog {
-
-		activeStreams := GetActiveChangeStreamsByTaskID(sc.ID)
+	// Only log if this task has active ChangeStreams
+	if len(activeStreams) > 0 {
 		csDetails := make([]string, 0, len(activeStreams))
 		activeCount := 0
 		receivedTotal := 0
