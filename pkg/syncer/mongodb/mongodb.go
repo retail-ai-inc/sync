@@ -629,7 +629,7 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 						flushDuration, rate)
 
 					if timeSinceLastFlush > time.Minute {
-						s.logger.Infof("[MongoDB] Processing rate over last minute: %.2f items/sec", rate)
+						s.logger.Debugf("[MongoDB] Processing rate over last minute: %.2f items/sec", rate)
 						lastFlushTime = time.Now()
 						totalProcessed = 0
 					}
