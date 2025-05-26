@@ -45,11 +45,11 @@ func (qc *QueryCounter) CountMongoDBDocuments(ctx context.Context, client *mongo
 
 	// If no query is provided, use EstimatedDocumentCount
 	if query == nil || len(query.Conditions) == 0 {
-		qc.logger.Infof("[MongoDB] SQL: db.%s.estimatedDocumentCount() | START: %s", collection, startTime.Format("15:04:05.000"))
+		qc.logger.Debugf("[MongoDB] SQL: db.%s.estimatedDocumentCount() | START: %s", collection, startTime.Format("15:04:05.000"))
 		coll := client.Database(database).Collection(collection)
 		count, err := coll.EstimatedDocumentCount(ctx)
 		endTime := time.Now()
-		qc.logger.Infof("[MongoDB] RESULT: %d | END: %s | Duration: %dms", count, endTime.Format("15:04:05.000"), endTime.Sub(startTime).Milliseconds())
+		qc.logger.Debugf("[MongoDB] RESULT: %d | END: %s | Duration: %dms", count, endTime.Format("15:04:05.000"), endTime.Sub(startTime).Milliseconds())
 		if err != nil {
 			qc.logger.Errorf("[QueryCounter] EstimatedDocumentCount failed for %s.%s: %v", database, collection, err)
 			return -1, fmt.Errorf("estimated document count failed: %w", err)
@@ -155,13 +155,13 @@ func (qc *QueryCounter) CountMongoDBDocuments(ctx context.Context, client *mongo
 
 	// Log the filter being used and execute count
 	if filterBytes, err := bson.MarshalExtJSON(filter, true, false); err == nil {
-		qc.logger.Infof("[MongoDB] SQL: db.%s.countDocuments(%s) | START: %s", collection, string(filterBytes), startTime.Format("15:04:05.000"))
+		qc.logger.Debugf("[MongoDB] SQL: db.%s.countDocuments(%s) | START: %s", collection, string(filterBytes), startTime.Format("15:04:05.000"))
 	}
 
 	coll := client.Database(database).Collection(collection)
 	count, err := coll.CountDocuments(ctx, filter)
 	endTime := time.Now()
-	qc.logger.Infof("[MongoDB] RESULT: %d | END: %s | Duration: %dms", count, endTime.Format("15:04:05.000"), endTime.Sub(startTime).Milliseconds())
+	qc.logger.Debugf("[MongoDB] RESULT: %d | END: %s | Duration: %dms", count, endTime.Format("15:04:05.000"), endTime.Sub(startTime).Milliseconds())
 
 	if err != nil {
 		qc.logger.Errorf("[QueryCounter] CountDocuments failed for %s.%s: %v",
