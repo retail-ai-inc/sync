@@ -452,9 +452,10 @@ func countAndLogMongoDB(ctx context.Context, sc config.SyncConfig, log *logrus.L
 			}
 		}
 
-		// Create comprehensive status JSON without sync_task_id (since it's global)
+		// Create comprehensive status JSON with sync_task_id
 		comprehensiveStatus := map[string]interface{}{
-			"timestamp": time.Now().UTC().Format(time.RFC3339),
+			"sync_task_id": sc.ID,
+			"timestamp":    time.Now().UTC().Format(time.RFC3339),
 			"summary": map[string]interface{}{
 				"total_received":  receivedTotal,
 				"total_executed":  executedTotal,
@@ -472,6 +473,7 @@ func countAndLogMongoDB(ctx context.Context, sc config.SyncConfig, log *logrus.L
 		if jsonData, err := json.Marshal(comprehensiveStatus); err == nil {
 			log.WithFields(logrus.Fields{
 				"monitor_action": "changestream_comprehensive_status",
+				"sync_task_id":   sc.ID,
 			}).Infof("[MongoDB] Comprehensive ChangeStream Status: %s", string(jsonData))
 		} else {
 			log.WithError(err).Error("[MongoDB] Failed to marshal comprehensive status to JSON")

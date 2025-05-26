@@ -412,6 +412,11 @@ ORDER BY t1.sync_task_id
 			continue
 		}
 
+		// Skip Task ID=0 to filter out legacy data
+		if taskID == "0" {
+			continue
+		}
+
 		// Skip if we've already processed this task (take only the latest)
 		if processedTasks[taskID] {
 			continue
