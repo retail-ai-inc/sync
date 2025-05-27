@@ -13,8 +13,11 @@ Sync Data Platform provides an intuitive interface for managing and monitoring d
 
 ## Main Features
 
+### Dashboard
+<img width="800" alt="image" src="https://github.com/user-attachments/assets/9a874651-0832-48ba-8cd3-1137e6da5afe" />
+
 ### Task Management
-<img width="800" alt="image" src="https://github.com/user-attachments/assets/08c9d723-8dca-4dd8-9ca9-2459c2072858" />
+<img width="800" alt="image" src="https://github.com/user-attachments/assets/597c5987-3eea-4a0a-ad4d-39c7d4594868" />
 
 
 - View task status and details
@@ -23,7 +26,7 @@ Sync Data Platform provides an intuitive interface for managing and monitoring d
 - Operate tasks (start/stop/monitor)
 
 ### Monitoring Dashboard
-<img width="800" alt="image" src="https://github.com/user-attachments/assets/2a1bd9f1-0d46-4961-868f-80dab83b3705" />
+<img width="800" alt="image" src="https://github.com/user-attachments/assets/e3670689-5662-4509-937e-6758a6536cce" />
 <img width="800" alt="image" src="https://github.com/user-attachments/assets/a38eed54-96ac-4bda-9191-29bc25cdef06" />
 
 - **Key Metrics**:
