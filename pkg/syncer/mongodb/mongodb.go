@@ -21,7 +21,6 @@ import (
 )
 
 type bufferedChange struct {
-	token  bson.Raw
 	model  mongo.WriteModel
 	opType string
 }
@@ -48,15 +47,6 @@ type MongoDBSyncer struct {
 	bufferDir     string
 	bufferEnabled bool
 	processRate   int // Changes per second to process
-	// Counters for event statistics
-	receivedEvents map[string]int
-	executedEvents map[string]int
-	// Detailed operation counters
-	insertedEvents      map[string]int
-	updatedEvents       map[string]int
-	deletedEvents       map[string]int
-	statisticsM         sync.RWMutex
-	lastCounterResetDay time.Time
 }
 
 func NewMongoDBSyncer(cfg config.SyncConfig, logger *logrus.Logger) *MongoDBSyncer {
@@ -102,25 +92,19 @@ func NewMongoDBSyncer(cfg config.SyncConfig, logger *logrus.Logger) *MongoDBSync
 		logger.Warnf("[MongoDB] Failed to create buffer dir %s: %v", bufferDir, err)
 	}
 
-	// Default processing rate: 10000 changes per second (increased from 3000)
-	processRate := 10000
+	// Reduced processing rate to prevent memory pressure
+	processRate := 3000 // Reduced from 10000 to prevent OOM
 	// Custom configured rate can be implemented in the future by expanding the SyncConfig struct
 
 	return &MongoDBSyncer{
-		sourceClient:        sourceClient,
-		targetClient:        targetClient,
-		cfg:                 cfg,
-		logger:              logger.WithField("sync_task_id", cfg.ID),
-		resumeTokens:        resumeMap,
-		bufferDir:           bufferDir,
-		bufferEnabled:       true, // Enable by default
-		processRate:         processRate,
-		receivedEvents:      make(map[string]int),
-		executedEvents:      make(map[string]int),
-		insertedEvents:      make(map[string]int),
-		updatedEvents:       make(map[string]int),
-		deletedEvents:       make(map[string]int),
-		lastCounterResetDay: time.Now(),
+		sourceClient:  sourceClient,
+		targetClient:  targetClient,
+		cfg:           cfg,
+		logger:        logger.WithField("sync_task_id", cfg.ID),
+		resumeTokens:  resumeMap,
+		bufferDir:     bufferDir,
+		bufferEnabled: true, // Enable by default
+		processRate:   processRate,
 	}
 }
 
@@ -414,33 +398,10 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 	// Ensure ChangeStream is deregistered when function exits
 	defer utils.DeactivateChangeStream(sourceDB, collectionName)
 
-	// Initialize counters for this collection
-	collKey := fmt.Sprintf("%s.%s", sourceDB, collectionName)
-	s.statisticsM.Lock()
-	if s.receivedEvents[collKey] == 0 {
-		s.receivedEvents[collKey] = 0
-	}
-	if s.executedEvents[collKey] == 0 {
-		s.executedEvents[collKey] = 0
-	}
-	if s.insertedEvents[collKey] == 0 {
-		s.insertedEvents[collKey] = 0
-	}
-	if s.updatedEvents[collKey] == 0 {
-		s.updatedEvents[collKey] = 0
-	}
-	if s.deletedEvents[collKey] == 0 {
-		s.deletedEvents[collKey] = 0
-	}
-	s.statisticsM.Unlock()
-
 	filteredTypes := make(map[string]int)
 	var previousSourceCount, previousTargetCount int64
 	var previousEventGap int
 	var monitorStartTime = time.Now()
-
-	// Check for day change and reset counters if needed
-	s.checkAndResetDailyCounters()
 
 	go func() {
 		for {
@@ -474,9 +435,6 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 						return // Exit current goroutine to let the main process restart the change stream
 					}
 				}
-
-				// Check for day change and reset counters
-				s.checkAndResetDailyCounters()
 			case <-diagnosticTicker.C:
 				s.logger.Debugf("[MongoDB] =========== DIAGNOSTIC LOG BEGIN ===========")
 				s.logger.Debugf("[MongoDB] ChangeStream monitoring %s.%s for %s", sourceDB, collectionName, time.Since(monitorStartTime))
@@ -540,26 +498,14 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 					s.logger.Debugf("[MongoDB] Buffer directory not found or empty: %v", err)
 				}
 
-				s.statisticsM.RLock()
-				received := s.receivedEvents[collKey]
-				executed := s.executedEvents[collKey]
-				processingGap := received - executed
-				s.statisticsM.RUnlock()
-
-				s.logger.Debugf("[MongoDB] Event counters: received=%d, executed=%d, pending=%d",
-					received, executed, processingGap)
+				// Event statistics are now tracked in ChangeStreamInfo via utils package
+				s.logger.Debugf("[MongoDB] Event statistics are tracked in ChangeStreamInfo and database")
 				s.logger.Debugf("[MongoDB] Event types: %v", filteredTypes)
 
 				currentProcessRate := s.processRate
 				s.logger.Debugf("[MongoDB] Processing rate: %d changes/sec", currentProcessRate)
 
-				if previousEventGap > 0 {
-					gapDiff := processingGap - previousEventGap
-					if gapDiff > 1000 {
-						s.logger.Warnf("[MongoDB] Processing gap increased by %d, possible slowdown", gapDiff)
-					}
-				}
-				previousEventGap = processingGap
+				// Gap tracking logic removed - statistics now tracked in database
 
 				s.logger.Debugf("[MongoDB] =========== DIAGNOSTIC LOG END ===========")
 			}
@@ -601,10 +547,12 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 	}
 	s.logger.Infof("[MongoDB] Watching changes => %s.%s", sourceDB, collectionName)
 
-	// Increase buffer size and flush interval to handle high throughput
+	// Reduce buffer size to prevent OOM issues with large datasets
 	var buffer []bufferedChange
-	const batchSize = 2000           // Increased from 500
-	flushInterval := time.Second * 1 // Increased from 5 seconds
+	var latestToken bson.Raw // Track the latest resume token separately
+	var tokenMutex sync.RWMutex
+	const batchSize = 500            // Reduced from 2000 to prevent OOM
+	flushInterval := time.Second * 2 // Increased flush frequency
 	timer := time.NewTimer(flushInterval)
 	var bufferMutex sync.Mutex
 
@@ -630,10 +578,16 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 
 					if s.bufferEnabled {
 						// Store to persistent buffer instead of directly flushing
-						s.storeToBuffer(ctx, &buffer, sourceDB, collectionName)
+						tokenMutex.RLock()
+						currentToken := latestToken
+						tokenMutex.RUnlock()
+						s.storeToBuffer(ctx, &buffer, sourceDB, collectionName, currentToken)
 					} else {
 						s.logger.Debugf("[MongoDB] flush timer => %s.%s => flushing %d ops", sourceDB, collectionName, len(buffer))
-						s.flushBuffer(ctx, targetColl, &buffer, sourceDB, collectionName)
+						tokenMutex.RLock()
+						currentToken := latestToken
+						tokenMutex.RUnlock()
+						s.flushBuffer(ctx, targetColl, &buffer, sourceDB, collectionName, currentToken)
 					}
 
 					flushDuration := time.Since(flushStart)
@@ -671,10 +625,16 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 			if len(buffer) > 0 {
 				if s.bufferEnabled {
 					s.logger.Infof("[MongoDB] context done => storing %d ops to buffer for %s.%s", len(buffer), sourceDB, collectionName)
-					s.storeToBuffer(ctx, &buffer, sourceDB, collectionName)
+					tokenMutex.RLock()
+					currentToken := latestToken
+					tokenMutex.RUnlock()
+					s.storeToBuffer(ctx, &buffer, sourceDB, collectionName, currentToken)
 				} else {
 					s.logger.Infof("[MongoDB] context done => flush %d ops for %s.%s", len(buffer), sourceDB, collectionName)
-					s.flushBuffer(ctx, targetColl, &buffer, sourceDB, collectionName)
+					tokenMutex.RLock()
+					currentToken := latestToken
+					tokenMutex.RUnlock()
+					s.flushBuffer(ctx, targetColl, &buffer, sourceDB, collectionName, currentToken)
 				}
 			}
 			bufferMutex.Unlock()
@@ -689,11 +649,7 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 					continue
 				}
 
-				// Increment received events counter
-				s.statisticsM.Lock()
-				s.receivedEvents[collKey]++
-				received := s.receivedEvents[collKey]
-				s.statisticsM.Unlock()
+				// Event received - will be tracked in ChangeStreamInfo
 
 				opType, _ := changeEvent["operationType"].(string)
 
@@ -710,6 +666,11 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 				token := cs.ResumeToken()
 				model := s.prepareWriteModel(changeEvent, collectionName, opType)
 				if model != nil {
+					// Update latest token
+					tokenMutex.Lock()
+					latestToken = token
+					tokenMutex.Unlock()
+
 					// Determine the actual operation type based on the model type
 					actualOpType := opType
 					if opType == "update" {
@@ -721,21 +682,12 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 
 					bufferMutex.Lock()
 					buffer = append(buffer, bufferedChange{
-						token:  token,
 						model:  model,
 						opType: actualOpType,
 					})
 					bufferMutex.Unlock()
 
-					// Update ChangeStream activity status with current counts
-					// Detailed executed counts will be updated in flushBuffer when operations are actually processed
-					s.statisticsM.RLock()
-					currentExecuted := s.executedEvents[collKey]
-					currentInserted := s.insertedEvents[collKey]
-					currentUpdated := s.updatedEvents[collKey]
-					currentDeleted := s.deletedEvents[collKey]
-					s.statisticsM.RUnlock()
-					utils.UpdateChangeStreamDetailedActivity(sourceDB, collectionName, 0, received, currentExecuted, currentInserted, currentUpdated, currentDeleted)
+					// Activity will be tracked through ChangeStreamInfo updates in utils package
 
 					queryStr := describeWriteModel(model, actualOpType)
 					s.logger.Debugf("[MongoDB][%s] table=%s.%s query=%s",
@@ -753,20 +705,48 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 					bufferMutex.Lock()
 					buffSize := len(buffer)
 
-					if buffSize%500 == 0 {
+					if buffSize%100 == 0 && buffSize > 0 {
 						s.logger.Debugf("[MongoDB] Current buffer size: %d for %s.%s",
 							buffSize, sourceDB, collectionName)
+
+						// Memory pressure warning
+						if buffSize > batchSize*1.5 {
+							s.logger.Warnf("[MongoDB] High memory pressure detected: buffer size %d exceeds threshold for %s.%s",
+								buffSize, sourceDB, collectionName)
+						}
 					}
 
 					if buffSize >= batchSize {
 						if s.bufferEnabled {
 							s.logger.Infof("[MongoDB] buffer reached %d => storing to persistent buffer => %s.%s", batchSize, sourceDB, collectionName)
-							s.storeToBuffer(ctx, &buffer, sourceDB, collectionName)
+							tokenMutex.RLock()
+							currentToken := latestToken
+							tokenMutex.RUnlock()
+							s.storeToBuffer(ctx, &buffer, sourceDB, collectionName, currentToken)
 						} else {
 							s.logger.Infof("[MongoDB] buffer reached %d => flush now => %s.%s", batchSize, sourceDB, collectionName)
-							s.flushBuffer(ctx, targetColl, &buffer, sourceDB, collectionName)
+							tokenMutex.RLock()
+							currentToken := latestToken
+							tokenMutex.RUnlock()
+							s.flushBuffer(ctx, targetColl, &buffer, sourceDB, collectionName, currentToken)
 						}
 						timer.Reset(flushInterval)
+					}
+
+					// Emergency memory management: force flush if buffer gets too large
+					if buffSize >= batchSize*2 {
+						s.logger.Warnf("[MongoDB] Emergency buffer flush triggered: %d items for %s.%s", buffSize, sourceDB, collectionName)
+						if s.bufferEnabled {
+							tokenMutex.RLock()
+							currentToken := latestToken
+							tokenMutex.RUnlock()
+							s.storeToBuffer(ctx, &buffer, sourceDB, collectionName, currentToken)
+						} else {
+							tokenMutex.RLock()
+							currentToken := latestToken
+							tokenMutex.RUnlock()
+							s.flushBuffer(ctx, targetColl, &buffer, sourceDB, collectionName, currentToken)
+						}
 					}
 					bufferMutex.Unlock()
 				} else {
@@ -784,8 +764,6 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 						s.logger.Warnf("[MongoDB] History lost for %s.%s, removing resume token and rebuilding stream", sourceDB, collectionName)
 
 						s.logger.Errorf("[MongoDB] ChangeStreamHistoryLost error details:")
-						s.logger.Errorf("[MongoDB] - Current event counts: received=%d, executed=%d",
-							s.receivedEvents[collKey], s.executedEvents[collKey])
 						s.logger.Errorf("[MongoDB] - Operation type distribution: %v", filteredTypes)
 
 						bufferPath := s.getBufferPath(sourceDB, collectionName)
@@ -941,18 +919,16 @@ func toJSONString(doc interface{}) string {
 }
 
 // flushBuffer processes batched write operations to the target collection
-func (s *MongoDBSyncer) flushBuffer(ctx context.Context, targetColl *mongo.Collection, buffer *[]bufferedChange, sourceDB, collectionName string) {
+func (s *MongoDBSyncer) flushBuffer(ctx context.Context, targetColl *mongo.Collection, buffer *[]bufferedChange, sourceDB, collectionName string, currentToken bson.Raw) {
 	if len(*buffer) == 0 {
 		return
 	}
 
 	writeModels := make([]mongo.WriteModel, 0, len(*buffer))
-	var lastToken bson.Raw
 
 	var insertCount, updateCount, deleteCount int
 	for _, bc := range *buffer {
 		writeModels = append(writeModels, bc.model)
-		lastToken = bc.token
 
 		switch bc.opType {
 		case "insert":
@@ -978,25 +954,14 @@ func (s *MongoDBSyncer) flushBuffer(ctx context.Context, targetColl *mongo.Colle
 				return err // If it's a connection error, RetryMongoOperation will retry
 			}
 
-			// Update executed events counter and detailed operation counts
-			collKey := fmt.Sprintf("%s.%s", sourceDB, collectionName)
+			// Operation results tracking now handled by ChangeStreamInfo
 			successCount := int(res.InsertedCount + res.ModifiedCount + res.DeletedCount)
+			bufferSize := len(*buffer)
 
-			s.statisticsM.Lock()
-			s.executedEvents[collKey] += successCount
-			s.insertedEvents[collKey] += int(res.InsertedCount)
-			s.updatedEvents[collKey] += int(res.ModifiedCount)
-			s.deletedEvents[collKey] += int(res.DeletedCount)
-
-			received := s.receivedEvents[collKey]
-			executed := s.executedEvents[collKey]
-			inserted := s.insertedEvents[collKey]
-			updated := s.updatedEvents[collKey]
-			deleted := s.deletedEvents[collKey]
-			s.statisticsM.Unlock()
-
-			// Update ChangeStream activity status with detailed counts
-			utils.UpdateChangeStreamDetailedActivity(sourceDB, collectionName, 0, received, executed, inserted, updated, deleted)
+			// Accumulate ChangeStream activity with correct statistics
+			// received = number of events that were buffered (batch size)
+			// executed = number of operations that were successfully applied
+			utils.AccumulateChangeStreamActivity(sourceDB, collectionName, successCount, bufferSize, successCount, int(res.InsertedCount), int(res.ModifiedCount), int(res.DeletedCount))
 
 			s.logger.Debugf(
 				"[MongoDB] BulkWrite => table=%s.%s inserted=%d matched=%d modified=%d upserted=%d deleted=%d (opTotals=>insert=%d, update=%d, delete=%d)",
@@ -1012,8 +977,8 @@ func (s *MongoDBSyncer) flushBuffer(ctx context.Context, targetColl *mongo.Colle
 				deleteCount,
 			)
 
-			if lastToken != nil {
-				s.saveMongoDBResumeToken(sourceDB, collectionName, lastToken)
+			if currentToken != nil {
+				s.saveMongoDBResumeToken(sourceDB, collectionName, currentToken)
 			}
 			return nil
 		})
@@ -1141,11 +1106,8 @@ func (s *MongoDBSyncer) flushBuffer(ctx context.Context, targetColl *mongo.Colle
 	}
 
 	// Save latest resume token before clearing buffer
-	if len(*buffer) > 0 {
-		lastToken := (*buffer)[len(*buffer)-1].token
-		if lastToken != nil {
-			s.saveMongoDBResumeToken(sourceDB, collectionName, lastToken)
-		}
+	if currentToken != nil {
+		s.saveMongoDBResumeToken(sourceDB, collectionName, currentToken)
 	}
 	// Clear in-memory buffer
 	*buffer = (*buffer)[:0]
@@ -1233,7 +1195,7 @@ func (s *MongoDBSyncer) getResumeTokenPath(db, coll string) string {
 }
 
 // storeToBuffer persists the buffered changes to disk
-func (s *MongoDBSyncer) storeToBuffer(ctx context.Context, buffer *[]bufferedChange, sourceDB, collectionName string) {
+func (s *MongoDBSyncer) storeToBuffer(ctx context.Context, buffer *[]bufferedChange, sourceDB, collectionName string, latestToken bson.Raw) {
 	if len(*buffer) == 0 {
 		return
 	}
@@ -1303,7 +1265,7 @@ func (s *MongoDBSyncer) storeToBuffer(ctx context.Context, buffer *[]bufferedCha
 			// Create persisted change
 			persistedChange := persistedChange{
 				ID:         fmt.Sprintf("%d_%d", timestamp, j),
-				Token:      change.token,
+				Token:      latestToken,
 				Doc:        docBytes,
 				OpType:     change.opType,
 				SourceDB:   sourceDB,
@@ -1339,8 +1301,8 @@ func (s *MongoDBSyncer) storeToBuffer(ctx context.Context, buffer *[]bufferedCha
 	*buffer = (*buffer)[:0]
 
 	// Save latest token
-	if len(*buffer) > 0 && (*buffer)[len(*buffer)-1].token != nil {
-		s.saveMongoDBResumeToken(sourceDB, collectionName, (*buffer)[len(*buffer)-1].token)
+	if latestToken != nil {
+		s.saveMongoDBResumeToken(sourceDB, collectionName, latestToken)
 	}
 }
 
@@ -1458,7 +1420,6 @@ func (s *MongoDBSyncer) processBufferedChanges(ctx context.Context, targetColl *
 				model := s.convertToWriteModel(persistedChange)
 				if model != nil {
 					batch = append(batch, bufferedChange{
-						token:  persistedChange.Token,
 						model:  model,
 						opType: persistedChange.OpType,
 					})
@@ -1478,7 +1439,6 @@ func (s *MongoDBSyncer) processBufferedChanges(ctx context.Context, targetColl *
 			model := s.convertToWriteModel(persistedChange)
 			if model != nil {
 				batch = append(batch, bufferedChange{
-					token:  persistedChange.Token,
 					model:  model,
 					opType: persistedChange.OpType,
 				})
@@ -1498,7 +1458,7 @@ func (s *MongoDBSyncer) processBufferedChanges(ctx context.Context, targetColl *
 		deleteOps := countDeleteOps(batch)
 		s.logger.Debugf("[MongoDB] Flushing %d operations (%d deletes) for %s.%s",
 			len(batch), deleteOps, sourceDB, collectionName)
-		s.flushBuffer(ctx, targetColl, &batch, sourceDB, collectionName)
+		s.flushBuffer(ctx, targetColl, &batch, sourceDB, collectionName, processedToken)
 
 		// Save the last processed token
 		if processedToken != nil {
@@ -1623,40 +1583,6 @@ func (s *MongoDBSyncer) convertToWriteModel(persistedChange persistedChange) mon
 	}
 
 	return model
-}
-
-// checkAndResetDailyCounters checks if the day has changed and resets counters if needed
-func (s *MongoDBSyncer) checkAndResetDailyCounters() {
-	now := time.Now()
-	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-
-	s.statisticsM.RLock()
-	lastResetDay := s.lastCounterResetDay
-	s.statisticsM.RUnlock()
-
-	if today.After(lastResetDay) {
-		s.statisticsM.Lock()
-		// Log final counts before reset
-		for collKey, received := range s.receivedEvents {
-			executed := s.executedEvents[collKey]
-			inserted := s.insertedEvents[collKey]
-			updated := s.updatedEvents[collKey]
-			deleted := s.deletedEvents[collKey]
-			s.logger.Infof("[MongoDB] Daily statistics for %s: received=%d, executed=%d (inserted=%d, updated=%d, deleted=%d), day=%s",
-				collKey, received, executed, inserted, updated, deleted, lastResetDay.Format("2006-01-02"))
-		}
-
-		// Reset all counters
-		s.receivedEvents = make(map[string]int)
-		s.executedEvents = make(map[string]int)
-		s.insertedEvents = make(map[string]int)
-		s.updatedEvents = make(map[string]int)
-		s.deletedEvents = make(map[string]int)
-		s.lastCounterResetDay = today
-		s.statisticsM.Unlock()
-
-		s.logger.Infof("[MongoDB] Daily counters reset at %s", today.Format("2006-01-02 15:04:05"))
-	}
 }
 
 // findTableAdvancedSettings returns the AdvancedSettings for a given table name

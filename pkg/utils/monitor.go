@@ -92,6 +92,23 @@ func UpdateChangeStreamDetailedActivity(database, collection string, eventCount 
 	}
 }
 
+// AccumulateChangeStreamActivity accumulates ChangeStream statistics instead of replacing them
+func AccumulateChangeStreamActivity(database, collection string, eventCount, receivedEvents, executedEvents, insertedCount, updatedCount, deletedCount int) {
+	csTrackerMutex.Lock()
+	defer csTrackerMutex.Unlock()
+
+	key := fmt.Sprintf("%s.%s", database, collection)
+	if stream, exists := changeStreamTracker[key]; exists {
+		stream.LastActivity = time.Now()
+		stream.EventCount += int64(eventCount)
+		stream.ReceivedEvents += receivedEvents
+		stream.ExecutedEvents += executedEvents
+		stream.InsertedCount += insertedCount
+		stream.UpdatedCount += updatedCount
+		stream.DeletedCount += deletedCount
+	}
+}
+
 // RecordChangeStreamError records ChangeStream errors
 func RecordChangeStreamError(database, collection, errorMsg string) {
 	key := fmt.Sprintf("%s.%s", database, collection)
@@ -440,58 +457,24 @@ func countAndLogMongoDB(ctx context.Context, sc config.SyncConfig, log *logrus.L
 			csDetails = append(csDetails, details)
 		}
 
-		// Add comprehensive JSON log with all required data
+		// Calculate pending total for logging
 		pendingTotal := receivedTotal - executedTotal
-		var rate string
-		if activeCount > 0 {
-			// Simple rate calculation based on recent activity
-			rate = "N/A"
+
+		// Store individual ChangeStream statistics directly to database
+		// (no longer need to prepare JSON structure for logging)
+
+		// Store comprehensive ChangeStream statistics to database instead of just logging
+		if err := StoreChangeStreamStatistics(sc.ID, activeStreams); err != nil {
+			log.WithError(err).Error("[MongoDB] Failed to store ChangeStream statistics to database")
 		} else {
-			rate = "0/sec"
-		}
-
-		// Prepare individual ChangeStream details
-		changeStreamList := make([]map[string]interface{}, 0, len(activeStreams))
-		for key, cs := range activeStreams {
-			changeStreamList = append(changeStreamList, map[string]interface{}{
-				"name":     key,
-				"received": cs.ReceivedEvents,
-				"executed": cs.ExecutedEvents,
-				"errors":   cs.ErrorCount,
-				"pending":  cs.ReceivedEvents - cs.ExecutedEvents,
-				"operations": map[string]interface{}{
-					"inserted": cs.InsertedCount,
-					"updated":  cs.UpdatedCount,
-					"deleted":  cs.DeletedCount,
-				},
-			})
-		}
-
-		// Create comprehensive status JSON with sync_task_id
-		comprehensiveStatus := map[string]interface{}{
-			"sync_task_id": sc.ID,
-			"timestamp":    time.Now().UTC().Format(time.RFC3339),
-			"summary": map[string]interface{}{
-				"total_received":  receivedTotal,
-				"total_executed":  executedTotal,
-				"total_pending":   pendingTotal,
-				"processing_rate": rate,
-			},
-			"changestreams": map[string]interface{}{
-				"active_count":  activeCount,
-				"total_tracked": len(activeStreams),
-				"details":       changeStreamList,
-			},
-		}
-
-		// Convert to JSON string for logging
-		if jsonData, err := json.Marshal(comprehensiveStatus); err == nil {
 			log.WithFields(logrus.Fields{
 				"monitor_action": "changestream_comprehensive_status",
 				"sync_task_id":   sc.ID,
-			}).Infof("[MongoDB] Comprehensive ChangeStream Status: %s", string(jsonData))
-		} else {
-			log.WithError(err).Error("[MongoDB] Failed to marshal comprehensive status to JSON")
+				"active_count":   activeCount,
+				"total_received": receivedTotal,
+				"total_executed": executedTotal,
+				"total_pending":  pendingTotal,
+			}).Debugf("[MongoDB] ChangeStream statistics stored to database: %d active streams", activeCount)
 		}
 
 		serverActiveStreams, serverCount, err := getMongoDBActiveChangeStreams(ctx, srcClient)
@@ -721,4 +704,167 @@ INSERT INTO monitoring_log (
 	if err != nil {
 		logrus.Errorf("Failed to insert into monitoring_log: %v", err)
 	}
+}
+
+// StoreChangeStreamStatistics stores ChangeStream statistics to changestream_statistics table
+func StoreChangeStreamStatistics(syncTaskID int, activeStreams map[string]*ChangeStreamInfo) error {
+	db, err := db.OpenSQLiteDB()
+	if err != nil {
+		return fmt.Errorf("failed to open local DB for changestream_statistics: %w", err)
+	}
+	defer db.Close()
+
+	// Begin transaction for better performance
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Check if we need to reset daily statistics (at midnight)
+	if err := resetDailyStatisticsIfNeeded(tx, syncTaskID); err != nil {
+		return fmt.Errorf("failed to reset daily statistics: %w", err)
+	}
+
+	const upsertSQL = `
+INSERT INTO changestream_statistics (
+	task_id,
+	collection_name,
+	received,
+	executed,
+	pending,
+	errors,
+	inserted,
+	updated,
+	deleted,
+	last_updated
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+ON CONFLICT(task_id, collection_name) DO UPDATE SET
+	received = excluded.received,
+	executed = excluded.executed,
+	pending = excluded.pending,
+	errors = excluded.errors,
+	inserted = excluded.inserted,
+	updated = excluded.updated,
+	deleted = excluded.deleted,
+	last_updated = CURRENT_TIMESTAMP;
+`
+
+	stmt, err := tx.Prepare(upsertSQL)
+	if err != nil {
+		return fmt.Errorf("failed to prepare upsert statement: %w", err)
+	}
+	defer stmt.Close()
+
+	// Insert/update statistics for each active ChangeStream
+	for collectionKey, csInfo := range activeStreams {
+		if !csInfo.Active {
+			continue // Skip inactive streams
+		}
+
+		pending := csInfo.ReceivedEvents - csInfo.ExecutedEvents
+		if pending < 0 {
+			pending = 0 // Ensure pending is not negative
+		}
+
+		_, err = stmt.Exec(
+			syncTaskID,
+			collectionKey,
+			csInfo.ReceivedEvents,
+			csInfo.ExecutedEvents,
+			pending,
+			csInfo.ErrorCount,
+			csInfo.InsertedCount,
+			csInfo.UpdatedCount,
+			csInfo.DeletedCount,
+		)
+		if err != nil {
+			logrus.Errorf("Failed to upsert changestream_statistics for %s: %v", collectionKey, err)
+			continue
+		}
+
+		logrus.Debugf("[MongoDB] Updated changestream_statistics: task_id=%d, collection=%s, received=%d, executed=%d, pending=%d",
+			syncTaskID, collectionKey, csInfo.ReceivedEvents, csInfo.ExecutedEvents, pending)
+	}
+
+	// Commit transaction
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit changestream_statistics transaction: %w", err)
+	}
+
+	logrus.Debugf("[MongoDB] Successfully stored ChangeStream statistics for task_id=%d (%d active streams)",
+		syncTaskID, len(activeStreams))
+	return nil
+}
+
+// resetDailyStatisticsIfNeeded checks if it's a new day and resets statistics if needed
+func resetDailyStatisticsIfNeeded(tx *sql.Tx, syncTaskID int) error {
+	now := time.Now()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+
+	// Check if any records exist for this sync task
+	checkSQL := `
+		SELECT COUNT(*), MAX(DATE(last_updated)) as last_date
+		FROM changestream_statistics 
+		WHERE task_id = ?
+	`
+
+	var recordCount int
+	var lastDateStr sql.NullString
+
+	err := tx.QueryRow(checkSQL, syncTaskID).Scan(&recordCount, &lastDateStr)
+	if err != nil {
+		return fmt.Errorf("failed to check existing records: %w", err)
+	}
+
+	// If no records exist, no need to reset
+	if recordCount == 0 {
+		logrus.Debugf("[MongoDB] No existing records for task_id=%d, skipping daily reset check", syncTaskID)
+		return nil
+	}
+
+	// Parse the last update date
+	if !lastDateStr.Valid {
+		logrus.Debugf("[MongoDB] No valid last_updated date found for task_id=%d", syncTaskID)
+		return nil
+	}
+
+	lastDate, err := time.Parse("2006-01-02", lastDateStr.String)
+	if err != nil {
+		return fmt.Errorf("failed to parse last update date: %w", err)
+	}
+
+	// Check if we need to reset (if last update was before today)
+	if lastDate.Before(today) {
+		logrus.Infof("[MongoDB] Daily reset triggered for task_id=%d: last_date=%s, today=%s",
+			syncTaskID, lastDate.Format("2006-01-02"), today.Format("2006-01-02"))
+
+		// Reset all statistics to 0 for this sync task
+		resetSQL := `
+			UPDATE changestream_statistics 
+			SET received = 0,
+				executed = 0,
+				pending = 0,
+				errors = 0,
+				inserted = 0,
+				updated = 0,
+				deleted = 0,
+				last_updated = CURRENT_TIMESTAMP
+			WHERE task_id = ?
+		`
+
+		result, err := tx.Exec(resetSQL, syncTaskID)
+		if err != nil {
+			return fmt.Errorf("failed to reset daily statistics: %w", err)
+		}
+
+		rowsAffected, _ := result.RowsAffected()
+		logrus.Infof("[MongoDB] Daily statistics reset completed for task_id=%d: %d records reset",
+			syncTaskID, rowsAffected)
+	} else {
+		logrus.Debugf("[MongoDB] No daily reset needed for task_id=%d: last_date=%s is today",
+			syncTaskID, lastDate.Format("2006-01-02"))
+	}
+
+	return nil
 }
