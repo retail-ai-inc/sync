@@ -4,6 +4,7 @@
 [![Coverage Status](https://codecov.io/gh/retail-ai-inc/sync/graph/badge.svg)](https://codecov.io/gh/retail-ai-inc/sync)
 [![GoDoc](https://godoc.org/github.com/retail-ai-inc/sync?status.svg)](https://godoc.org/github.com/retail-ai-inc/sync)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![DeepWiki](https://img.shields.io/badge/docs-DeepWiki-blue)](https://deepwiki.com/retail-ai-inc/sync)
 
 Synchronize Production NOSQL and SQL data to Standalone instances for Data scientists or other purposes. A **Go-based** tool to synchronize MongoDB or SQL data from a **MongoDB replica set** or **sharded cluster** or production SQL instance to a **standalone instance**, supports initial and incremental synchronization, including **indexes** with change stream monitoring.
 
