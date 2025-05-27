@@ -41,12 +41,15 @@ func NewQueryCounter(logger *logrus.Logger) *QueryCounter {
 
 // CountMongoDBDocuments counts documents in a MongoDB collection with specified conditions
 func (qc *QueryCounter) CountMongoDBDocuments(ctx context.Context, client *mongo.Client, database, collection string, query *CountQuery) (int64, error) {
-	qc.logger.Debugf("[QueryCounter] Executing count on %s.%s", database, collection)
+	startTime := time.Now()
 
 	// If no query is provided, use EstimatedDocumentCount
 	if query == nil || len(query.Conditions) == 0 {
+		qc.logger.Debugf("[MongoDB] SQL: db.%s.estimatedDocumentCount() | START: %s", collection, startTime.Format("15:04:05.000"))
 		coll := client.Database(database).Collection(collection)
 		count, err := coll.EstimatedDocumentCount(ctx)
+		endTime := time.Now()
+		qc.logger.Debugf("[MongoDB] RESULT: %d | END: %s | Duration: %dms", count, endTime.Format("15:04:05.000"), endTime.Sub(startTime).Milliseconds())
 		if err != nil {
 			qc.logger.Errorf("[QueryCounter] EstimatedDocumentCount failed for %s.%s: %v", database, collection, err)
 			return -1, fmt.Errorf("estimated document count failed: %w", err)
@@ -73,7 +76,7 @@ func (qc *QueryCounter) CountMongoDBDocuments(ctx context.Context, client *mongo
 
 		relevantConditions++
 
-		// Handle dateRange operator specifically
+		// Handle different operators
 		if condition.Operator == "dateRange" && condition.Field != "" {
 			switch strings.ToLower(condition.Value) {
 			case "daily", "today":
@@ -136,6 +139,12 @@ func (qc *QueryCounter) CountMongoDBDocuments(ctx context.Context, client *mongo
 			default:
 				qc.logger.Warnf("[QueryCounter] Unknown date range type: %s", condition.Value)
 			}
+		} else if condition.Operator == "=" && condition.Field != "" && condition.Value != "" {
+			// Handle equality operator for id-based queries
+			filter[condition.Field] = condition.Value
+		} else {
+			// Handle other operators (like id-based queries)
+			qc.logger.Debugf("[QueryCounter] Unhandled operator: %s for field: %s", condition.Operator, condition.Field)
 		}
 	}
 
@@ -144,15 +153,21 @@ func (qc *QueryCounter) CountMongoDBDocuments(ctx context.Context, client *mongo
 			database, collection)
 	}
 
-	// Execute count with filter
+	// Log the filter being used and execute count
+	if filterBytes, err := bson.MarshalExtJSON(filter, true, false); err == nil {
+		qc.logger.Debugf("[MongoDB] SQL: db.%s.countDocuments(%s) | START: %s", collection, string(filterBytes), startTime.Format("15:04:05.000"))
+	}
+
 	coll := client.Database(database).Collection(collection)
 	count, err := coll.CountDocuments(ctx, filter)
+	endTime := time.Now()
+	qc.logger.Debugf("[MongoDB] RESULT: %d | END: %s | Duration: %dms", count, endTime.Format("15:04:05.000"), endTime.Sub(startTime).Milliseconds())
+
 	if err != nil {
 		qc.logger.Errorf("[QueryCounter] CountDocuments failed for %s.%s: %v",
 			database, collection, err)
 		return -1, fmt.Errorf("count documents failed: %w", err)
 	}
 
-	qc.logger.Debugf("[QueryCounter] Counted %d documents in %s.%s", count, database, collection)
 	return count, nil
 }
