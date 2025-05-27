@@ -718,13 +718,13 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 
 					if buffSize >= batchSize {
 						if s.bufferEnabled {
-							s.logger.Infof("[MongoDB] buffer reached %d => storing to persistent buffer => %s.%s", batchSize, sourceDB, collectionName)
+							s.logger.Debugf("[MongoDB] buffer reached %d => storing to persistent buffer => %s.%s", batchSize, sourceDB, collectionName)
 							tokenMutex.RLock()
 							currentToken := latestToken
 							tokenMutex.RUnlock()
 							s.storeToBuffer(ctx, &buffer, sourceDB, collectionName, currentToken)
 						} else {
-							s.logger.Infof("[MongoDB] buffer reached %d => flush now => %s.%s", batchSize, sourceDB, collectionName)
+							s.logger.Debugf("[MongoDB] buffer reached %d => flush now => %s.%s", batchSize, sourceDB, collectionName)
 							tokenMutex.RLock()
 							currentToken := latestToken
 							tokenMutex.RUnlock()

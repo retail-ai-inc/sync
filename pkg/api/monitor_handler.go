@@ -464,7 +464,7 @@ ORDER BY task_id, collection_name
 	if totalActiveStreams > 0 && totalExecuted > 0 {
 		// Simple calculation: assume data represents recent activity
 		// For more accurate rate, we would need time-based windows
-		processingRate = fmt.Sprintf("~%d/min", totalExecuted)
+		// processingRate = fmt.Sprintf("~%d/min", totalExecuted)
 	}
 
 	// Prepare response
