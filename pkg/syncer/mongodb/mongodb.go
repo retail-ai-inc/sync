@@ -1216,6 +1216,9 @@ func (s *MongoDBSyncer) storeToBuffer(ctx context.Context, buffer *[]bufferedCha
 	s.logger.Debugf("[MongoDB] Starting batch buffer write: %d changes for %s.%s",
 		len(*buffer), sourceDB, collectionName)
 
+	// Track write success
+	writeSuccess := true
+
 	for i := 0; i < len(*buffer); i += batchSize {
 		end := i + batchSize
 		if end > len(*buffer) {
@@ -1281,11 +1284,13 @@ func (s *MongoDBSyncer) storeToBuffer(ctx context.Context, buffer *[]bufferedCha
 		batchBytes, err := json.Marshal(batchChanges)
 		if err != nil {
 			s.logger.Errorf("[MongoDB] Failed to marshal batch changes: %v", err)
+			writeSuccess = false
 			continue
 		}
 
 		if err := os.WriteFile(batchFilePath, batchBytes, 0644); err != nil {
 			s.logger.Errorf("[MongoDB] Failed to write batch file %s: %v", batchFilePath, err)
+			writeSuccess = false
 		}
 	}
 
@@ -1297,12 +1302,18 @@ func (s *MongoDBSyncer) storeToBuffer(ctx context.Context, buffer *[]bufferedCha
 	s.logger.Debugf("[MongoDB] Stored %d changes to buffer for %s.%s using batch optimization",
 		len(*buffer), sourceDB, collectionName)
 
-	// Clear in-memory buffer
-	*buffer = (*buffer)[:0]
+	// Only clear buffer and update token if all writes succeeded
+	if writeSuccess {
+		// Clear in-memory buffer
+		*buffer = (*buffer)[:0]
 
-	// Save latest token
-	if latestToken != nil {
-		s.saveMongoDBResumeToken(sourceDB, collectionName, latestToken)
+		// Save latest token
+		if latestToken != nil {
+			s.saveMongoDBResumeToken(sourceDB, collectionName, latestToken)
+		}
+		s.logger.Debugf("[MongoDB] All writes successful, buffer cleared and resume token updated")
+	} else {
+		s.logger.Warnf("[MongoDB] Some writes failed, keeping data in buffer and NOT updating resume token")
 	}
 }
 
