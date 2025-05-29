@@ -1401,6 +1401,9 @@ func (s *MongoDBSyncer) processBufferedChanges(ctx context.Context, targetColl *
 	var processedToken bson.Raw
 	startTime := time.Now()
 
+	// Track if we encounter any corrupted files
+	corruptedFileEncountered := false
+
 	// Read and process files
 	for i := 0; i < filesToProcess; i++ {
 		if i >= len(files) {
@@ -1422,7 +1425,9 @@ func (s *MongoDBSyncer) processBufferedChanges(ctx context.Context, targetColl *
 				s.logger.Errorf("[MongoDB] Failed to unmarshal batch changes: %v", err)
 				s.logger.Errorf("[MongoDB] Corrupted file: %s, size: %d bytes", filePath, len(fileData))
 				_ = os.Remove(filePath)
-				continue
+				corruptedFileEncountered = true
+				s.logger.Warnf("[MongoDB] Stopping processing due to corrupted file to prevent data loss")
+				break // Stop processing to prevent skipping data
 			}
 
 			// Process each change in the batch
@@ -1444,7 +1449,9 @@ func (s *MongoDBSyncer) processBufferedChanges(ctx context.Context, targetColl *
 			if err := json.Unmarshal(fileData, &persistedChange); err != nil {
 				s.logger.Errorf("[MongoDB] Failed to unmarshal persisted change: %v", err)
 				_ = os.Remove(filePath)
-				continue
+				corruptedFileEncountered = true
+				s.logger.Warnf("[MongoDB] Stopping processing due to corrupted file to prevent data loss")
+				break // Stop processing to prevent skipping data
 			}
 
 			model := s.convertToWriteModel(persistedChange)
@@ -1471,9 +1478,12 @@ func (s *MongoDBSyncer) processBufferedChanges(ctx context.Context, targetColl *
 			len(batch), deleteOps, sourceDB, collectionName)
 		s.flushBuffer(ctx, targetColl, &batch, sourceDB, collectionName, processedToken)
 
-		// Save the last processed token
-		if processedToken != nil {
+		// Only save resume token if no corrupted files were encountered
+		if !corruptedFileEncountered && processedToken != nil {
 			s.saveMongoDBResumeToken(sourceDB, collectionName, processedToken)
+			s.logger.Debugf("[MongoDB] Resume token updated successfully")
+		} else if corruptedFileEncountered {
+			s.logger.Warnf("[MongoDB] Resume token NOT updated due to corrupted file encounter - will reprocess from last known good position")
 		}
 	}
 
