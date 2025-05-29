@@ -560,7 +560,6 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 	var bufferMutex sync.Mutex
 
 	var eventsReceived, eventsProcessed int64
-	var lastMemoryLogTime = time.Now()
 	var diskWriteFailures int
 
 	go func() {
