@@ -1227,9 +1227,17 @@ func (s *MongoDBSyncer) storeToBufferWithLogging(ctx context.Context, buffer *[]
 		return true
 	}
 
+	// Create a copy of the buffer to prevent concurrent modification
+	// This protects against race conditions between timer and event goroutines
+	bufferCopy := make([]bufferedChange, len(*buffer))
+	copy(bufferCopy, *buffer)
+
+	// Clear the original buffer immediately to prevent memory accumulation
+	*buffer = (*buffer)[:0]
+
 	bufferPath := s.getBufferPath(sourceDB, collectionName)
 	startTime := time.Now()
-	initialBufferSize := len(*buffer)
+	initialBufferSize := len(bufferCopy)
 
 	// Only log detailed start info for large buffers or when there have been failures
 	logDetailed := initialBufferSize > 200
@@ -1241,6 +1249,8 @@ func (s *MongoDBSyncer) storeToBufferWithLogging(ctx context.Context, buffer *[]
 	if err := os.MkdirAll(bufferPath, os.ModePerm); err != nil {
 		s.logger.Errorf("[DISK_WRITE_MKDIR_FAIL] Collection=%s | Path=%s | Error=%v",
 			collectionName, bufferPath, err)
+		// On directory creation failure, restore the buffer
+		*buffer = append(*buffer, bufferCopy...)
 		return false
 	}
 
@@ -1249,16 +1259,16 @@ func (s *MongoDBSyncer) storeToBufferWithLogging(ctx context.Context, buffer *[]
 	timestamp := time.Now().UnixNano()
 	writeSuccess := true
 
-	for i := 0; i < len(*buffer); i += batchSize {
+	for i := 0; i < len(bufferCopy); i += batchSize {
 		end := i + batchSize
-		if end > len(*buffer) {
-			end = len(*buffer)
+		if end > len(bufferCopy) {
+			end = len(bufferCopy)
 		}
 
 		batchChanges := make([]persistedChange, 0, end-i)
 
 		for j := i; j < end; j++ {
-			change := (*buffer)[j]
+			change := bufferCopy[j]
 
 			var docBytes []byte
 			var err error
@@ -1333,20 +1343,24 @@ func (s *MongoDBSyncer) storeToBufferWithLogging(ctx context.Context, buffer *[]
 	s.logger.Infof("[DISK_WRITE_COMPLETE] Collection=%s | Items=%d | DataMB=%.1f | Duration=%v | Success=%v",
 		collectionName, initialBufferSize, float64(totalDataSize)/1024/1024, duration, writeSuccess)
 
-	if writeSuccess {
-		*buffer = (*buffer)[:0]
-		if latestToken != nil {
-			s.saveMongoDBResumeToken(sourceDB, collectionName, latestToken)
-		}
-		if logDetailed {
-			s.logger.Infof("[MEMORY_CLEARED] Collection=%s | Buffer cleared and resume token updated", collectionName)
-		}
-	} else {
-		s.logger.Errorf("[MEMORY_RETAINED] Collection=%s | WriteSuccess=%v | Buffer size remains=%d | DATA ACCUMULATING IN MEMORY!",
+	// Handle write failure case
+	if !writeSuccess {
+		// Restore the failed data to buffer for retry
+		*buffer = append(*buffer, bufferCopy...)
+		s.logger.Errorf("[MEMORY_RETAINED] Collection=%s | WriteSuccess=%v | Buffer restored with %d items | DATA ACCUMULATING IN MEMORY!",
 			collectionName, writeSuccess, len(*buffer))
+		return false
 	}
 
-	return writeSuccess
+	// Success case - save token and log if detailed
+	if latestToken != nil {
+		s.saveMongoDBResumeToken(sourceDB, collectionName, latestToken)
+	}
+	if logDetailed {
+		s.logger.Infof("[MEMORY_CLEARED] Collection=%s | Buffer cleared and resume token updated", collectionName)
+	}
+
+	return true
 }
 
 // processPersistentBuffer reads from the persistent buffer and applies changes at a controlled rate
