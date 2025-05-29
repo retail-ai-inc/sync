@@ -559,28 +559,10 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 	timer := time.NewTimer(flushInterval)
 	var bufferMutex sync.Mutex
 
-	var eventsReceived, eventsProcessed int64
+	var eventsReceived int64
 	var diskWriteFailures int
-
-	go func() {
-		memTicker := time.NewTicker(30 * time.Second)
-		defer memTicker.Stop()
-
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-memTicker.C:
-				bufferMutex.Lock()
-				currentSize := len(buffer)
-				bufferMutex.Unlock()
-
-				s.logMemoryUsage("PERIODIC_CHECK", collectionName, currentSize)
-				s.logger.Warnf("[STATS] Collection=%s | EventsReceived=%d | EventsProcessed=%d | DiskWriteFailures=%d",
-					collectionName, eventsReceived, eventsProcessed, diskWriteFailures)
-			}
-		}
-	}()
+	var lastMemoryLogTime = time.Now()
+	var lastBufferGrowthLogTime = time.Now()
 
 	changeStreamActive := true
 
@@ -729,19 +711,36 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 						targetColl.Name(),
 					)
 
-					if eventsReceived%10000 == 0 {
-						bufferMutex.Lock()
-						currentSize := len(buffer)
-						bufferMutex.Unlock()
-						s.logMemoryUsage("EVENT_100", collectionName, currentSize)
+					eventsReceived++
+
+					// Smart memory logging: only log when significant changes occur
+					now := time.Now()
+					shouldLogMemory := false
+					shouldLogBufferGrowth := false
+
+					// Log memory every 50K events or every 2 minutes
+					if eventsReceived%50000 == 0 || now.Sub(lastMemoryLogTime) > 2*time.Minute {
+						shouldLogMemory = true
+						lastMemoryLogTime = now
 					}
 
-					if buffSize%50 == 0 {
-						s.logger.Warnf("[BUFFER_GROWTH] Collection=%s | BufferSize=%d | EventsReceived=%d",
-							collectionName, buffSize, eventsReceived)
+					// Log buffer growth only when significant or time-based
+					if (buffSize%100 == 0 && buffSize > 100) || now.Sub(lastBufferGrowthLogTime) > time.Minute {
+						shouldLogBufferGrowth = true
+						lastBufferGrowthLogTime = now
+					}
+
+					if shouldLogMemory {
+						s.logMemoryUsage("PERIODIC_EVENT", collectionName, buffSize)
+					}
+
+					if shouldLogBufferGrowth {
+						s.logger.Warnf("[BUFFER_STATUS] Collection=%s | BufferSize=%d | EventsReceived=%d | DiskFailures=%d",
+							collectionName, buffSize, eventsReceived, diskWriteFailures)
 					}
 
 					if buffSize >= batchSize {
+						// Only log when hitting batch size threshold, not every 50 items
 						s.logger.Warnf("[BUFFER_FLUSH_TRIGGER] Collection=%s | BufferSize=%d | Attempting disk write",
 							collectionName, buffSize)
 
@@ -750,16 +749,22 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 							currentToken := latestToken
 							tokenMutex.RUnlock()
 
-							s.logMemoryUsage("BEFORE_DISK_WRITE", collectionName, buffSize)
+							// Only log memory before/after for large buffers or failures
+							logMemoryForDisk := buffSize > 200 || diskWriteFailures > 0
+							if logMemoryForDisk {
+								s.logMemoryUsage("BEFORE_DISK_WRITE", collectionName, buffSize)
+							}
 
 							writeSuccess := s.storeToBufferWithLogging(ctx, &buffer, sourceDB, collectionName, currentToken)
 							if !writeSuccess {
 								diskWriteFailures++
 								s.logger.Errorf("[DISK_WRITE_FAILURE] Collection=%s | BufferSize=%d | TotalFailures=%d",
 									collectionName, len(buffer), diskWriteFailures)
+								// Always log memory after failure for debugging
+								s.logMemoryUsage("AFTER_DISK_WRITE_FAILURE", collectionName, len(buffer))
+							} else if logMemoryForDisk {
+								s.logMemoryUsage("AFTER_DISK_WRITE", collectionName, len(buffer))
 							}
-
-							s.logMemoryUsage("AFTER_DISK_WRITE", collectionName, len(buffer))
 						}
 					}
 
@@ -1216,29 +1221,32 @@ func (s *MongoDBSyncer) getResumeTokenPath(db, coll string) string {
 	return filepath.Join(s.cfg.MongoDBResumeTokenPath, fileName)
 }
 
-// storeToBuffer persists the buffered changes to disk
-func (s *MongoDBSyncer) storeToBuffer(ctx context.Context, buffer *[]bufferedChange, sourceDB, collectionName string, latestToken bson.Raw) {
+// storeToBufferWithLogging persists the buffered changes to disk
+func (s *MongoDBSyncer) storeToBufferWithLogging(ctx context.Context, buffer *[]bufferedChange, sourceDB, collectionName string, latestToken bson.Raw) bool {
 	if len(*buffer) == 0 {
-		return
+		return true
 	}
 
 	bufferPath := s.getBufferPath(sourceDB, collectionName)
 	startTime := time.Now()
+	initialBufferSize := len(*buffer)
 
-	// Ensure buffer directory exists
-	if err := os.MkdirAll(bufferPath, os.ModePerm); err != nil {
-		s.logger.Errorf("[MongoDB] Failed to create buffer directory %s: %v", bufferPath, err)
-		return
+	// Only log detailed start info for large buffers or when there have been failures
+	logDetailed := initialBufferSize > 200
+	if logDetailed {
+		s.logger.Infof("[DISK_WRITE_START] Collection=%s | BufferSize=%d",
+			collectionName, initialBufferSize)
 	}
 
-	// Batch file writing optimization
-	batchSize := 100 // Number of files per batch
+	if err := os.MkdirAll(bufferPath, os.ModePerm); err != nil {
+		s.logger.Errorf("[DISK_WRITE_MKDIR_FAIL] Collection=%s | Path=%s | Error=%v",
+			collectionName, bufferPath, err)
+		return false
+	}
+
+	totalDataSize := 0
+	batchSize := 100
 	timestamp := time.Now().UnixNano()
-
-	s.logger.Debugf("[MongoDB] Starting batch buffer write: %d changes for %s.%s",
-		len(*buffer), sourceDB, collectionName)
-
-	// Track write success
 	writeSuccess := true
 
 	for i := 0; i < len(*buffer); i += batchSize {
@@ -1249,11 +1257,9 @@ func (s *MongoDBSyncer) storeToBuffer(ctx context.Context, buffer *[]bufferedCha
 
 		batchChanges := make([]persistedChange, 0, end-i)
 
-		// Prepare batch changes
 		for j := i; j < end; j++ {
 			change := (*buffer)[j]
 
-			// Serialize model to BSON
 			var docBytes []byte
 			var err error
 
@@ -1268,11 +1274,6 @@ func (s *MongoDBSyncer) storeToBuffer(ctx context.Context, buffer *[]bufferedCha
 						"filter":      rep.Filter,
 						"replacement": rep.Replacement,
 					})
-				} else if upd, ok := change.model.(*mongo.UpdateOneModel); ok {
-					docBytes, err = bson.Marshal(map[string]interface{}{
-						"filter": upd.Filter,
-						"update": upd.Update,
-					})
 				}
 			case "delete":
 				if del, ok := change.model.(*mongo.DeleteOneModel); ok {
@@ -1283,11 +1284,14 @@ func (s *MongoDBSyncer) storeToBuffer(ctx context.Context, buffer *[]bufferedCha
 			}
 
 			if err != nil {
-				s.logger.Errorf("[MongoDB] Failed to marshal document to BSON: %v", err)
+				s.logger.Errorf("[DISK_WRITE_MARSHAL_FAIL] Collection=%s | OpType=%s | Error=%v",
+					collectionName, change.opType, err)
+				writeSuccess = false
 				continue
 			}
 
-			// Create persisted change
+			totalDataSize += len(docBytes)
+
 			persistedChange := persistedChange{
 				ID:         fmt.Sprintf("%d_%d", timestamp, j),
 				Token:      latestToken,
@@ -1301,42 +1305,48 @@ func (s *MongoDBSyncer) storeToBuffer(ctx context.Context, buffer *[]bufferedCha
 			batchChanges = append(batchChanges, persistedChange)
 		}
 
-		// Write batch to single file
 		batchFilePath := filepath.Join(bufferPath, fmt.Sprintf("batch_%d_%d.json", timestamp, i))
 		batchBytes, err := json.Marshal(batchChanges)
 		if err != nil {
-			s.logger.Errorf("[MongoDB] Failed to marshal batch changes: %v", err)
+			s.logger.Errorf("[DISK_WRITE_JSON_FAIL] Collection=%s | BatchFile=%s | Error=%v",
+				collectionName, batchFilePath, err)
 			writeSuccess = false
 			continue
 		}
 
+		// Only log individual file writes for large batches or debugging
+		if logDetailed {
+			s.logger.Infof("[DISK_WRITE_FILE] Collection=%s | File=%s | Size=%dKB | Changes=%d",
+				collectionName, filepath.Base(batchFilePath), len(batchBytes)/1024, len(batchChanges))
+		}
+
 		if err := os.WriteFile(batchFilePath, batchBytes, 0644); err != nil {
-			s.logger.Errorf("[MongoDB] Failed to write batch file %s: %v", batchFilePath, err)
+			s.logger.Errorf("[DISK_WRITE_FILE_FAIL] Collection=%s | File=%s | Error=%v",
+				collectionName, batchFilePath, err)
 			writeSuccess = false
 		}
 	}
 
 	duration := time.Since(startTime)
-	rate := float64(len(*buffer)) / duration.Seconds()
-	s.logger.Debugf("[MongoDB] Completed batch buffer write in %v (%.2f items/sec) for %s.%s",
-		duration, rate, sourceDB, collectionName)
 
-	s.logger.Debugf("[MongoDB] Stored %d changes to buffer for %s.%s using batch optimization",
-		len(*buffer), sourceDB, collectionName)
+	// Always log completion summary
+	s.logger.Infof("[DISK_WRITE_COMPLETE] Collection=%s | Items=%d | DataMB=%.1f | Duration=%v | Success=%v",
+		collectionName, initialBufferSize, float64(totalDataSize)/1024/1024, duration, writeSuccess)
 
-	// Only clear buffer and update token if all writes succeeded
 	if writeSuccess {
-		// Clear in-memory buffer
 		*buffer = (*buffer)[:0]
-
-		// Save latest token
 		if latestToken != nil {
 			s.saveMongoDBResumeToken(sourceDB, collectionName, latestToken)
 		}
-		s.logger.Debugf("[MongoDB] All writes successful, buffer cleared and resume token updated")
+		if logDetailed {
+			s.logger.Infof("[MEMORY_CLEARED] Collection=%s | Buffer cleared and resume token updated", collectionName)
+		}
 	} else {
-		s.logger.Warnf("[MongoDB] Some writes failed, keeping data in buffer and NOT updating resume token")
+		s.logger.Errorf("[MEMORY_RETAINED] Collection=%s | WriteSuccess=%v | Buffer size remains=%d | DATA ACCUMULATING IN MEMORY!",
+			collectionName, writeSuccess, len(*buffer))
 	}
+
+	return writeSuccess
 }
 
 // processPersistentBuffer reads from the persistent buffer and applies changes at a controlled rate
@@ -1655,123 +1665,4 @@ func (s *MongoDBSyncer) logMemoryUsage(location, collectionName string, bufferSi
 
 	s.logger.Warnf("[MEMORY] %s | Collection=%s | BufferSize=%d | AllocMB=%d | SysMB=%d | HeapMB=%d | HeapSysMB=%d | NumGC=%d | HeapObjects=%d",
 		location, collectionName, bufferSize, allocMB, sysMB, heapMB, heapSysMB, m.NumGC, m.HeapObjects)
-}
-
-func (s *MongoDBSyncer) storeToBufferWithLogging(ctx context.Context, buffer *[]bufferedChange, sourceDB, collectionName string, latestToken bson.Raw) bool {
-	if len(*buffer) == 0 {
-		return true
-	}
-
-	bufferPath := s.getBufferPath(sourceDB, collectionName)
-	startTime := time.Now()
-	initialBufferSize := len(*buffer)
-
-	s.logger.Warnf("[DISK_WRITE_START] Collection=%s | BufferSize=%d | BufferPath=%s",
-		collectionName, initialBufferSize, bufferPath)
-
-	if err := os.MkdirAll(bufferPath, os.ModePerm); err != nil {
-		s.logger.Errorf("[DISK_WRITE_MKDIR_FAIL] Collection=%s | Path=%s | Error=%v",
-			collectionName, bufferPath, err)
-		return false
-	}
-
-	totalDataSize := 0
-	batchSize := 100
-	timestamp := time.Now().UnixNano()
-	writeSuccess := true
-
-	s.logger.Warnf("[DISK_WRITE_BATCH_START] Collection=%s | TotalChanges=%d | BatchSize=%d",
-		collectionName, len(*buffer), batchSize)
-
-	for i := 0; i < len(*buffer); i += batchSize {
-		end := i + batchSize
-		if end > len(*buffer) {
-			end = len(*buffer)
-		}
-
-		batchChanges := make([]persistedChange, 0, end-i)
-
-		for j := i; j < end; j++ {
-			change := (*buffer)[j]
-
-			var docBytes []byte
-			var err error
-
-			switch change.opType {
-			case "insert":
-				if ins, ok := change.model.(*mongo.InsertOneModel); ok {
-					docBytes, err = bson.Marshal(ins.Document)
-				}
-			case "update", "replace":
-				if rep, ok := change.model.(*mongo.ReplaceOneModel); ok {
-					docBytes, err = bson.Marshal(map[string]interface{}{
-						"filter":      rep.Filter,
-						"replacement": rep.Replacement,
-					})
-				}
-			case "delete":
-				if del, ok := change.model.(*mongo.DeleteOneModel); ok {
-					docBytes, err = bson.Marshal(map[string]interface{}{
-						"filter": del.Filter,
-					})
-				}
-			}
-
-			if err != nil {
-				s.logger.Errorf("[DISK_WRITE_MARSHAL_FAIL] Collection=%s | OpType=%s | Error=%v",
-					collectionName, change.opType, err)
-				writeSuccess = false
-				continue
-			}
-
-			totalDataSize += len(docBytes)
-
-			persistedChange := persistedChange{
-				ID:         fmt.Sprintf("%d_%d", timestamp, j),
-				Token:      latestToken,
-				Doc:        docBytes,
-				OpType:     change.opType,
-				SourceDB:   sourceDB,
-				SourceColl: collectionName,
-				Timestamp:  time.Now(),
-			}
-
-			batchChanges = append(batchChanges, persistedChange)
-		}
-
-		batchFilePath := filepath.Join(bufferPath, fmt.Sprintf("batch_%d_%d.json", timestamp, i))
-		batchBytes, err := json.Marshal(batchChanges)
-		if err != nil {
-			s.logger.Errorf("[DISK_WRITE_JSON_FAIL] Collection=%s | BatchFile=%s | Error=%v",
-				collectionName, batchFilePath, err)
-			writeSuccess = false
-			continue
-		}
-
-		s.logger.Warnf("[DISK_WRITE_FILE] Collection=%s | File=%s | Size=%d bytes | Changes=%d",
-			collectionName, filepath.Base(batchFilePath), len(batchBytes), len(batchChanges))
-
-		if err := os.WriteFile(batchFilePath, batchBytes, 0644); err != nil {
-			s.logger.Errorf("[DISK_WRITE_FILE_FAIL] Collection=%s | File=%s | Error=%v",
-				collectionName, batchFilePath, err)
-			writeSuccess = false
-		}
-	}
-
-	duration := time.Since(startTime)
-	s.logger.Warnf("[DISK_WRITE_COMPLETE] Collection=%s | InitialBufferSize=%d | TotalDataSize=%d bytes | Duration=%v | Success=%v",
-		collectionName, initialBufferSize, totalDataSize, duration, writeSuccess)
-
-	if writeSuccess {
-		*buffer = (*buffer)[:0]
-		if latestToken != nil {
-			s.saveMongoDBResumeToken(sourceDB, collectionName, latestToken)
-		}
-		s.logger.Warnf("[MEMORY_CLEARED] Collection=%s | Buffer cleared and resume token updated", collectionName)
-	} else {
-		s.logger.Errorf("[MEMORY_RETAINED] Collection=%s | WriteSuccess=%v | Buffer size remains=%d | DATA ACCUMULATING IN MEMORY!",
-			collectionName, writeSuccess, len(*buffer))
-	}
-
-	return writeSuccess
 }
