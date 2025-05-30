@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -853,8 +854,27 @@ func (s *MongoDBSyncer) prepareWriteModel(doc bson.M, collName, opType string) m
 
 		s.logger.Debugf("[MongoDB] Processing update operation for %s, docID=%v", collName, docID)
 
-		// Use full document replacement for all updates to ensure data consistency
-		if fullDoc, ok := doc["fullDocument"].(bson.M); ok {
+		// Check if we have both fullDocument and updateDescription
+		fullDoc, hasFullDoc := doc["fullDocument"].(bson.M)
+		updateDesc, hasUpdateDesc := doc["updateDescription"].(bson.M)
+
+		// Try incremental update if we have updateDescription
+		if hasUpdateDesc && hasFullDoc {
+			// Check for array index out of bounds issues
+			if s.hasArrayIndexOutOfBounds(updateDesc, fullDoc) {
+				s.logger.Debugf("[MongoDB] Array index out of bounds detected, using full replacement for docID=%v", docID)
+			} else {
+				// Use incremental update
+				incrementalModel := s.buildIncrementalUpdate(docID, updateDesc, fullDoc, tableSecurity)
+				if incrementalModel != nil {
+					s.logger.Debugf("[MongoDB] Using incremental update for docID=%v", docID)
+					return incrementalModel
+				}
+			}
+		}
+
+		// Fallback to full document replacement
+		if hasFullDoc {
 			if tableSecurity.SecurityEnabled && len(tableSecurity.FieldSecurity) > 0 {
 				for field, value := range fullDoc {
 					processedValue := security.ProcessValue(value, field, tableSecurity)
@@ -889,6 +909,119 @@ func (s *MongoDBSyncer) prepareWriteModel(doc bson.M, collName, opType string) m
 	return nil
 }
 
+// hasArrayIndexOutOfBounds checks if any updated fields contain array indices that exceed the current array length
+func (s *MongoDBSyncer) hasArrayIndexOutOfBounds(updateDesc bson.M, fullDoc bson.M) bool {
+	updatedFields, hasUpdatedFields := updateDesc["updatedFields"].(bson.M)
+	if !hasUpdatedFields {
+		return false
+	}
+
+	for fieldPath := range updatedFields {
+		// Check if this is an array index update (e.g., "Prices.2.Price")
+		parts := strings.Split(fieldPath, ".")
+		if len(parts) < 3 {
+			continue // Not an array index update
+		}
+
+		// Look for numeric indices in the field path
+		for i := 1; i < len(parts)-1; i++ {
+			if s.isNumericString(parts[i]) {
+				// This is an array index, check if it's out of bounds
+				arrayFieldPath := strings.Join(parts[:i], ".")
+				arrayField := s.getNestedField(fullDoc, arrayFieldPath)
+
+				if arraySlice, ok := arrayField.([]interface{}); ok {
+					indexValue := s.parseIndex(parts[i])
+					if indexValue >= len(arraySlice) {
+						s.logger.Debugf("[MongoDB] Array index %d exceeds current length %d for field %s",
+							indexValue, len(arraySlice), arrayFieldPath)
+						return true
+					}
+				}
+			}
+		}
+	}
+
+	return false
+}
+
+// buildIncrementalUpdate creates an incremental update operation
+func (s *MongoDBSyncer) buildIncrementalUpdate(docID interface{}, updateDesc bson.M, fullDoc bson.M, tableSecurity security.TableSecurity) mongo.WriteModel {
+	updateDoc := bson.M{}
+
+	// Handle updated fields
+	if updatedFields, ok := updateDesc["updatedFields"].(bson.M); ok && len(updatedFields) > 0 {
+		setDoc := bson.M{}
+		for fieldPath, newValue := range updatedFields {
+			// Apply security processing if needed
+			if tableSecurity.SecurityEnabled && len(tableSecurity.FieldSecurity) > 0 {
+				// Extract the field name (handle nested paths)
+				fieldName := strings.Split(fieldPath, ".")[0]
+				processedValue := security.ProcessValue(newValue, fieldName, tableSecurity)
+				setDoc[fieldPath] = processedValue
+			} else {
+				setDoc[fieldPath] = newValue
+			}
+		}
+		if len(setDoc) > 0 {
+			updateDoc["$set"] = setDoc
+		}
+	}
+
+	// Handle removed fields
+	if removedFields, ok := updateDesc["removedFields"].([]interface{}); ok && len(removedFields) > 0 {
+		unsetDoc := bson.M{}
+		for _, field := range removedFields {
+			if fieldStr, ok := field.(string); ok {
+				unsetDoc[fieldStr] = ""
+			}
+		}
+		if len(unsetDoc) > 0 {
+			updateDoc["$unset"] = unsetDoc
+		}
+	}
+
+	if len(updateDoc) == 0 {
+		return nil
+	}
+
+	s.logger.Debugf("[MongoDB] Built incremental update: %v", updateDoc)
+	return mongo.NewUpdateOneModel().
+		SetFilter(bson.M{"_id": docID}).
+		SetUpdate(updateDoc).
+		SetUpsert(true)
+}
+
+// Helper functions
+func (s *MongoDBSyncer) isNumericString(str string) bool {
+	_, err := strconv.Atoi(str)
+	return err == nil
+}
+
+func (s *MongoDBSyncer) parseIndex(str string) int {
+	index, _ := strconv.Atoi(str)
+	return index
+}
+
+func (s *MongoDBSyncer) getNestedField(doc bson.M, fieldPath string) interface{} {
+	parts := strings.Split(fieldPath, ".")
+	current := doc
+
+	for i, part := range parts {
+		if i == len(parts)-1 {
+			return current[part]
+		}
+
+		if next, ok := current[part].(bson.M); ok {
+			current = next
+		} else {
+			return nil
+		}
+	}
+
+	return nil
+}
+
 func describeWriteModel(m mongo.WriteModel, opType string) string {
 	switch opType {
 	case "insert":
@@ -898,6 +1031,9 @@ func describeWriteModel(m mongo.WriteModel, opType string) string {
 	case "update", "replace":
 		if rep, ok := m.(*mongo.ReplaceOneModel); ok {
 			return fmt.Sprintf("UPDATE filter=%s, doc=%s", toJSONString(rep.Filter), toJSONString(rep.Replacement))
+		}
+		if upd, ok := m.(*mongo.UpdateOneModel); ok {
+			return fmt.Sprintf("UPDATE filter=%s, update=%s", toJSONString(upd.Filter), toJSONString(upd.Update))
 		}
 	case "delete":
 		if del, ok := m.(*mongo.DeleteOneModel); ok {
@@ -1550,10 +1686,13 @@ func (s *MongoDBSyncer) convertToWriteModel(persistedChange persistedChange) mon
 				SetFilter(filter).
 				SetReplacement(replacement).
 				SetUpsert(true)
-		} else if updateData["update"] != nil {
-			// Legacy format detected - skip to avoid array index issues
-			s.logger.Warnf("[MongoDB] Skipping legacy update operation (partial update) for document %v to avoid array index issues. Please restart sync for full document replacement.", filter["_id"])
-			return nil
+		} else if updateDoc, hasUpdate := updateData["update"]; hasUpdate && updateDoc != nil {
+			// Handle incremental update operations (including positional operators)
+			s.logger.Debugf("[MongoDB] Processing incremental update operation")
+			model = mongo.NewUpdateOneModel().
+				SetFilter(filter).
+				SetUpdate(updateDoc).
+				SetUpsert(true)
 		} else {
 			s.logger.Errorf("[MongoDB] Invalid update data structure: missing both replacement and update fields")
 			s.logger.Errorf("[MongoDB] updateData content: %v", updateData)

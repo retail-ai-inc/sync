@@ -76,14 +76,19 @@ Create standalone databases outside of your production database servers with the
   - A target Redis instance with write permissions.
 
 
+## Quick Start
+### 1.Start with docker (For End Users)
 
-## Installation(For development)
+```bash
+docker run -d -p 8080:8080 zhangyongguang/sync:latest
+```
 
-After running `./sync`, the application will output a browser address:
+**Access the Web UI**:
 - URL: [http://localhost:8080](http://localhost:8080)
 - Username: `admin`
 - Password: `admin`
 
+### 2.Development Setup (For Developers)
 
 ```
 # 1. Clone the repository:
@@ -96,14 +101,15 @@ go mod tidy
 # 3. Run the application
 go run cmd/sync/main.go
 
-# 4. Build the binary
-go build -o sync cmd/sync/main.go
-
-# 5. Build the Docker image
+# 4. Build the Docker image
 docker build -t sync .
 docker run -d -p 8080:8080 sync
 ```
 
+**Access the Web UI**:
+- URL: [http://localhost:8080](http://localhost:8080)
+- Username: `admin`
+- Password: `admin`
 
 ## Real-Time Synchronization
 
