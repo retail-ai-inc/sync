@@ -44,7 +44,7 @@ Create standalone databases outside of your production database servers with the
 ## Features
 
 - **UI Interface**:  
-  - The tool has added a **UI interface**, making it easier to operate and monitor the synchronization process. For detailed UI documentation and usage guidance, please refer to [READMEUI.md](READMEUI.md).
+  - The tool has added a [**UI interface**](READMEUI.md), making it easier to operate and monitor the synchronization process. For detailed UI documentation and usage guidance, please refer to [READMEUI.md](READMEUI.md).
 - **Initial Sync**:
   - MongoDB: Bulk synchronization of data from the MongoDB cluster or MongoDB replica set to the standalone MongoDB instance.
   - MySQL/MariaDB: Initial synchronization using batch inserts (default batch size: 100 rows) from the source to the target if the target table is empty.
