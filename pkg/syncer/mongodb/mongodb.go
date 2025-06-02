@@ -530,6 +530,7 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 	}
 
 	// Process any existing buffered changes before starting the change stream
+	// Note: These changes were already counted as "received" when originally buffered
 	s.processBufferedChanges(ctx, targetColl, sourceDB, collectionName)
 
 	s.logger.Infof("[MongoDB] Creating ChangeStream pipeline for %s.%s: %v", sourceDB, collectionName, pipeline)
@@ -579,12 +580,14 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 
 					if s.bufferEnabled {
 						// Store to persistent buffer instead of directly flushing
+						// Note: Events already counted as "received" when added to buffer
 						tokenMutex.RLock()
 						currentToken := latestToken
 						tokenMutex.RUnlock()
 						s.storeToBuffer(ctx, &buffer, sourceDB, collectionName, currentToken)
 					} else {
 						s.logger.Debugf("[MongoDB] flush timer => %s.%s => flushing %d ops", sourceDB, collectionName, len(buffer))
+						// Note: Events already counted as "received" when added to buffer
 						tokenMutex.RLock()
 						currentToken := latestToken
 						tokenMutex.RUnlock()
@@ -626,12 +629,14 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 			if len(buffer) > 0 {
 				if s.bufferEnabled {
 					s.logger.Infof("[MongoDB] context done => storing %d ops to buffer for %s.%s", len(buffer), sourceDB, collectionName)
+					// Note: Events already counted as "received" when added to buffer
 					tokenMutex.RLock()
 					currentToken := latestToken
 					tokenMutex.RUnlock()
 					s.storeToBuffer(ctx, &buffer, sourceDB, collectionName, currentToken)
 				} else {
 					s.logger.Infof("[MongoDB] context done => flush %d ops for %s.%s", len(buffer), sourceDB, collectionName)
+					// Note: Events already counted as "received" when added to buffer
 					tokenMutex.RLock()
 					currentToken := latestToken
 					tokenMutex.RUnlock()
@@ -688,7 +693,8 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 					})
 					bufferMutex.Unlock()
 
-					// Activity will be tracked through ChangeStreamInfo updates in utils package
+					// Count this event as received immediately when added to buffer (avoid duplicate counting)
+					utils.AccumulateChangeStreamActivity(sourceDB, collectionName, 0, 1, 0, 0, 0, 0)
 
 					queryStr := describeWriteModel(model, actualOpType)
 					s.logger.Debugf("[MongoDB][%s] table=%s.%s query=%s",
@@ -1092,12 +1098,11 @@ func (s *MongoDBSyncer) flushBuffer(ctx context.Context, targetColl *mongo.Colle
 
 			// Operation results tracking now handled by ChangeStreamInfo
 			successCount := int(res.InsertedCount + res.ModifiedCount + res.DeletedCount)
-			bufferSize := len(*buffer)
 
-			// Accumulate ChangeStream activity with correct statistics
-			// received = number of events that were buffered (batch size)
-			// executed = number of operations that were successfully applied
-			utils.AccumulateChangeStreamActivity(sourceDB, collectionName, successCount, bufferSize, successCount, int(res.InsertedCount), int(res.ModifiedCount), int(res.DeletedCount))
+			// Accumulate ChangeStream activity with execution statistics only
+			// Do NOT add to received count here to avoid duplicate counting
+			// (received is already counted when events are added to buffer)
+			utils.AccumulateChangeStreamActivity(sourceDB, collectionName, successCount, 0, successCount, int(res.InsertedCount), int(res.ModifiedCount), int(res.DeletedCount))
 
 			s.logger.Debugf(
 				"[MongoDB] BulkWrite => table=%s.%s inserted=%d matched=%d modified=%d upserted=%d deleted=%d (opTotals=>insert=%d, update=%d, delete=%d)",
@@ -1612,6 +1617,9 @@ func (s *MongoDBSyncer) processBufferedChanges(ctx context.Context, targetColl *
 		deleteOps := countDeleteOps(batch)
 		s.logger.Debugf("[MongoDB] Flushing %d operations (%d deletes) for %s.%s",
 			len(batch), deleteOps, sourceDB, collectionName)
+
+		// Note: flushBuffer will only count execution statistics, not received
+		// since these events were already counted as received when first buffered
 		s.flushBuffer(ctx, targetColl, &batch, sourceDB, collectionName, processedToken)
 
 		// Only save resume token if no corrupted files were encountered

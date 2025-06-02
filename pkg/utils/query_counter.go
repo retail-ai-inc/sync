@@ -3,6 +3,7 @@ package utils
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -140,11 +141,73 @@ func (qc *QueryCounter) CountMongoDBDocuments(ctx context.Context, client *mongo
 				qc.logger.Warnf("[QueryCounter] Unknown date range type: %s", condition.Value)
 			}
 		} else if condition.Operator == "=" && condition.Field != "" && condition.Value != "" {
-			// Handle equality operator for id-based queries
-			filter[condition.Field] = condition.Value
+			// Handle equality operator - try to convert to number first for id fields
+			if intValue, err := strconv.ParseInt(condition.Value, 10, 64); err == nil {
+				filter[condition.Field] = intValue
+				qc.logger.Debugf("[QueryCounter] Converted equality value '%s' to int64: %d", condition.Value, intValue)
+			} else if floatValue, err := strconv.ParseFloat(condition.Value, 64); err == nil {
+				filter[condition.Field] = floatValue
+				qc.logger.Debugf("[QueryCounter] Converted equality value '%s' to float64: %f", condition.Value, floatValue)
+			} else {
+				filter[condition.Field] = condition.Value
+				qc.logger.Debugf("[QueryCounter] Using string value for equality: '%s'", condition.Value)
+			}
+		} else if condition.Field != "" && condition.Value != "" {
+			// Handle comparison operators (>, <, >=, <=)
+			switch condition.Operator {
+			case ">":
+				// Try to convert value to number for numeric comparison (int first, then float)
+				if intValue, err := strconv.ParseInt(condition.Value, 10, 64); err == nil {
+					filter[condition.Field] = bson.M{"$gt": intValue}
+				} else if floatValue, err := strconv.ParseFloat(condition.Value, 64); err == nil {
+					filter[condition.Field] = bson.M{"$gt": floatValue}
+				} else {
+					filter[condition.Field] = bson.M{"$gt": condition.Value}
+				}
+			case ">=":
+				if intValue, err := strconv.ParseInt(condition.Value, 10, 64); err == nil {
+					filter[condition.Field] = bson.M{"$gte": intValue}
+				} else if floatValue, err := strconv.ParseFloat(condition.Value, 64); err == nil {
+					filter[condition.Field] = bson.M{"$gte": floatValue}
+				} else {
+					filter[condition.Field] = bson.M{"$gte": condition.Value}
+				}
+			case "<":
+				if intValue, err := strconv.ParseInt(condition.Value, 10, 64); err == nil {
+					filter[condition.Field] = bson.M{"$lt": intValue}
+				} else if floatValue, err := strconv.ParseFloat(condition.Value, 64); err == nil {
+					filter[condition.Field] = bson.M{"$lt": floatValue}
+				} else {
+					filter[condition.Field] = bson.M{"$lt": condition.Value}
+				}
+			case "<=":
+				if intValue, err := strconv.ParseInt(condition.Value, 10, 64); err == nil {
+					filter[condition.Field] = bson.M{"$lte": intValue}
+				} else if floatValue, err := strconv.ParseFloat(condition.Value, 64); err == nil {
+					filter[condition.Field] = bson.M{"$lte": floatValue}
+				} else {
+					filter[condition.Field] = bson.M{"$lte": condition.Value}
+				}
+			case "!=", "<>":
+				if intValue, err := strconv.ParseInt(condition.Value, 10, 64); err == nil {
+					filter[condition.Field] = bson.M{"$ne": intValue}
+				} else if floatValue, err := strconv.ParseFloat(condition.Value, 64); err == nil {
+					filter[condition.Field] = bson.M{"$ne": floatValue}
+				} else {
+					filter[condition.Field] = bson.M{"$ne": condition.Value}
+				}
+			default:
+				// Handle other operators (like id-based queries)
+				qc.logger.Debugf("[QueryCounter] Unhandled operator: %s for field: %s", condition.Operator, condition.Field)
+			}
 		} else {
 			// Handle other operators (like id-based queries)
 			qc.logger.Debugf("[QueryCounter] Unhandled operator: %s for field: %s", condition.Operator, condition.Field)
+		}
+
+		// Log what was actually added to the filter for this condition
+		if currentValue, exists := filter[condition.Field]; exists {
+			qc.logger.Debugf("[QueryCounter] Added to filter: %s = %+v (type: %T)", condition.Field, currentValue, currentValue)
 		}
 	}
 
@@ -153,10 +216,12 @@ func (qc *QueryCounter) CountMongoDBDocuments(ctx context.Context, client *mongo
 			database, collection)
 	}
 
-	// Log the filter being used and execute count
-	if filterBytes, err := bson.MarshalExtJSON(filter, true, false); err == nil {
-		qc.logger.Debugf("[MongoDB] SQL: db.%s.countDocuments(%s) | START: %s", collection, string(filterBytes), startTime.Format("15:04:05.000"))
-	}
+	// Log the complete query after all conditions are processed
+	queryStr := qc.buildReadableQueryString(collection, filter)
+	qc.logger.Debugf("[QueryCounter] MongoDB query: %s", queryStr)
+
+	// Log the filter being used and execute count - use the same format for consistency
+	qc.logger.Debugf("[MongoDB] SQL: %s | START: %s", queryStr, startTime.Format("15:04:05.000"))
 
 	coll := client.Database(database).Collection(collection)
 	count, err := coll.CountDocuments(ctx, filter)
@@ -170,4 +235,79 @@ func (qc *QueryCounter) CountMongoDBDocuments(ctx context.Context, client *mongo
 	}
 
 	return count, nil
+}
+
+// buildReadableQueryString builds a human-readable MongoDB query string using ISODate format
+func (qc *QueryCounter) buildReadableQueryString(collection string, filter bson.M) string {
+	if len(filter) == 0 {
+		return fmt.Sprintf("db.%s.countDocuments({})", collection)
+	}
+
+	var conditions []string
+
+	for field, value := range filter {
+		conditionStr := qc.formatFilterCondition(field, value)
+		if conditionStr != "" {
+			conditions = append(conditions, conditionStr)
+		}
+	}
+
+	if len(conditions) == 0 {
+		return fmt.Sprintf("db.%s.countDocuments({})", collection)
+	}
+
+	return fmt.Sprintf("db.%s.countDocuments({%s})", collection, strings.Join(conditions, ", "))
+}
+
+// formatFilterCondition formats a single filter condition to readable string
+func (qc *QueryCounter) formatFilterCondition(field string, value interface{}) string {
+	switch v := value.(type) {
+	case bson.M:
+		// Handle operators like $gt, $gte, $lt, $lte
+		var parts []string
+		for op, opValue := range v {
+			switch op {
+			case "$gt":
+				parts = append(parts, fmt.Sprintf("$gt: %v", qc.formatValue(opValue)))
+			case "$gte":
+				if t, ok := opValue.(time.Time); ok {
+					parts = append(parts, fmt.Sprintf("$gte: ISODate(\"%s\")", t.Format("2006-01-02T15:04:05.000Z")))
+				} else {
+					parts = append(parts, fmt.Sprintf("$gte: %v", qc.formatValue(opValue)))
+				}
+			case "$lt":
+				parts = append(parts, fmt.Sprintf("$lt: %v", qc.formatValue(opValue)))
+			case "$lte":
+				if t, ok := opValue.(time.Time); ok {
+					parts = append(parts, fmt.Sprintf("$lte: ISODate(\"%s\")", t.Format("2006-01-02T15:04:05.000Z")))
+				} else {
+					parts = append(parts, fmt.Sprintf("$lte: %v", qc.formatValue(opValue)))
+				}
+			case "$ne":
+				parts = append(parts, fmt.Sprintf("$ne: %v", qc.formatValue(opValue)))
+			default:
+				parts = append(parts, fmt.Sprintf("%s: %v", op, qc.formatValue(opValue)))
+			}
+		}
+		if len(parts) > 0 {
+			return fmt.Sprintf("%s: {%s}", field, strings.Join(parts, ", "))
+		}
+	default:
+		return fmt.Sprintf("%s: %v", field, qc.formatValue(value))
+	}
+	return ""
+}
+
+// formatValue formats a value for display
+func (qc *QueryCounter) formatValue(value interface{}) string {
+	switch v := value.(type) {
+	case time.Time:
+		return fmt.Sprintf("ISODate(\"%s\")", v.Format("2006-01-02T15:04:05.000Z"))
+	case string:
+		return fmt.Sprintf("\"%s\"", v)
+	case int, int32, int64, float32, float64:
+		return fmt.Sprintf("%v", v)
+	default:
+		return fmt.Sprintf("%v", v)
+	}
 }

@@ -799,20 +799,31 @@ ON CONFLICT(task_id, collection_name) DO UPDATE SET
 
 // resetDailyStatisticsIfNeeded checks if it's a new day and resets statistics if needed
 func resetDailyStatisticsIfNeeded(tx *sql.Tx, syncTaskID int) error {
-	now := time.Now()
-	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	// Use Japan timezone (JST) for daily reset logic
+	jst, err := time.LoadLocation("Asia/Tokyo")
+	if err != nil {
+		logrus.Warnf("[MongoDB] Failed to load JST timezone: %v, falling back to local time", err)
+		jst = time.Local
+	}
 
-	// Check if any records exist for this sync task
+	now := time.Now().In(jst)
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, jst)
+
+	// Check if any records exist for this sync task and if we already reset today
 	checkSQL := `
-		SELECT COUNT(*), MAX(DATE(last_updated)) as last_date
+		SELECT COUNT(*), 
+		       MAX(last_updated) as last_updated_time,
+		       COALESCE(MAX(CASE WHEN DATE(last_updated, 'localtime') = ? THEN 1 ELSE 0 END), 0) as reset_today
 		FROM changestream_statistics 
 		WHERE task_id = ?
 	`
 
+	todayJSTStr := today.Format("2006-01-02")
 	var recordCount int
-	var lastDateStr sql.NullString
+	var lastUpdatedTime sql.NullString
+	var resetToday int
 
-	err := tx.QueryRow(checkSQL, syncTaskID).Scan(&recordCount, &lastDateStr)
+	err = tx.QueryRow(checkSQL, todayJSTStr, syncTaskID).Scan(&recordCount, &lastUpdatedTime, &resetToday)
 	if err != nil {
 		return fmt.Errorf("failed to check existing records: %w", err)
 	}
@@ -823,21 +834,31 @@ func resetDailyStatisticsIfNeeded(tx *sql.Tx, syncTaskID int) error {
 		return nil
 	}
 
-	// Parse the last update date
-	if !lastDateStr.Valid {
-		logrus.Debugf("[MongoDB] No valid last_updated date found for task_id=%d", syncTaskID)
+	// If we already reset today, skip
+	if resetToday > 0 {
+		logrus.Debugf("[MongoDB] Already reset today for task_id=%d, skipping daily reset", syncTaskID)
 		return nil
 	}
 
-	lastDate, err := time.Parse("2006-01-02", lastDateStr.String)
-	if err != nil {
-		return fmt.Errorf("failed to parse last update date: %w", err)
+	// Parse the last update time to determine if we need to reset
+	if !lastUpdatedTime.Valid {
+		logrus.Debugf("[MongoDB] No valid last_updated time found for task_id=%d", syncTaskID)
+		return nil
 	}
 
-	// Check if we need to reset (if last update was before today)
-	if lastDate.Before(today) {
-		logrus.Infof("[MongoDB] Daily reset triggered for task_id=%d: last_date=%s, today=%s",
-			syncTaskID, lastDate.Format("2006-01-02"), today.Format("2006-01-02"))
+	lastUpdate, err := time.Parse("2006-01-02 15:04:05", lastUpdatedTime.String)
+	if err != nil {
+		return fmt.Errorf("failed to parse last update time: %w", err)
+	}
+
+	// Convert to JST for comparison
+	lastUpdateJST := lastUpdate.UTC().In(jst)
+	lastUpdateDateJST := time.Date(lastUpdateJST.Year(), lastUpdateJST.Month(), lastUpdateJST.Day(), 0, 0, 0, 0, jst)
+
+	// Check if we need to reset (if last update was before today in JST)
+	if lastUpdateDateJST.Before(today) {
+		logrus.Infof("[MongoDB] Daily reset triggered for task_id=%d: last_date=%s (JST), today=%s (JST)",
+			syncTaskID, lastUpdateDateJST.Format("2006-01-02"), today.Format("2006-01-02"))
 
 		// Reset all statistics to 0 for this sync task
 		resetSQL := `
@@ -859,12 +880,42 @@ func resetDailyStatisticsIfNeeded(tx *sql.Tx, syncTaskID int) error {
 		}
 
 		rowsAffected, _ := result.RowsAffected()
-		logrus.Infof("[MongoDB] Daily statistics reset completed for task_id=%d: %d records reset",
+
+		// CRITICAL FIX: Also reset in-memory ChangeStreamInfo statistics for this sync task
+		resetInMemoryStatistics(syncTaskID)
+
+		logrus.Infof("[MongoDB] Daily statistics reset completed for task_id=%d: %d records reset (database + memory)",
 			syncTaskID, rowsAffected)
 	} else {
-		logrus.Debugf("[MongoDB] No daily reset needed for task_id=%d: last_date=%s is today",
-			syncTaskID, lastDate.Format("2006-01-02"))
+		logrus.Debugf("[MongoDB] No daily reset needed for task_id=%d: last_date=%s is today in JST",
+			syncTaskID, lastUpdateDateJST.Format("2006-01-02"))
 	}
 
 	return nil
+}
+
+// resetInMemoryStatistics resets ChangeStreamInfo statistics in memory for a specific sync task
+func resetInMemoryStatistics(syncTaskID int) {
+	csTrackerMutex.Lock()
+	defer csTrackerMutex.Unlock()
+
+	resetCount := 0
+	for key, cs := range changeStreamTracker {
+		if cs.SyncTaskID == syncTaskID {
+			// Reset all accumulated statistics to 0
+			cs.ReceivedEvents = 0
+			cs.ExecutedEvents = 0
+			cs.InsertedCount = 0
+			cs.UpdatedCount = 0
+			cs.DeletedCount = 0
+			cs.ErrorCount = 0
+			cs.EventCount = 0
+			// Keep other fields like Created, LastActivity, Active unchanged
+			resetCount++
+			logrus.Debugf("[MongoDB] Reset in-memory statistics for ChangeStream: %s", key)
+		}
+	}
+
+	logrus.Infof("[MongoDB] Reset in-memory statistics for %d ChangeStreams of task_id=%d",
+		resetCount, syncTaskID)
 }
