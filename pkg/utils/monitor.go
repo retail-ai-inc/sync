@@ -164,6 +164,45 @@ func GetActiveChangeStreamsByTaskID(syncTaskID int) map[string]*ChangeStreamInfo
 // StartRowCountMonitoring periodically logs row counts to console + DB
 func StartRowCountMonitoring(ctx context.Context, cfg *config.Config, log *logrus.Logger, interval time.Duration) {
 	ticker := time.NewTicker(interval)
+
+	// Start daily summary at 00:05 JST
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				// Calculate time until next 00:05 JST
+				jst, err := time.LoadLocation("Asia/Tokyo")
+				if err != nil {
+					log.Warnf("[Monitor] Failed to load JST timezone: %v, falling back to local time", err)
+					jst = time.Local
+				}
+
+				now := time.Now().In(jst)
+				nextRunTime := time.Date(now.Year(), now.Month(), now.Day(), 0, 5, 0, 0, jst)
+
+				// If it's already past 00:05 today, schedule for tomorrow
+				if now.After(nextRunTime) {
+					nextRunTime = nextRunTime.AddDate(0, 0, 1)
+				}
+
+				durationUntilRun := nextRunTime.Sub(now)
+				log.Infof("[Monitor] Daily summary scheduled to run at: %s (in %v)",
+					nextRunTime.Format("2006-01-02 15:04:05 JST"), durationUntilRun)
+
+				// Wait until the scheduled time
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(durationUntilRun):
+					// Run daily summary for dateRange tables
+					logYesterdayDataVolume(ctx, cfg, log)
+				}
+			}
+		}
+	}()
+
 	go func() {
 		defer ticker.Stop()
 		for {
@@ -441,42 +480,41 @@ func countAndLogMongoDB(ctx context.Context, sc config.SyncConfig, log *logrus.L
 	// Log comprehensive ChangeStream status for each sync task
 	activeStreams := GetActiveChangeStreamsByTaskID(sc.ID)
 
-	// Only log if this task has active ChangeStreams
+	// Always check ChangeStream statistics and daily reset
+	csDetails := make([]string, 0, len(activeStreams))
+	activeCount := 0
+	receivedTotal := 0
+	executedTotal := 0
+
+	for key, cs := range activeStreams {
+		activeCount++
+		receivedTotal += cs.ReceivedEvents
+		executedTotal += cs.ExecutedEvents
+		details := fmt.Sprintf("%s[events:%d,received:%d,executed:%d,errors:%d]",
+			key, cs.EventCount, cs.ReceivedEvents, cs.ExecutedEvents, cs.ErrorCount)
+		csDetails = append(csDetails, details)
+	}
+
+	// Calculate pending total for logging
+	pendingTotal := receivedTotal - executedTotal
+
+	// Always store ChangeStream statistics to database (even if no active streams)
+	// This ensures daily reset logic is always executed
+	if err := StoreChangeStreamStatistics(sc.ID, activeStreams); err != nil {
+		log.WithError(err).Error("[MongoDB] Failed to store ChangeStream statistics to database")
+	} else {
+		log.WithFields(logrus.Fields{
+			"monitor_action": "changestream_comprehensive_status",
+			"sync_task_id":   sc.ID,
+			"active_count":   activeCount,
+			"total_received": receivedTotal,
+			"total_executed": executedTotal,
+			"total_pending":  pendingTotal,
+		}).Debugf("[MongoDB] ChangeStream statistics stored to database: %d active streams", activeCount)
+	}
+
+	// Only check server-side ChangeStreams if we have active streams
 	if len(activeStreams) > 0 {
-		csDetails := make([]string, 0, len(activeStreams))
-		activeCount := 0
-		receivedTotal := 0
-		executedTotal := 0
-
-		for key, cs := range activeStreams {
-			activeCount++
-			receivedTotal += cs.ReceivedEvents
-			executedTotal += cs.ExecutedEvents
-			details := fmt.Sprintf("%s[events:%d,received:%d,executed:%d,errors:%d]",
-				key, cs.EventCount, cs.ReceivedEvents, cs.ExecutedEvents, cs.ErrorCount)
-			csDetails = append(csDetails, details)
-		}
-
-		// Calculate pending total for logging
-		pendingTotal := receivedTotal - executedTotal
-
-		// Store individual ChangeStream statistics directly to database
-		// (no longer need to prepare JSON structure for logging)
-
-		// Store comprehensive ChangeStream statistics to database instead of just logging
-		if err := StoreChangeStreamStatistics(sc.ID, activeStreams); err != nil {
-			log.WithError(err).Error("[MongoDB] Failed to store ChangeStream statistics to database")
-		} else {
-			log.WithFields(logrus.Fields{
-				"monitor_action": "changestream_comprehensive_status",
-				"sync_task_id":   sc.ID,
-				"active_count":   activeCount,
-				"total_received": receivedTotal,
-				"total_executed": executedTotal,
-				"total_pending":  pendingTotal,
-			}).Debugf("[MongoDB] ChangeStream statistics stored to database: %d active streams", activeCount)
-		}
-
 		serverActiveStreams, serverCount, err := getMongoDBActiveChangeStreams(ctx, srcClient)
 		if err != nil {
 			log.WithError(err).WithField("db_type", dbType).
@@ -918,4 +956,176 @@ func resetInMemoryStatistics(syncTaskID int) {
 
 	logrus.Infof("[MongoDB] Reset in-memory statistics for %d ChangeStreams of task_id=%d",
 		resetCount, syncTaskID)
+}
+
+// logYesterdayDataVolume logs yesterday's data volume for tables with dateRange conditions
+func logYesterdayDataVolume(ctx context.Context, cfg *config.Config, log *logrus.Logger) {
+	log.Infof("[Monitor] Starting daily summary for yesterday's data volume...")
+
+	// Get Japan timezone
+	jst, err := time.LoadLocation("Asia/Tokyo")
+	if err != nil {
+		log.Warnf("[Monitor] Failed to load JST timezone: %v, falling back to local time", err)
+		jst = time.Local
+	}
+
+	// Calculate yesterday's date range in JST
+	now := time.Now().In(jst)
+	yesterday := now.AddDate(0, 0, -1)
+	yesterdayStart := time.Date(yesterday.Year(), yesterday.Month(), yesterday.Day(), 0, 0, 0, 0, jst)
+	yesterdayEnd := time.Date(yesterday.Year(), yesterday.Month(), yesterday.Day(), 23, 59, 59, 999999999, jst)
+
+	log.Infof("[Monitor] Processing yesterday's data volume: %s to %s (JST)",
+		yesterdayStart.Format("2006-01-02 15:04:05"), yesterdayEnd.Format("2006-01-02 15:04:05"))
+
+	for _, sc := range cfg.SyncConfigs {
+		if !sc.Enable {
+			continue
+		}
+
+		switch strings.ToLower(sc.Type) {
+		case "mongodb":
+			logYesterdayMongoDBVolume(ctx, sc, log, yesterdayStart, yesterdayEnd)
+		default:
+			log.Debugf("[Monitor] Daily summary for type %s not implemented", sc.Type)
+		}
+	}
+
+	log.Infof("[Monitor] Daily summary completed")
+}
+
+// logYesterdayMongoDBVolume logs yesterday's MongoDB data volume for dateRange tables
+func logYesterdayMongoDBVolume(ctx context.Context, sc config.SyncConfig, log *logrus.Logger, yesterdayStart, yesterdayEnd time.Time) {
+	srcClient, err := mongo.Connect(ctx, options.Client().ApplyURI(sc.SourceConnection))
+	if err != nil {
+		log.WithError(err).WithField("db_type", "MONGODB").
+			Error("[Monitor] Failed to connect to source for daily summary")
+		return
+	}
+	defer func() {
+		_ = srcClient.Disconnect(ctx)
+	}()
+
+	tgtClient, err := mongo.Connect(ctx, options.Client().ApplyURI(sc.TargetConnection))
+	if err != nil {
+		log.WithError(err).WithField("db_type", "MONGODB").
+			Error("[Monitor] Failed to connect to target for daily summary")
+		return
+	}
+	defer func() {
+		_ = tgtClient.Disconnect(ctx)
+	}()
+
+	dbType := strings.ToUpper(sc.Type)
+	srcDBName := common.GetDatabaseName(sc.Type, sc.SourceConnection)
+	tgtDBName := common.GetDatabaseName(sc.Type, sc.TargetConnection)
+
+	for _, mapping := range sc.Mappings {
+		for _, tblMap := range mapping.Tables {
+			// Check if this table has dateRange conditions
+			hasDateRangeCondition := false
+			var dateRangeField string
+
+			if tblMap.CountQuery != nil && len(tblMap.CountQuery) > 0 {
+				if conditions, ok := tblMap.CountQuery["conditions"]; ok {
+					conditionBytes, err := json.Marshal(conditions)
+					if err == nil {
+						var conditionsList []CountCondition
+						if err := json.Unmarshal(conditionBytes, &conditionsList); err == nil {
+							for _, condition := range conditionsList {
+								if condition.Operator == "dateRange" && condition.Field != "" {
+									hasDateRangeCondition = true
+									dateRangeField = condition.Field
+									break
+								}
+							}
+						}
+					}
+				}
+			}
+
+			// Skip tables without dateRange conditions
+			if !hasDateRangeCondition {
+				continue
+			}
+
+			log.Infof("[Monitor] Processing daily summary for dateRange table: %s (field: %s)",
+				tblMap.SourceTable, dateRangeField)
+
+			// Create yesterday's query conditions
+			yesterdayQuery := &CountQuery{
+				Conditions: []CountCondition{
+					{
+						Field:    dateRangeField,
+						Operator: "dateRange",
+						Table:    tblMap.SourceTable,
+						Value:    "yesterday", // Custom value for yesterday
+					},
+				},
+			}
+
+			queryCounter := NewQueryCounterWithYesterdaySupport(log, yesterdayStart, yesterdayEnd)
+
+			// Count source collection for yesterday
+			srcCount, err := queryCounter.CountMongoDBDocuments(ctx, srcClient, srcDBName, tblMap.SourceTable, yesterdayQuery)
+			if err != nil {
+				log.WithError(err).WithFields(logrus.Fields{
+					"sync_task_id": sc.ID,
+					"db_type":      dbType,
+					"src_db":       srcDBName,
+					"src_coll":     tblMap.SourceTable,
+					"date_field":   dateRangeField,
+					"operation":    "yesterday_source_count",
+				}).Error("Failed to get yesterday's source collection count")
+				srcCount = -1
+			}
+
+			// Count target collection for yesterday
+			tgtCount, err := queryCounter.CountMongoDBDocuments(ctx, tgtClient, tgtDBName, tblMap.TargetTable, yesterdayQuery)
+			if err != nil {
+				log.WithError(err).WithFields(logrus.Fields{
+					"sync_task_id": sc.ID,
+					"db_type":      dbType,
+					"tgt_db":       tgtDBName,
+					"tgt_coll":     tblMap.TargetTable,
+					"date_field":   dateRangeField,
+					"operation":    "yesterday_target_count",
+				}).Error("Failed to get yesterday's target collection count")
+				tgtCount = -1
+			}
+
+			// Calculate synced count
+			syncedCount := tgtCount
+			if srcCount >= 0 && tgtCount >= 0 {
+				// For daily sync, synced count is typically the target count
+				// as we're measuring how many records were successfully synced
+				syncedCount = tgtCount
+			}
+
+			// Log the daily summary with special format for GCP Logging alerts
+			log.WithFields(logrus.Fields{
+				"sync_task_id":        sc.ID,
+				"db_type":             dbType,
+				"src_db":              srcDBName,
+				"src_coll":            tblMap.SourceTable,
+				"src_yesterday_count": srcCount,
+				"tgt_db":              tgtDBName,
+				"tgt_coll":            tblMap.TargetTable,
+				"tgt_yesterday_count": tgtCount,
+				"synced_yesterday":    syncedCount,
+				"date_field":          dateRangeField,
+				"yesterday_date":      yesterdayStart.Format("2006-01-02"),
+				"monitor_action":      "daily_sync_summary",
+			}).Info("daily_sync_summary")
+
+			// Store to database for historical tracking
+			storeMonitoringLog(sc.ID, dbType, srcDBName, tblMap.SourceTable, srcCount,
+				tgtDBName, tblMap.TargetTable, tgtCount, "daily_sync_summary")
+
+			log.Infof("[Monitor] Daily summary: Task %d, Table %s.%s -> %s.%s, "+
+				"Yesterday (%s): Source=%d, Target=%d, Synced=%d (field: %s)",
+				sc.ID, srcDBName, tblMap.SourceTable, tgtDBName, tblMap.TargetTable,
+				yesterdayStart.Format("2006-01-02"), srcCount, tgtCount, syncedCount, dateRangeField)
+		}
+	}
 }

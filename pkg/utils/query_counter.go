@@ -28,6 +28,9 @@ type CountCondition struct {
 // QueryCounter handles executing count queries with specific conditions
 type QueryCounter struct {
 	logger *logrus.Logger
+	// Support for custom date ranges (for yesterday support)
+	customYesterdayStart *time.Time
+	customYesterdayEnd   *time.Time
 }
 
 // NewQueryCounter creates a new QueryCounter instance
@@ -37,6 +40,18 @@ func NewQueryCounter(logger *logrus.Logger) *QueryCounter {
 	}
 	return &QueryCounter{
 		logger: logger,
+	}
+}
+
+// NewQueryCounterWithYesterdaySupport creates a QueryCounter with custom yesterday date range
+func NewQueryCounterWithYesterdaySupport(logger *logrus.Logger, yesterdayStart, yesterdayEnd time.Time) *QueryCounter {
+	if logger == nil {
+		logger = logrus.New()
+	}
+	return &QueryCounter{
+		logger:               logger,
+		customYesterdayStart: &yesterdayStart,
+		customYesterdayEnd:   &yesterdayEnd,
 	}
 }
 
@@ -98,6 +113,33 @@ func (qc *QueryCounter) CountMongoDBDocuments(ctx context.Context, client *mongo
 				// Log equivalent MongoDB query for debugging
 				qc.logger.Debugf("[QueryCounter] MongoDB query: db.%s.countDocuments({%s: {$gte: ISODate(\"%s\"), $lte: ISODate(\"%s\")}})",
 					collection, condition.Field, startOfDayUTC.Format("2006-01-02T15:04:05Z"), endOfDayUTC.Format("2006-01-02T15:04:05Z"))
+
+			case "yesterday":
+				// Use custom yesterday range if provided, otherwise calculate
+				var startOfYesterday, endOfYesterday time.Time
+				if qc.customYesterdayStart != nil && qc.customYesterdayEnd != nil {
+					startOfYesterday = *qc.customYesterdayStart
+					endOfYesterday = *qc.customYesterdayEnd
+				} else {
+					// Fallback to calculated yesterday in JST
+					now := time.Now().In(jst)
+					yesterday := now.AddDate(0, 0, -1)
+					startOfYesterday = time.Date(yesterday.Year(), yesterday.Month(), yesterday.Day(), 0, 0, 0, 0, jst)
+					endOfYesterday = time.Date(yesterday.Year(), yesterday.Month(), yesterday.Day(), 23, 59, 59, 999999999, jst)
+				}
+
+				// Convert to UTC for MongoDB query
+				startOfYesterdayUTC := startOfYesterday.UTC()
+				endOfYesterdayUTC := endOfYesterday.UTC()
+
+				filter[condition.Field] = bson.M{
+					"$gte": startOfYesterdayUTC,
+					"$lte": endOfYesterdayUTC,
+				}
+
+				// Log equivalent MongoDB query for debugging
+				qc.logger.Debugf("[QueryCounter] MongoDB query (yesterday): db.%s.countDocuments({%s: {$gte: ISODate(\"%s\"), $lte: ISODate(\"%s\")}})",
+					collection, condition.Field, startOfYesterdayUTC.Format("2006-01-02T15:04:05Z"), endOfYesterdayUTC.Format("2006-01-02T15:04:05Z"))
 
 			case "weekly":
 				now := time.Now().In(jst)
