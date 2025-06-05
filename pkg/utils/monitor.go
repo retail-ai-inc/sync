@@ -1022,17 +1022,17 @@ func logYesterdayMongoDBVolume(ctx context.Context, sc config.SyncConfig, log *l
 
 	for _, mapping := range sc.Mappings {
 		for _, tblMap := range mapping.Tables {
-			// Check if this table has dateRange conditions
-			hasDateRangeCondition := false
+			// Parse original count query conditions
+			var originalConditions []CountCondition
+			var hasDateRangeCondition bool
 			var dateRangeField string
 
 			if tblMap.CountQuery != nil && len(tblMap.CountQuery) > 0 {
 				if conditions, ok := tblMap.CountQuery["conditions"]; ok {
 					conditionBytes, err := json.Marshal(conditions)
 					if err == nil {
-						var conditionsList []CountCondition
-						if err := json.Unmarshal(conditionBytes, &conditionsList); err == nil {
-							for _, condition := range conditionsList {
+						if err := json.Unmarshal(conditionBytes, &originalConditions); err == nil {
+							for _, condition := range originalConditions {
 								if condition.Operator == "dateRange" && condition.Field != "" {
 									hasDateRangeCondition = true
 									dateRangeField = condition.Field
@@ -1049,19 +1049,39 @@ func logYesterdayMongoDBVolume(ctx context.Context, sc config.SyncConfig, log *l
 				continue
 			}
 
-			log.Infof("[Monitor] Processing daily summary for dateRange table: %s (field: %s)",
-				tblMap.SourceTable, dateRangeField)
+			log.Infof("[Monitor] Processing daily summary for dateRange table: %s (field: %s, total conditions: %d)",
+				tblMap.SourceTable, dateRangeField, len(originalConditions))
 
-			// Create yesterday's query conditions
-			yesterdayQuery := &CountQuery{
-				Conditions: []CountCondition{
-					{
-						Field:    dateRangeField,
-						Operator: "dateRange",
-						Table:    tblMap.SourceTable,
+			// Create yesterday's query conditions based on original conditions
+			// Replace dateRange value from "daily" to "yesterday", keep all other conditions
+			var yesterdayConditions []CountCondition
+			for _, condition := range originalConditions {
+				if condition.Operator == "dateRange" && condition.Field == dateRangeField {
+					// Replace dateRange value with "yesterday"
+					yesterdayConditions = append(yesterdayConditions, CountCondition{
+						Field:    condition.Field,
+						Operator: condition.Operator,
+						Table:    condition.Table,
 						Value:    "yesterday", // Custom value for yesterday
-					},
-				},
+					})
+				} else {
+					// Keep other conditions as is
+					yesterdayConditions = append(yesterdayConditions, condition)
+				}
+			}
+
+			yesterdayQuery := &CountQuery{
+				Conditions: yesterdayConditions,
+			}
+
+			// Log the conditions being used for yesterday's query for debugging
+			if len(yesterdayConditions) > 1 {
+				conditionDetails := make([]string, len(yesterdayConditions))
+				for i, cond := range yesterdayConditions {
+					conditionDetails[i] = fmt.Sprintf("%s %s %v", cond.Field, cond.Operator, cond.Value)
+				}
+				log.Debugf("[Monitor] Yesterday query conditions for %s: [%s]",
+					tblMap.SourceTable, strings.Join(conditionDetails, ", "))
 			}
 
 			queryCounter := NewQueryCounterWithYesterdaySupport(log, yesterdayStart, yesterdayEnd)
