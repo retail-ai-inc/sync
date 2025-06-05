@@ -1283,6 +1283,12 @@ func (s *MongoDBSyncer) flushBufferWithResult(ctx context.Context, targetColl *m
 		func() error {
 			res, err := targetColl.BulkWrite(ctx, writeModels, options.BulkWrite().SetOrdered(false))
 			if err != nil {
+				// Handle duplicate key errors specially
+				if strings.Contains(err.Error(), "E11000 duplicate key error") {
+					s.logger.Warnf("[MongoDB] BulkWrite encountered duplicate key error, switching to individual operations for %s.%s", sourceDB, collectionName)
+					// Try individual operations to isolate problematic records
+					return s.handleBatchWithDuplicateKeys(ctx, targetColl, writeModels, sourceDB, collectionName)
+				}
 				// Don't retry resumeToken errors
 				if strings.Contains(err.Error(), "resume token") {
 					s.removeMongoDBResumeToken(sourceDB, collectionName)
@@ -1928,4 +1934,75 @@ func (s *MongoDBSyncer) findTableAdvancedSettings(tableName string) config.Advan
 		SyncIndexes:     false,
 		IgnoreDeleteOps: false, // Default to ignore delete operations
 	}
+}
+
+// handleBatchWithDuplicateKeys processes writeModels individually when bulk operation fails due to duplicate keys
+func (s *MongoDBSyncer) handleBatchWithDuplicateKeys(ctx context.Context, targetColl *mongo.Collection, writeModels []mongo.WriteModel, sourceDB, collectionName string) error {
+	var successCount, skipCount int
+	var lastErr error
+
+	s.logger.Infof("[MongoDB] Processing %d operations individually due to duplicate key errors for %s.%s",
+		len(writeModels), sourceDB, collectionName)
+
+	for i, model := range writeModels {
+		var err error
+		var opType string
+		var docID interface{}
+
+		// Extract operation type and document ID for logging
+		switch m := model.(type) {
+		case *mongo.InsertOneModel:
+			opType = "insert"
+			if doc, ok := m.Document.(bson.M); ok {
+				docID = doc["_id"]
+			}
+			_, err = targetColl.InsertOne(ctx, m.Document)
+		case *mongo.UpdateOneModel:
+			opType = "update"
+			if filter, ok := m.Filter.(bson.M); ok {
+				docID = filter["_id"]
+			}
+			_, err = targetColl.UpdateOne(ctx, m.Filter, m.Update, options.Update().SetUpsert(true))
+		case *mongo.ReplaceOneModel:
+			opType = "replace"
+			if filter, ok := m.Filter.(bson.M); ok {
+				docID = filter["_id"]
+			}
+			_, err = targetColl.ReplaceOne(ctx, m.Filter, m.Replacement, options.Replace().SetUpsert(true))
+		case *mongo.DeleteOneModel:
+			opType = "delete"
+			if filter, ok := m.Filter.(bson.M); ok {
+				docID = filter["_id"]
+			}
+			_, err = targetColl.DeleteOne(ctx, m.Filter)
+		default:
+			s.logger.Warnf("[MongoDB] Unknown write model type, skipping operation %d", i)
+			continue
+		}
+
+		if err != nil {
+			if strings.Contains(err.Error(), "E11000 duplicate key error") {
+				s.logger.Warnf("[MongoDB] Skipping duplicate key error for %s operation with _id=%v: %v",
+					opType, docID, err)
+				skipCount++
+			} else {
+				s.logger.Errorf("[MongoDB] Failed %s operation with _id=%v: %v",
+					opType, docID, err)
+				lastErr = err
+			}
+		} else {
+			successCount++
+		}
+	}
+
+	s.logger.Infof("[MongoDB] Individual operation results for %s.%s: success=%d, skipped=%d, total=%d",
+		sourceDB, collectionName, successCount, skipCount, len(writeModels))
+
+	// Consider operation successful if we processed all operations (even with some skips)
+	// Only fail if there were non-duplicate-key errors
+	if lastErr != nil && !strings.Contains(lastErr.Error(), "E11000 duplicate key error") {
+		return lastErr
+	}
+
+	return nil
 }
