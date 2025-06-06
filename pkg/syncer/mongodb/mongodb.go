@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -1664,11 +1663,11 @@ func (s *MongoDBSyncer) processBufferedChanges(ctx context.Context, sourceDB, co
 			if err := json.Unmarshal(fileData, &batchChanges); err != nil {
 				s.logger.Errorf("[MongoDB] Failed to unmarshal batch changes: %v", err)
 				s.logger.Errorf("[MongoDB] Corrupted file: %s, size: %d bytes", filePath, len(fileData))
-				// Remove corrupted file immediately and continue
-				if removeErr := os.Remove(filePath); removeErr != nil {
-					s.logger.Errorf("[MongoDB] Failed to remove corrupted file %s: %v", filePath, removeErr)
+				// Move corrupted file to quarantine directory instead of deleting
+				if quarantineErr := s.quarantineCorruptedFile(filePath, sourceDB, collectionName); quarantineErr != nil {
+					s.logger.Errorf("[MongoDB] Failed to quarantine corrupted file %s: %v", filePath, quarantineErr)
 				} else {
-					s.logger.Infof("[MongoDB] Removed corrupted file: %s", filePath)
+					s.logger.Infof("[MongoDB] Quarantined corrupted file: %s", filePath)
 				}
 				corruptedFileEncountered = true
 				continue // Continue processing other files
@@ -1692,11 +1691,11 @@ func (s *MongoDBSyncer) processBufferedChanges(ctx context.Context, sourceDB, co
 			var persistedChange persistedChange
 			if err := json.Unmarshal(fileData, &persistedChange); err != nil {
 				s.logger.Errorf("[MongoDB] Failed to unmarshal persisted change: %v", err)
-				// Remove corrupted file immediately and continue
-				if removeErr := os.Remove(filePath); removeErr != nil {
-					s.logger.Errorf("[MongoDB] Failed to remove corrupted file %s: %v", filePath, removeErr)
+				// Move corrupted file to quarantine directory instead of deleting
+				if quarantineErr := s.quarantineCorruptedFile(filePath, sourceDB, collectionName); quarantineErr != nil {
+					s.logger.Errorf("[MongoDB] Failed to quarantine corrupted file %s: %v", filePath, quarantineErr)
 				} else {
-					s.logger.Infof("[MongoDB] Removed corrupted file: %s", filePath)
+					s.logger.Infof("[MongoDB] Quarantined corrupted file: %s", filePath)
 				}
 				corruptedFileEncountered = true
 				continue // Continue processing other files
@@ -1783,7 +1782,7 @@ func (s *MongoDBSyncer) getBufferPath(db, coll string) string {
 	return filepath.Join(s.bufferDir, fmt.Sprintf("%s_%s", db, coll))
 }
 
-// validateBatchFile performs lightweight validation to check file integrity
+// validateBatchFile performs complete JSON validation to check file integrity
 func (s *MongoDBSyncer) validateBatchFile(filePath string) bool {
 	// 1. Check file size
 	stat, err := os.Stat(filePath)
@@ -1792,32 +1791,17 @@ func (s *MongoDBSyncer) validateBatchFile(filePath string) bool {
 		return false
 	}
 
-	// 2. Check JSON structure integrity (only read first and last bytes)
-	file, err := os.Open(filePath)
+	// 2. Complete JSON validation by attempting to unmarshal
+	fileData, err := os.ReadFile(filePath)
 	if err != nil {
-		s.logger.Debugf("[MongoDB] File validation failed: cannot open %s", filePath)
-		return false
-	}
-	defer file.Close()
-
-	// Read first byte
-	first := make([]byte, 1)
-	if n, _ := file.Read(first); n != 1 || first[0] != '[' {
-		s.logger.Debugf("[MongoDB] File validation failed: invalid JSON start for %s", filePath)
+		s.logger.Debugf("[MongoDB] File validation failed: cannot read file %s: %v", filePath, err)
 		return false
 	}
 
-	// Read last byte
-	if stat.Size() > 1 {
-		if _, err := file.Seek(-1, io.SeekEnd); err != nil { // Seek to end-1
-			s.logger.Debugf("[MongoDB] File validation failed: cannot seek to end for %s", filePath)
-			return false
-		}
-		last := make([]byte, 1)
-		if n, _ := file.Read(last); n != 1 || last[0] != ']' {
-			s.logger.Debugf("[MongoDB] File validation failed: invalid JSON end for %s", filePath)
-			return false
-		}
+	var batchChanges []persistedChange
+	if err := json.Unmarshal(fileData, &batchChanges); err != nil {
+		s.logger.Debugf("[MongoDB] File validation failed: invalid JSON structure for %s: %v", filePath, err)
+		return false
 	}
 
 	s.logger.Debugf("[MongoDB] File validation passed for %s", filePath)
@@ -2004,5 +1988,27 @@ func (s *MongoDBSyncer) handleBatchWithDuplicateKeys(ctx context.Context, target
 		return lastErr
 	}
 
+	return nil
+}
+
+// quarantineCorruptedFile moves a corrupted file to a quarantine directory for later analysis
+func (s *MongoDBSyncer) quarantineCorruptedFile(filePath, sourceDB, collectionName string) error {
+	// Create quarantine directory
+	quarantineDir := filepath.Join(s.bufferDir, "quarantine", fmt.Sprintf("%s_%s", sourceDB, collectionName))
+	if err := os.MkdirAll(quarantineDir, os.ModePerm); err != nil {
+		return fmt.Errorf("failed to create quarantine directory: %w", err)
+	}
+
+	// Generate unique filename with timestamp
+	fileName := filepath.Base(filePath)
+	timestamp := time.Now().Format("20060102_150405")
+	quarantinePath := filepath.Join(quarantineDir, fmt.Sprintf("corrupted_%s_%s", timestamp, fileName))
+
+	// Move file to quarantine directory
+	if err := os.Rename(filePath, quarantinePath); err != nil {
+		return fmt.Errorf("failed to move file to quarantine: %w", err)
+	}
+
+	s.logger.Infof("[MongoDB] Corrupted file moved to quarantine: %s -> %s", filePath, quarantinePath)
 	return nil
 }
