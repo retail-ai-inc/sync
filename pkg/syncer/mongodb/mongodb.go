@@ -1735,16 +1735,60 @@ func (s *MongoDBSyncer) processBufferedChanges(ctx context.Context, sourceDB, co
 
 	// Step 3: Only delete files if write was successful
 	if writeSuccess && len(processedFiles) > 0 {
-		deletedCount := 0
-		for _, filePath := range processedFiles {
-			if err := os.Remove(filePath); err != nil {
-				s.logger.Warnf("[MongoDB] Failed to remove processed buffer file %s: %v", filePath, err)
-			} else {
-				deletedCount++
-				s.logger.Debugf("[MongoDB] Deleted processed buffer file: %s", filepath.Base(filePath))
+		// Check if uploadToGcs is enabled for any table
+		uploadToGcs := false
+		gcsAddress := ""
+
+		// Get table advanced settings to check if GCS upload is enabled
+		for _, mapping := range s.cfg.Mappings {
+			for _, table := range mapping.Tables {
+				if table.SourceTable == collectionName || table.TargetTable == collectionName {
+					if table.AdvancedSettings.UploadToGcs {
+						uploadToGcs = true
+						gcsAddress = table.AdvancedSettings.GcsAddress
+						s.logger.Debugf("[MongoDB] GCS upload enabled for %s.%s, address: %s",
+							sourceDB, collectionName, gcsAddress)
+					}
+					break
+				}
+			}
+			if uploadToGcs {
+				break
 			}
 		}
-		s.logger.Debugf("[MongoDB] Deleted %d/%d buffer files after successful database write", deletedCount, len(processedFiles))
+
+		if uploadToGcs && gcsAddress != "" {
+			// Upload files to GCS instead of deleting them
+			uploadedCount := 0
+			for _, filePath := range processedFiles {
+				if err := utils.UploadToGCS(ctx, filePath, gcsAddress); err != nil {
+					s.logger.Errorf("[MongoDB] Failed to upload buffer file %s to GCS: %v", filePath, err)
+					// Keep file on failure
+				} else {
+					uploadedCount++
+					// Delete file after successful upload
+					if err := os.Remove(filePath); err != nil {
+						s.logger.Warnf("[MongoDB] Failed to remove uploaded buffer file %s: %v", filePath, err)
+					} else {
+						s.logger.Debugf("[MongoDB] Deleted buffer file after GCS upload: %s", filepath.Base(filePath))
+					}
+				}
+			}
+			s.logger.Debugf("[MongoDB] Uploaded %d/%d buffer files to GCS for %s.%s",
+				uploadedCount, len(processedFiles), sourceDB, collectionName)
+		} else {
+			// Original behavior: delete files directly
+			deletedCount := 0
+			for _, filePath := range processedFiles {
+				if err := os.Remove(filePath); err != nil {
+					s.logger.Warnf("[MongoDB] Failed to remove processed buffer file %s: %v", filePath, err)
+				} else {
+					deletedCount++
+					s.logger.Debugf("[MongoDB] Deleted processed buffer file: %s", filepath.Base(filePath))
+				}
+			}
+			s.logger.Debugf("[MongoDB] Deleted %d/%d buffer files after successful database write", deletedCount, len(processedFiles))
+		}
 
 		// Only save resume token if write was successful and no corrupted files were encountered
 		if !corruptedFileEncountered && processedToken != nil {
@@ -1917,6 +1961,8 @@ func (s *MongoDBSyncer) findTableAdvancedSettings(tableName string) config.Advan
 	return config.AdvancedSettings{
 		SyncIndexes:     false,
 		IgnoreDeleteOps: false, // Default to ignore delete operations
+		UploadToGcs:     false, // Default to not upload to GCS
+		GcsAddress:      "",    // Default empty GCS address
 	}
 }
 

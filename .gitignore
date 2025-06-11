@@ -64,3 +64,4 @@ CLAUDE.md
 .cursorrules
 .cursor
 decrypt
+decode_bson.js

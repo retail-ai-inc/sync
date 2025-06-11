@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/retail-ai-inc/sync/pkg/utils"
 	"github.com/sirupsen/logrus"
 )
 
@@ -110,7 +111,7 @@ func (e *BackupExecutor) Execute(ctx context.Context, taskID int) error {
 	logrus.Infof("[BackupExecutor] Archive file created: %s", archivePath)
 
 	// Upload to GCS
-	if err := e.uploadToGCS(ctx, archivePath, config.Destination.GCSPath); err != nil {
+	if err := utils.UploadToGCS(ctx, archivePath, config.Destination.GCSPath); err != nil {
 		return fmt.Errorf("upload to GCS failed: %w", err)
 	}
 
@@ -573,29 +574,6 @@ func (e *BackupExecutor) compressDirectory(sourceDir, destFile string) error {
 		return err
 	}
 
-	return nil
-}
-
-// uploadToGCS Upload to GCS
-func (e *BackupExecutor) uploadToGCS(ctx context.Context, localFile, gcsPath string) error {
-	// Parse filename for more friendly log message
-	fileName := filepath.Base(localFile)
-	destPath := fmt.Sprintf("%s/%s", gcsPath, fileName)
-
-	// Use full path to avoid command parsing issues
-	gsutilPath, err := exec.LookPath("gsutil")
-	if err != nil {
-		gsutilPath = "gsutil" // If not found, use default command name
-		logrus.Warnf("[BackupExecutor] gsutil command not found in PATH, using default name")
-	}
-	cmd := exec.CommandContext(ctx, gsutilPath, "cp", localFile, destPath)
-
-	// Print full command for debugging
-	if err := executeCommand(cmd, "gsutil"); err != nil {
-		return err
-	}
-
-	logrus.Infof("[BackupExecutor] Uploaded backup file %s to %s", fileName, destPath)
 	return nil
 }
 
