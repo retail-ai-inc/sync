@@ -13,10 +13,11 @@ Synchronize Production NOSQL and SQL data to Standalone instances for Data scien
 > - `Sync` is **PII** proof, meaning you can select specific records, keys, columns from your source databases, and sync them into target databases using one-way **encryption** or **masking** methods.
 
 ## What is the problem
-Let's assume you have a mid to big-sized SaaS platform or service with multiple tech teams and stakeholders. Different teams have different requirements for analyzing the production data independently. However, the tech team doesn't want to allow all these stakeholders direct access to the production databases due to security and stability issues.
+- Let's assume you have multiple tech teams and stakeholders. Different teams have different requirements for analyzing the production data independently. However, the tech team doesn't want to allow all these stakeholders direct access to the production databases due to security and stability issues.
+- Another use case is to support your hot storage and cold storage policies. For example, allowing your smartphone app users to access only the latest 1 year of data from the hot storage, and serve the rest of the data on a request basis from cold storage.
 
 ## A simple one-way solution
-Create standalone databases outside of your production database servers with the same name as production and sync the production data of the specific tables or collections to the standalone database. **Sync** will do this for you.
+Create standalone databases outside of your production database servers with the same name as the production databases and synchronize the production data of specific tables or collections to the standalone database. **Sync** will do this for you.
 
 ## Supported Databases
 
@@ -26,7 +27,7 @@ Create standalone databases outside of your production database servers with the
 - PostgreSQL (PostgreSQL version 10+ with logical replication enabled)
 - Redis (Standalone, Sentinel; does not support cluster mode)
 
-## High Level Design Diagram
+## High-Level Design Diagram
 
 ### MongoDB sync (usual)
 ![image](https://github.com/user-attachments/assets/f600c3ae-a6bf-4d64-9a7b-6715456a146b)
@@ -42,6 +43,8 @@ Create standalone databases outside of your production database servers with the
 
 ## Features
 
+- **UI Interface**:  
+  - The tool has added a [**UI interface**](READMEUI.md), making it easier to operate and monitor the synchronization process. For detailed UI documentation and usage guidance, please refer to [READMEUI.md](READMEUI.md).
 - **Initial Sync**:
   - MongoDB: Bulk synchronization of data from the MongoDB cluster or MongoDB replica set to the standalone MongoDB instance.
   - MySQL/MariaDB: Initial synchronization using batch inserts (default batch size: 100 rows) from the source to the target if the target table is empty.
@@ -53,12 +56,10 @@ Create standalone databases outside of your production database servers with the
   - PostgreSQL: Uses WAL (Write-Ahead Log) with the pgoutput plugin to capture and apply incremental changes to the target.
   - Redis: Uses Redis Streams and Keyspace Notifications to capture and sync incremental changes in real-time.
 - **Batch Processing & Concurrency**:  
-  Handles synchronization in batches for optimized performance and supports parallel synchronization for multiple collections/tables.
+  Handles synchronization in batches for optimized performance and supports parallel synchronization across multiple collections or tables.
 - **Restart Resilience**: 
   Stores MongoDB resume tokens, MySQL binlog positions, PostgreSQL replication positions, and Redis stream offsets in configurable state files, allowing the tool to resume synchronization from the last known position after a restart.
-  - **Note for Redis**: Redis does not support resuming from the last state after a sync interruption. If `Sync` is interrupted or crashes, it will restart the synchronization process by executing the initial sync method to retrieve all keys and sync them to the target database. This is due to limitations in Redis Streams and Keyspace Notifications, which do not provide a built-in mechanism to persist and resume stream offsets across restarts. As a result, the tool cannot accurately determine the last synced state and must perform a full resync to ensure data consistency.
-- **UI Interface**:  
-  - The tool has added a **UI interface**, making it easier to operate and monitor the synchronization process. For detailed UI documentation and usage guide, please see [READMEUI.md](READMEUI.md).
+  - **Note for Redis**: Redis does not support resuming from the last state after a sync interruption. If `Sync` is interrupted or crashes, it will restart the synchronization process by executing the initial sync method to retrieve all keys and sync them to the target database. This is due to limitations in Redis Streams and Keyspace Notifications, which do not provide a built-in mechanism for persisting and resuming stream offsets across restarts. As a result, the tool cannot accurately determine the last synced state and must perform a full resync to ensure data consistency.
 
 ## Prerequisites
 - For MongoDB sources:
@@ -119,7 +120,7 @@ docker run -d -p 8080:8080 sync
 - Redis: Uses Redis Streams and Keyspace Notifications to sync changes in real-time.
   - **Note for Redis**: If `Sync` is interrupted, Redis will restart the synchronization process with an initial sync of all keys to the target. This ensures data consistency but may increase synchronization time after interruptions.
 
-On the restart, the tool resumes from the stored state (resume token for MongoDB, binlog position for MySQL/MariaDB, replication slot for PostgreSQL).
+Upon restart, the tool resumes from the stored state (resume token for MongoDB, binlog position for MySQL/MariaDB, or replication slot for PostgreSQL).
 
 ## Availability  
 
