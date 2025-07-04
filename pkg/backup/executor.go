@@ -143,19 +143,21 @@ func (e *BackupExecutor) Execute(ctx context.Context, taskID int) error {
 
 		archivePath := filepath.Join(tempParentDir, archiveBaseName)
 
+		logrus.Infof("[BackupExecutor] Starting compression for table %s: %s -> %s", table, tempDir, archivePath)
 		if err := e.compressDirectory(tempDir, archivePath); err != nil {
 			logrus.Errorf("[BackupExecutor] Compression failed for table %s: %v", table, err)
-			os.RemoveAll(tempDir) // Clean up
+			os.RemoveAll(tempDir) // Clean up temp directory only
 			continue
 		}
 		logrus.Infof("[BackupExecutor] Archive file created for table %s: %s", table, archivePath)
 
 		// Upload to GCS
+		logrus.Infof("[BackupExecutor] Starting upload to GCS for table %s", table)
 		if err := utils.UploadToGCS(ctx, archivePath, config.Destination.GCSPath); err != nil {
 			logrus.Errorf("[BackupExecutor] Upload to GCS failed for table %s: %v", table, err)
-			// Clean up both temp directory and archive file
+			logrus.Warnf("[BackupExecutor] Archive file preserved for debugging: %s", archivePath)
+			// Clean up temp directory only, keep archive file for debugging
 			os.RemoveAll(tempDir)
-			os.Remove(archivePath)
 			continue
 		}
 
@@ -579,6 +581,8 @@ func (e *BackupExecutor) exportPostgreSQL(ctx context.Context, config struct {
 
 // compressDirectory Compress directory
 func (e *BackupExecutor) compressDirectory(sourceDir, destFile string) error {
+	logrus.Infof("[BackupExecutor] Starting compression of directory: %s", sourceDir)
+
 	// Use full path to avoid command parsing issues
 	tarPath, err := exec.LookPath("tar")
 	if err != nil {
@@ -592,6 +596,7 @@ func (e *BackupExecutor) compressDirectory(sourceDir, destFile string) error {
 	// Define find function
 	findFiles := func(path string, info os.FileInfo, err error) error {
 		if err != nil {
+			logrus.Warnf("[BackupExecutor] Error walking path %s: %v", path, err)
 			return err
 		}
 
@@ -601,26 +606,43 @@ func (e *BackupExecutor) compressDirectory(sourceDir, destFile string) error {
 			// Support JSON, SQL and BSON files
 			if ext == ".json" || ext == ".sql" || ext == ".bson" {
 				allFiles = append(allFiles, path)
-				logrus.Debugf("[BackupExecutor] Found file to compress: %s", path)
+				logrus.Infof("[BackupExecutor] Found file to compress: %s (size: %.2f MB)",
+					path, float64(info.Size())/1024/1024)
+			} else {
+				logrus.Debugf("[BackupExecutor] Skipping file with unsupported extension: %s", path)
 			}
 		}
 		return nil
 	}
 
 	// Recursively traverse directory
+	logrus.Infof("[BackupExecutor] Scanning directory for compressible files: %s", sourceDir)
 	if err := filepath.Walk(sourceDir, findFiles); err != nil {
+		logrus.Errorf("[BackupExecutor] Failed to walk directory %s: %v", sourceDir, err)
 		return fmt.Errorf("failed to walk directory: %w", err)
 	}
 
 	if len(allFiles) == 0 {
 		// Detailed logging to help debugging
 		files, _ := filepath.Glob(filepath.Join(sourceDir, "*"))
-		logrus.Errorf("[BackupExecutor] No compressible files found. Directory contents: %v", files)
+		logrus.Errorf("[BackupExecutor] No compressible files found in %s. Directory contents: %v", sourceDir, files)
+
+		// List all files recursively for debugging
+		logrus.Infof("[BackupExecutor] Listing all files in directory for debugging:")
+		filepath.Walk(sourceDir, func(path string, info os.FileInfo, err error) error {
+			if err == nil && !info.IsDir() {
+				logrus.Infof("[BackupExecutor] Found file: %s (ext: %s, size: %d)",
+					path, filepath.Ext(path), info.Size())
+			}
+			return nil
+		})
+
 		return fmt.Errorf("no files to compress (checked for .json, .sql, .bson)")
 	}
 
 	// Make all file paths relative
 	var relativeFiles []string
+	totalSize := int64(0)
 	for _, file := range allFiles {
 		relFile, err := filepath.Rel(sourceDir, file)
 		if err != nil {
@@ -628,6 +650,10 @@ func (e *BackupExecutor) compressDirectory(sourceDir, destFile string) error {
 			continue
 		}
 		relativeFiles = append(relativeFiles, relFile)
+
+		if info, err := os.Stat(file); err == nil {
+			totalSize += info.Size()
+		}
 	}
 
 	// Build tar command, using -r option to include all subdirectories
@@ -635,11 +661,21 @@ func (e *BackupExecutor) compressDirectory(sourceDir, destFile string) error {
 	args = append(args, relativeFiles...)
 	cmd := exec.Command(tarPath, args...)
 
-	logrus.Infof("[BackupExecutor] Compressing %d files to %s", len(relativeFiles), destFile)
+	logrus.Infof("[BackupExecutor] Compressing %d files (total size: %.2f MB) to %s",
+		len(relativeFiles), float64(totalSize)/1024/1024, destFile)
 
 	// Execute command
 	if err := executeCommand(cmd, "tar"); err != nil {
+		logrus.Errorf("[BackupExecutor] Compression failed: %v", err)
 		return err
+	}
+
+	// Check if compressed file was created and get its size
+	if info, err := os.Stat(destFile); err == nil {
+		logrus.Infof("[BackupExecutor] Compression completed successfully. Archive size: %.2f MB",
+			float64(info.Size())/1024/1024)
+	} else {
+		logrus.Warnf("[BackupExecutor] Could not stat compressed file %s: %v", destFile, err)
 	}
 
 	return nil
