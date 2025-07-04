@@ -25,6 +25,34 @@ func NewBackupExecutor(db *sql.DB) *BackupExecutor {
 	return &BackupExecutor{db: db}
 }
 
+// cleanQueryStringValues Clean string values in query condition to remove extra escaping
+func cleanQueryStringValues(queryObj map[string]interface{}) map[string]interface{} {
+	cleaned := make(map[string]interface{})
+
+	for key, value := range queryObj {
+		switch v := value.(type) {
+		case string:
+			// Remove surrounding quotes if they exist (handle over-escaping)
+			cleanValue := v
+			// Remove extra double quotes from the beginning and end
+			if strings.HasPrefix(cleanValue, `"`) && strings.HasSuffix(cleanValue, `"`) {
+				cleanValue = strings.TrimPrefix(cleanValue, `"`)
+				cleanValue = strings.TrimSuffix(cleanValue, `"`)
+			}
+			cleaned[key] = cleanValue
+			logrus.Debugf("[BackupExecutor] Cleaned string value for key %s: '%s' -> '%s'", key, v, cleanValue)
+		case map[string]interface{}:
+			// Recursively clean nested objects
+			cleaned[key] = cleanQueryStringValues(v)
+		default:
+			// Keep other types as is
+			cleaned[key] = value
+		}
+	}
+
+	return cleaned
+}
+
 // processFileNamePattern Process file name pattern and replace date placeholders
 func processFileNamePattern(pattern, tableName string) string {
 	if pattern == "" {
@@ -297,8 +325,13 @@ func (e *BackupExecutor) exportMongoDBWithDump(ctx context.Context, config struc
 
 		// Build query condition
 		if queryObj, ok := config.Query[collection]; ok && len(queryObj) > 0 {
+			// Clean query string values to remove extra escaping
+			cleanedQueryObj := cleanQueryStringValues(queryObj)
+			logrus.Infof("[BackupExecutor] Original query for collection %s: %+v", collection, queryObj)
+			logrus.Infof("[BackupExecutor] Cleaned query for collection %s: %+v", collection, cleanedQueryObj)
+
 			// Process time range query if needed
-			processedQueryObj, err := utils.ProcessTimeRangeQuery(queryObj)
+			processedQueryObj, err := utils.ProcessTimeRangeQuery(cleanedQueryObj)
 			if err != nil {
 				logrus.Warnf("[BackupExecutor] Failed to process time range query for collection %s: %v", collection, err)
 				continue
@@ -396,8 +429,13 @@ func (e *BackupExecutor) exportMongoDBWithExport(ctx context.Context, config str
 		// Build query condition
 		var query string
 		if queryObj, ok := config.Query[collection]; ok && len(queryObj) > 0 {
+			// Clean query string values to remove extra escaping
+			cleanedQueryObj := cleanQueryStringValues(queryObj)
+			logrus.Infof("[BackupExecutor] Original query for collection %s: %+v", collection, queryObj)
+			logrus.Infof("[BackupExecutor] Cleaned query for collection %s: %+v", collection, cleanedQueryObj)
+
 			// Process time range query if needed
-			processedQueryObj, err := utils.ProcessTimeRangeQuery(queryObj)
+			processedQueryObj, err := utils.ProcessTimeRangeQuery(cleanedQueryObj)
 			if err != nil {
 				logrus.Warnf("[BackupExecutor] Failed to process time range query for collection %s: %v", collection, err)
 				continue
@@ -802,8 +840,13 @@ func (e *BackupExecutor) exportMongoDBSingleTableWithDump(ctx context.Context, c
 
 	// Build query condition
 	if queryObj, ok := config.Query[collection]; ok && len(queryObj) > 0 {
+		// Clean query string values to remove extra escaping
+		cleanedQueryObj := cleanQueryStringValues(queryObj)
+		logrus.Infof("[BackupExecutor] Original query for collection %s: %+v", collection, queryObj)
+		logrus.Infof("[BackupExecutor] Cleaned query for collection %s: %+v", collection, cleanedQueryObj)
+
 		// Process time range query if needed
-		processedQueryObj, err := utils.ProcessTimeRangeQuery(queryObj)
+		processedQueryObj, err := utils.ProcessTimeRangeQuery(cleanedQueryObj)
 		if err != nil {
 			logrus.Warnf("[BackupExecutor] Failed to process time range query for collection %s: %v", collection, err)
 			return fmt.Errorf("failed to process time range query: %w", err)
@@ -898,8 +941,13 @@ func (e *BackupExecutor) exportMongoDBSingleTableWithExport(ctx context.Context,
 	// Build query condition
 	var query string
 	if queryObj, ok := config.Query[collection]; ok && len(queryObj) > 0 {
+		// Clean query string values to remove extra escaping
+		cleanedQueryObj := cleanQueryStringValues(queryObj)
+		logrus.Infof("[BackupExecutor] Original query for collection %s: %+v", collection, queryObj)
+		logrus.Infof("[BackupExecutor] Cleaned query for collection %s: %+v", collection, cleanedQueryObj)
+
 		// Process time range query if needed
-		processedQueryObj, err := utils.ProcessTimeRangeQuery(queryObj)
+		processedQueryObj, err := utils.ProcessTimeRangeQuery(cleanedQueryObj)
 		if err != nil {
 			logrus.Warnf("[BackupExecutor] Failed to process time range query for collection %s: %v", collection, err)
 			return fmt.Errorf("failed to process time range query: %w", err)
