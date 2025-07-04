@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -172,7 +173,7 @@ func (s *MongoDBSyncer) syncDatabase(ctx context.Context, mapping config.Databas
 		}
 
 		// Start watching changes
-		go s.watchChanges(ctx, srcColl, tgtColl, sourceDBName, tableMap.TargetTable)
+		go s.watchChanges(ctx, srcColl, tgtColl, sourceDBName, tableMap.SourceTable)
 	}
 }
 
@@ -529,7 +530,8 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 	}
 
 	// Process any existing buffered changes before starting the change stream
-	s.processBufferedChanges(ctx, targetColl, sourceDB, collectionName)
+	// Note: These changes were already counted as "received" when originally buffered
+	s.processBufferedChanges(ctx, sourceDB, collectionName, targetColl.Database().Name(), targetColl.Name())
 
 	s.logger.Infof("[MongoDB] Creating ChangeStream pipeline for %s.%s: %v", sourceDB, collectionName, pipeline)
 
@@ -578,12 +580,14 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 
 					if s.bufferEnabled {
 						// Store to persistent buffer instead of directly flushing
+						// Note: Events already counted as "received" when added to buffer
 						tokenMutex.RLock()
 						currentToken := latestToken
 						tokenMutex.RUnlock()
 						s.storeToBuffer(ctx, &buffer, sourceDB, collectionName, currentToken)
 					} else {
 						s.logger.Debugf("[MongoDB] flush timer => %s.%s => flushing %d ops", sourceDB, collectionName, len(buffer))
+						// Note: Events already counted as "received" when added to buffer
 						tokenMutex.RLock()
 						currentToken := latestToken
 						tokenMutex.RUnlock()
@@ -612,7 +616,7 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 
 	// Start a separate goroutine for processing the persistent buffer
 	if s.bufferEnabled {
-		go s.processPersistentBuffer(ctx, targetColl, sourceDB, collectionName)
+		go s.processPersistentBuffer(ctx, sourceDB, collectionName, targetColl.Database().Name(), targetColl.Name())
 	}
 
 	lastLogTime := time.Now()
@@ -625,12 +629,14 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 			if len(buffer) > 0 {
 				if s.bufferEnabled {
 					s.logger.Infof("[MongoDB] context done => storing %d ops to buffer for %s.%s", len(buffer), sourceDB, collectionName)
+					// Note: Events already counted as "received" when added to buffer
 					tokenMutex.RLock()
 					currentToken := latestToken
 					tokenMutex.RUnlock()
 					s.storeToBuffer(ctx, &buffer, sourceDB, collectionName, currentToken)
 				} else {
 					s.logger.Infof("[MongoDB] context done => flush %d ops for %s.%s", len(buffer), sourceDB, collectionName)
+					// Note: Events already counted as "received" when added to buffer
 					tokenMutex.RLock()
 					currentToken := latestToken
 					tokenMutex.RUnlock()
@@ -687,7 +693,8 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 					})
 					bufferMutex.Unlock()
 
-					// Activity will be tracked through ChangeStreamInfo updates in utils package
+					// Count this event as received immediately when added to buffer (avoid duplicate counting)
+					utils.AccumulateChangeStreamActivity(sourceDB, collectionName, 0, 1, 0, 0, 0, 0)
 
 					queryStr := describeWriteModel(model, actualOpType)
 					s.logger.Debugf("[MongoDB][%s] table=%s.%s query=%s",
@@ -853,8 +860,27 @@ func (s *MongoDBSyncer) prepareWriteModel(doc bson.M, collName, opType string) m
 
 		s.logger.Debugf("[MongoDB] Processing update operation for %s, docID=%v", collName, docID)
 
-		// Use full document replacement for all updates to ensure data consistency
-		if fullDoc, ok := doc["fullDocument"].(bson.M); ok {
+		// Check if we have both fullDocument and updateDescription
+		fullDoc, hasFullDoc := doc["fullDocument"].(bson.M)
+		updateDesc, hasUpdateDesc := doc["updateDescription"].(bson.M)
+
+		// Try incremental update if we have updateDescription
+		if hasUpdateDesc && hasFullDoc {
+			// Check for array index out of bounds issues
+			if s.hasArrayIndexOutOfBounds(updateDesc, fullDoc) {
+				s.logger.Debugf("[MongoDB] Array index out of bounds detected, using full replacement for docID=%v", docID)
+			} else {
+				// Use incremental update
+				incrementalModel := s.buildIncrementalUpdate(docID, updateDesc, fullDoc, tableSecurity)
+				if incrementalModel != nil {
+					s.logger.Debugf("[MongoDB] Using incremental update for docID=%v", docID)
+					return incrementalModel
+				}
+			}
+		}
+
+		// Fallback to full document replacement
+		if hasFullDoc {
 			if tableSecurity.SecurityEnabled && len(tableSecurity.FieldSecurity) > 0 {
 				for field, value := range fullDoc {
 					processedValue := security.ProcessValue(value, field, tableSecurity)
@@ -889,6 +915,119 @@ func (s *MongoDBSyncer) prepareWriteModel(doc bson.M, collName, opType string) m
 	return nil
 }
 
+// hasArrayIndexOutOfBounds checks if any updated fields contain array indices that exceed the current array length
+func (s *MongoDBSyncer) hasArrayIndexOutOfBounds(updateDesc bson.M, fullDoc bson.M) bool {
+	updatedFields, hasUpdatedFields := updateDesc["updatedFields"].(bson.M)
+	if !hasUpdatedFields {
+		return false
+	}
+
+	for fieldPath := range updatedFields {
+		// Check if this is an array index update (e.g., "Prices.2.Price")
+		parts := strings.Split(fieldPath, ".")
+		if len(parts) < 3 {
+			continue // Not an array index update
+		}
+
+		// Look for numeric indices in the field path
+		for i := 1; i < len(parts)-1; i++ {
+			if s.isNumericString(parts[i]) {
+				// This is an array index, check if it's out of bounds
+				arrayFieldPath := strings.Join(parts[:i], ".")
+				arrayField := s.getNestedField(fullDoc, arrayFieldPath)
+
+				if arraySlice, ok := arrayField.([]interface{}); ok {
+					indexValue := s.parseIndex(parts[i])
+					if indexValue >= len(arraySlice) {
+						s.logger.Debugf("[MongoDB] Array index %d exceeds current length %d for field %s",
+							indexValue, len(arraySlice), arrayFieldPath)
+						return true
+					}
+				}
+			}
+		}
+	}
+
+	return false
+}
+
+// buildIncrementalUpdate creates an incremental update operation
+func (s *MongoDBSyncer) buildIncrementalUpdate(docID interface{}, updateDesc bson.M, fullDoc bson.M, tableSecurity security.TableSecurity) mongo.WriteModel {
+	updateDoc := bson.M{}
+
+	// Handle updated fields
+	if updatedFields, ok := updateDesc["updatedFields"].(bson.M); ok && len(updatedFields) > 0 {
+		setDoc := bson.M{}
+		for fieldPath, newValue := range updatedFields {
+			// Apply security processing if needed
+			if tableSecurity.SecurityEnabled && len(tableSecurity.FieldSecurity) > 0 {
+				// Extract the field name (handle nested paths)
+				fieldName := strings.Split(fieldPath, ".")[0]
+				processedValue := security.ProcessValue(newValue, fieldName, tableSecurity)
+				setDoc[fieldPath] = processedValue
+			} else {
+				setDoc[fieldPath] = newValue
+			}
+		}
+		if len(setDoc) > 0 {
+			updateDoc["$set"] = setDoc
+		}
+	}
+
+	// Handle removed fields
+	if removedFields, ok := updateDesc["removedFields"].([]interface{}); ok && len(removedFields) > 0 {
+		unsetDoc := bson.M{}
+		for _, field := range removedFields {
+			if fieldStr, ok := field.(string); ok {
+				unsetDoc[fieldStr] = ""
+			}
+		}
+		if len(unsetDoc) > 0 {
+			updateDoc["$unset"] = unsetDoc
+		}
+	}
+
+	if len(updateDoc) == 0 {
+		return nil
+	}
+
+	s.logger.Debugf("[MongoDB] Built incremental update: %v", updateDoc)
+	return mongo.NewUpdateOneModel().
+		SetFilter(bson.M{"_id": docID}).
+		SetUpdate(updateDoc).
+		SetUpsert(true)
+}
+
+// Helper functions
+func (s *MongoDBSyncer) isNumericString(str string) bool {
+	_, err := strconv.Atoi(str)
+	return err == nil
+}
+
+func (s *MongoDBSyncer) parseIndex(str string) int {
+	index, _ := strconv.Atoi(str)
+	return index
+}
+
+func (s *MongoDBSyncer) getNestedField(doc bson.M, fieldPath string) interface{} {
+	parts := strings.Split(fieldPath, ".")
+	current := doc
+
+	for i, part := range parts {
+		if i == len(parts)-1 {
+			return current[part]
+		}
+
+		if next, ok := current[part].(bson.M); ok {
+			current = next
+		} else {
+			return nil
+		}
+	}
+
+	return nil
+}
+
 func describeWriteModel(m mongo.WriteModel, opType string) string {
 	switch opType {
 	case "insert":
@@ -898,6 +1037,9 @@ func describeWriteModel(m mongo.WriteModel, opType string) string {
 	case "update", "replace":
 		if rep, ok := m.(*mongo.ReplaceOneModel); ok {
 			return fmt.Sprintf("UPDATE filter=%s, doc=%s", toJSONString(rep.Filter), toJSONString(rep.Replacement))
+		}
+		if upd, ok := m.(*mongo.UpdateOneModel); ok {
+			return fmt.Sprintf("UPDATE filter=%s, update=%s", toJSONString(upd.Filter), toJSONString(upd.Update))
 		}
 	case "delete":
 		if del, ok := m.(*mongo.DeleteOneModel); ok {
@@ -956,12 +1098,11 @@ func (s *MongoDBSyncer) flushBuffer(ctx context.Context, targetColl *mongo.Colle
 
 			// Operation results tracking now handled by ChangeStreamInfo
 			successCount := int(res.InsertedCount + res.ModifiedCount + res.DeletedCount)
-			bufferSize := len(*buffer)
 
-			// Accumulate ChangeStream activity with correct statistics
-			// received = number of events that were buffered (batch size)
-			// executed = number of operations that were successfully applied
-			utils.AccumulateChangeStreamActivity(sourceDB, collectionName, successCount, bufferSize, successCount, int(res.InsertedCount), int(res.ModifiedCount), int(res.DeletedCount))
+			// Accumulate ChangeStream activity with execution statistics only
+			// Do NOT add to received count here to avoid duplicate counting
+			// (received is already counted when events are added to buffer)
+			utils.AccumulateChangeStreamActivity(sourceDB, collectionName, successCount, 0, successCount, int(res.InsertedCount), int(res.ModifiedCount), int(res.DeletedCount))
 
 			s.logger.Debugf(
 				"[MongoDB] BulkWrite => table=%s.%s inserted=%d matched=%d modified=%d upserted=%d deleted=%d (opTotals=>insert=%d, update=%d, delete=%d)",
@@ -1113,6 +1254,93 @@ func (s *MongoDBSyncer) flushBuffer(ctx context.Context, targetColl *mongo.Colle
 	*buffer = (*buffer)[:0]
 }
 
+// flushBufferWithResult processes batched write operations and returns write success status
+func (s *MongoDBSyncer) flushBufferWithResult(ctx context.Context, targetColl *mongo.Collection, buffer *[]bufferedChange, sourceDB, collectionName string, currentToken bson.Raw) bool {
+	if len(*buffer) == 0 {
+		return true // No data to write is considered successful
+	}
+
+	writeModels := make([]mongo.WriteModel, 0, len(*buffer))
+
+	var insertCount, updateCount, deleteCount int
+	for _, bc := range *buffer {
+		writeModels = append(writeModels, bc.model)
+
+		switch bc.opType {
+		case "insert":
+			insertCount++
+		case "update", "replace":
+			updateCount++
+		case "delete":
+			deleteCount++
+		}
+	}
+
+	// Use RetryMongoOperation for retries
+	err := utils.RetryMongoOperation(ctx, s.logger, fmt.Sprintf("BulkWrite to %s.%s",
+		targetColl.Database().Name(), targetColl.Name()),
+		func() error {
+			res, err := targetColl.BulkWrite(ctx, writeModels, options.BulkWrite().SetOrdered(false))
+			if err != nil {
+				// Handle duplicate key errors specially
+				if strings.Contains(err.Error(), "E11000 duplicate key error") {
+					s.logger.Warnf("[MongoDB] BulkWrite encountered duplicate key error, switching to individual operations for %s.%s", sourceDB, collectionName)
+					// Try individual operations to isolate problematic records
+					return s.handleBatchWithDuplicateKeys(ctx, targetColl, writeModels, sourceDB, collectionName)
+				}
+				// Don't retry resumeToken errors
+				if strings.Contains(err.Error(), "resume token") {
+					s.removeMongoDBResumeToken(sourceDB, collectionName)
+					return err // Return error, won't retry
+				}
+				return err // If it's a connection error, RetryMongoOperation will retry
+			}
+
+			// Operation results tracking now handled by ChangeStreamInfo
+			successCount := int(res.InsertedCount + res.ModifiedCount + res.DeletedCount)
+
+			// Accumulate ChangeStream activity with execution statistics only
+			// Do NOT add to received count here to avoid duplicate counting
+			// (received is already counted when events are added to buffer)
+			utils.AccumulateChangeStreamActivity(sourceDB, collectionName, successCount, 0, successCount, int(res.InsertedCount), int(res.ModifiedCount), int(res.DeletedCount))
+
+			s.logger.Debugf(
+				"[MongoDB] BulkWrite => table=%s.%s inserted=%d matched=%d modified=%d upserted=%d deleted=%d (opTotals=>insert=%d, update=%d, delete=%d)",
+				targetColl.Database().Name(),
+				targetColl.Name(),
+				res.InsertedCount,
+				res.MatchedCount,
+				res.ModifiedCount,
+				res.UpsertedCount,
+				res.DeletedCount,
+				insertCount,
+				updateCount,
+				deleteCount,
+			)
+
+			if currentToken != nil {
+				s.saveMongoDBResumeToken(sourceDB, collectionName, currentToken)
+			}
+			return nil
+		})
+
+	if err != nil {
+		s.logger.Errorf("[MongoDB] BulkWrite failed after retries: %v", err)
+		// Don't clear buffer on failure - return false to indicate failure
+		return false
+	}
+
+	// Save latest resume token and clear buffer only on success
+	if currentToken != nil {
+		s.saveMongoDBResumeToken(sourceDB, collectionName, currentToken)
+	}
+	// Clear in-memory buffer
+	*buffer = (*buffer)[:0]
+
+	// Return true to indicate successful write
+	return true
+}
+
 func (s *MongoDBSyncer) loadMongoDBResumeToken(db, coll string) bson.Raw {
 	key := fmt.Sprintf("%s.%s", db, coll)
 
@@ -1216,6 +1444,9 @@ func (s *MongoDBSyncer) storeToBuffer(ctx context.Context, buffer *[]bufferedCha
 	s.logger.Debugf("[MongoDB] Starting batch buffer write: %d changes for %s.%s",
 		len(*buffer), sourceDB, collectionName)
 
+	// Track write success
+	writeSuccess := true
+
 	for i := 0; i < len(*buffer); i += batchSize {
 		end := i + batchSize
 		if end > len(*buffer) {
@@ -1281,11 +1512,22 @@ func (s *MongoDBSyncer) storeToBuffer(ctx context.Context, buffer *[]bufferedCha
 		batchBytes, err := json.Marshal(batchChanges)
 		if err != nil {
 			s.logger.Errorf("[MongoDB] Failed to marshal batch changes: %v", err)
+			writeSuccess = false
 			continue
 		}
 
 		if err := os.WriteFile(batchFilePath, batchBytes, 0644); err != nil {
 			s.logger.Errorf("[MongoDB] Failed to write batch file %s: %v", batchFilePath, err)
+			writeSuccess = false
+		} else {
+			// Wait for filesystem to ensure file is fully written before validation
+			time.Sleep(50 * time.Millisecond)
+			// Validate the written file immediately
+			if !s.validateBatchFile(batchFilePath) {
+				s.logger.Warnf("[MongoDB] Batch file validation failed, retrying: %s", batchFilePath)
+				_ = os.Remove(batchFilePath) // Remove corrupted file
+				writeSuccess = false         // Keep data in buffer for retry
+			}
 		}
 	}
 
@@ -1297,17 +1539,23 @@ func (s *MongoDBSyncer) storeToBuffer(ctx context.Context, buffer *[]bufferedCha
 	s.logger.Debugf("[MongoDB] Stored %d changes to buffer for %s.%s using batch optimization",
 		len(*buffer), sourceDB, collectionName)
 
-	// Clear in-memory buffer
-	*buffer = (*buffer)[:0]
+	// Only clear buffer and update token if all writes succeeded
+	if writeSuccess {
+		// Clear in-memory buffer
+		*buffer = (*buffer)[:0]
 
-	// Save latest token
-	if latestToken != nil {
-		s.saveMongoDBResumeToken(sourceDB, collectionName, latestToken)
+		// Save latest token
+		if latestToken != nil {
+			s.saveMongoDBResumeToken(sourceDB, collectionName, latestToken)
+		}
+		s.logger.Debugf("[MongoDB] All writes successful, buffer cleared and resume token updated")
+	} else {
+		s.logger.Warnf("[MongoDB] Some writes failed, keeping data in buffer and NOT updating resume token")
 	}
 }
 
 // processPersistentBuffer reads from the persistent buffer and applies changes at a controlled rate
-func (s *MongoDBSyncer) processPersistentBuffer(ctx context.Context, targetColl *mongo.Collection, sourceDB, collectionName string) {
+func (s *MongoDBSyncer) processPersistentBuffer(ctx context.Context, sourceDB, collectionName, targetDBName, targetCollectionName string) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 
@@ -1323,7 +1571,7 @@ func (s *MongoDBSyncer) processPersistentBuffer(ctx context.Context, targetColl 
 			return
 		case <-ticker.C:
 			// Process up to processRate files per second
-			processed := s.processBufferedChanges(ctx, targetColl, sourceDB, collectionName)
+			processed := s.processBufferedChanges(ctx, sourceDB, collectionName, targetDBName, targetCollectionName)
 			totalProcessed += int64(processed)
 		case <-diagnosticTicker.C:
 			elapsed := time.Since(lastProcessTime)
@@ -1352,8 +1600,11 @@ func (s *MongoDBSyncer) processPersistentBuffer(ctx context.Context, targetColl 
 	}
 }
 
-// processBufferedChanges processes a batch of buffered changes
-func (s *MongoDBSyncer) processBufferedChanges(ctx context.Context, targetColl *mongo.Collection, sourceDB, collectionName string) int {
+// processBufferedChanges processes a batch of buffered changes with data safety
+func (s *MongoDBSyncer) processBufferedChanges(ctx context.Context, sourceDB, collectionName, targetDBName, targetCollectionName string) int {
+	// Get fresh target collection from current client to ensure we use the latest connection
+	targetColl := s.targetClient.Database(targetDBName).Collection(targetCollectionName)
+
 	bufferPath := s.getBufferPath(sourceDB, collectionName)
 	processedCount := 0
 
@@ -1388,9 +1639,13 @@ func (s *MongoDBSyncer) processBufferedChanges(ctx context.Context, targetColl *
 
 	var batch []bufferedChange
 	var processedToken bson.Raw
+	var processedFiles []string // Track successfully processed files for deletion
 	startTime := time.Now()
 
-	// Read and process files
+	// Track if we encounter any corrupted files
+	corruptedFileEncountered := false
+
+	// Step 1: Read and process files (DO NOT DELETE YET)
 	for i := 0; i < filesToProcess; i++ {
 		if i >= len(files) {
 			break
@@ -1410,8 +1665,14 @@ func (s *MongoDBSyncer) processBufferedChanges(ctx context.Context, targetColl *
 			if err := json.Unmarshal(fileData, &batchChanges); err != nil {
 				s.logger.Errorf("[MongoDB] Failed to unmarshal batch changes: %v", err)
 				s.logger.Errorf("[MongoDB] Corrupted file: %s, size: %d bytes", filePath, len(fileData))
-				_ = os.Remove(filePath)
-				continue
+				// Move corrupted file to quarantine directory instead of deleting
+				if quarantineErr := s.quarantineCorruptedFile(filePath, sourceDB, collectionName); quarantineErr != nil {
+					s.logger.Errorf("[MongoDB] Failed to quarantine corrupted file %s: %v", filePath, quarantineErr)
+				} else {
+					s.logger.Infof("[MongoDB] Quarantined corrupted file: %s", filePath)
+				}
+				corruptedFileEncountered = true
+				continue // Continue processing other files
 			}
 
 			// Process each change in the batch
@@ -1432,8 +1693,14 @@ func (s *MongoDBSyncer) processBufferedChanges(ctx context.Context, targetColl *
 			var persistedChange persistedChange
 			if err := json.Unmarshal(fileData, &persistedChange); err != nil {
 				s.logger.Errorf("[MongoDB] Failed to unmarshal persisted change: %v", err)
-				_ = os.Remove(filePath)
-				continue
+				// Move corrupted file to quarantine directory instead of deleting
+				if quarantineErr := s.quarantineCorruptedFile(filePath, sourceDB, collectionName); quarantineErr != nil {
+					s.logger.Errorf("[MongoDB] Failed to quarantine corrupted file %s: %v", filePath, quarantineErr)
+				} else {
+					s.logger.Infof("[MongoDB] Quarantined corrupted file: %s", filePath)
+				}
+				corruptedFileEncountered = true
+				continue // Continue processing other files
 			}
 
 			model := s.convertToWriteModel(persistedChange)
@@ -1447,30 +1714,99 @@ func (s *MongoDBSyncer) processBufferedChanges(ctx context.Context, targetColl *
 			}
 		}
 
-		// Delete processed file
-		if err := os.Remove(filePath); err != nil {
-			s.logger.Warnf("[MongoDB] Failed to remove processed buffer file %s: %v", filePath, err)
+		// Add to processed files list (will be deleted only after successful write)
+		processedFiles = append(processedFiles, filePath)
+	}
+
+	// Step 2: Try to write to database
+	writeSuccess := false
+	if len(batch) > 0 {
+		deleteOps := countDeleteOps(batch)
+		s.logger.Debugf("[MongoDB] Attempting to flush %d operations (%d deletes) for %s.%s",
+			len(batch), deleteOps, sourceDB, collectionName)
+
+		// Create a custom flush operation that returns success status
+		writeSuccess = s.flushBufferWithResult(ctx, targetColl, &batch, sourceDB, collectionName, processedToken)
+
+		if writeSuccess {
+			s.logger.Debugf("[MongoDB] Successfully flushed %d operations to database", len(batch))
+		} else {
+			s.logger.Errorf("[MongoDB] Failed to flush operations to database - keeping buffer files for retry")
 		}
 	}
 
-	// Apply batch to target collection
-	if len(batch) > 0 {
-		deleteOps := countDeleteOps(batch)
-		s.logger.Debugf("[MongoDB] Flushing %d operations (%d deletes) for %s.%s",
-			len(batch), deleteOps, sourceDB, collectionName)
-		s.flushBuffer(ctx, targetColl, &batch, sourceDB, collectionName, processedToken)
+	// Step 3: Only delete files if write was successful
+	if writeSuccess && len(processedFiles) > 0 {
+		// Check if uploadToGcs is enabled for any table
+		uploadToGcs := false
+		gcsAddress := ""
 
-		// Save the last processed token
-		if processedToken != nil {
-			s.saveMongoDBResumeToken(sourceDB, collectionName, processedToken)
+		// Get table advanced settings to check if GCS upload is enabled
+		for _, mapping := range s.cfg.Mappings {
+			for _, table := range mapping.Tables {
+				if table.SourceTable == collectionName || table.TargetTable == collectionName {
+					if table.AdvancedSettings.UploadToGcs {
+						uploadToGcs = true
+						gcsAddress = table.AdvancedSettings.GcsAddress
+						s.logger.Debugf("[MongoDB] GCS upload enabled for %s.%s, address: %s",
+							sourceDB, collectionName, gcsAddress)
+					}
+					break
+				}
+			}
+			if uploadToGcs {
+				break
+			}
 		}
+
+		if uploadToGcs && gcsAddress != "" {
+			// Upload files to GCS instead of deleting them
+			uploadedCount := 0
+			for _, filePath := range processedFiles {
+				if err := utils.UploadToGCS(ctx, filePath, gcsAddress); err != nil {
+					s.logger.Errorf("[MongoDB] Failed to upload buffer file %s to GCS: %v", filePath, err)
+					// Keep file on failure
+				} else {
+					uploadedCount++
+					// Delete file after successful upload
+					if err := os.Remove(filePath); err != nil {
+						s.logger.Warnf("[MongoDB] Failed to remove uploaded buffer file %s: %v", filePath, err)
+					} else {
+						s.logger.Debugf("[MongoDB] Deleted buffer file after GCS upload: %s", filepath.Base(filePath))
+					}
+				}
+			}
+			s.logger.Debugf("[MongoDB] Uploaded %d/%d buffer files to GCS for %s.%s",
+				uploadedCount, len(processedFiles), sourceDB, collectionName)
+		} else {
+			// Original behavior: delete files directly
+			deletedCount := 0
+			for _, filePath := range processedFiles {
+				if err := os.Remove(filePath); err != nil {
+					s.logger.Warnf("[MongoDB] Failed to remove processed buffer file %s: %v", filePath, err)
+				} else {
+					deletedCount++
+					s.logger.Debugf("[MongoDB] Deleted processed buffer file: %s", filepath.Base(filePath))
+				}
+			}
+			s.logger.Debugf("[MongoDB] Deleted %d/%d buffer files after successful database write", deletedCount, len(processedFiles))
+		}
+
+		// Only save resume token if write was successful and no corrupted files were encountered
+		if !corruptedFileEncountered && processedToken != nil {
+			s.saveMongoDBResumeToken(sourceDB, collectionName, processedToken)
+			s.logger.Debugf("[MongoDB] Resume token updated successfully")
+		}
+	} else if len(processedFiles) > 0 {
+		s.logger.Warnf("[MongoDB] Database write failed - keeping %d buffer files for retry: %v",
+			len(processedFiles), processedFiles)
 	}
 
 	if processedCount > 0 {
 		duration := time.Since(startTime)
 		rate := float64(processedCount) / duration.Seconds()
-		s.logger.Debugf("[MongoDB] Processed %d changes in %v (%.2f/sec) for %s.%s",
-			processedCount, duration, rate, sourceDB, collectionName)
+		s.logger.Debugf("[MongoDB] Processed %d changes in %v (%.2f/sec) for %s.%s, write_success=%v",
+			processedCount, duration, rate, sourceDB, collectionName, writeSuccess)
 	}
 
 	return processedCount
@@ -1490,6 +1826,32 @@ func countDeleteOps(batch []bufferedChange) int {
 // getBufferPath returns the path to the buffer directory for a collection
 func (s *MongoDBSyncer) getBufferPath(db, coll string) string {
 	return filepath.Join(s.bufferDir, fmt.Sprintf("%s_%s", db, coll))
+}
+
+// validateBatchFile performs complete JSON validation to check file integrity
+func (s *MongoDBSyncer) validateBatchFile(filePath string) bool {
+	// 1. Check file size
+	stat, err := os.Stat(filePath)
+	if err != nil || stat.Size() < 10 {
+		s.logger.Debugf("[MongoDB] File validation failed: invalid size for %s", filePath)
+		return false
+	}
+
+	// 2. Complete JSON validation by attempting to unmarshal
+	fileData, err := os.ReadFile(filePath)
+	if err != nil {
+		s.logger.Debugf("[MongoDB] File validation failed: cannot read file %s: %v", filePath, err)
+		return false
+	}
+
+	var batchChanges []persistedChange
+	if err := json.Unmarshal(fileData, &batchChanges); err != nil {
+		s.logger.Debugf("[MongoDB] File validation failed: invalid JSON structure for %s: %v", filePath, err)
+		return false
+	}
+
+	s.logger.Debugf("[MongoDB] File validation passed for %s", filePath)
+	return true
 }
 
 // convertToWriteModel converts persistedChange to WriteModel
@@ -1529,10 +1891,13 @@ func (s *MongoDBSyncer) convertToWriteModel(persistedChange persistedChange) mon
 				SetFilter(filter).
 				SetReplacement(replacement).
 				SetUpsert(true)
-		} else if updateData["update"] != nil {
-			// Legacy format detected - skip to avoid array index issues
-			s.logger.Warnf("[MongoDB] Skipping legacy update operation (partial update) for document %v to avoid array index issues. Please restart sync for full document replacement.", filter["_id"])
-			return nil
+		} else if updateDoc, hasUpdate := updateData["update"]; hasUpdate && updateDoc != nil {
+			// Handle incremental update operations (including positional operators)
+			s.logger.Debugf("[MongoDB] Processing incremental update operation")
+			model = mongo.NewUpdateOneModel().
+				SetFilter(filter).
+				SetUpdate(updateDoc).
+				SetUpsert(true)
 		} else {
 			s.logger.Errorf("[MongoDB] Invalid update data structure: missing both replacement and update fields")
 			s.logger.Errorf("[MongoDB] updateData content: %v", updateData)
@@ -1598,5 +1963,100 @@ func (s *MongoDBSyncer) findTableAdvancedSettings(tableName string) config.Advan
 	return config.AdvancedSettings{
 		SyncIndexes:     false,
 		IgnoreDeleteOps: false, // Default to ignore delete operations
+		UploadToGcs:     false, // Default to not upload to GCS
+		GcsAddress:      "",    // Default empty GCS address
 	}
+}
+
+// handleBatchWithDuplicateKeys processes writeModels individually when bulk operation fails due to duplicate keys
+func (s *MongoDBSyncer) handleBatchWithDuplicateKeys(ctx context.Context, targetColl *mongo.Collection, writeModels []mongo.WriteModel, sourceDB, collectionName string) error {
+	var successCount, skipCount int
+	var lastErr error
+
+	s.logger.Infof("[MongoDB] Processing %d operations individually due to duplicate key errors for %s.%s",
+		len(writeModels), sourceDB, collectionName)
+
+	for i, model := range writeModels {
+		var err error
+		var opType string
+		var docID interface{}
+
+		// Extract operation type and document ID for logging
+		switch m := model.(type) {
+		case *mongo.InsertOneModel:
+			opType = "insert"
+			if doc, ok := m.Document.(bson.M); ok {
+				docID = doc["_id"]
+			}
+			_, err = targetColl.InsertOne(ctx, m.Document)
+		case *mongo.UpdateOneModel:
+			opType = "update"
+			if filter, ok := m.Filter.(bson.M); ok {
+				docID = filter["_id"]
+			}
+			_, err = targetColl.UpdateOne(ctx, m.Filter, m.Update, options.Update().SetUpsert(true))
+		case *mongo.ReplaceOneModel:
+			opType = "replace"
+			if filter, ok := m.Filter.(bson.M); ok {
+				docID = filter["_id"]
+			}
+			_, err = targetColl.ReplaceOne(ctx, m.Filter, m.Replacement, options.Replace().SetUpsert(true))
+		case *mongo.DeleteOneModel:
+			opType = "delete"
+			if filter, ok := m.Filter.(bson.M); ok {
+				docID = filter["_id"]
+			}
+			_, err = targetColl.DeleteOne(ctx, m.Filter)
+		default:
+			s.logger.Warnf("[MongoDB] Unknown write model type, skipping operation %d", i)
+			continue
+		}
+
+		if err != nil {
+			if strings.Contains(err.Error(), "E11000 duplicate key error") {
+				s.logger.Warnf("[MongoDB] Skipping duplicate key error for %s operation with _id=%v: %v",
+					opType, docID, err)
+				skipCount++
+			} else {
+				s.logger.Errorf("[MongoDB] Failed %s operation with _id=%v: %v",
+					opType, docID, err)
+				lastErr = err
+			}
+		} else {
+			successCount++
+		}
+	}
+
+	s.logger.Infof("[MongoDB] Individual operation results for %s.%s: success=%d, skipped=%d, total=%d",
+		sourceDB, collectionName, successCount, skipCount, len(writeModels))
+
+	// Consider operation successful if we processed all operations (even with some skips)
+	// Only fail if there were non-duplicate-key errors
+	if lastErr != nil && !strings.Contains(lastErr.Error(), "E11000 duplicate key error") {
+		return lastErr
+	}
+
+	return nil
+}
+
+// quarantineCorruptedFile moves a corrupted file to a quarantine directory for later analysis
+func (s *MongoDBSyncer) quarantineCorruptedFile(filePath, sourceDB, collectionName string) error {
+	// Create quarantine directory
+	quarantineDir := filepath.Join(s.bufferDir, "quarantine", fmt.Sprintf("%s_%s", sourceDB, collectionName))
+	if err := os.MkdirAll(quarantineDir, os.ModePerm); err != nil {
+		return fmt.Errorf("failed to create quarantine directory: %w", err)
+	}
+
+	// Generate unique filename with timestamp
+	fileName := filepath.Base(filePath)
+	timestamp := time.Now().Format("20060102_150405")
+	quarantinePath := filepath.Join(quarantineDir, fmt.Sprintf("corrupted_%s_%s", timestamp, fileName))
+
+	// Move file to quarantine directory
+	if err := os.Rename(filePath, quarantinePath); err != nil {
+		return fmt.Errorf("failed to move file to quarantine: %w", err)
+	}
+
+	s.logger.Infof("[MongoDB] Corrupted file moved to quarantine: %s -> %s", filePath, quarantinePath)
+	return nil
 }

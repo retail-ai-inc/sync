@@ -28,8 +28,20 @@ RUN mkdir -p /app/ui && unzip -o /app/ui/dist.zip -d /app/ui/
 # Use a smaller base image to run the application
 FROM alpine:latest
 
-# Install tzdata (optional)
-RUN apk add --no-cache tzdata sqlite
+# Install runtime dependencies including MongoDB tools and Google Cloud SDK
+RUN apk update && apk add --no-cache \
+    tzdata \
+    sqlite \
+    mongodb-tools \
+    python3 \
+    py3-pip \
+    curl \
+    bash
+
+# Install Google Cloud SDK for gsutil command
+RUN curl https://sdk.cloud.google.com | bash
+ENV PATH $PATH:/root/google-cloud-sdk/bin
+
 ENV TZ=Asia/Tokyo
 
 # Set the working directory

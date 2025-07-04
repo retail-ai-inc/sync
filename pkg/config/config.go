@@ -13,8 +13,10 @@ import (
 )
 
 type AdvancedSettings struct {
-	SyncIndexes     bool `json:"syncIndexes"`
-	IgnoreDeleteOps bool `json:"ignoreDeleteOps"`
+	SyncIndexes     bool   `json:"syncIndexes"`
+	IgnoreDeleteOps bool   `json:"ignoreDeleteOps"`
+	UploadToGcs     bool   `json:"uploadToGcs"`
+	GcsAddress      string `json:"gcsAddress"`
 }
 
 type TableMapping struct {
@@ -263,6 +265,12 @@ ORDER BY id ASC
 												}
 												if ignoreDeleteOps, ok := advancedSettings["ignoreDeleteOps"].(bool); ok {
 													sc.Mappings[i].Tables[j].AdvancedSettings.IgnoreDeleteOps = ignoreDeleteOps
+												}
+												if uploadToGcs, ok := advancedSettings["uploadToGcs"].(bool); ok {
+													sc.Mappings[i].Tables[j].AdvancedSettings.UploadToGcs = uploadToGcs
+												}
+												if gcsAddress, ok := advancedSettings["gcsAddress"].(string); ok {
+													sc.Mappings[i].Tables[j].AdvancedSettings.GcsAddress = gcsAddress
 												}
 											}
 										}
