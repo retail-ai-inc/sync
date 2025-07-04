@@ -58,7 +58,8 @@ func NewRouter() http.Handler {
 	r.Put("/backup/{id}", BackupUpdateHandler)
 
 	// 8) Cronjob related
-	r.Post("/backup/execute/{id}", BackupExecuteHandler) // POST /api/backup/execute/{id}
+	r.Post("/backup/execute/{id}", BackupExecuteHandler)  // POST /api/backup/execute/{id}
+	r.Get("/backup/status/{taskId}", BackupStatusHandler) // GET /api/backup/status/{taskId}
 
 	return r
 }
