@@ -39,6 +39,11 @@ func cleanQueryStringValues(queryObj map[string]interface{}) map[string]interfac
 				cleanValue = strings.TrimPrefix(cleanValue, `"`)
 				cleanValue = strings.TrimSuffix(cleanValue, `"`)
 			}
+			// Remove extra single quotes from the beginning and end
+			if strings.HasPrefix(cleanValue, `'`) && strings.HasSuffix(cleanValue, `'`) {
+				cleanValue = strings.TrimPrefix(cleanValue, `'`)
+				cleanValue = strings.TrimSuffix(cleanValue, `'`)
+			}
 			cleaned[key] = cleanValue
 			logrus.Debugf("[BackupExecutor] Cleaned string value for key %s: '%s' -> '%s'", key, v, cleanValue)
 		case map[string]interface{}:

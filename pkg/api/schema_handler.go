@@ -157,9 +157,10 @@ func getMongoDBSchema(c context.Context, req SchemaRequest) (SchemaResponse, err
 	// Get collection document sample to infer structure
 	collection := client.Database(req.Connection.Database).Collection(req.TableName)
 
-	// Get sample documents to extract nested fields
+	// Get sample documents to extract nested fields (last 10 documents)
 	var sampleDocs []bson.M
-	findCursor, err := collection.Find(ctx, bson.M{}, options.Find().SetLimit(10))
+	findOptions := options.Find().SetSort(bson.D{{Key: "$natural", Value: -1}}).SetLimit(10)
+	findCursor, err := collection.Find(ctx, bson.M{}, findOptions)
 	if err != nil {
 		return SchemaResponse{}, fmt.Errorf("failed to query documents: %w", err)
 	}
@@ -169,73 +170,18 @@ func getMongoDBSchema(c context.Context, req SchemaRequest) (SchemaResponse, err
 		return SchemaResponse{}, fmt.Errorf("failed to decode documents: %w", err)
 	}
 
-	// Use aggregation query to get top-level fields
-	pipeline := bson.A{
-		bson.D{{Key: "$limit", Value: 100}},
-		bson.D{{Key: "$project", Value: bson.D{{Key: "arrayofkeyvalue", Value: bson.D{{Key: "$objectToArray", Value: "$$ROOT"}}}}}},
-		bson.D{{Key: "$unwind", Value: "$arrayofkeyvalue"}},
-		bson.D{{Key: "$group", Value: bson.D{
-			{Key: "_id", Value: nil},
-			{Key: "fields", Value: bson.D{{Key: "$addToSet", Value: "$arrayofkeyvalue.k"}}},
-			{Key: "fieldTypes", Value: bson.D{{Key: "$push", Value: bson.D{
-				{Key: "field", Value: "$arrayofkeyvalue.k"},
-				{Key: "value", Value: "$arrayofkeyvalue.v"},
-			}}}},
-		}}},
-	}
-
-	cursor, err := collection.Aggregate(ctx, pipeline)
-	if err != nil {
-		return SchemaResponse{}, fmt.Errorf("failed to analyze collection structure: %w", err)
-	}
-	defer cursor.Close(ctx)
-
-	type AggResult struct {
-		Fields     []string `bson:"fields"`
-		FieldTypes []struct {
-			Field string      `bson:"field"`
-			Value interface{} `bson:"value"`
-		} `bson:"fieldTypes"`
-	}
-
-	var results []AggResult
-	if err := cursor.All(ctx, &results); err != nil {
-		return SchemaResponse{}, fmt.Errorf("failed to decode results: %w", err)
-	}
-
 	// If collection is empty, return empty field list
-	if len(results) == 0 || len(sampleDocs) == 0 {
+	if len(sampleDocs) == 0 {
 		logrus.Warnf("[MongoDB] Collection is empty, unable to infer structure: %s.%s", req.Connection.Database, req.TableName)
 		return SchemaResponse{Fields: []Field{}}, nil
 	}
 
-	// Create field mapping to get unique fields and types
-	result := results[0]
+	// Create field mapping to get unique fields and types from sample documents
 	fieldMap := make(map[string]string)
 
-	// First mark all discovered fields
-	for _, field := range result.Fields {
-		fieldMap[field] = ""
-	}
-
-	// Then try to get type for each field
-	for _, ft := range result.FieldTypes {
-		if fieldMap[ft.Field] == "" && ft.Value != nil {
-			fieldMap[ft.Field] = getMongoFieldType(ft.Value)
-		}
-	}
-
-	// Process sample documents to discover nested fields
-	nestedFields := make(map[string]string)
+	// Process sample documents to discover all fields (top-level and nested)
 	for _, doc := range sampleDocs {
-		extractNestedFields(doc, "", nestedFields)
-	}
-
-	// Merge top-level fields and nested fields
-	for field, fieldType := range nestedFields {
-		if _, exists := fieldMap[field]; !exists {
-			fieldMap[field] = fieldType
-		}
+		extractNestedFields(doc, "", fieldMap)
 	}
 
 	// Build field response
