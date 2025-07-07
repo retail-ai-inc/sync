@@ -58,5 +58,9 @@ ENV SYNC_DB_PATH=/mnt/state/sync.db
 # Copy the extracted UI files
 COPY --from=builder /app/ui /app/ui
 
-# Run the application
-ENTRYPOINT ["./sync"]
+# Copy and setup the startup script
+COPY start.sh /app/start.sh
+RUN chmod +x /app/start.sh
+
+# Run the startup script
+ENTRYPOINT ["/app/start.sh"]
