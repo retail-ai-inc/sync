@@ -28,8 +28,20 @@ RUN mkdir -p /app/ui && unzip -o /app/ui/dist.zip -d /app/ui/
 # Use a smaller base image to run the application
 FROM alpine:latest
 
-# Install tzdata (optional)
-RUN apk add --no-cache tzdata sqlite
+# Install runtime dependencies including MongoDB tools and Google Cloud SDK
+RUN apk update && apk add --no-cache \
+    tzdata \
+    sqlite \
+    mongodb-tools \
+    python3 \
+    py3-pip \
+    curl \
+    bash
+
+# Install Google Cloud SDK for gsutil command
+RUN curl https://sdk.cloud.google.com | bash
+ENV PATH $PATH:/root/google-cloud-sdk/bin
+
 ENV TZ=Asia/Tokyo
 
 # Set the working directory
@@ -46,5 +58,9 @@ ENV SYNC_DB_PATH=/mnt/state/sync.db
 # Copy the extracted UI files
 COPY --from=builder /app/ui /app/ui
 
-# Run the application
-ENTRYPOINT ["./sync"]
+# Copy and setup the startup script
+COPY start.sh /app/start.sh
+RUN chmod +x /app/start.sh
+
+# Run the startup script
+ENTRYPOINT ["/app/start.sh"]
