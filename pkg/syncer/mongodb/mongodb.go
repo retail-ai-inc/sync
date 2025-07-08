@@ -830,6 +830,87 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 		return
 	case <-time.After(5 * time.Second):
 	}
+
+	// Add retry mechanism for source database restart issues
+	// Retry up to 5 times with 10 second intervals
+	for retry := 1; retry <= 5; retry++ {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(10 * time.Second):
+		}
+
+		s.logger.Infof("[MongoDB] Attempting to re-establish ChangeStream for %s.%s (attempt %d/5)",
+			sourceDB, collectionName, retry)
+
+		// Check source connection before attempting to create ChangeStream
+		if err := utils.CheckMongoConnection(ctx, s.sourceClient); err != nil {
+			s.logger.Warnf("[MongoDB] Source connection check failed on retry %d: %v", retry, err)
+			// Try to reconnect source client
+			if newClient, err := utils.ReopenMongoConnection(ctx, s.logger, s.cfg.SourceConnection); err == nil {
+				if s.sourceClient != nil {
+					_ = s.sourceClient.Disconnect(ctx)
+				}
+				s.sourceClient = newClient
+				sourceColl = s.sourceClient.Database(sourceDB).Collection(collectionName)
+				s.logger.Infof("[MongoDB] Successfully reconnected source client on retry %d", retry)
+			} else {
+				s.logger.Errorf("[MongoDB] Failed to reconnect source client on retry %d: %v", retry, err)
+				continue // Try next retry
+			}
+		}
+
+		// Attempt to re-establish ChangeStream
+		opts := options.ChangeStream().SetFullDocument(options.UpdateLookup)
+		resumeToken := s.loadMongoDBResumeToken(sourceDB, collectionName)
+		if resumeToken != nil {
+			opts.SetResumeAfter(resumeToken)
+			s.logger.Infof("[MongoDB] Re-establishing ChangeStream with resume token (attempt %d/5)", retry)
+		} else {
+			s.logger.Warnf("[MongoDB] No resume token available, starting from current position (attempt %d/5)", retry)
+		}
+
+		pipeline := mongo.Pipeline{
+			{{Key: "$match", Value: bson.D{
+				{Key: "ns.db", Value: sourceDB},
+				{Key: "ns.coll", Value: collectionName},
+				{Key: "operationType", Value: bson.M{"$in": []string{"insert", "update", "replace", "delete"}}},
+			}}},
+		}
+
+		newCs, newErr := sourceColl.Watch(ctx, pipeline, opts)
+		if newErr != nil {
+			s.logger.Errorf("[MongoDB] Failed to re-establish ChangeStream on attempt %d/5: %v", retry, newErr)
+
+			// If resume token fails, try without it
+			if resumeToken != nil {
+				s.logger.Warnf("[MongoDB] Retrying without resume token (attempt %d/5)", retry)
+				s.removeMongoDBResumeToken(sourceDB, collectionName)
+				opts = options.ChangeStream().SetFullDocument(options.UpdateLookup)
+				newCs, newErr = sourceColl.Watch(ctx, pipeline, opts)
+
+				if newErr != nil {
+					s.logger.Errorf("[MongoDB] Failed to re-establish ChangeStream without resume token (attempt %d/5): %v", retry, newErr)
+					continue // Try next retry
+				}
+			} else {
+				continue // Try next retry
+			}
+		}
+
+		// Success - close test stream and restart monitoring
+		s.logger.Infof("[MongoDB] Successfully re-established ChangeStream for %s.%s on attempt %d/5",
+			sourceDB, collectionName, retry)
+		newCs.Close(ctx)
+
+		// Restart the entire watchChanges function
+		s.watchChanges(ctx, sourceColl, targetColl, sourceDB, collectionName)
+		return
+	}
+
+	// If all retries failed, log error and exit
+	s.logger.Errorf("[MongoDB] Failed to re-establish ChangeStream for %s.%s after 5 attempts, giving up",
+		sourceDB, collectionName)
 }
 
 func (s *MongoDBSyncer) prepareWriteModel(doc bson.M, collName, opType string) mongo.WriteModel {
