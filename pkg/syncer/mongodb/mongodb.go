@@ -1601,8 +1601,6 @@ func (s *MongoDBSyncer) storeToBuffer(ctx context.Context, buffer *[]bufferedCha
 			s.logger.Errorf("[MongoDB] Failed to write batch file %s: %v", batchFilePath, err)
 			writeSuccess = false
 		} else {
-			// Wait for filesystem to ensure file is fully written before validation
-			time.Sleep(50 * time.Millisecond)
 			// Validate the written file immediately
 			if !s.validateBatchFile(batchFilePath) {
 				s.logger.Warnf("[MongoDB] Batch file validation failed, retrying: %s", batchFilePath)
