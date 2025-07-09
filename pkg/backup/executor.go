@@ -428,7 +428,13 @@ func (e *BackupExecutor) exportMongoDBWithExport(ctx context.Context, config str
 		// Build field projection
 		var fields string
 		if fieldsArr, ok := config.Database.Fields[collection]; ok && len(fieldsArr) > 0 {
-			fields = "--fields=" + strings.Join(fieldsArr, ",")
+			// Check if fields is set to "all" - if so, don't add fields parameter to export all fields
+			if len(fieldsArr) == 1 && fieldsArr[0] == "all" {
+				logrus.Infof("[BackupExecutor] Fields set to 'all' for collection %s, exporting all fields", collection)
+				fields = ""
+			} else {
+				fields = "--fields=" + strings.Join(fieldsArr, ",")
+			}
 		}
 
 		// Build query condition
@@ -471,7 +477,12 @@ func (e *BackupExecutor) exportMongoDBWithExport(ctx context.Context, config str
 			cmd.Args = append(cmd.Args, "--type=csv")
 			// CSV format requires fields parameter
 			if fields == "" {
-				logrus.Warnf("[BackupExecutor] CSV export for collection %s requires fields specification", collection)
+				// Check if this is due to "all" fields setting
+				if fieldsArr, ok := config.Database.Fields[collection]; ok && len(fieldsArr) == 1 && fieldsArr[0] == "all" {
+					logrus.Warnf("[BackupExecutor] CSV export for collection %s with 'all' fields is not supported - CSV format requires explicit field specification", collection)
+				} else {
+					logrus.Warnf("[BackupExecutor] CSV export for collection %s requires fields specification", collection)
+				}
 				continue
 			}
 		} else {
@@ -940,7 +951,13 @@ func (e *BackupExecutor) exportMongoDBSingleTableWithExport(ctx context.Context,
 	// Build field projection
 	var fields string
 	if fieldsArr, ok := config.Database.Fields[collection]; ok && len(fieldsArr) > 0 {
-		fields = "--fields=" + strings.Join(fieldsArr, ",")
+		// Check if fields is set to "all" - if so, don't add fields parameter to export all fields
+		if len(fieldsArr) == 1 && fieldsArr[0] == "all" {
+			logrus.Infof("[BackupExecutor] Fields set to 'all' for collection %s, exporting all fields", collection)
+			fields = ""
+		} else {
+			fields = "--fields=" + strings.Join(fieldsArr, ",")
+		}
 	}
 
 	// Build query condition
@@ -983,8 +1000,14 @@ func (e *BackupExecutor) exportMongoDBSingleTableWithExport(ctx context.Context,
 		cmd.Args = append(cmd.Args, "--type=csv")
 		// CSV format requires fields parameter
 		if fields == "" {
-			logrus.Warnf("[BackupExecutor] CSV export for collection %s requires fields specification", collection)
-			return fmt.Errorf("CSV export requires fields specification")
+			// Check if this is due to "all" fields setting
+			if fieldsArr, ok := config.Database.Fields[collection]; ok && len(fieldsArr) == 1 && fieldsArr[0] == "all" {
+				logrus.Warnf("[BackupExecutor] CSV export for collection %s with 'all' fields is not supported - CSV format requires explicit field specification", collection)
+				return fmt.Errorf("CSV export with 'all' fields is not supported - CSV format requires explicit field specification")
+			} else {
+				logrus.Warnf("[BackupExecutor] CSV export for collection %s requires fields specification", collection)
+				return fmt.Errorf("CSV export requires fields specification")
+			}
 		}
 	} else {
 		// Use JSON format by default
