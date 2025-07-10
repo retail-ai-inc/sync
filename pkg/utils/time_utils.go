@@ -112,11 +112,11 @@ func convertToMongoDBTimeRange(timeRangeObj map[string]interface{}) (map[string]
 
 	// Calculate start and end dates based on offsets
 	startDate := now.AddDate(0, 0, int(startOffsetInt))
-	endDate := now.AddDate(0, 0, int(endOffsetInt)+1) // +1 because we want the end of the day
+	endDate := now.AddDate(0, 0, int(endOffsetInt))
 
 	// Set time to start of day for start date
 	startOfDay := time.Date(startDate.Year(), startDate.Month(), startDate.Day(), 0, 0, 0, 0, jstLocation)
-	// Set time to start of day for end date (exclusive)
+	// Set time to start of day for end date (exclusive) - endOffset already represents the boundary
 	endOfDay := time.Date(endDate.Year(), endDate.Month(), endDate.Day(), 0, 0, 0, 0, jstLocation)
 
 	// Convert to UTC for database query
@@ -152,7 +152,7 @@ func GetJSTTimeRange(startOffset, endOffset int) (time.Time, time.Time, error) {
 	now := time.Now().In(jstLocation)
 
 	startDate := now.AddDate(0, 0, startOffset)
-	endDate := now.AddDate(0, 0, endOffset+1)
+	endDate := now.AddDate(0, 0, endOffset)
 
 	startOfDay := time.Date(startDate.Year(), startDate.Month(), startDate.Day(), 0, 0, 0, 0, jstLocation)
 	endOfDay := time.Date(endDate.Year(), endDate.Month(), endDate.Day(), 0, 0, 0, 0, jstLocation)

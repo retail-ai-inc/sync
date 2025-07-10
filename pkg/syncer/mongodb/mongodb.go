@@ -53,25 +53,47 @@ type MongoDBSyncer struct {
 func NewMongoDBSyncer(cfg config.SyncConfig, logger *logrus.Logger) *MongoDBSyncer {
 	var err error
 	var sourceClient *mongo.Client
-	err = utils.Retry(5, 2*time.Second, 2.0, func() error {
-		var connErr error
-		sourceClient, connErr = mongo.Connect(context.Background(), options.Client().ApplyURI(cfg.SourceConnection))
-		return connErr
-	})
+
+	// First attempt to connect to source without retry to check for immediate failures
+	sourceClient, err = mongo.Connect(context.Background(), options.Client().ApplyURI(cfg.SourceConnection))
 	if err != nil {
-		logger.Errorf("[MongoDB] Failed to connect to source after retries: %v", err)
-		return nil
+		// Check if it's a URI parsing error, if so, don't retry
+		if strings.Contains(err.Error(), "scheme must be") || strings.Contains(err.Error(), "error parsing uri") {
+			logger.Errorf("[MongoDB] Invalid source connection URI: %v", err)
+			return nil
+		}
+		// For other errors, retry with exponential backoff
+		err = utils.Retry(5, 2*time.Second, 2.0, func() error {
+			var connErr error
+			sourceClient, connErr = mongo.Connect(context.Background(), options.Client().ApplyURI(cfg.SourceConnection))
+			return connErr
+		})
+		if err != nil {
+			logger.Errorf("[MongoDB] Failed to connect to source after retries: %v", err)
+			return nil
+		}
 	}
 
 	var targetClient *mongo.Client
-	err = utils.Retry(5, 2*time.Second, 2.0, func() error {
-		var connErr error
-		targetClient, connErr = mongo.Connect(context.Background(), options.Client().ApplyURI(cfg.TargetConnection))
-		return connErr
-	})
+
+	// First attempt to connect to target without retry to check for immediate failures
+	targetClient, err = mongo.Connect(context.Background(), options.Client().ApplyURI(cfg.TargetConnection))
 	if err != nil {
-		logger.Errorf("[MongoDB] Failed to connect to target after retries: %v", err)
-		return nil
+		// Check if it's a URI parsing error, if so, don't retry
+		if strings.Contains(err.Error(), "scheme must be") || strings.Contains(err.Error(), "error parsing uri") {
+			logger.Errorf("[MongoDB] Invalid target connection URI: %v", err)
+			return nil
+		}
+		// For other errors, retry with exponential backoff
+		err = utils.Retry(5, 2*time.Second, 2.0, func() error {
+			var connErr error
+			targetClient, connErr = mongo.Connect(context.Background(), options.Client().ApplyURI(cfg.TargetConnection))
+			return connErr
+		})
+		if err != nil {
+			logger.Errorf("[MongoDB] Failed to connect to target after retries: %v", err)
+			return nil
+		}
 	}
 
 	resumeMap := make(map[string]bson.Raw)
@@ -830,6 +852,87 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 		return
 	case <-time.After(5 * time.Second):
 	}
+
+	// Add retry mechanism for source database restart issues
+	// Retry up to 5 times with 10 second intervals
+	for retry := 1; retry <= 5; retry++ {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(10 * time.Second):
+		}
+
+		s.logger.Infof("[MongoDB] Attempting to re-establish ChangeStream for %s.%s (attempt %d/5)",
+			sourceDB, collectionName, retry)
+
+		// Check source connection before attempting to create ChangeStream
+		if err := utils.CheckMongoConnection(ctx, s.sourceClient); err != nil {
+			s.logger.Warnf("[MongoDB] Source connection check failed on retry %d: %v", retry, err)
+			// Try to reconnect source client
+			if newClient, err := utils.ReopenMongoConnection(ctx, s.logger, s.cfg.SourceConnection); err == nil {
+				if s.sourceClient != nil {
+					_ = s.sourceClient.Disconnect(ctx)
+				}
+				s.sourceClient = newClient
+				sourceColl = s.sourceClient.Database(sourceDB).Collection(collectionName)
+				s.logger.Infof("[MongoDB] Successfully reconnected source client on retry %d", retry)
+			} else {
+				s.logger.Errorf("[MongoDB] Failed to reconnect source client on retry %d: %v", retry, err)
+				continue // Try next retry
+			}
+		}
+
+		// Attempt to re-establish ChangeStream
+		opts := options.ChangeStream().SetFullDocument(options.UpdateLookup)
+		resumeToken := s.loadMongoDBResumeToken(sourceDB, collectionName)
+		if resumeToken != nil {
+			opts.SetResumeAfter(resumeToken)
+			s.logger.Infof("[MongoDB] Re-establishing ChangeStream with resume token (attempt %d/5)", retry)
+		} else {
+			s.logger.Warnf("[MongoDB] No resume token available, starting from current position (attempt %d/5)", retry)
+		}
+
+		pipeline := mongo.Pipeline{
+			{{Key: "$match", Value: bson.D{
+				{Key: "ns.db", Value: sourceDB},
+				{Key: "ns.coll", Value: collectionName},
+				{Key: "operationType", Value: bson.M{"$in": []string{"insert", "update", "replace", "delete"}}},
+			}}},
+		}
+
+		newCs, newErr := sourceColl.Watch(ctx, pipeline, opts)
+		if newErr != nil {
+			s.logger.Errorf("[MongoDB] Failed to re-establish ChangeStream on attempt %d/5: %v", retry, newErr)
+
+			// If resume token fails, try without it
+			if resumeToken != nil {
+				s.logger.Warnf("[MongoDB] Retrying without resume token (attempt %d/5)", retry)
+				s.removeMongoDBResumeToken(sourceDB, collectionName)
+				opts = options.ChangeStream().SetFullDocument(options.UpdateLookup)
+				newCs, newErr = sourceColl.Watch(ctx, pipeline, opts)
+
+				if newErr != nil {
+					s.logger.Errorf("[MongoDB] Failed to re-establish ChangeStream without resume token (attempt %d/5): %v", retry, newErr)
+					continue // Try next retry
+				}
+			} else {
+				continue // Try next retry
+			}
+		}
+
+		// Success - close test stream and restart monitoring
+		s.logger.Infof("[MongoDB] Successfully re-established ChangeStream for %s.%s on attempt %d/5",
+			sourceDB, collectionName, retry)
+		newCs.Close(ctx)
+
+		// Restart the entire watchChanges function
+		s.watchChanges(ctx, sourceColl, targetColl, sourceDB, collectionName)
+		return
+	}
+
+	// If all retries failed, log error and exit
+	s.logger.Errorf("[MongoDB] Failed to re-establish ChangeStream for %s.%s after 5 attempts, giving up",
+		sourceDB, collectionName)
 }
 
 func (s *MongoDBSyncer) prepareWriteModel(doc bson.M, collName, opType string) mongo.WriteModel {
@@ -1520,8 +1623,6 @@ func (s *MongoDBSyncer) storeToBuffer(ctx context.Context, buffer *[]bufferedCha
 			s.logger.Errorf("[MongoDB] Failed to write batch file %s: %v", batchFilePath, err)
 			writeSuccess = false
 		} else {
-			// Wait for filesystem to ensure file is fully written before validation
-			time.Sleep(50 * time.Millisecond)
 			// Validate the written file immediately
 			if !s.validateBatchFile(batchFilePath) {
 				s.logger.Warnf("[MongoDB] Batch file validation failed, retrying: %s", batchFilePath)

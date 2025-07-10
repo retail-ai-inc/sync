@@ -35,13 +35,15 @@ Sync Data Platform provides an intuitive interface for managing and monitoring d
   - Rows synced today
   - Table row trend chart
 
-## SQL Debugging Tool
-<img width="800" alt="image" src="https://github.com/user-attachments/assets/3f310171-68b7-462b-aae6-66ce3169b46a" />
+## Data Backup
+<img width="800" alt="image" src="https://github.com/user-attachments/assets/ed3df3e9-d139-4a5f-8f6d-4852e0f27784" />
 
-- Select a sync task
-- Query templates (Query/Insert/Update/Delete)
-- Execute queries on source and target databases simultaneously
-- Display result comparison
+- Click "Add new backup task" to create scheduled backups
+- Configure backup settings (MongoDB/PostgreSQL, BSON/JSON/CSV format, query filters)
+- Set destination (GCS path, file naming patterns)
+- Operate tasks (start/stop/schedule/monitor execution)
+- Support incremental and full backup modes
+- Download compressed backup files (.tar.gz) from GCS storage
 
 ## System Settings
 
