@@ -148,8 +148,6 @@ func (e *BackupExecutor) Execute(ctx context.Context, taskID int) error {
 		switch config.SourceType {
 		case "mongodb":
 			exportErr = e.exportMongoDBSingleTable(ctx, config, tempDir, task, table)
-		case "postgresql":
-			exportErr = e.exportPostgreSQLSingleTable(ctx, config, tempDir, table)
 		default:
 			exportErr = fmt.Errorf("unsupported database type: %s", config.SourceType)
 		}
@@ -177,7 +175,7 @@ func (e *BackupExecutor) Execute(ctx context.Context, taskID int) error {
 		archivePath := filepath.Join(tempParentDir, archiveBaseName)
 
 		logrus.Infof("[BackupExecutor] Starting compression for table %s: %s -> %s", table, tempDir, archivePath)
-		if err := e.compressDirectory(tempDir, archivePath); err != nil {
+		if err := e.CompressDirectory(tempDir, archivePath); err != nil {
 			logrus.Errorf("[BackupExecutor] Compression failed for table %s: %v", table, err)
 			os.RemoveAll(tempDir) // Clean up temp directory only
 			continue
@@ -520,121 +518,8 @@ func (e *BackupExecutor) exportMongoDBWithExport(ctx context.Context, config str
 	return nil
 }
 
-// exportPostgreSQL Export PostgreSQL data
-func (e *BackupExecutor) exportPostgreSQL(ctx context.Context, config struct {
-	Name       string `json:"name"`
-	SourceType string `json:"sourceType"`
-	Database   struct {
-		URL      string              `json:"url"`
-		Username string              `json:"username"`
-		Password string              `json:"password"`
-		Database string              `json:"database"`
-		Tables   []string            `json:"tables"`
-		Fields   map[string][]string `json:"fields"`
-	} `json:"database"`
-	Destination struct {
-		GCSPath         string `json:"gcsPath"`
-		Retention       int    `json:"retention"`
-		ServiceAccount  string `json:"serviceAccount"`
-		FileNamePattern string `json:"fileNamePattern"`
-	} `json:"destination"`
-	Format     string                            `json:"format"`
-	BackupType string                            `json:"backupType"`
-	Query      map[string]map[string]interface{} `json:"query"`
-}, tempDir string) error {
-	dateStr := utils.GetTodayDateString()
-
-	// Set environment variables
-	env := os.Environ()
-	if config.Database.Password != "" {
-		env = append(env, fmt.Sprintf("PGPASSWORD=%s", config.Database.Password))
-	}
-
-	for _, table := range config.Database.Tables {
-		outputPath := filepath.Join(tempDir, fmt.Sprintf("%s-%s.sql",
-			table, dateStr))
-
-		// Build query condition (PostgreSQL-specific SQL WHERE clause)
-		var whereClause string
-
-		if queryObj, ok := config.Query[table]; ok && len(queryObj) > 0 {
-			// Convert query object to SQL WHERE clause
-			var conditions []string
-			for field, value := range queryObj {
-				// Process appropriately based on value type
-				switch v := value.(type) {
-				case int, int64, float64:
-					// Numeric types use directly
-					conditions = append(conditions, fmt.Sprintf("%s = %v", field, v))
-				case string:
-					// Strings need quotes
-					conditions = append(conditions, fmt.Sprintf("%s = '%s'", field, v))
-				case map[string]interface{}:
-					// Object type, may be complex query condition
-					for op, val := range v {
-						// Handle common MongoDB operators
-						switch op {
-						case "$gt":
-							conditions = append(conditions, fmt.Sprintf("%s > %v", field, val))
-						case "$gte":
-							conditions = append(conditions, fmt.Sprintf("%s >= %v", field, val))
-						case "$lt":
-							conditions = append(conditions, fmt.Sprintf("%s < %v", field, val))
-						case "$lte":
-							conditions = append(conditions, fmt.Sprintf("%s <= %v", field, val))
-						case "$eq":
-							if strVal, ok := val.(string); ok {
-								conditions = append(conditions, fmt.Sprintf("%s = '%s'", field, strVal))
-							} else {
-								conditions = append(conditions, fmt.Sprintf("%s = %v", field, val))
-							}
-						default:
-							logrus.Warnf("[BackupExecutor] Unsupported operator %s for field %s", op, field)
-						}
-					}
-				default:
-					logrus.Warnf("[BackupExecutor] Unsupported value type for field %s: %T", field, value)
-				}
-			}
-
-			if len(conditions) > 0 {
-				whereClause = fmt.Sprintf("--where=%s", strings.Join(conditions, " AND "))
-				logrus.Infof("[BackupExecutor] PostgreSQL WHERE clause for table %s: %s", table, whereClause)
-			}
-		}
-
-		// Build command
-		// Use full path to avoid command parsing issues
-		pgDumpPath, err := exec.LookPath("pg_dump")
-		if err != nil {
-			pgDumpPath = "pg_dump" // If not found, use default command name
-			logrus.Warnf("[BackupExecutor] pg_dump command not found in PATH, using default name")
-		}
-		cmd := exec.CommandContext(ctx, pgDumpPath,
-			"-h", config.Database.URL,
-			"-U", config.Database.Username,
-			"-d", config.Database.Database,
-			"-t", table,
-			"-f", outputPath)
-
-		cmd.Env = env
-
-		// Add optional parameters
-		if whereClause != "" {
-			cmd.Args = append(cmd.Args, whereClause)
-		}
-
-		// Execute command
-		if err := executeCommand(cmd, "pg_dump"); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-// compressDirectory Compress directory
-func (e *BackupExecutor) compressDirectory(sourceDir, destFile string) error {
+// CompressDirectory Compress directory
+func (e *BackupExecutor) CompressDirectory(sourceDir, destFile string) error {
 	logrus.Infof("[BackupExecutor] Starting compression of directory: %s", sourceDir)
 
 	// Use full path to avoid command parsing issues
@@ -1037,117 +922,6 @@ func (e *BackupExecutor) exportMongoDBSingleTableWithExport(ctx context.Context,
 
 	// Execute command
 	if err := executeCommand(cmd, "mongoexport"); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-// exportPostgreSQLSingleTable Export single PostgreSQL table
-func (e *BackupExecutor) exportPostgreSQLSingleTable(ctx context.Context, config struct {
-	Name       string `json:"name"`
-	SourceType string `json:"sourceType"`
-	Database   struct {
-		URL      string              `json:"url"`
-		Username string              `json:"username"`
-		Password string              `json:"password"`
-		Database string              `json:"database"`
-		Tables   []string            `json:"tables"`
-		Fields   map[string][]string `json:"fields"`
-	} `json:"database"`
-	Destination struct {
-		GCSPath         string `json:"gcsPath"`
-		Retention       int    `json:"retention"`
-		ServiceAccount  string `json:"serviceAccount"`
-		FileNamePattern string `json:"fileNamePattern"`
-	} `json:"destination"`
-	Format     string                            `json:"format"`
-	BackupType string                            `json:"backupType"`
-	Query      map[string]map[string]interface{} `json:"query"`
-}, tempDir string, tableName string) error {
-	dateStr := time.Now().Format("2006-01-02")
-
-	// Set environment variables
-	env := os.Environ()
-	if config.Database.Password != "" {
-		env = append(env, fmt.Sprintf("PGPASSWORD=%s", config.Database.Password))
-	}
-
-	outputPath := filepath.Join(tempDir, fmt.Sprintf("%s-%s.sql",
-		tableName, dateStr))
-
-	// Build query condition (PostgreSQL-specific SQL WHERE clause)
-	var whereClause string
-
-	if queryObj, ok := config.Query[tableName]; ok && len(queryObj) > 0 {
-		// Convert query object to SQL WHERE clause
-		var conditions []string
-		for field, value := range queryObj {
-			// Process appropriately based on value type
-			switch v := value.(type) {
-			case int, int64, float64:
-				// Numeric types use directly
-				conditions = append(conditions, fmt.Sprintf("%s = %v", field, v))
-			case string:
-				// Strings need quotes
-				conditions = append(conditions, fmt.Sprintf("%s = '%s'", field, v))
-			case map[string]interface{}:
-				// Object type, may be complex query condition
-				for op, val := range v {
-					// Handle common MongoDB operators
-					switch op {
-					case "$gt":
-						conditions = append(conditions, fmt.Sprintf("%s > %v", field, val))
-					case "$gte":
-						conditions = append(conditions, fmt.Sprintf("%s >= %v", field, val))
-					case "$lt":
-						conditions = append(conditions, fmt.Sprintf("%s < %v", field, val))
-					case "$lte":
-						conditions = append(conditions, fmt.Sprintf("%s <= %v", field, val))
-					case "$eq":
-						if strVal, ok := val.(string); ok {
-							conditions = append(conditions, fmt.Sprintf("%s = '%s'", field, strVal))
-						} else {
-							conditions = append(conditions, fmt.Sprintf("%s = %v", field, val))
-						}
-					default:
-						logrus.Warnf("[BackupExecutor] Unsupported operator %s for field %s", op, field)
-					}
-				}
-			default:
-				logrus.Warnf("[BackupExecutor] Unsupported value type for field %s: %T", field, value)
-			}
-		}
-
-		if len(conditions) > 0 {
-			whereClause = fmt.Sprintf("--where=%s", strings.Join(conditions, " AND "))
-			logrus.Infof("[BackupExecutor] PostgreSQL WHERE clause for table %s: %s", tableName, whereClause)
-		}
-	}
-
-	// Build command
-	// Use full path to avoid command parsing issues
-	pgDumpPath, err := exec.LookPath("pg_dump")
-	if err != nil {
-		pgDumpPath = "pg_dump" // If not found, use default command name
-		logrus.Warnf("[BackupExecutor] pg_dump command not found in PATH, using default name")
-	}
-	cmd := exec.CommandContext(ctx, pgDumpPath,
-		"-h", config.Database.URL,
-		"-U", config.Database.Username,
-		"-d", config.Database.Database,
-		"-t", tableName,
-		"-f", outputPath)
-
-	cmd.Env = env
-
-	// Add optional parameters
-	if whereClause != "" {
-		cmd.Args = append(cmd.Args, whereClause)
-	}
-
-	// Execute command
-	if err := executeCommand(cmd, "pg_dump"); err != nil {
 		return err
 	}
 
