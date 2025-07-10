@@ -204,6 +204,14 @@ func TestSyncIntegration(t *testing.T) {
 		TestAPIBackupIntegration(t)
 	})
 
+	t.Run("TC29_CronManager", func(t *testing.T) {
+		TestCronManagerIntegration(t)
+	})
+
+	t.Run("TC30_BackupExecutor", func(t *testing.T) {
+		TestBackupExecutorIntegration(t)
+	})
+
 	time.Sleep(3 * time.Second)
 
 }
