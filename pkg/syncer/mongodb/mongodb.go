@@ -53,25 +53,47 @@ type MongoDBSyncer struct {
 func NewMongoDBSyncer(cfg config.SyncConfig, logger *logrus.Logger) *MongoDBSyncer {
 	var err error
 	var sourceClient *mongo.Client
-	err = utils.Retry(5, 2*time.Second, 2.0, func() error {
-		var connErr error
-		sourceClient, connErr = mongo.Connect(context.Background(), options.Client().ApplyURI(cfg.SourceConnection))
-		return connErr
-	})
+
+	// First attempt to connect to source without retry to check for immediate failures
+	sourceClient, err = mongo.Connect(context.Background(), options.Client().ApplyURI(cfg.SourceConnection))
 	if err != nil {
-		logger.Errorf("[MongoDB] Failed to connect to source after retries: %v", err)
-		return nil
+		// Check if it's a URI parsing error, if so, don't retry
+		if strings.Contains(err.Error(), "scheme must be") || strings.Contains(err.Error(), "error parsing uri") {
+			logger.Errorf("[MongoDB] Invalid source connection URI: %v", err)
+			return nil
+		}
+		// For other errors, retry with exponential backoff
+		err = utils.Retry(5, 2*time.Second, 2.0, func() error {
+			var connErr error
+			sourceClient, connErr = mongo.Connect(context.Background(), options.Client().ApplyURI(cfg.SourceConnection))
+			return connErr
+		})
+		if err != nil {
+			logger.Errorf("[MongoDB] Failed to connect to source after retries: %v", err)
+			return nil
+		}
 	}
 
 	var targetClient *mongo.Client
-	err = utils.Retry(5, 2*time.Second, 2.0, func() error {
-		var connErr error
-		targetClient, connErr = mongo.Connect(context.Background(), options.Client().ApplyURI(cfg.TargetConnection))
-		return connErr
-	})
+
+	// First attempt to connect to target without retry to check for immediate failures
+	targetClient, err = mongo.Connect(context.Background(), options.Client().ApplyURI(cfg.TargetConnection))
 	if err != nil {
-		logger.Errorf("[MongoDB] Failed to connect to target after retries: %v", err)
-		return nil
+		// Check if it's a URI parsing error, if so, don't retry
+		if strings.Contains(err.Error(), "scheme must be") || strings.Contains(err.Error(), "error parsing uri") {
+			logger.Errorf("[MongoDB] Invalid target connection URI: %v", err)
+			return nil
+		}
+		// For other errors, retry with exponential backoff
+		err = utils.Retry(5, 2*time.Second, 2.0, func() error {
+			var connErr error
+			targetClient, connErr = mongo.Connect(context.Background(), options.Client().ApplyURI(cfg.TargetConnection))
+			return connErr
+		})
+		if err != nil {
+			logger.Errorf("[MongoDB] Failed to connect to target after retries: %v", err)
+			return nil
+		}
 	}
 
 	resumeMap := make(map[string]bson.Raw)

@@ -191,6 +191,19 @@ func TestSyncIntegration(t *testing.T) {
 		testTC23ConfigurationChanges(t, cfg.SyncConfigs)
 	})
 
+	// New test cases for improved coverage
+	t.Run("TC26_TimeUtils", func(t *testing.T) {
+		TestTimeUtilsIntegration(t)
+	})
+
+	t.Run("TC27_MongoDBBuffer", func(t *testing.T) {
+		TestMongoDBSyncerCreation(t)
+	})
+
+	t.Run("TC28_APIBackup", func(t *testing.T) {
+		TestAPIBackupIntegration(t)
+	})
+
 	time.Sleep(3 * time.Second)
 
 }

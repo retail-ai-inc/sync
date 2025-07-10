@@ -6,13 +6,17 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	_ "github.com/mattn/go-sqlite3" // for sqlite
 	"github.com/retail-ai-inc/sync/pkg/db"
 	"github.com/sirupsen/logrus"
 )
 
-var Log = logrus.New()
+var (
+	Log      = logrus.New()
+	logMutex sync.RWMutex
+)
 
 type CustomTextFormatter struct {
 }
@@ -34,7 +38,7 @@ func (f *CustomTextFormatter) Format(entry *logrus.Entry) ([]byte, error) {
 			v := entry.Data[k]
 			parts = append(parts, fmt.Sprintf("%s=%v", k, v))
 		}
-		dataStr = " " + strings.Join(parts, " ")
+		dataStr = " " + strings.Join(parts, "")
 	}
 
 	logLine := fmt.Sprintf("[%s] [%s] %s%s\n", timestamp, level, entry.Message, dataStr)
@@ -49,7 +53,11 @@ func InitLogger(logLevel string) *logrus.Logger {
 
 	logger.AddHook(NewSQLiteHook())
 
+	// Thread-safe update of global logger
+	logMutex.Lock()
 	Log = logger
+	logMutex.Unlock()
+
 	return logger
 }
 
@@ -73,10 +81,13 @@ func getLogLevel(level string) logrus.Level {
 }
 
 type SQLiteHook struct {
+	formatter *CustomTextFormatter
 }
 
 func NewSQLiteHook() *SQLiteHook {
-	return &SQLiteHook{}
+	return &SQLiteHook{
+		formatter: &CustomTextFormatter{},
+	}
 }
 
 func (h *SQLiteHook) Fire(entry *logrus.Entry) error {
@@ -86,7 +97,8 @@ func (h *SQLiteHook) Fire(entry *logrus.Entry) error {
 	}
 	defer db.Close()
 
-	formatted, _ := Log.Formatter.Format(entry)
+	// Use the hook's own formatter instead of accessing global Log.Formatter
+	formatted, _ := h.formatter.Format(entry)
 	level := entry.Level.String()
 	message := strings.TrimSuffix(string(formatted), "\n")
 
