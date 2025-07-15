@@ -48,6 +48,9 @@ type MongoDBSyncer struct {
 	bufferDir     string
 	bufferEnabled bool
 	processRate   int // Changes per second to process
+	// Fields for goroutine lifecycle management
+	activeProcessors map[string]context.CancelFunc
+	processorMutex   sync.RWMutex
 }
 
 func NewMongoDBSyncer(cfg config.SyncConfig, logger *logrus.Logger) *MongoDBSyncer {
@@ -120,14 +123,15 @@ func NewMongoDBSyncer(cfg config.SyncConfig, logger *logrus.Logger) *MongoDBSync
 	// Custom configured rate can be implemented in the future by expanding the SyncConfig struct
 
 	return &MongoDBSyncer{
-		sourceClient:  sourceClient,
-		targetClient:  targetClient,
-		cfg:           cfg,
-		logger:        logger.WithField("sync_task_id", cfg.ID),
-		resumeTokens:  resumeMap,
-		bufferDir:     bufferDir,
-		bufferEnabled: true, // Enable by default
-		processRate:   processRate,
+		sourceClient:     sourceClient,
+		targetClient:     targetClient,
+		cfg:              cfg,
+		logger:           logger.WithField("sync_task_id", cfg.ID),
+		resumeTokens:     resumeMap,
+		bufferDir:        bufferDir,
+		bufferEnabled:    true, // Enable by default
+		processRate:      processRate,
+		activeProcessors: make(map[string]context.CancelFunc),
 	}
 }
 
@@ -407,6 +411,31 @@ func (s *MongoDBSyncer) doInitialSync(ctx context.Context, sourceColl, targetCol
 }
 
 func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl *mongo.Collection, sourceDB, collectionName string) {
+	// Ensure only one buffer processor is running for this collection
+	key := fmt.Sprintf("%s.%s", sourceDB, collectionName)
+
+	s.processorMutex.Lock()
+	// Stop existing processor if any
+	if cancelFunc, exists := s.activeProcessors[key]; exists {
+		cancelFunc()
+		delete(s.activeProcessors, key)
+	}
+
+	// Create new context for this processor
+	processorCtx, cancel := context.WithCancel(ctx)
+	s.activeProcessors[key] = cancel
+	s.processorMutex.Unlock()
+
+	// Ensure processor is cleaned up when function exits
+	defer func() {
+		s.processorMutex.Lock()
+		if _, exists := s.activeProcessors[key]; exists {
+			delete(s.activeProcessors, key)
+		}
+		s.processorMutex.Unlock()
+		cancel()
+	}()
+
 	// Add connection health check timer
 	connCheckTicker := time.NewTicker(5 * time.Minute)
 	defer connCheckTicker.Stop()
@@ -638,7 +667,7 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 
 	// Start a separate goroutine for processing the persistent buffer
 	if s.bufferEnabled {
-		go s.processPersistentBuffer(ctx, sourceDB, collectionName, targetColl.Database().Name(), targetColl.Name())
+		go s.processPersistentBuffer(processorCtx, sourceDB, collectionName, targetColl.Database().Name(), targetColl.Name())
 	}
 
 	lastLogTime := time.Now()
@@ -1755,7 +1784,11 @@ func (s *MongoDBSyncer) processBufferedChanges(ctx context.Context, sourceDB, co
 		filePath := filepath.Join(bufferPath, files[i].Name())
 		fileData, err := os.ReadFile(filePath)
 		if err != nil {
-			s.logger.Errorf("[MongoDB] Failed to read buffer file %s: %v", filePath, err)
+			if os.IsNotExist(err) {
+				s.logger.Debugf("[MongoDB] Buffer file %s already processed by another goroutine", filePath)
+			} else {
+				s.logger.Errorf("[MongoDB] Failed to read buffer file %s: %v", filePath, err)
+			}
 			continue
 		}
 
@@ -1871,7 +1904,9 @@ func (s *MongoDBSyncer) processBufferedChanges(ctx context.Context, sourceDB, co
 					uploadedCount++
 					// Delete file after successful upload
 					if err := os.Remove(filePath); err != nil {
-						s.logger.Warnf("[MongoDB] Failed to remove uploaded buffer file %s: %v", filePath, err)
+						if !os.IsNotExist(err) {
+							s.logger.Warnf("[MongoDB] Failed to remove uploaded buffer file %s: %v", filePath, err)
+						}
 					} else {
 						s.logger.Debugf("[MongoDB] Deleted buffer file after GCS upload: %s", filepath.Base(filePath))
 					}
@@ -1884,7 +1919,9 @@ func (s *MongoDBSyncer) processBufferedChanges(ctx context.Context, sourceDB, co
 			deletedCount := 0
 			for _, filePath := range processedFiles {
 				if err := os.Remove(filePath); err != nil {
-					s.logger.Warnf("[MongoDB] Failed to remove processed buffer file %s: %v", filePath, err)
+					if !os.IsNotExist(err) {
+						s.logger.Warnf("[MongoDB] Failed to remove processed buffer file %s: %v", filePath, err)
+					}
 				} else {
 					deletedCount++
 					s.logger.Debugf("[MongoDB] Deleted processed buffer file: %s", filepath.Base(filePath))
