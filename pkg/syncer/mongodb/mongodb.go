@@ -1790,7 +1790,14 @@ func (s *MongoDBSyncer) processBufferedChanges(ctx context.Context, sourceDB, co
 			break
 		}
 
-		filePath := filepath.Join(bufferPath, files[i].Name())
+		fileName := files[i].Name()
+
+		// Skip temporary files, wait for them to be renamed to final files
+		if strings.HasPrefix(fileName, "temp_") {
+			continue
+		}
+
+		filePath := filepath.Join(bufferPath, fileName)
 		fileData, err := os.ReadFile(filePath)
 		if err != nil {
 			if os.IsNotExist(err) {
