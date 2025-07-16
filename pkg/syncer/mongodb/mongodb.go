@@ -1639,8 +1639,9 @@ func (s *MongoDBSyncer) storeToBuffer(ctx context.Context, buffer *[]bufferedCha
 			batchChanges = append(batchChanges, persistedChange)
 		}
 
-		// Write batch to single file
+		// Write batch to single file using atomic write (temp file + rename)
 		batchFilePath := filepath.Join(bufferPath, fmt.Sprintf("batch_%d_%d.json", timestamp, i))
+		tempFilePath := filepath.Join(bufferPath, fmt.Sprintf("temp_%d_%d.json", timestamp, i))
 		batchBytes, err := json.Marshal(batchChanges)
 		if err != nil {
 			s.logger.Errorf("[MongoDB] Failed to marshal batch changes: %v", err)
@@ -1648,15 +1649,23 @@ func (s *MongoDBSyncer) storeToBuffer(ctx context.Context, buffer *[]bufferedCha
 			continue
 		}
 
-		if err := os.WriteFile(batchFilePath, batchBytes, 0644); err != nil {
-			s.logger.Errorf("[MongoDB] Failed to write batch file %s: %v", batchFilePath, err)
+		// Write to temporary file first
+		if err := os.WriteFile(tempFilePath, batchBytes, 0644); err != nil {
+			s.logger.Errorf("[MongoDB] Failed to write temp batch file %s: %v", tempFilePath, err)
 			writeSuccess = false
 		} else {
-			// Validate the written file immediately
-			if !s.validateBatchFile(batchFilePath) {
-				s.logger.Warnf("[MongoDB] Batch file validation failed, retrying: %s", batchFilePath)
-				_ = os.Remove(batchFilePath) // Remove corrupted file
-				writeSuccess = false         // Keep data in buffer for retry
+			// Atomic rename to final filename
+			if err := os.Rename(tempFilePath, batchFilePath); err != nil {
+				s.logger.Errorf("[MongoDB] Failed to rename temp file %s to %s: %v", tempFilePath, batchFilePath, err)
+				_ = os.Remove(tempFilePath) // Clean up temp file
+				writeSuccess = false
+			} else {
+				// Validate the written file immediately
+				if !s.validateBatchFile(batchFilePath) {
+					s.logger.Warnf("[MongoDB] Batch file validation failed, retrying: %s", batchFilePath)
+					_ = os.Remove(batchFilePath) // Remove corrupted file
+					writeSuccess = false         // Keep data in buffer for retry
+				}
 			}
 		}
 	}
