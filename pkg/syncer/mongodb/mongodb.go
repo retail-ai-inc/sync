@@ -26,15 +26,26 @@ type bufferedChange struct {
 	opType string
 }
 
+// rawChangeEvent represents the raw BSON data from Change Stream
+type rawChangeEvent struct {
+	FullDoc       []byte    // Raw BSON data from fullDocument
+	DocKey        []byte    // Raw BSON data from documentKey  
+	UpdateDesc    []byte    // Raw BSON data from updateDescription
+	OpType        string    // Operation type
+	Timestamp     time.Time // Event timestamp
+}
+
 // persistedChange represents a change that will be saved to disk
 type persistedChange struct {
-	ID         string    `json:"id"`
-	Token      bson.Raw  `json:"token"`
-	Doc        []byte    `json:"doc"` // Changed to []byte to store raw BSON data
-	OpType     string    `json:"op_type"`
-	SourceDB   string    `json:"source_db"`
-	SourceColl string    `json:"source_coll"`
-	Timestamp  time.Time `json:"timestamp"`
+	ID         string    `bson:"id"`
+	Token      bson.Raw  `bson:"token"`
+	FullDoc    []byte    `bson:"full_doc"`    // Raw BSON data from fullDocument
+	DocKey     []byte    `bson:"doc_key"`     // Raw BSON data from documentKey
+	UpdateDesc []byte    `bson:"update_desc"` // Raw BSON data from updateDescription (for updates)
+	OpType     string    `bson:"op_type"`
+	SourceDB   string    `bson:"source_db"`
+	SourceColl string    `bson:"source_coll"`
+	Timestamp  time.Time `bson:"timestamp"`
 }
 
 type MongoDBSyncer struct {
@@ -601,7 +612,7 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 	s.logger.Infof("[MongoDB] Watching changes => %s.%s", sourceDB, collectionName)
 
 	// Reduce buffer size to prevent OOM issues with large datasets
-	var buffer []bufferedChange
+	var buffer []rawChangeEvent
 	var latestToken bson.Raw // Track the latest resume token separately
 	var tokenMutex sync.RWMutex
 	const batchSize = 500            // Reduced from 2000 to prevent OOM
@@ -721,41 +732,24 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 				}
 
 				token := cs.ResumeToken()
-				model := s.prepareWriteModel(changeEvent, collectionName, opType)
-				if model != nil {
+				
+				// Extract raw BSON data directly from change event
+				rawEvent := s.extractRawBSONData(changeEvent, opType, collectionName)
+				if rawEvent != nil {
 					// Update latest token
 					tokenMutex.Lock()
 					latestToken = token
 					tokenMutex.Unlock()
 
-					// Determine the actual operation type based on the model type
-					actualOpType := opType
-					if opType == "update" {
-						if _, isReplace := model.(*mongo.ReplaceOneModel); isReplace {
-							actualOpType = "replace"
-							s.logger.Debugf("[MongoDB] Changed opType from 'update' to 'replace' for full document replacement")
-						}
-					}
-
 					bufferMutex.Lock()
-					buffer = append(buffer, bufferedChange{
-						model:  model,
-						opType: actualOpType,
-					})
+					buffer = append(buffer, *rawEvent)
 					bufferMutex.Unlock()
 
 					// Count this event as received immediately when added to buffer (avoid duplicate counting)
 					utils.AccumulateChangeStreamActivity(sourceDB, collectionName, 0, 1, 0, 0, 0, 0)
 
-					queryStr := describeWriteModel(model, actualOpType)
-					s.logger.Debugf("[MongoDB][%s] table=%s.%s query=%s",
-						strings.ToUpper(actualOpType),
-						targetColl.Database().Name(),
-						targetColl.Name(),
-						queryStr,
-					)
-					s.logger.Debugf("[MongoDB][%s] table=%s.%s rowsAffected=1",
-						strings.ToUpper(actualOpType),
+					s.logger.Debugf("[MongoDB][%s] table=%s.%s event extracted",
+						strings.ToUpper(rawEvent.OpType),
 						targetColl.Database().Name(),
 						targetColl.Name(),
 					)
@@ -808,7 +802,7 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 					}
 					bufferMutex.Unlock()
 				} else {
-					s.logger.Debugf("[MongoDB] Failed to prepare write model for event type %s, skipping", opType)
+					s.logger.Debugf("[MongoDB] Failed to extract raw BSON data for event type %s, skipping", opType)
 				}
 			} else {
 				if errCS := cs.Err(); errCS != nil {
@@ -1193,7 +1187,7 @@ func toJSONString(doc interface{}) string {
 }
 
 // flushBuffer processes batched write operations to the target collection
-func (s *MongoDBSyncer) flushBuffer(ctx context.Context, targetColl *mongo.Collection, buffer *[]bufferedChange, sourceDB, collectionName string, currentToken bson.Raw) {
+func (s *MongoDBSyncer) flushBuffer(ctx context.Context, targetColl *mongo.Collection, buffer *[]rawChangeEvent, sourceDB, collectionName string, currentToken bson.Raw) {
 	if len(*buffer) == 0 {
 		return
 	}
@@ -1202,15 +1196,19 @@ func (s *MongoDBSyncer) flushBuffer(ctx context.Context, targetColl *mongo.Colle
 
 	var insertCount, updateCount, deleteCount int
 	for _, bc := range *buffer {
-		writeModels = append(writeModels, bc.model)
+		// Convert rawChangeEvent to WriteModel
+		model := s.convertRawEventToWriteModel(bc, sourceDB, collectionName)
+		if model != nil {
+			writeModels = append(writeModels, model)
 
-		switch bc.opType {
-		case "insert":
-			insertCount++
-		case "update", "replace":
-			updateCount++
-		case "delete":
-			deleteCount++
+			switch bc.OpType {
+			case "insert":
+				insertCount++
+			case "update", "replace":
+				updateCount++
+			case "delete":
+				deleteCount++
+			}
 		}
 	}
 
@@ -1274,29 +1272,34 @@ func (s *MongoDBSyncer) flushBuffer(ctx context.Context, targetColl *mongo.Colle
 			s.logger.Errorf("[MongoDB] === Source documents that caused validation errors: ===")
 			for i, bc := range *buffer {
 				var docContent string
-				switch bc.opType {
+				switch bc.OpType {
 				case "insert":
-					if ins, ok := bc.model.(*mongo.InsertOneModel); ok {
+					// Convert rawChangeEvent to WriteModel for logging
+					model := s.convertRawEventToWriteModel(bc, sourceDB, collectionName)
+					if ins, ok := model.(*mongo.InsertOneModel); ok {
 						docContent = toJSONString(ins.Document)
 					}
 				case "update", "replace":
-					if rep, ok := bc.model.(*mongo.ReplaceOneModel); ok {
+					model := s.convertRawEventToWriteModel(bc, sourceDB, collectionName)
+					if rep, ok := model.(*mongo.ReplaceOneModel); ok {
 						docContent = fmt.Sprintf("filter=%s, replacement=%s", toJSONString(rep.Filter), toJSONString(rep.Replacement))
-					} else if upd, ok := bc.model.(*mongo.UpdateOneModel); ok {
+					} else if upd, ok := model.(*mongo.UpdateOneModel); ok {
 						docContent = fmt.Sprintf("filter=%s, update=%s", toJSONString(upd.Filter), toJSONString(upd.Update))
 					}
 				case "delete":
-					if del, ok := bc.model.(*mongo.DeleteOneModel); ok {
+					model := s.convertRawEventToWriteModel(bc, sourceDB, collectionName)
+					if del, ok := model.(*mongo.DeleteOneModel); ok {
 						docContent = fmt.Sprintf("filter=%s", toJSONString(del.Filter))
 					}
 				}
-				s.logger.Errorf("[MongoDB] Source doc [%d], type=%s: %s", i, bc.opType, docContent)
+				s.logger.Errorf("[MongoDB] Source doc [%d], type=%s: %s", i, bc.OpType, docContent)
 
-				if bc.opType == "insert" || bc.opType == "replace" {
+				if bc.OpType == "insert" || bc.OpType == "replace" {
 					var doc bson.M
-					if ins, ok := bc.model.(*mongo.InsertOneModel); ok {
+					model := s.convertRawEventToWriteModel(bc, sourceDB, collectionName)
+					if ins, ok := model.(*mongo.InsertOneModel); ok {
 						doc, _ = ins.Document.(bson.M)
-					} else if rep, ok := bc.model.(*mongo.ReplaceOneModel); ok {
+					} else if rep, ok := model.(*mongo.ReplaceOneModel); ok {
 						doc, _ = rep.Replacement.(bson.M)
 					}
 
@@ -1387,7 +1390,7 @@ func (s *MongoDBSyncer) flushBuffer(ctx context.Context, targetColl *mongo.Colle
 }
 
 // flushBufferWithResult processes batched write operations and returns write success status
-func (s *MongoDBSyncer) flushBufferWithResult(ctx context.Context, targetColl *mongo.Collection, buffer *[]bufferedChange, sourceDB, collectionName string, currentToken bson.Raw) bool {
+func (s *MongoDBSyncer) flushBufferWithResult(ctx context.Context, targetColl *mongo.Collection, buffer *[]rawChangeEvent, sourceDB, collectionName string, currentToken bson.Raw) bool {
 	if len(*buffer) == 0 {
 		return true // No data to write is considered successful
 	}
@@ -1396,15 +1399,19 @@ func (s *MongoDBSyncer) flushBufferWithResult(ctx context.Context, targetColl *m
 
 	var insertCount, updateCount, deleteCount int
 	for _, bc := range *buffer {
-		writeModels = append(writeModels, bc.model)
+		// Convert rawChangeEvent to WriteModel
+		model := s.convertRawEventToWriteModel(bc, sourceDB, collectionName)
+		if model != nil {
+			writeModels = append(writeModels, model)
 
-		switch bc.opType {
-		case "insert":
-			insertCount++
-		case "update", "replace":
-			updateCount++
-		case "delete":
-			deleteCount++
+			switch bc.OpType {
+			case "insert":
+				insertCount++
+			case "update", "replace":
+				updateCount++
+			case "delete":
+				deleteCount++
+			}
 		}
 	}
 
@@ -1555,7 +1562,7 @@ func (s *MongoDBSyncer) getResumeTokenPath(db, coll string) string {
 }
 
 // storeToBuffer persists the buffered changes to disk
-func (s *MongoDBSyncer) storeToBuffer(ctx context.Context, buffer *[]bufferedChange, sourceDB, collectionName string, latestToken bson.Raw) {
+func (s *MongoDBSyncer) storeToBuffer(ctx context.Context, buffer *[]rawChangeEvent, sourceDB, collectionName string, latestToken bson.Raw) {
 	if len(*buffer) == 0 {
 		return
 	}
@@ -1591,58 +1598,36 @@ func (s *MongoDBSyncer) storeToBuffer(ctx context.Context, buffer *[]bufferedCha
 		for j := i; j < end; j++ {
 			change := (*buffer)[j]
 
-			// Serialize model to BSON
-			var docBytes []byte
-			var err error
-
-			switch change.opType {
-			case "insert":
-				if ins, ok := change.model.(*mongo.InsertOneModel); ok {
-					docBytes, err = bson.Marshal(ins.Document)
-				}
-			case "update", "replace":
-				if rep, ok := change.model.(*mongo.ReplaceOneModel); ok {
-					docBytes, err = bson.Marshal(map[string]interface{}{
-						"filter":      rep.Filter,
-						"replacement": rep.Replacement,
-					})
-				} else if upd, ok := change.model.(*mongo.UpdateOneModel); ok {
-					docBytes, err = bson.Marshal(map[string]interface{}{
-						"filter": upd.Filter,
-						"update": upd.Update,
-					})
-				}
-			case "delete":
-				if del, ok := change.model.(*mongo.DeleteOneModel); ok {
-					docBytes, err = bson.Marshal(map[string]interface{}{
-						"filter": del.Filter,
-					})
-				}
-			}
-
-			if err != nil {
-				s.logger.Errorf("[MongoDB] Failed to marshal document to BSON: %v", err)
-				continue
-			}
-
-			// Create persisted change
+			// Create persisted change with raw BSON data
 			persistedChange := persistedChange{
 				ID:         fmt.Sprintf("%d_%d", timestamp, j),
 				Token:      latestToken,
-				Doc:        docBytes,
-				OpType:     change.opType,
+				FullDoc:    change.FullDoc,
+				DocKey:     change.DocKey,
+				UpdateDesc: change.UpdateDesc,
+				OpType:     change.OpType,
 				SourceDB:   sourceDB,
 				SourceColl: collectionName,
-				Timestamp:  time.Now(),
+				Timestamp:  change.Timestamp,
 			}
 
 			batchChanges = append(batchChanges, persistedChange)
 		}
 
-		// Write batch to single file using atomic write (temp file + rename)
-		batchFilePath := filepath.Join(bufferPath, fmt.Sprintf("batch_%d_%d.json", timestamp, i))
-		tempFilePath := filepath.Join(bufferPath, fmt.Sprintf("temp_%d_%d.json", timestamp, i))
-		batchBytes, err := json.Marshal(batchChanges)
+		// Write batch to single file using BSON instead of JSON
+		batchFilePath := filepath.Join(bufferPath, fmt.Sprintf("batch_%d_%d.bson", timestamp, i))
+		tempFilePath := filepath.Join(bufferPath, fmt.Sprintf("temp_%d_%d.bson", timestamp, i))
+		
+		// Wrap the batch in a structure for proper BSON serialization
+		batchWrapper := struct {
+			Changes []persistedChange `bson:"changes"`
+			Count   int               `bson:"count"`
+		}{
+			Changes: batchChanges,
+			Count:   len(batchChanges),
+		}
+		
+		batchBytes, err := bson.Marshal(batchWrapper)
 		if err != nil {
 			s.logger.Errorf("[MongoDB] Failed to marshal batch changes: %v", err)
 			writeSuccess = false
@@ -1776,7 +1761,7 @@ func (s *MongoDBSyncer) processBufferedChanges(ctx context.Context, sourceDB, co
 	s.logger.Debugf("[MongoDB] Processing %d/%d buffered changes for %s.%s%s",
 		filesToProcess, len(files), sourceDB, collectionName, fileCountStat)
 
-	var batch []bufferedChange
+	var batch []rawChangeEvent
 	var processedToken bson.Raw
 	var processedFiles []string // Track successfully processed files for deletion
 	startTime := time.Now()
@@ -1810,9 +1795,12 @@ func (s *MongoDBSyncer) processBufferedChanges(ctx context.Context, sourceDB, co
 
 		// Check if it's a batch processing file
 		if strings.HasPrefix(filepath.Base(filePath), "batch_") {
-			// Parse batch changes
-			var batchChanges []persistedChange
-			if err := json.Unmarshal(fileData, &batchChanges); err != nil {
+			// Parse batch changes using BSON
+			var batchWrapper struct {
+				Changes []persistedChange `bson:"changes"`
+				Count   int               `bson:"count"`
+			}
+			if err := bson.Unmarshal(fileData, &batchWrapper); err != nil {
 				s.logger.Errorf("[MongoDB] Failed to unmarshal batch changes: %v", err)
 				s.logger.Errorf("[MongoDB] Corrupted file: %s, size: %d bytes", filePath, len(fileData))
 				// Move corrupted file to quarantine directory instead of deleting
@@ -1826,22 +1814,27 @@ func (s *MongoDBSyncer) processBufferedChanges(ctx context.Context, sourceDB, co
 			}
 
 			// Process each change in the batch
-			for _, persistedChange := range batchChanges {
+			for _, persistedChange := range batchWrapper.Changes {
 				// Convert to WriteModel
 				model := s.convertToWriteModel(persistedChange)
 				if model != nil {
-					batch = append(batch, bufferedChange{
-						model:  model,
-						opType: persistedChange.OpType,
-					})
+					// Convert persistedChange back to rawChangeEvent for consistency
+					rawEvent := rawChangeEvent{
+						FullDoc:    persistedChange.FullDoc,
+						DocKey:     persistedChange.DocKey,
+						UpdateDesc: persistedChange.UpdateDesc,
+						OpType:     persistedChange.OpType,
+						Timestamp:  persistedChange.Timestamp,
+					}
+					batch = append(batch, rawEvent)
 					processedToken = persistedChange.Token
 					processedCount++
 				}
 			}
 		} else {
-			// Process old format single change file
+			// Process old format single change file using BSON
 			var persistedChange persistedChange
-			if err := json.Unmarshal(fileData, &persistedChange); err != nil {
+			if err := bson.Unmarshal(fileData, &persistedChange); err != nil {
 				s.logger.Errorf("[MongoDB] Failed to unmarshal persisted change: %v", err)
 				// Move corrupted file to quarantine directory instead of deleting
 				if quarantineErr := s.quarantineCorruptedFile(filePath, sourceDB, collectionName); quarantineErr != nil {
@@ -1855,10 +1848,15 @@ func (s *MongoDBSyncer) processBufferedChanges(ctx context.Context, sourceDB, co
 
 			model := s.convertToWriteModel(persistedChange)
 			if model != nil {
-				batch = append(batch, bufferedChange{
-					model:  model,
-					opType: persistedChange.OpType,
-				})
+				// Convert persistedChange back to rawChangeEvent for consistency
+				rawEvent := rawChangeEvent{
+					FullDoc:    persistedChange.FullDoc,
+					DocKey:     persistedChange.DocKey,
+					UpdateDesc: persistedChange.UpdateDesc,
+					OpType:     persistedChange.OpType,
+					Timestamp:  persistedChange.Timestamp,
+				}
+				batch = append(batch, rawEvent)
 				processedToken = persistedChange.Token
 				processedCount++
 			}
@@ -1967,10 +1965,10 @@ func (s *MongoDBSyncer) processBufferedChanges(ctx context.Context, sourceDB, co
 }
 
 // Helper function to count delete operations in a batch
-func countDeleteOps(batch []bufferedChange) int {
+func countDeleteOps(batch []rawChangeEvent) int {
 	count := 0
 	for _, change := range batch {
-		if change.opType == "delete" {
+		if change.OpType == "delete" {
 			count++
 		}
 	}
@@ -1982,7 +1980,7 @@ func (s *MongoDBSyncer) getBufferPath(db, coll string) string {
 	return filepath.Join(s.bufferDir, fmt.Sprintf("%s_%s", db, coll))
 }
 
-// validateBatchFile performs complete JSON validation to check file integrity
+// validateBatchFile performs complete BSON validation to check file integrity
 func (s *MongoDBSyncer) validateBatchFile(filePath string) bool {
 	// 1. Check file size
 	stat, err := os.Stat(filePath)
@@ -1991,16 +1989,19 @@ func (s *MongoDBSyncer) validateBatchFile(filePath string) bool {
 		return false
 	}
 
-	// 2. Complete JSON validation by attempting to unmarshal
+	// 2. Complete BSON validation by attempting to unmarshal
 	fileData, err := os.ReadFile(filePath)
 	if err != nil {
 		s.logger.Debugf("[MongoDB] File validation failed: cannot read file %s: %v", filePath, err)
 		return false
 	}
 
-	var batchChanges []persistedChange
-	if err := json.Unmarshal(fileData, &batchChanges); err != nil {
-		s.logger.Debugf("[MongoDB] File validation failed: invalid JSON structure for %s: %v", filePath, err)
+	var batchWrapper struct {
+		Changes []persistedChange `bson:"changes"`
+		Count   int               `bson:"count"`
+	}
+	if err := bson.Unmarshal(fileData, &batchWrapper); err != nil {
+		s.logger.Debugf("[MongoDB] File validation failed: invalid BSON structure for %s: %v", filePath, err)
 		return false
 	}
 
@@ -2008,7 +2009,7 @@ func (s *MongoDBSyncer) validateBatchFile(filePath string) bool {
 	return true
 }
 
-// convertToWriteModel converts persistedChange to WriteModel
+// convertToWriteModel converts persistedChange to WriteModel using raw BSON data
 func (s *MongoDBSyncer) convertToWriteModel(persistedChange persistedChange) mongo.WriteModel {
 	var model mongo.WriteModel
 
@@ -2016,81 +2017,82 @@ func (s *MongoDBSyncer) convertToWriteModel(persistedChange persistedChange) mon
 
 	switch persistedChange.OpType {
 	case "insert":
-		var doc bson.D
-		if err := bson.Unmarshal(persistedChange.Doc, &doc); err != nil {
+		var doc bson.M
+		if err := bson.Unmarshal(persistedChange.FullDoc, &doc); err != nil {
 			s.logger.Errorf("[MongoDB] Failed to unmarshal insert document from BSON: %v", err)
 			return nil
 		}
 		model = mongo.NewInsertOneModel().SetDocument(doc)
 
 	case "update":
-		var updateData bson.M
-		if err := bson.Unmarshal(persistedChange.Doc, &updateData); err != nil {
-			s.logger.Errorf("[MongoDB] Failed to unmarshal update document from BSON: %v", err)
-			return nil
-		}
+		// For updates, we need to check if we have updateDescription or fullDocument
+		if len(persistedChange.UpdateDesc) > 0 {
+			// Incremental update
+			var updateDoc bson.M
+			if err := bson.Unmarshal(persistedChange.UpdateDesc, &updateDoc); err != nil {
+				s.logger.Errorf("[MongoDB] Failed to unmarshal update document from BSON: %v", err)
+				return nil
+			}
 
-		filter, ok := updateData["filter"].(bson.M)
-		if !ok {
-			s.logger.Errorf("[MongoDB] Invalid update data structure: missing filter field")
-			s.logger.Errorf("[MongoDB] updateData content: %v", updateData)
-			return nil
-		}
+			var docKey bson.M
+			if err := bson.Unmarshal(persistedChange.DocKey, &docKey); err != nil {
+				s.logger.Errorf("[MongoDB] Failed to unmarshal document key from BSON: %v", err)
+				return nil
+			}
 
-		// Check for new format (replacement) - this is what we want
-		if replacement, hasReplacement := updateData["replacement"]; hasReplacement && replacement != nil {
-			// New format: use ReplaceOneModel for full document replacement
-			s.logger.Debugf("[MongoDB] Processing update as full document replacement")
-			model = mongo.NewReplaceOneModel().
-				SetFilter(filter).
-				SetReplacement(replacement).
-				SetUpsert(true)
-		} else if updateDoc, hasUpdate := updateData["update"]; hasUpdate && updateDoc != nil {
-			// Handle incremental update operations (including positional operators)
-			s.logger.Debugf("[MongoDB] Processing incremental update operation")
 			model = mongo.NewUpdateOneModel().
-				SetFilter(filter).
+				SetFilter(docKey).
 				SetUpdate(updateDoc).
 				SetUpsert(true)
+		} else if len(persistedChange.FullDoc) > 0 {
+			// Full document replacement
+			var fullDoc bson.M
+			if err := bson.Unmarshal(persistedChange.FullDoc, &fullDoc); err != nil {
+				s.logger.Errorf("[MongoDB] Failed to unmarshal full document from BSON: %v", err)
+				return nil
+			}
+
+			var docKey bson.M
+			if err := bson.Unmarshal(persistedChange.DocKey, &docKey); err != nil {
+				s.logger.Errorf("[MongoDB] Failed to unmarshal document key from BSON: %v", err)
+				return nil
+			}
+
+			model = mongo.NewReplaceOneModel().
+				SetFilter(docKey).
+				SetReplacement(fullDoc).
+				SetUpsert(true)
 		} else {
-			s.logger.Errorf("[MongoDB] Invalid update data structure: missing both replacement and update fields")
-			s.logger.Errorf("[MongoDB] updateData content: %v", updateData)
+			s.logger.Errorf("[MongoDB] Invalid update data: missing both update description and full document")
 			return nil
 		}
 
 	case "replace":
-		var updateData bson.M
-		if err := bson.Unmarshal(persistedChange.Doc, &updateData); err != nil {
+		var fullDoc bson.M
+		if err := bson.Unmarshal(persistedChange.FullDoc, &fullDoc); err != nil {
 			s.logger.Errorf("[MongoDB] Failed to unmarshal replace document from BSON: %v", err)
 			return nil
 		}
 
-		filter, ok := updateData["filter"].(bson.M)
-		if !ok || updateData["replacement"] == nil {
-			s.logger.Errorf("[MongoDB] Invalid replace data structure: missing filter or replacement field")
-			s.logger.Errorf("[MongoDB] updateData content: %v", updateData)
+		var docKey bson.M
+		if err := bson.Unmarshal(persistedChange.DocKey, &docKey); err != nil {
+			s.logger.Errorf("[MongoDB] Failed to unmarshal document key from BSON: %v", err)
 			return nil
 		}
 
 		model = mongo.NewReplaceOneModel().
-			SetFilter(filter).
-			SetReplacement(updateData["replacement"]).
+			SetFilter(docKey).
+			SetReplacement(fullDoc).
 			SetUpsert(true)
 
 	case "delete":
-		var deleteData bson.M
-		if err := bson.Unmarshal(persistedChange.Doc, &deleteData); err != nil {
-			s.logger.Errorf("[MongoDB] Failed to unmarshal delete document from BSON: %v", err)
+		var docKey bson.M
+		if err := bson.Unmarshal(persistedChange.DocKey, &docKey); err != nil {
+			s.logger.Errorf("[MongoDB] Failed to unmarshal delete document key from BSON: %v", err)
 			return nil
 		}
 
-		filter, ok := deleteData["filter"].(bson.M)
-		if !ok {
-			s.logger.Errorf("[MongoDB] Invalid delete filter structure")
-			return nil
-		}
-
-		model = mongo.NewDeleteOneModel().SetFilter(filter)
+		model = mongo.NewDeleteOneModel().SetFilter(docKey)
 
 	default:
 		s.logger.Errorf("[MongoDB] Unknown operation type in persisted change: %s", persistedChange.OpType)
@@ -2213,4 +2215,255 @@ func (s *MongoDBSyncer) quarantineCorruptedFile(filePath, sourceDB, collectionNa
 
 	s.logger.Infof("[MongoDB] Corrupted file moved to quarantine: %s -> %s", filePath, quarantinePath)
 	return nil
+}
+
+// extractRawBSONData extracts raw BSON data directly from Change Stream event
+func (s *MongoDBSyncer) extractRawBSONData(changeEvent bson.M, opType, collectionName string) *rawChangeEvent {
+	tableSecurity := security.FindTableSecurityFromMappings(collectionName, s.cfg.Mappings)
+	advancedSettings := s.findTableAdvancedSettings(collectionName)
+
+	// Extract timestamp
+	timestamp := time.Now()
+	if ts, ok := changeEvent["_ts"].(time.Time); ok {
+		timestamp = ts
+	}
+
+	// Extract documentKey (always present)
+	docKeyBytes, err := bson.Marshal(changeEvent["documentKey"])
+	if err != nil {
+		s.logger.Errorf("[MongoDB] Failed to marshal documentKey: %v", err)
+		return nil
+	}
+
+	switch opType {
+	case "insert":
+		if fullDoc, ok := changeEvent["fullDocument"].(bson.M); ok {
+			// Apply security processing if needed
+			if tableSecurity.SecurityEnabled && len(tableSecurity.FieldSecurity) > 0 {
+				for field, value := range fullDoc {
+					processedValue := security.ProcessValue(value, field, tableSecurity)
+					fullDoc[field] = processedValue
+				}
+			}
+			
+			fullDocBytes, err := bson.Marshal(fullDoc)
+			if err != nil {
+				s.logger.Errorf("[MongoDB] Failed to marshal fullDocument: %v", err)
+				return nil
+			}
+
+			return &rawChangeEvent{
+				FullDoc:    fullDocBytes,
+				DocKey:     docKeyBytes,
+				UpdateDesc: nil,
+				OpType:     "insert",
+				Timestamp:  timestamp,
+			}
+		}
+		s.logger.Errorf("[MongoDB] Insert operation failed: fullDocument not found in change event for %s", collectionName)
+
+	case "update", "replace":
+		var docID interface{}
+		if id, ok := changeEvent["documentKey"].(bson.M)["_id"]; ok {
+			docID = id
+		} else {
+			s.logger.Warnf("[MongoDB] cannot find _id in documentKey => %v", changeEvent)
+			return nil
+		}
+
+		s.logger.Debugf("[MongoDB] Processing update operation for %s, docID=%v", collectionName, docID)
+
+		// Check if we have both fullDocument and updateDescription
+		fullDoc, hasFullDoc := changeEvent["fullDocument"].(bson.M)
+		updateDesc, hasUpdateDesc := changeEvent["updateDescription"].(bson.M)
+
+		// Try incremental update if we have updateDescription
+		if hasUpdateDesc && hasFullDoc {
+			// Check for array index out of bounds issues
+			if s.hasArrayIndexOutOfBounds(updateDesc, fullDoc) {
+				s.logger.Debugf("[MongoDB] Array index out of bounds detected, using full replacement for docID=%v", docID)
+				// Fall through to full document replacement
+			} else {
+				// Use incremental update - store updateDescription
+				updateDescBytes, err := bson.Marshal(updateDesc)
+				if err != nil {
+					s.logger.Errorf("[MongoDB] Failed to marshal updateDescription: %v", err)
+					return nil
+				}
+
+				return &rawChangeEvent{
+					FullDoc:    nil,
+					DocKey:     docKeyBytes,
+					UpdateDesc: updateDescBytes,
+					OpType:     "update",
+					Timestamp:  timestamp,
+				}
+			}
+		}
+
+		// Fallback to full document replacement
+		if hasFullDoc {
+			// Apply security processing if needed
+			if tableSecurity.SecurityEnabled && len(tableSecurity.FieldSecurity) > 0 {
+				for field, value := range fullDoc {
+					processedValue := security.ProcessValue(value, field, tableSecurity)
+					fullDoc[field] = processedValue
+				}
+			}
+
+			fullDocBytes, err := bson.Marshal(fullDoc)
+			if err != nil {
+				s.logger.Errorf("[MongoDB] Failed to marshal fullDocument: %v", err)
+				return nil
+			}
+
+			s.logger.Debugf("[MongoDB] Using full document replacement for update operation, docID=%v", docID)
+			return &rawChangeEvent{
+				FullDoc:    fullDocBytes,
+				DocKey:     docKeyBytes,
+				UpdateDesc: nil,
+				OpType:     "replace",
+				Timestamp:  timestamp,
+			}
+		} else {
+			s.logger.Warnf("[MongoDB] fullDocument not available for update operation, skipping, docID=%v", docID)
+			return nil
+		}
+
+	case "delete":
+		// Use table-specific ignoreDeleteOps setting instead of global enableDeleteOps
+		if advancedSettings.IgnoreDeleteOps {
+			s.logger.Debugf("[MongoDB] Delete operation skipped (ignoreDeleteOps=true) for table %s, document: %v", collectionName, changeEvent["documentKey"])
+			return nil
+		}
+
+		s.logger.Debugf("[MongoDB] Delete operation prepared for %s", collectionName)
+		return &rawChangeEvent{
+			FullDoc:    nil,
+			DocKey:     docKeyBytes,
+			UpdateDesc: nil,
+			OpType:     "delete",
+			Timestamp:  timestamp,
+		}
+	}
+
+	s.logger.Warnf("[MongoDB] No raw BSON data extracted for opType=%s, collName=%s", opType, collectionName)
+	return nil
+}
+
+// convertRawEventToWriteModel converts rawChangeEvent to WriteModel
+func (s *MongoDBSyncer) convertRawEventToWriteModel(rawEvent rawChangeEvent, sourceDB, collectionName string) mongo.WriteModel {
+	switch rawEvent.OpType {
+	case "insert":
+		var doc bson.M
+		if err := bson.Unmarshal(rawEvent.FullDoc, &doc); err != nil {
+			s.logger.Errorf("[MongoDB] Failed to unmarshal insert document from BSON: %v", err)
+			return nil
+		}
+		return mongo.NewInsertOneModel().SetDocument(doc)
+
+	case "update":
+		// For updates, we need to check if we have updateDescription or fullDocument
+		if len(rawEvent.UpdateDesc) > 0 {
+			// Incremental update
+			var updateDesc bson.M
+			if err := bson.Unmarshal(rawEvent.UpdateDesc, &updateDesc); err != nil {
+				s.logger.Errorf("[MongoDB] Failed to unmarshal update description from BSON: %v", err)
+				return nil
+			}
+
+			var docKey bson.M
+			if err := bson.Unmarshal(rawEvent.DocKey, &docKey); err != nil {
+				s.logger.Errorf("[MongoDB] Failed to unmarshal document key from BSON: %v", err)
+				return nil
+			}
+
+			// Extract document ID
+			var docID interface{}
+			if id, ok := docKey["_id"]; ok {
+				docID = id
+			} else {
+				s.logger.Errorf("[MongoDB] Cannot find _id in documentKey")
+				return nil
+			}
+
+			// Build incremental update using the same logic as prepareWriteModel
+			tableSecurity := security.FindTableSecurityFromMappings(collectionName, s.cfg.Mappings)
+			
+			// Get full document for array bounds checking (if available)
+			var fullDoc bson.M
+			if len(rawEvent.FullDoc) > 0 {
+				if err := bson.Unmarshal(rawEvent.FullDoc, &fullDoc); err != nil {
+					s.logger.Warnf("[MongoDB] Failed to unmarshal full document for bounds checking: %v", err)
+				}
+			}
+
+			// Check for array index out of bounds issues
+			if len(fullDoc) > 0 && s.hasArrayIndexOutOfBounds(updateDesc, fullDoc) {
+				s.logger.Debugf("[MongoDB] Array index out of bounds detected, using full replacement")
+				// Fall through to full document replacement
+			} else {
+				// Use incremental update
+				incrementalModel := s.buildIncrementalUpdate(docID, updateDesc, fullDoc, tableSecurity)
+				if incrementalModel != nil {
+					s.logger.Debugf("[MongoDB] Using incremental update for docID=%v", docID)
+					return incrementalModel
+				}
+			}
+		}
+
+		// Fallback to full document replacement
+		if len(rawEvent.FullDoc) > 0 {
+			var fullDoc bson.M
+			if err := bson.Unmarshal(rawEvent.FullDoc, &fullDoc); err != nil {
+				s.logger.Errorf("[MongoDB] Failed to unmarshal full document from BSON: %v", err)
+				return nil
+			}
+
+			var docKey bson.M
+			if err := bson.Unmarshal(rawEvent.DocKey, &docKey); err != nil {
+				s.logger.Errorf("[MongoDB] Failed to unmarshal document key from BSON: %v", err)
+				return nil
+			}
+
+			return mongo.NewReplaceOneModel().
+				SetFilter(docKey).
+				SetReplacement(fullDoc).
+				SetUpsert(true)
+		} else {
+			s.logger.Errorf("[MongoDB] Invalid update data: missing both update description and full document")
+			return nil
+		}
+
+	case "replace":
+		var fullDoc bson.M
+		if err := bson.Unmarshal(rawEvent.FullDoc, &fullDoc); err != nil {
+			s.logger.Errorf("[MongoDB] Failed to unmarshal replace document from BSON: %v", err)
+			return nil
+		}
+
+		var docKey bson.M
+		if err := bson.Unmarshal(rawEvent.DocKey, &docKey); err != nil {
+			s.logger.Errorf("[MongoDB] Failed to unmarshal document key from BSON: %v", err)
+			return nil
+		}
+
+		return mongo.NewReplaceOneModel().
+			SetFilter(docKey).
+			SetReplacement(fullDoc).
+			SetUpsert(true)
+
+	case "delete":
+		var docKey bson.M
+		if err := bson.Unmarshal(rawEvent.DocKey, &docKey); err != nil {
+			s.logger.Errorf("[MongoDB] Failed to unmarshal delete document key from BSON: %v", err)
+			return nil
+		}
+
+		return mongo.NewDeleteOneModel().SetFilter(docKey)
+
+	default:
+		s.logger.Errorf("[MongoDB] Unknown operation type in raw change event: %s", rawEvent.OpType)
+		return nil
+	}
 }
