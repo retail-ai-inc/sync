@@ -26,6 +26,14 @@ type bufferedChange struct {
 	opType string
 }
 
+// rawBSONEvent represents the optimized raw BSON data structure for high-performance I/O
+type rawBSONEvent struct {
+	RawData     bson.Raw  // Raw BSON data from Change Stream event
+	OpType      string    // Operation type (extracted from event header)
+	ResumeToken bson.Raw  // Resume token for this event
+	Timestamp   time.Time // Event timestamp
+}
+
 // rawChangeEvent represents the raw BSON data from Change Stream
 type rawChangeEvent struct {
 	FullDoc       []byte    // Raw BSON data from fullDocument
@@ -66,6 +74,9 @@ type MongoDBSyncer struct {
 	// New fields for async pipeline
 	eventChannel    chan rawChangeEvent
 	channelCapacity int
+	// Optimized fields for high-performance I/O
+	optimizedEventChannel chan rawBSONEvent
+	optimizedChannelCapacity int
 }
 
 func NewMongoDBSyncer(cfg config.SyncConfig, logger *logrus.Logger) *MongoDBSyncer {
@@ -130,27 +141,23 @@ func NewMongoDBSyncer(cfg config.SyncConfig, logger *logrus.Logger) *MongoDBSync
 	}
 
 	if err := os.MkdirAll(bufferDir, os.ModePerm); err != nil {
-		logger.Warnf("[MongoDB] Failed to create buffer dir %s: %v", bufferDir, err)
+		logger.Warnf("[MongoDB] Failed to create buffer directory %s: %v", bufferDir, err)
 	}
 
-	// Reduced processing rate to prevent memory pressure
-	processRate := 3000 // Reduced from 10000 to prevent OOM
-	// Custom configured rate can be implemented in the future by expanding the SyncConfig struct
-
 	return &MongoDBSyncer{
-		sourceClient:     sourceClient,
-		targetClient:     targetClient,
-		cfg:              cfg,
-		logger:           logger.WithField("sync_task_id", cfg.ID),
-		resumeTokens:     resumeMap,
-		resumeTokensM:    sync.RWMutex{},
-		bufferDir:        bufferDir,
-		bufferEnabled:    true, // Enable by default
-		processRate:      processRate,
+		sourceClient:  sourceClient,
+		targetClient:  targetClient,
+		cfg:           cfg,
+		logger:        logger,
+		resumeTokens:  resumeMap,
+		bufferDir:     bufferDir,
+		bufferEnabled: true, // Enable persistent buffer by default
+		processRate:   100,  // Default processing rate
 		activeProcessors: make(map[string]context.CancelFunc),
-		processorMutex:   sync.RWMutex{},
 		// Initialize async pipeline components
 		channelCapacity: 10000, // Configurable channel capacity
+		optimizedChannelCapacity: 20000, // Higher capacity for optimized channel
+		optimizedEventChannel: make(chan rawBSONEvent, 20000), // Configurable optimized channel capacity
 	}
 }
 
@@ -474,15 +481,15 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 	var previousEventGap int
 	var monitorStartTime = time.Now()
 
-	// Create event channel for async pipeline
-	eventChannel := make(chan rawChangeEvent, s.channelCapacity)
-	defer close(eventChannel)
+	// Create optimized event channel for high-performance I/O
+	optimizedEventChannel := make(chan rawBSONEvent, s.optimizedChannelCapacity)
+	defer close(optimizedEventChannel)
 
-	// Start disk writer goroutine (Stage 2)
+	// Start optimized disk writer goroutine (Stage 2)
 	diskWriterCtx, diskWriterCancel := context.WithCancel(processorCtx)
 	defer diskWriterCancel()
 	
-	go s.diskWriter(diskWriterCtx, eventChannel, sourceDB, collectionName)
+	go s.optimizedDiskWriter(diskWriterCtx, optimizedEventChannel, sourceDB, collectionName)
 
 	// Start persistent buffer processor (Stage 3)
 	if s.bufferEnabled {
@@ -593,13 +600,13 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 				s.logger.Debugf("[MongoDB] Processing rate: %d changes/sec", currentProcessRate)
 
 				// Channel status monitoring
-				channelLen := len(eventChannel)
-				channelCap := cap(eventChannel)
+				channelLen := len(optimizedEventChannel)
+				channelCap := cap(optimizedEventChannel)
 				channelUsage := float64(channelLen) / float64(channelCap) * 100
-				s.logger.Debugf("[MongoDB] Channel status: %d/%d (%.1f%%)", channelLen, channelCap, channelUsage)
+				s.logger.Debugf("[MongoDB] Optimized channel status: %d/%d (%.1f%%)", channelLen, channelCap, channelUsage)
 				
 				if channelUsage > 80 {
-					s.logger.Warnf("[MongoDB] Channel usage high: %.1f%%, possible disk writer bottleneck", channelUsage)
+					s.logger.Warnf("[MongoDB] Optimized channel usage high: %.1f%%, possible disk writer bottleneck", channelUsage)
 				}
 
 				// Gap tracking logic removed - statistics now tracked in database
@@ -688,42 +695,40 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 				// Get resume token from change stream
 				token := cs.ResumeToken()
 				
-				// Create raw event with resume token included
-				rawEvent := rawChangeEvent{
-					FullDoc:     rawBSON, // Store the complete raw BSON data
-					DocKey:      nil,     // Will be extracted in diskWriter
-					UpdateDesc:  nil,     // Will be extracted in diskWriter
+				// Create optimized raw BSON event
+				optimizedEvent := rawBSONEvent{
+					RawData:     rawBSON, // Store the complete raw BSON data
 					OpType:      opType,
-					Timestamp:   time.Now(),
 					ResumeToken: token,
+					Timestamp:   time.Now(),
 				}
 
-				// Stage 1: Send to channel (non-blocking with backpressure handling)
+				// Stage 1: Send to optimized channel (non-blocking with backpressure handling)
 				select {
-				case eventChannel <- rawEvent:
-					// Successfully sent to channel
+				case optimizedEventChannel <- optimizedEvent:
+					// Successfully sent to optimized channel
 					utils.AccumulateChangeStreamActivity(sourceDB, collectionName, 0, 1, 0, 0, 0, 0)
-					s.logger.Debugf("[MongoDB][%s] table=%s.%s event sent to channel",
+					s.logger.Debugf("[MongoDB][%s] table=%s.%s event sent to optimized channel",
 						strings.ToUpper(opType),
 						targetColl.Database().Name(),
 						targetColl.Name(),
 					)
 				default:
 					// Channel is full - apply backpressure
-					s.logger.Warnf("[MongoDB] Channel full, applying backpressure for %s.%s", sourceDB, collectionName)
+					s.logger.Warnf("[MongoDB] Optimized channel full, applying backpressure for %s.%s", sourceDB, collectionName)
 					
 					// Wait for space in channel with timeout
 					select {
-					case eventChannel <- rawEvent:
+					case optimizedEventChannel <- optimizedEvent:
 						utils.AccumulateChangeStreamActivity(sourceDB, collectionName, 0, 1, 0, 0, 0, 0)
-						s.logger.Debugf("[MongoDB][%s] table=%s.%s event sent to channel after backpressure",
+						s.logger.Debugf("[MongoDB][%s] table=%s.%s event sent to optimized channel after backpressure",
 							strings.ToUpper(opType),
 							targetColl.Database().Name(),
 							targetColl.Name(),
 						)
 					case <-time.After(100 * time.Millisecond):
-						s.logger.Errorf("[MongoDB] Failed to send event to channel after backpressure timeout for %s.%s", sourceDB, collectionName)
-						utils.RecordChangeStreamError(sourceDB, collectionName, "Channel backpressure timeout")
+						s.logger.Errorf("[MongoDB] Failed to send event to optimized channel after backpressure timeout for %s.%s", sourceDB, collectionName)
+						utils.RecordChangeStreamError(sourceDB, collectionName, "Optimized channel backpressure timeout")
 					}
 				}
 				
@@ -1997,9 +2002,39 @@ func (s *MongoDBSyncer) processBufferedChanges(ctx context.Context, sourceDB, co
 			continue
 		}
 
-		// Check if it's a batch processing file
-		if strings.HasPrefix(filepath.Base(filePath), "batch_") {
-			// Parse batch changes using BSON
+		// Check if it's an optimized batch file
+		if strings.HasPrefix(filepath.Base(filePath), "optimized_batch_") {
+			// Process optimized raw BSON format
+			optimizedEvents, err := s.parseOptimizedBatchFile(fileData)
+			if err != nil {
+				s.logger.Errorf("[MongoDB] Failed to parse optimized batch file: %v", err)
+				s.logger.Errorf("[MongoDB] Corrupted optimized file: %s, size: %d bytes", filePath, len(fileData))
+				// Move corrupted file to quarantine directory instead of deleting
+				if quarantineErr := s.quarantineCorruptedFile(filePath, sourceDB, collectionName); quarantineErr != nil {
+					s.logger.Errorf("[MongoDB] Failed to quarantine corrupted file %s: %v", filePath, quarantineErr)
+				} else {
+					s.logger.Infof("[MongoDB] Quarantined corrupted optimized file: %s", filePath)
+				}
+				corruptedFileEncountered = true
+				continue // Continue processing other files
+			}
+
+			// Process each optimized event
+			for _, optimizedEvent := range optimizedEvents {
+				// Convert optimized event to rawChangeEvent using full processing
+				rawEvent, err := s.convertOptimizedEventToRawEvent(optimizedEvent, sourceDB, collectionName)
+				if err != nil {
+					s.logger.Warnf("[MongoDB] Failed to convert optimized event: %v", err)
+					continue
+				}
+				
+				if rawEvent != nil {
+					batch = append(batch, *rawEvent)
+					processedCount++
+				}
+			}
+		} else if strings.HasPrefix(filepath.Base(filePath), "batch_") {
+			// Parse legacy batch changes using BSON
 			var batchWrapper struct {
 				Changes []persistedChange `bson:"changes"`
 				Count   int               `bson:"count"`
@@ -2670,4 +2705,243 @@ func (s *MongoDBSyncer) convertRawEventToWriteModel(rawEvent rawChangeEvent, sou
 		s.logger.Errorf("[MongoDB] Unknown operation type in raw change event: %s", rawEvent.OpType)
 		return nil
 	}
+}
+
+// optimizedDiskWriter is the high-performance disk writer that only does byte stream operations
+func (s *MongoDBSyncer) optimizedDiskWriter(ctx context.Context, eventChannel <-chan rawBSONEvent, sourceDB, collectionName string) {
+	s.logger.Infof("[MongoDB] Starting optimized disk writer for %s.%s", sourceDB, collectionName)
+	defer s.logger.Infof("[MongoDB] Stopping optimized disk writer for %s.%s", sourceDB, collectionName)
+
+	var buffer [][]byte
+	const batchSize = 1000 // Larger batch size for better I/O performance
+	flushInterval := time.Second * 1 // Faster flush interval
+	timer := time.NewTimer(flushInterval)
+	defer timer.Stop()
+
+	lastFlushTime := time.Now()
+	var totalProcessed int
+	var lastSavedToken bson.Raw
+
+	for {
+		select {
+		case <-ctx.Done():
+			// Final flush before shutdown
+			if len(buffer) > 0 {
+				s.logger.Infof("[MongoDB] Final optimized flush: %d events for %s.%s", len(buffer), sourceDB, collectionName)
+				s.flushOptimizedBufferBatch(ctx, &buffer, sourceDB, collectionName, &totalProcessed, &lastFlushTime, &lastSavedToken)
+			}
+			return
+		case event, ok := <-eventChannel:
+			if !ok {
+				// Channel closed
+				if len(buffer) > 0 {
+					s.logger.Infof("[MongoDB] Optimized channel closed, final flush: %d events for %s.%s", len(buffer), sourceDB, collectionName)
+					s.flushOptimizedBufferBatch(ctx, &buffer, sourceDB, collectionName, &totalProcessed, &lastFlushTime, &lastSavedToken)
+				}
+				return
+			}
+
+			// Add raw BSON data to buffer (zero CPU overhead)
+			buffer = append(buffer, event.RawData)
+
+			// Check if we should flush
+			if len(buffer) >= batchSize {
+				s.flushOptimizedBufferBatch(ctx, &buffer, sourceDB, collectionName, &totalProcessed, &lastFlushTime, &lastSavedToken)
+				timer.Reset(flushInterval)
+			}
+		case <-timer.C:
+			if len(buffer) > 0 {
+				s.flushOptimizedBufferBatch(ctx, &buffer, sourceDB, collectionName, &totalProcessed, &lastFlushTime, &lastSavedToken)
+			}
+			timer.Reset(flushInterval)
+		}
+	}
+}
+
+// flushOptimizedBufferBatch handles the ultra-fast disk writing with minimal CPU overhead
+func (s *MongoDBSyncer) flushOptimizedBufferBatch(ctx context.Context, buffer *[][]byte, sourceDB, collectionName string, totalProcessed *int, lastFlushTime *time.Time, lastSavedToken *bson.Raw) {
+	batchSize := len(*buffer)
+	if batchSize == 0 {
+		return
+	}
+
+	s.logger.Debugf("[MongoDB] Starting optimized buffer flush: %d items for %s.%s",
+		batchSize, sourceDB, collectionName)
+
+	flushStart := time.Now()
+
+	if s.bufferEnabled {
+		// Ultra-fast byte stream concatenation with length prefix
+		success := s.storeOptimizedBufferToDisk(ctx, buffer, sourceDB, collectionName)
+		
+		if success {
+			s.logger.Debugf("[MongoDB] Optimized buffer flush completed successfully for %s.%s", sourceDB, collectionName)
+		} else {
+			s.logger.Warnf("[MongoDB] Failed to persist optimized buffer for %s.%s", sourceDB, collectionName)
+		}
+	} else {
+		s.logger.Warnf("[MongoDB] Optimized direct flush mode not supported for %s.%s", sourceDB, collectionName)
+	}
+
+	flushDuration := time.Since(flushStart)
+	*totalProcessed += batchSize
+	timeSinceLastFlush := time.Since(*lastFlushTime)
+	rate := float64(*totalProcessed) / timeSinceLastFlush.Seconds()
+
+	s.logger.Debugf("[MongoDB] Optimized buffer flush completed in %v, rate: %.2f items/sec",
+		flushDuration, rate)
+
+	if timeSinceLastFlush > time.Minute {
+		s.logger.Debugf("[MongoDB] Optimized processing rate over last minute: %.2f items/sec", rate)
+		*lastFlushTime = time.Now()
+		*totalProcessed = 0
+	}
+}
+
+// storeOptimizedBufferToDisk performs ultra-fast byte stream writing with minimal CPU overhead
+func (s *MongoDBSyncer) storeOptimizedBufferToDisk(ctx context.Context, buffer *[][]byte, sourceDB, collectionName string) bool {
+	if len(*buffer) == 0 {
+		return true
+	}
+
+	bufferPath := s.getBufferPath(sourceDB, collectionName)
+	startTime := time.Now()
+
+	// Ensure buffer directory exists
+	if err := os.MkdirAll(bufferPath, os.ModePerm); err != nil {
+		s.logger.Errorf("[MongoDB] Failed to create buffer directory %s: %v", bufferPath, err)
+		return false
+	}
+
+	timestamp := time.Now().UnixNano()
+	s.logger.Debugf("[MongoDB] Starting optimized buffer write: %d raw BSON events for %s.%s",
+		len(*buffer), sourceDB, collectionName)
+
+	// Create optimized batch file with length-prefixed format
+	batchFilePath := filepath.Join(bufferPath, fmt.Sprintf("optimized_batch_%d.raw", timestamp))
+	tempFilePath := filepath.Join(bufferPath, fmt.Sprintf("temp_optimized_%d.raw", timestamp))
+
+	// Ultra-fast byte stream concatenation
+	var combinedData []byte
+	totalSize := 0
+	
+	// Calculate total size first
+	for _, rawBSON := range *buffer {
+		totalSize += 4 + len(rawBSON) // 4 bytes for length + BSON data
+	}
+	
+	// Pre-allocate buffer for better performance
+	combinedData = make([]byte, 0, totalSize)
+	
+	// Concatenate with length prefix (4-byte little-endian length)
+	for _, rawBSON := range *buffer {
+		length := uint32(len(rawBSON))
+		lengthBytes := make([]byte, 4)
+		lengthBytes[0] = byte(length)
+		lengthBytes[1] = byte(length >> 8)
+		lengthBytes[2] = byte(length >> 16)
+		lengthBytes[3] = byte(length >> 24)
+		
+		combinedData = append(combinedData, lengthBytes...)
+		combinedData = append(combinedData, rawBSON...)
+	}
+
+	// Write to temporary file first (atomic operation)
+	if err := os.WriteFile(tempFilePath, combinedData, 0644); err != nil {
+		s.logger.Errorf("[MongoDB] Failed to write temp optimized batch file %s: %v", tempFilePath, err)
+		return false
+	}
+
+	// Atomic rename to final filename
+	if err := os.Rename(tempFilePath, batchFilePath); err != nil {
+		s.logger.Errorf("[MongoDB] Failed to rename temp file %s to %s: %v", tempFilePath, batchFilePath, err)
+		_ = os.Remove(tempFilePath) // Clean up temp file
+		return false
+	}
+
+	duration := time.Since(startTime)
+	rate := float64(len(*buffer)) / duration.Seconds()
+	s.logger.Debugf("[MongoDB] Completed optimized buffer write in %v (%.2f items/sec) for %s.%s",
+		duration, rate, sourceDB, collectionName)
+
+	// Clear buffer only on successful write
+	*buffer = (*buffer)[:0]
+	s.logger.Debugf("[MongoDB] Optimized buffer cleared successfully")
+
+	return true
+}
+
+// parseOptimizedBatchFile parses the optimized batch file format with length-prefixed BSON data
+func (s *MongoDBSyncer) parseOptimizedBatchFile(fileData []byte) ([]rawBSONEvent, error) {
+	var events []rawBSONEvent
+	offset := 0
+
+	for offset < len(fileData) {
+		// Check if we have enough bytes for length prefix
+		if offset+4 > len(fileData) {
+			return nil, fmt.Errorf("incomplete length prefix at offset %d", offset)
+		}
+
+		// Read 4-byte length prefix (little-endian)
+		length := uint32(fileData[offset]) |
+			uint32(fileData[offset+1])<<8 |
+			uint32(fileData[offset+2])<<16 |
+			uint32(fileData[offset+3])<<24
+
+		offset += 4
+
+		// Check if we have enough bytes for the BSON data
+		if offset+int(length) > len(fileData) {
+			return nil, fmt.Errorf("incomplete BSON data at offset %d, expected %d bytes", offset, length)
+		}
+
+		// Extract BSON data
+		bsonData := fileData[offset : offset+int(length)]
+		offset += int(length)
+
+		// Parse the BSON data to extract operation type and other metadata
+		var changeEvent bson.M
+		if err := bson.Unmarshal(bsonData, &changeEvent); err != nil {
+			s.logger.Warnf("[MongoDB] Failed to unmarshal BSON data: %v", err)
+			continue
+		}
+
+		// Extract operation type
+		opType, _ := changeEvent["operationType"].(string)
+		if opType == "" {
+			s.logger.Warnf("[MongoDB] Missing operation type in change event")
+			continue
+		}
+
+		// Create optimized event
+		optimizedEvent := rawBSONEvent{
+			RawData:   bsonData,
+			OpType:    opType,
+			Timestamp: time.Now(), // We don't store timestamp in optimized format, use current time
+		}
+
+		events = append(events, optimizedEvent)
+	}
+
+	return events, nil
+}
+
+// convertOptimizedEventToRawEvent converts an optimized event to rawChangeEvent with full processing
+func (s *MongoDBSyncer) convertOptimizedEventToRawEvent(optimizedEvent rawBSONEvent, sourceDB, collectionName string) (*rawChangeEvent, error) {
+	// Parse the raw BSON data
+	var changeEvent bson.M
+	if err := bson.Unmarshal(optimizedEvent.RawData, &changeEvent); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal optimized event: %w", err)
+	}
+
+	// Use the existing extractRawBSONData function to process the event
+	rawEvent := s.extractRawBSONData(changeEvent, optimizedEvent.OpType, collectionName)
+	if rawEvent == nil {
+		return nil, fmt.Errorf("failed to extract BSON data from optimized event")
+	}
+
+	// Set the timestamp from the optimized event
+	rawEvent.Timestamp = optimizedEvent.Timestamp
+
+	return rawEvent, nil
 }
