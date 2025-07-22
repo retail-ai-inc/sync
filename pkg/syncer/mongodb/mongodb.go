@@ -633,6 +633,9 @@ func (s *MongoDBSyncer) processFileAsStream(ctx context.Context, filePath string
 	defer file.Close()
 
 	scanner := bufio.NewScanner(file)
+	// Set buffer size to 100MB to handle large BSON documents
+	bufferSize := 100 * 1024 * 1024 // 100MB
+	scanner.Buffer(make([]byte, bufferSize), bufferSize)
 	// Set the scanner to use our custom split function.
 	scanner.Split(func(data []byte, atEOF bool) (advance int, token []byte, err error) {
 		if atEOF && len(data) == 0 {
