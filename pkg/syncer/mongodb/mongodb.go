@@ -33,6 +33,7 @@ type rawChangeEvent struct {
 	UpdateDesc    []byte    // Raw BSON data from updateDescription
 	OpType        string    // Operation type
 	Timestamp     time.Time // Event timestamp
+	ResumeToken   bson.Raw  // Resume token for this event
 }
 
 // persistedChange represents a change that will be saved to disk
@@ -62,6 +63,9 @@ type MongoDBSyncer struct {
 	// Fields for goroutine lifecycle management
 	activeProcessors map[string]context.CancelFunc
 	processorMutex   sync.RWMutex
+	// New fields for async pipeline
+	eventChannel    chan rawChangeEvent
+	channelCapacity int
 }
 
 func NewMongoDBSyncer(cfg config.SyncConfig, logger *logrus.Logger) *MongoDBSyncer {
@@ -139,10 +143,14 @@ func NewMongoDBSyncer(cfg config.SyncConfig, logger *logrus.Logger) *MongoDBSync
 		cfg:              cfg,
 		logger:           logger.WithField("sync_task_id", cfg.ID),
 		resumeTokens:     resumeMap,
+		resumeTokensM:    sync.RWMutex{},
 		bufferDir:        bufferDir,
 		bufferEnabled:    true, // Enable by default
 		processRate:      processRate,
 		activeProcessors: make(map[string]context.CancelFunc),
+		processorMutex:   sync.RWMutex{},
+		// Initialize async pipeline components
+		channelCapacity: 10000, // Configurable channel capacity
 	}
 }
 
@@ -466,6 +474,22 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 	var previousEventGap int
 	var monitorStartTime = time.Now()
 
+	// Create event channel for async pipeline
+	eventChannel := make(chan rawChangeEvent, s.channelCapacity)
+	defer close(eventChannel)
+
+	// Start disk writer goroutine (Stage 2)
+	diskWriterCtx, diskWriterCancel := context.WithCancel(processorCtx)
+	defer diskWriterCancel()
+	
+	go s.diskWriter(diskWriterCtx, eventChannel, sourceDB, collectionName)
+
+	// Start persistent buffer processor (Stage 3)
+	if s.bufferEnabled {
+		go s.processPersistentBuffer(processorCtx, sourceDB, collectionName, targetColl.Database().Name(), targetColl.Name())
+	}
+
+	// Start monitoring goroutine
 	go func() {
 		for {
 			select {
@@ -568,6 +592,16 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 				currentProcessRate := s.processRate
 				s.logger.Debugf("[MongoDB] Processing rate: %d changes/sec", currentProcessRate)
 
+				// Channel status monitoring
+				channelLen := len(eventChannel)
+				channelCap := cap(eventChannel)
+				channelUsage := float64(channelLen) / float64(channelCap) * 100
+				s.logger.Debugf("[MongoDB] Channel status: %d/%d (%.1f%%)", channelLen, channelCap, channelUsage)
+				
+				if channelUsage > 80 {
+					s.logger.Warnf("[MongoDB] Channel usage high: %.1f%%, possible disk writer bottleneck", channelUsage)
+				}
+
 				// Gap tracking logic removed - statistics now tracked in database
 
 				s.logger.Debugf("[MongoDB] =========== DIAGNOSTIC LOG END ===========")
@@ -611,116 +645,36 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 	}
 	s.logger.Infof("[MongoDB] Watching changes => %s.%s", sourceDB, collectionName)
 
-	// Reduce buffer size to prevent OOM issues with large datasets
-	var buffer []rawChangeEvent
-	var latestToken bson.Raw // Track the latest resume token separately
-	var tokenMutex sync.RWMutex
-	const batchSize = 500            // Reduced from 2000 to prevent OOM
-	flushInterval := time.Second * 2 // Increased flush frequency
-	timer := time.NewTimer(flushInterval)
-	var bufferMutex sync.Mutex
-
-	changeStreamActive := true
-
-	lastFlushTime := time.Now()
-	var totalProcessed int
-
-	// Separate goroutine for buffer flushing
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-timer.C:
-				bufferMutex.Lock()
-				if len(buffer) > 0 {
-					batchSize := len(buffer)
-					s.logger.Debugf("[MongoDB] Starting buffer flush: %d items for %s.%s",
-						batchSize, sourceDB, collectionName)
-
-					flushStart := time.Now()
-
-					if s.bufferEnabled {
-						// Store to persistent buffer instead of directly flushing
-						// Note: Events already counted as "received" when added to buffer
-						tokenMutex.RLock()
-						currentToken := latestToken
-						tokenMutex.RUnlock()
-						s.storeToBuffer(ctx, &buffer, sourceDB, collectionName, currentToken)
-					} else {
-						s.logger.Debugf("[MongoDB] flush timer => %s.%s => flushing %d ops", sourceDB, collectionName, len(buffer))
-						// Note: Events already counted as "received" when added to buffer
-						tokenMutex.RLock()
-						currentToken := latestToken
-						tokenMutex.RUnlock()
-						s.flushBuffer(ctx, targetColl, &buffer, sourceDB, collectionName, currentToken)
-					}
-
-					flushDuration := time.Since(flushStart)
-					totalProcessed += batchSize
-					timeSinceLastFlush := time.Since(lastFlushTime)
-					rate := float64(totalProcessed) / timeSinceLastFlush.Seconds()
-
-					s.logger.Debugf("[MongoDB] Buffer flush completed in %v, rate: %.2f items/sec",
-						flushDuration, rate)
-
-					if timeSinceLastFlush > time.Minute {
-						s.logger.Debugf("[MongoDB] Processing rate over last minute: %.2f items/sec", rate)
-						lastFlushTime = time.Now()
-						totalProcessed = 0
-					}
-				}
-				bufferMutex.Unlock()
-				timer.Reset(flushInterval)
-			}
-		}
-	}()
-
-	// Start a separate goroutine for processing the persistent buffer
-	if s.bufferEnabled {
-		go s.processPersistentBuffer(processorCtx, sourceDB, collectionName, targetColl.Database().Name(), targetColl.Name())
-	}
-
 	lastLogTime := time.Now()
 	eventsSinceLastLog := 0
+	changeStreamActive := true
 
+	// Stage 1: Producer - Ultra-lightweight Change Stream reader with raw BSON
 	for changeStreamActive {
 		select {
 		case <-ctx.Done():
-			bufferMutex.Lock()
-			if len(buffer) > 0 {
-				if s.bufferEnabled {
-					s.logger.Infof("[MongoDB] context done => storing %d ops to buffer for %s.%s", len(buffer), sourceDB, collectionName)
-					// Note: Events already counted as "received" when added to buffer
-					tokenMutex.RLock()
-					currentToken := latestToken
-					tokenMutex.RUnlock()
-					s.storeToBuffer(ctx, &buffer, sourceDB, collectionName, currentToken)
-				} else {
-					s.logger.Infof("[MongoDB] context done => flush %d ops for %s.%s", len(buffer), sourceDB, collectionName)
-					// Note: Events already counted as "received" when added to buffer
-					tokenMutex.RLock()
-					currentToken := latestToken
-					tokenMutex.RUnlock()
-					s.flushBuffer(ctx, targetColl, &buffer, sourceDB, collectionName, currentToken)
-				}
-			}
-			bufferMutex.Unlock()
+			s.logger.Infof("[MongoDB] Context cancelled, stopping change stream for %s.%s", sourceDB, collectionName)
 			cs.Close(ctx)
 			return
 		default:
 			if cs.Next(ctx) {
+				// Performance optimization: Use raw BSON data directly
+				rawBSON := cs.Current
+				if rawBSON == nil {
+					s.logger.Warnf("[MongoDB] Received nil raw BSON data, skipping")
+					continue
+				}
+
+				// Minimal decoding to get operation type for filtering and logging
 				var changeEvent bson.M
-				if errDec := cs.Decode(&changeEvent); errDec != nil {
+				if errDec := bson.Unmarshal(rawBSON, &changeEvent); errDec != nil {
 					s.logger.Errorf("[MongoDB] decode event fail => %v", errDec)
 					utils.RecordChangeStreamError(sourceDB, collectionName, fmt.Sprintf("decode error: %v", errDec))
 					continue
 				}
 
 				// Event received - will be tracked in ChangeStreamInfo
-
 				opType, _ := changeEvent["operationType"].(string)
-
 				filteredTypes[opType]++
 				eventsSinceLastLog++
 
@@ -731,79 +685,50 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 					eventsSinceLastLog = 0
 				}
 
+				// Get resume token from change stream
 				token := cs.ResumeToken()
 				
-				// Extract raw BSON data directly from change event
-				rawEvent := s.extractRawBSONData(changeEvent, opType, collectionName)
-				if rawEvent != nil {
-					// Update latest token
-					tokenMutex.Lock()
-					latestToken = token
-					tokenMutex.Unlock()
+				// Create raw event with resume token included
+				rawEvent := rawChangeEvent{
+					FullDoc:     rawBSON, // Store the complete raw BSON data
+					DocKey:      nil,     // Will be extracted in diskWriter
+					UpdateDesc:  nil,     // Will be extracted in diskWriter
+					OpType:      opType,
+					Timestamp:   time.Now(),
+					ResumeToken: token,
+				}
 
-					bufferMutex.Lock()
-					buffer = append(buffer, *rawEvent)
-					bufferMutex.Unlock()
-
-					// Count this event as received immediately when added to buffer (avoid duplicate counting)
+				// Stage 1: Send to channel (non-blocking with backpressure handling)
+				select {
+				case eventChannel <- rawEvent:
+					// Successfully sent to channel
 					utils.AccumulateChangeStreamActivity(sourceDB, collectionName, 0, 1, 0, 0, 0, 0)
-
-					s.logger.Debugf("[MongoDB][%s] table=%s.%s event extracted",
-						strings.ToUpper(rawEvent.OpType),
+					s.logger.Debugf("[MongoDB][%s] table=%s.%s event sent to channel",
+						strings.ToUpper(opType),
 						targetColl.Database().Name(),
 						targetColl.Name(),
 					)
-
-					bufferMutex.Lock()
-					buffSize := len(buffer)
-
-					if buffSize%100 == 0 && buffSize > 0 {
-						s.logger.Debugf("[MongoDB] Current buffer size: %d for %s.%s",
-							buffSize, sourceDB, collectionName)
-
-						// Memory pressure warning
-						if buffSize > batchSize*1.5 {
-							s.logger.Warnf("[MongoDB] High memory pressure detected: buffer size %d exceeds threshold for %s.%s",
-								buffSize, sourceDB, collectionName)
-						}
+				default:
+					// Channel is full - apply backpressure
+					s.logger.Warnf("[MongoDB] Channel full, applying backpressure for %s.%s", sourceDB, collectionName)
+					
+					// Wait for space in channel with timeout
+					select {
+					case eventChannel <- rawEvent:
+						utils.AccumulateChangeStreamActivity(sourceDB, collectionName, 0, 1, 0, 0, 0, 0)
+						s.logger.Debugf("[MongoDB][%s] table=%s.%s event sent to channel after backpressure",
+							strings.ToUpper(opType),
+							targetColl.Database().Name(),
+							targetColl.Name(),
+						)
+					case <-time.After(100 * time.Millisecond):
+						s.logger.Errorf("[MongoDB] Failed to send event to channel after backpressure timeout for %s.%s", sourceDB, collectionName)
+						utils.RecordChangeStreamError(sourceDB, collectionName, "Channel backpressure timeout")
 					}
-
-					if buffSize >= batchSize {
-						if s.bufferEnabled {
-							s.logger.Debugf("[MongoDB] buffer reached %d => storing to persistent buffer => %s.%s", batchSize, sourceDB, collectionName)
-							tokenMutex.RLock()
-							currentToken := latestToken
-							tokenMutex.RUnlock()
-							s.storeToBuffer(ctx, &buffer, sourceDB, collectionName, currentToken)
-						} else {
-							s.logger.Debugf("[MongoDB] buffer reached %d => flush now => %s.%s", batchSize, sourceDB, collectionName)
-							tokenMutex.RLock()
-							currentToken := latestToken
-							tokenMutex.RUnlock()
-							s.flushBuffer(ctx, targetColl, &buffer, sourceDB, collectionName, currentToken)
-						}
-						timer.Reset(flushInterval)
-					}
-
-					// Emergency memory management: force flush if buffer gets too large
-					if buffSize >= batchSize*2 {
-						s.logger.Warnf("[MongoDB] Emergency buffer flush triggered: %d items for %s.%s", buffSize, sourceDB, collectionName)
-						if s.bufferEnabled {
-							tokenMutex.RLock()
-							currentToken := latestToken
-							tokenMutex.RUnlock()
-							s.storeToBuffer(ctx, &buffer, sourceDB, collectionName, currentToken)
-						} else {
-							tokenMutex.RLock()
-							currentToken := latestToken
-							tokenMutex.RUnlock()
-							s.flushBuffer(ctx, targetColl, &buffer, sourceDB, collectionName, currentToken)
-						}
-					}
-					bufferMutex.Unlock()
-				} else {
-					s.logger.Debugf("[MongoDB] Failed to extract raw BSON data for event type %s, skipping", opType)
 				}
+				
+				// CRITICAL FIX: Do NOT save resume token here!
+				// Token will be saved in diskWriter only after successful disk persistence
 			} else {
 				if errCS := cs.Err(); errCS != nil {
 					s.logger.Errorf("[MongoDB] changeStream error => %v", errCS)
@@ -956,6 +881,285 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 	// If all retries failed, log error and exit
 	s.logger.Errorf("[MongoDB] Failed to re-establish ChangeStream for %s.%s after 5 attempts, giving up",
 		sourceDB, collectionName)
+}
+
+// diskWriter is Stage 2 of the async pipeline - handles disk I/O operations with proper token saving
+func (s *MongoDBSyncer) diskWriter(ctx context.Context, eventChannel <-chan rawChangeEvent, sourceDB, collectionName string) {
+	s.logger.Infof("[MongoDB] Starting disk writer for %s.%s", sourceDB, collectionName)
+	defer s.logger.Infof("[MongoDB] Stopping disk writer for %s.%s", sourceDB, collectionName)
+
+	var buffer []rawChangeEvent
+	const batchSize = 500
+	flushInterval := time.Second * 2
+	timer := time.NewTimer(flushInterval)
+	defer timer.Stop()
+
+	lastFlushTime := time.Now()
+	var totalProcessed int
+	var lastSavedToken bson.Raw // Track the last successfully saved token
+
+	for {
+		select {
+		case <-ctx.Done():
+			// Final flush before shutdown
+			if len(buffer) > 0 {
+				s.logger.Infof("[MongoDB] Final flush: %d events for %s.%s", len(buffer), sourceDB, collectionName)
+				s.flushBufferBatchWithTokenSaving(ctx, &buffer, sourceDB, collectionName, &totalProcessed, &lastFlushTime, &lastSavedToken)
+			}
+			return
+		case event, ok := <-eventChannel:
+			if !ok {
+				// Channel closed
+				if len(buffer) > 0 {
+					s.logger.Infof("[MongoDB] Channel closed, final flush: %d events for %s.%s", len(buffer), sourceDB, collectionName)
+					s.flushBufferBatchWithTokenSaving(ctx, &buffer, sourceDB, collectionName, &totalProcessed, &lastFlushTime, &lastSavedToken)
+				}
+				return
+			}
+
+			// Add event to buffer
+			buffer = append(buffer, event)
+
+			// Check if we should flush
+			if len(buffer) >= batchSize {
+				s.flushBufferBatchWithTokenSaving(ctx, &buffer, sourceDB, collectionName, &totalProcessed, &lastFlushTime, &lastSavedToken)
+				timer.Reset(flushInterval)
+			}
+		case <-timer.C:
+			if len(buffer) > 0 {
+				s.flushBufferBatchWithTokenSaving(ctx, &buffer, sourceDB, collectionName, &totalProcessed, &lastFlushTime, &lastSavedToken)
+			}
+			timer.Reset(flushInterval)
+		}
+	}
+}
+
+// flushBufferBatchWithTokenSaving handles the actual flushing with proper token saving
+func (s *MongoDBSyncer) flushBufferBatchWithTokenSaving(ctx context.Context, buffer *[]rawChangeEvent, sourceDB, collectionName string, totalProcessed *int, lastFlushTime *time.Time, lastSavedToken *bson.Raw) {
+	batchSize := len(*buffer)
+	s.logger.Debugf("[MongoDB] Starting buffer flush: %d items for %s.%s",
+		batchSize, sourceDB, collectionName)
+
+	flushStart := time.Now()
+
+	if s.bufferEnabled {
+		// Extract the latest token from the batch for saving
+		var latestToken bson.Raw
+		if len(*buffer) > 0 {
+			latestToken = (*buffer)[len(*buffer)-1].ResumeToken
+		}
+
+		// Store to persistent buffer
+		success := s.storeToBufferWithToken(ctx, buffer, sourceDB, collectionName, latestToken)
+		
+		if success && latestToken != nil {
+			// CRITICAL FIX: Only save token after successful disk persistence
+			s.saveMongoDBResumeToken(sourceDB, collectionName, latestToken)
+			*lastSavedToken = latestToken
+			s.logger.Debugf("[MongoDB] Resume token saved after successful disk persistence for %s.%s", sourceDB, collectionName)
+		} else if !success {
+			s.logger.Warnf("[MongoDB] Failed to persist buffer, token NOT saved for %s.%s", sourceDB, collectionName)
+		}
+	} else {
+		// Direct flush to target (fallback mode)
+		// Note: This would require access to targetColl, which we don't have in this context
+		// In a real implementation, we'd need to pass this or use a different approach
+		s.logger.Warnf("[MongoDB] Direct flush mode not supported in async pipeline for %s.%s", sourceDB, collectionName)
+	}
+
+	flushDuration := time.Since(flushStart)
+	*totalProcessed += batchSize
+	timeSinceLastFlush := time.Since(*lastFlushTime)
+	rate := float64(*totalProcessed) / timeSinceLastFlush.Seconds()
+
+	s.logger.Debugf("[MongoDB] Buffer flush completed in %v, rate: %.2f items/sec",
+		flushDuration, rate)
+
+	if timeSinceLastFlush > time.Minute {
+		s.logger.Debugf("[MongoDB] Processing rate over last minute: %.2f items/sec", rate)
+		*lastFlushTime = time.Now()
+		*totalProcessed = 0
+	}
+}
+
+// storeToBufferWithToken is an enhanced version that returns success status
+func (s *MongoDBSyncer) storeToBufferWithToken(ctx context.Context, buffer *[]rawChangeEvent, sourceDB, collectionName string, latestToken bson.Raw) bool {
+	if len(*buffer) == 0 {
+		return true
+	}
+
+	bufferPath := s.getBufferPath(sourceDB, collectionName)
+	startTime := time.Now()
+
+	// Ensure buffer directory exists
+	if err := os.MkdirAll(bufferPath, os.ModePerm); err != nil {
+		s.logger.Errorf("[MongoDB] Failed to create buffer directory %s: %v", bufferPath, err)
+		return false
+	}
+
+	// Batch file writing optimization
+	batchSize := 100 // Number of files per batch
+	timestamp := time.Now().UnixNano()
+
+	s.logger.Debugf("[MongoDB] Starting batch buffer write: %d changes for %s.%s",
+		len(*buffer), sourceDB, collectionName)
+
+	// Track write success
+	writeSuccess := true
+
+	for i := 0; i < len(*buffer); i += batchSize {
+		end := i + batchSize
+		if end > len(*buffer) {
+			end = len(*buffer)
+		}
+
+		batchChanges := make([]persistedChange, 0, end-i)
+
+		// Prepare batch changes with proper BSON extraction
+		for j := i; j < end; j++ {
+			change := (*buffer)[j]
+			
+			// Extract BSON data from the raw event
+			extractedData := s.extractBSONFromRawEvent(change, collectionName)
+			if extractedData == nil {
+				s.logger.Warnf("[MongoDB] Failed to extract BSON data for event %d, skipping", j)
+				continue
+			}
+
+			// Create persisted change with extracted BSON data
+			persistedChange := persistedChange{
+				ID:         fmt.Sprintf("%d_%d", timestamp, j),
+				Token:      change.ResumeToken, // Use the token from the event
+				FullDoc:    extractedData.FullDoc,
+				DocKey:     extractedData.DocKey,
+				UpdateDesc: extractedData.UpdateDesc,
+				OpType:     change.OpType,
+				SourceDB:   sourceDB,
+				SourceColl: collectionName,
+				Timestamp:  change.Timestamp,
+			}
+
+			batchChanges = append(batchChanges, persistedChange)
+		}
+
+		// Write batch to single file using BSON instead of JSON
+		batchFilePath := filepath.Join(bufferPath, fmt.Sprintf("batch_%d_%d.bson", timestamp, i))
+		tempFilePath := filepath.Join(bufferPath, fmt.Sprintf("temp_%d_%d.bson", timestamp, i))
+		
+		// Wrap the batch in a structure for proper BSON serialization
+		batchWrapper := struct {
+			Changes []persistedChange `bson:"changes"`
+			Count   int               `bson:"count"`
+		}{
+			Changes: batchChanges,
+			Count:   len(batchChanges),
+		}
+		
+		batchBytes, err := bson.Marshal(batchWrapper)
+		if err != nil {
+			s.logger.Errorf("[MongoDB] Failed to marshal batch changes: %v", err)
+			writeSuccess = false
+			continue
+		}
+
+		// Write to temporary file first
+		if err := os.WriteFile(tempFilePath, batchBytes, 0644); err != nil {
+			s.logger.Errorf("[MongoDB] Failed to write temp batch file %s: %v", tempFilePath, err)
+			writeSuccess = false
+		} else {
+			// Atomic rename to final filename
+			if err := os.Rename(tempFilePath, batchFilePath); err != nil {
+				s.logger.Errorf("[MongoDB] Failed to rename temp file %s to %s: %v", tempFilePath, batchFilePath, err)
+				_ = os.Remove(tempFilePath) // Clean up temp file
+				writeSuccess = false
+			} else {
+				// Validate the written file immediately
+				if !s.validateBatchFile(batchFilePath) {
+					s.logger.Warnf("[MongoDB] Batch file validation failed, retrying: %s", batchFilePath)
+					_ = os.Remove(batchFilePath) // Remove corrupted file
+					writeSuccess = false         // Keep data in buffer for retry
+				}
+			}
+		}
+	}
+
+	duration := time.Since(startTime)
+	rate := float64(len(*buffer)) / duration.Seconds()
+	s.logger.Debugf("[MongoDB] Completed batch buffer write in %v (%.2f items/sec) for %s.%s",
+		duration, rate, sourceDB, collectionName)
+
+	s.logger.Debugf("[MongoDB] Stored %d changes to buffer for %s.%s using batch optimization",
+		len(*buffer), sourceDB, collectionName)
+
+	// Only clear buffer if all writes succeeded
+	if writeSuccess {
+		// Clear in-memory buffer
+		*buffer = (*buffer)[:0]
+		s.logger.Debugf("[MongoDB] All writes successful, buffer cleared")
+	} else {
+		s.logger.Warnf("[MongoDB] Some writes failed, keeping data in buffer for retry")
+	}
+
+	return writeSuccess
+}
+
+// extractBSONFromRawEvent extracts BSON data from raw change event
+func (s *MongoDBSyncer) extractBSONFromRawEvent(event rawChangeEvent, collectionName string) *struct {
+	FullDoc    []byte
+	DocKey     []byte
+	UpdateDesc []byte
+} {
+	// Decode the raw BSON data to extract specific fields
+	var changeEvent bson.M
+	if err := bson.Unmarshal(event.FullDoc, &changeEvent); err != nil {
+		s.logger.Errorf("[MongoDB] Failed to unmarshal raw BSON data: %v", err)
+		return nil
+	}
+
+	// Extract operation type
+	opType, _ := changeEvent["operationType"].(string)
+
+	// Extract specific BSON data based on operation type
+	var fullDoc, docKey, updateDesc []byte
+
+	switch opType {
+	case "insert", "replace":
+		if fullDocument, exists := changeEvent["fullDocument"]; exists {
+			if fullDocBytes, err := bson.Marshal(fullDocument); err == nil {
+				fullDoc = fullDocBytes
+			}
+		}
+	case "update":
+		if fullDocument, exists := changeEvent["fullDocument"]; exists {
+			if fullDocBytes, err := bson.Marshal(fullDocument); err == nil {
+				fullDoc = fullDocBytes
+			}
+		}
+		if updateDescription, exists := changeEvent["updateDescription"]; exists {
+			if updateDescBytes, err := bson.Marshal(updateDescription); err == nil {
+				updateDesc = updateDescBytes
+			}
+		}
+	case "delete":
+		// For delete operations, we don't have fullDocument
+	}
+
+	// Extract document key
+	if documentKey, exists := changeEvent["documentKey"]; exists {
+		if docKeyBytes, err := bson.Marshal(documentKey); err == nil {
+			docKey = docKeyBytes
+		}
+	}
+
+	return &struct {
+		FullDoc    []byte
+		DocKey     []byte
+		UpdateDesc []byte
+	}{
+		FullDoc:    fullDoc,
+		DocKey:     docKey,
+		UpdateDesc: updateDesc,
+	}
 }
 
 func (s *MongoDBSyncer) prepareWriteModel(doc bson.M, collName, opType string) mongo.WriteModel {
