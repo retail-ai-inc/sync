@@ -17,6 +17,10 @@ type AdvancedSettings struct {
 	IgnoreDeleteOps bool   `json:"ignoreDeleteOps"`
 	UploadToGcs     bool   `json:"uploadToGcs"`
 	GcsAddress      string `json:"gcsAddress"`
+	// Retry settings for change stream recovery
+	MaxRetries      int           `json:"maxRetries"`      // Maximum number of retry attempts (default: 10)
+	BaseRetryDelay  time.Duration `json:"baseRetryDelay"`  // Base delay between retries (default: 5s)
+	MaxRetryDelay   time.Duration `json:"maxRetryDelay"`   // Maximum delay between retries (default: 5m)
 }
 
 type TableMapping struct {
@@ -271,6 +275,20 @@ ORDER BY id ASC
 												}
 												if gcsAddress, ok := advancedSettings["gcsAddress"].(string); ok {
 													sc.Mappings[i].Tables[j].AdvancedSettings.GcsAddress = gcsAddress
+												}
+												// Parse retry settings
+												if maxRetries, ok := advancedSettings["maxRetries"].(float64); ok {
+													sc.Mappings[i].Tables[j].AdvancedSettings.MaxRetries = int(maxRetries)
+												}
+												if baseRetryDelay, ok := advancedSettings["baseRetryDelay"].(string); ok {
+													if duration, err := time.ParseDuration(baseRetryDelay); err == nil {
+														sc.Mappings[i].Tables[j].AdvancedSettings.BaseRetryDelay = duration
+													}
+												}
+												if maxRetryDelay, ok := advancedSettings["maxRetryDelay"].(string); ok {
+													if duration, err := time.ParseDuration(maxRetryDelay); err == nil {
+														sc.Mappings[i].Tables[j].AdvancedSettings.MaxRetryDelay = duration
+													}
 												}
 											}
 										}
