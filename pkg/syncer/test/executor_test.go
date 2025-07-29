@@ -1049,7 +1049,7 @@ func TestCompressDirectoryMethod(t *testing.T) {
 
 			// Test compression
 			archivePath := filepath.Join(tempDir, "test-archive.tar.gz")
-			err = executor.CompressDirectory(tempDir, archivePath)
+			err = executor.CompressDirectory(tempDir, archivePath, "gzip")
 
 			if tc.expectSuccess {
 				if err != nil {
@@ -1135,7 +1135,7 @@ func TestCompressDirectoryWithLargeFiles(t *testing.T) {
 
 	// Test compression
 	archivePath := filepath.Join(tempDir, "large-archive.tar.gz")
-	err = executor.CompressDirectory(tempDir, archivePath)
+	err = executor.CompressDirectory(tempDir, archivePath, "gzip")
 	if err != nil {
 		t.Fatalf("Compression failed: %v", err)
 	}
@@ -1184,7 +1184,7 @@ func TestCompressDirectoryErrorCases(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := executor.CompressDirectory(tc.sourceDir, tc.destFile)
+			err := executor.CompressDirectory(tc.sourceDir, tc.destFile, "gzip")
 			if err == nil {
 				t.Errorf("Expected compression to fail for %s, but it succeeded", tc.name)
 			} else {

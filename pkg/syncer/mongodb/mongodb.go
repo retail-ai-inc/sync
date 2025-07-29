@@ -449,7 +449,7 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 			if !cs.Next(ctx) {
 				if err := cs.Err(); err != nil {
 					s.logger.Errorf("[MongoDB] Change stream error for %s.%s: %v", sourceDB, collectionName, err)
-					
+
 					// Check if this is a recoverable error
 					if isRecoverableError(err) {
 						s.logger.Warnf("[MongoDB] Recoverable error detected for %s.%s, will be retried by guardian", sourceDB, collectionName)
@@ -489,17 +489,17 @@ func (s *MongoDBSyncer) watchChangesWithRetry(ctx context.Context, sourceColl, t
 	if maxRetries <= 0 {
 		maxRetries = 10 // Default value
 	}
-	
+
 	baseDelay := advancedSettings.BaseRetryDelay
 	if baseDelay <= 0 {
 		baseDelay = 5 * time.Second // Default value
 	}
-	
+
 	maxDelay := advancedSettings.MaxRetryDelay
 	if maxDelay <= 0 {
 		maxDelay = 5 * time.Minute // Default value
 	}
-	
+
 	currentDelay := baseDelay
 	retryCount := 0
 
@@ -512,11 +512,11 @@ func (s *MongoDBSyncer) watchChangesWithRetry(ctx context.Context, sourceColl, t
 			return
 		default:
 			s.logger.Infof("[MongoDB] Attempting to start watchChanges for %s.%s (attempt %d)", sourceDB, collectionName, retryCount+1)
-			
+
 			// Start the actual watchChanges in a separate goroutine
 			watchCtx, watchCancel := context.WithCancel(ctx)
 			watchDone := make(chan struct{})
-			
+
 			go func() {
 				defer close(watchDone)
 				s.watchChanges(watchCtx, sourceColl, targetColl, sourceDB, collectionName)
@@ -537,10 +537,10 @@ func (s *MongoDBSyncer) watchChangesWithRetry(ctx context.Context, sourceColl, t
 						s.logger.Errorf("[MongoDB] Max retries (%d) exceeded for %s.%s, stopping guardian loop", maxRetries, sourceDB, collectionName)
 						return
 					}
-					
-					s.logger.Warnf("[MongoDB] watchChanges exited for %s.%s, retrying in %v (attempt %d/%d)", 
+
+					s.logger.Warnf("[MongoDB] watchChanges exited for %s.%s, retrying in %v (attempt %d/%d)",
 						sourceDB, collectionName, currentDelay, retryCount, maxRetries)
-					
+
 					// Exponential backoff with jitter
 					select {
 					case <-ctx.Done():
@@ -959,9 +959,9 @@ func isRecoverableError(err error) bool {
 	if err == nil {
 		return false
 	}
-	
+
 	errStr := err.Error()
-	
+
 	// Network-related errors that are typically recoverable
 	recoverablePatterns := []string{
 		"server selection timeout",
@@ -978,20 +978,20 @@ func isRecoverableError(err error) bool {
 		"broken pipe",
 		"i/o timeout",
 	}
-	
+
 	for _, pattern := range recoverablePatterns {
 		if strings.Contains(strings.ToLower(errStr), strings.ToLower(pattern)) {
 			return true
 		}
 	}
-	
+
 	// Check for specific MongoDB error codes that are recoverable
 	if strings.Contains(errStr, "error code 11600") || // InterruptedAtShutdown
 		strings.Contains(errStr, "error code 11602") || // InterruptedDueToReplStateChange
 		strings.Contains(errStr, "error code 10107") || // NotMaster
-		strings.Contains(errStr, "error code 189") {    // PrimarySteppedDown
+		strings.Contains(errStr, "error code 189") { // PrimarySteppedDown
 		return true
 	}
-	
+
 	return false
 }

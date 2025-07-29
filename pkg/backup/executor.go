@@ -118,9 +118,10 @@ func (e *BackupExecutor) Execute(ctx context.Context, taskID int) error {
 			ServiceAccount  string `json:"serviceAccount"`
 			FileNamePattern string `json:"fileNamePattern"`
 		} `json:"destination"`
-		Format     string                            `json:"format"`
-		BackupType string                            `json:"backupType"`
-		Query      map[string]map[string]interface{} `json:"query"`
+		Format          string                            `json:"format"`
+		BackupType      string                            `json:"backupType"`
+		Query           map[string]map[string]interface{} `json:"query"`
+		CompressionType string                            `json:"compressionType"`
 	}
 
 	if err := json.Unmarshal([]byte(task.ConfigJSON), &config); err != nil {
@@ -162,20 +163,38 @@ func (e *BackupExecutor) Execute(ctx context.Context, taskID int) error {
 		tempParentDir := filepath.Dir(tempDir)
 		archiveBaseName := processFileNamePattern(config.Destination.FileNamePattern, table)
 
-		// Ensure .tar.gz extension for archive
-		if !strings.HasSuffix(archiveBaseName, ".tar.gz") {
-			// Remove existing extension if any and add .tar.gz
+		// Determine compression type and file extension
+		compressionType := config.CompressionType
+		if compressionType == "" {
+			compressionType = "zip" // Default to zip
+		}
+
+		var fileExtension string
+		switch compressionType {
+		case "zip":
+			fileExtension = ".zip"
+		case "gzip":
+			fileExtension = ".tar.gz"
+		default:
+			logrus.Warnf("[BackupExecutor] Unknown compression type '%s', defaulting to zip", compressionType)
+			fileExtension = ".zip"
+			compressionType = "zip"
+		}
+
+		// Ensure correct extension for archive based on compression type
+		if !strings.HasSuffix(archiveBaseName, fileExtension) {
+			// Remove existing extension if any and add correct extension
 			ext := filepath.Ext(archiveBaseName)
 			if ext != "" {
 				archiveBaseName = strings.TrimSuffix(archiveBaseName, ext)
 			}
-			archiveBaseName += ".tar.gz"
+			archiveBaseName += fileExtension
 		}
 
 		archivePath := filepath.Join(tempParentDir, archiveBaseName)
 
-		logrus.Infof("[BackupExecutor] Starting compression for table %s: %s -> %s", table, tempDir, archivePath)
-		if err := e.CompressDirectory(tempDir, archivePath); err != nil {
+		logrus.Infof("[BackupExecutor] Starting compression for table %s: %s -> %s using %s", table, tempDir, archivePath, compressionType)
+		if err := e.CompressDirectory(tempDir, archivePath, compressionType); err != nil {
 			logrus.Errorf("[BackupExecutor] Compression failed for table %s: %v", table, err)
 			os.RemoveAll(tempDir) // Clean up temp directory only
 			continue
@@ -252,9 +271,10 @@ func (e *BackupExecutor) exportMongoDB(ctx context.Context, config struct {
 		ServiceAccount  string `json:"serviceAccount"`
 		FileNamePattern string `json:"fileNamePattern"`
 	} `json:"destination"`
-	Format     string                            `json:"format"`
-	BackupType string                            `json:"backupType"`
-	Query      map[string]map[string]interface{} `json:"query"`
+	Format          string                            `json:"format"`
+	BackupType      string                            `json:"backupType"`
+	Query           map[string]map[string]interface{} `json:"query"`
+	CompressionType string                            `json:"compressionType"`
 }, tempDir string, task BackupTask) error {
 	dateStr := utils.GetTodayDateString()
 
@@ -295,9 +315,10 @@ func (e *BackupExecutor) exportMongoDBWithDump(ctx context.Context, config struc
 		ServiceAccount  string `json:"serviceAccount"`
 		FileNamePattern string `json:"fileNamePattern"`
 	} `json:"destination"`
-	Format     string                            `json:"format"`
-	BackupType string                            `json:"backupType"`
-	Query      map[string]map[string]interface{} `json:"query"`
+	Format          string                            `json:"format"`
+	BackupType      string                            `json:"backupType"`
+	Query           map[string]map[string]interface{} `json:"query"`
+	CompressionType string                            `json:"compressionType"`
 }, tempDir string, task BackupTask, connStr string, dateStr string) error {
 	// Use full path to avoid command parsing issues
 	mongodumpPath, err := exec.LookPath("mongodump")
@@ -402,9 +423,10 @@ func (e *BackupExecutor) exportMongoDBWithExport(ctx context.Context, config str
 		ServiceAccount  string `json:"serviceAccount"`
 		FileNamePattern string `json:"fileNamePattern"`
 	} `json:"destination"`
-	Format     string                            `json:"format"`
-	BackupType string                            `json:"backupType"`
-	Query      map[string]map[string]interface{} `json:"query"`
+	Format          string                            `json:"format"`
+	BackupType      string                            `json:"backupType"`
+	Query           map[string]map[string]interface{} `json:"query"`
+	CompressionType string                            `json:"compressionType"`
 }, tempDir string, task BackupTask, connStr string, dateStr string) error {
 	// Use full path to avoid command parsing issues
 	mongoexportPath, err := exec.LookPath("mongoexport")
@@ -518,15 +540,21 @@ func (e *BackupExecutor) exportMongoDBWithExport(ctx context.Context, config str
 	return nil
 }
 
-// CompressDirectory Compress directory
-func (e *BackupExecutor) CompressDirectory(sourceDir, destFile string) error {
+// CompressDirectory Compress directory with specified compression type
+func (e *BackupExecutor) CompressDirectory(sourceDir, destFile, compressionType string) error {
 	logrus.Infof("[BackupExecutor] Starting compression of directory: %s", sourceDir)
 
-	// Use full path to avoid command parsing issues
-	tarPath, err := exec.LookPath("tar")
-	if err != nil {
-		tarPath = "tar" // If not found, use default command name
-		logrus.Warnf("[BackupExecutor] tar command not found in PATH, using default name")
+	// Set default compression type to zip if empty
+	if compressionType == "" {
+		compressionType = "zip"
+	}
+
+	logrus.Infof("[BackupExecutor] Using compression type: %s", compressionType)
+
+	// Check if compression tool is available
+	if err := e.checkCompressionToolAvailable(compressionType); err != nil {
+		logrus.Warnf("[BackupExecutor] Preferred compression tool unavailable: %v, fallback to gzip", err)
+		compressionType = "gzip"
 	}
 
 	// Recursively find all needed files
@@ -579,45 +607,26 @@ func (e *BackupExecutor) CompressDirectory(sourceDir, destFile string) error {
 		return fmt.Errorf("no files to compress (checked for .json, .sql, .bson)")
 	}
 
-	// Make all file paths relative
-	var relativeFiles []string
+	// Calculate total size
 	totalSize := int64(0)
 	for _, file := range allFiles {
-		relFile, err := filepath.Rel(sourceDir, file)
-		if err != nil {
-			logrus.Warnf("[BackupExecutor] Failed to get relative path for %s: %v", file, err)
-			continue
-		}
-		relativeFiles = append(relativeFiles, relFile)
-
 		if info, err := os.Stat(file); err == nil {
 			totalSize += info.Size()
 		}
 	}
 
-	// Build tar command, using -r option to include all subdirectories
-	args := []string{"-czf", destFile, "-C", sourceDir}
-	args = append(args, relativeFiles...)
-	cmd := exec.Command(tarPath, args...)
+	logrus.Infof("[BackupExecutor] Compressing %d files (total size: %.2f MB) using %s compression",
+		len(allFiles), float64(totalSize)/1024/1024, compressionType)
 
-	logrus.Infof("[BackupExecutor] Compressing %d files (total size: %.2f MB) to %s",
-		len(relativeFiles), float64(totalSize)/1024/1024, destFile)
-
-	// Execute command
-	if err := executeCommand(cmd, "tar"); err != nil {
-		logrus.Errorf("[BackupExecutor] Compression failed: %v", err)
-		return err
+	// Execute compression based on type
+	switch compressionType {
+	case "zip":
+		return e.compressWithZip(sourceDir, destFile, allFiles)
+	case "gzip":
+		return e.compressWithGzip(sourceDir, destFile, allFiles)
+	default:
+		return fmt.Errorf("unsupported compression type: %s", compressionType)
 	}
-
-	// Check if compressed file was created and get its size
-	if info, err := os.Stat(destFile); err == nil {
-		logrus.Infof("[BackupExecutor] Compression completed successfully. Archive size: %.2f MB",
-			float64(info.Size())/1024/1024)
-	} else {
-		logrus.Warnf("[BackupExecutor] Could not stat compressed file %s: %v", destFile, err)
-	}
-
-	return nil
 }
 
 // executeCommand General function to execute commands
@@ -648,6 +657,112 @@ func executeCommand(cmd *exec.Cmd, commandName string) error {
 	return nil
 }
 
+// checkCompressionToolAvailable Check if compression tool is available
+func (e *BackupExecutor) checkCompressionToolAvailable(compressionType string) error {
+	switch compressionType {
+	case "zip":
+		if _, err := exec.LookPath("zip"); err != nil {
+			return fmt.Errorf("zip command not found: %w", err)
+		}
+	case "gzip":
+		if _, err := exec.LookPath("tar"); err != nil {
+			return fmt.Errorf("tar command not found: %w", err)
+		}
+	default:
+		return fmt.Errorf("unsupported compression type: %s", compressionType)
+	}
+	return nil
+}
+
+// compressWithZip Compress files using zip
+func (e *BackupExecutor) compressWithZip(sourceDir, destFile string, allFiles []string) error {
+	// Use full path to avoid command parsing issues
+	zipPath, err := exec.LookPath("zip")
+	if err != nil {
+		zipPath = "zip" // If not found, use default command name
+		logrus.Warnf("[BackupExecutor] zip command not found in PATH, using default name")
+	}
+
+	// Make all file paths relative to source directory
+	var relativeFiles []string
+	for _, file := range allFiles {
+		relFile, err := filepath.Rel(sourceDir, file)
+		if err != nil {
+			logrus.Warnf("[BackupExecutor] Failed to get relative path for %s: %v", file, err)
+			continue
+		}
+		relativeFiles = append(relativeFiles, relFile)
+	}
+
+	// Build zip command: zip -r destFile files...
+	args := []string{"-r", destFile}
+	args = append(args, relativeFiles...)
+	cmd := exec.Command(zipPath, args...)
+	cmd.Dir = sourceDir // Set working directory to source directory
+
+	logrus.Infof("[BackupExecutor] Executing zip command in directory: %s", sourceDir)
+
+	// Execute command
+	if err := executeCommand(cmd, "zip"); err != nil {
+		logrus.Errorf("[BackupExecutor] ZIP compression failed: %v", err)
+		return err
+	}
+
+	// Check if compressed file was created and get its size
+	if info, err := os.Stat(destFile); err == nil {
+		logrus.Infof("[BackupExecutor] ZIP compression completed successfully. Archive size: %.2f MB",
+			float64(info.Size())/1024/1024)
+	} else {
+		logrus.Warnf("[BackupExecutor] Could not stat compressed file %s: %v", destFile, err)
+	}
+
+	return nil
+}
+
+// compressWithGzip Compress files using gzip (tar.gz)
+func (e *BackupExecutor) compressWithGzip(sourceDir, destFile string, allFiles []string) error {
+	// Use full path to avoid command parsing issues
+	tarPath, err := exec.LookPath("tar")
+	if err != nil {
+		tarPath = "tar" // If not found, use default command name
+		logrus.Warnf("[BackupExecutor] tar command not found in PATH, using default name")
+	}
+
+	// Make all file paths relative to source directory
+	var relativeFiles []string
+	for _, file := range allFiles {
+		relFile, err := filepath.Rel(sourceDir, file)
+		if err != nil {
+			logrus.Warnf("[BackupExecutor] Failed to get relative path for %s: %v", file, err)
+			continue
+		}
+		relativeFiles = append(relativeFiles, relFile)
+	}
+
+	// Build tar command: tar -czf destFile -C sourceDir files...
+	args := []string{"-czf", destFile, "-C", sourceDir}
+	args = append(args, relativeFiles...)
+	cmd := exec.Command(tarPath, args...)
+
+	logrus.Infof("[BackupExecutor] Executing tar command")
+
+	// Execute command
+	if err := executeCommand(cmd, "tar"); err != nil {
+		logrus.Errorf("[BackupExecutor] GZIP compression failed: %v", err)
+		return err
+	}
+
+	// Check if compressed file was created and get its size
+	if info, err := os.Stat(destFile); err == nil {
+		logrus.Infof("[BackupExecutor] GZIP compression completed successfully. Archive size: %.2f MB",
+			float64(info.Size())/1024/1024)
+	} else {
+		logrus.Warnf("[BackupExecutor] Could not stat compressed file %s: %v", destFile, err)
+	}
+
+	return nil
+}
+
 // exportMongoDBSingleTable Export single MongoDB collection
 func (e *BackupExecutor) exportMongoDBSingleTable(ctx context.Context, config struct {
 	Name       string `json:"name"`
@@ -666,9 +781,10 @@ func (e *BackupExecutor) exportMongoDBSingleTable(ctx context.Context, config st
 		ServiceAccount  string `json:"serviceAccount"`
 		FileNamePattern string `json:"fileNamePattern"`
 	} `json:"destination"`
-	Format     string                            `json:"format"`
-	BackupType string                            `json:"backupType"`
-	Query      map[string]map[string]interface{} `json:"query"`
+	Format          string                            `json:"format"`
+	BackupType      string                            `json:"backupType"`
+	Query           map[string]map[string]interface{} `json:"query"`
+	CompressionType string                            `json:"compressionType"`
 }, tempDir string, task BackupTask, tableName string) error {
 	dateStr := time.Now().Format("2006-01-02")
 
@@ -709,9 +825,10 @@ func (e *BackupExecutor) exportMongoDBSingleTableWithDump(ctx context.Context, c
 		ServiceAccount  string `json:"serviceAccount"`
 		FileNamePattern string `json:"fileNamePattern"`
 	} `json:"destination"`
-	Format     string                            `json:"format"`
-	BackupType string                            `json:"backupType"`
-	Query      map[string]map[string]interface{} `json:"query"`
+	Format          string                            `json:"format"`
+	BackupType      string                            `json:"backupType"`
+	Query           map[string]map[string]interface{} `json:"query"`
+	CompressionType string                            `json:"compressionType"`
 }, tempDir string, task BackupTask, connStr string, dateStr string, collection string) error {
 	// Use full path to avoid command parsing issues
 	mongodumpPath, err := exec.LookPath("mongodump")
@@ -813,9 +930,10 @@ func (e *BackupExecutor) exportMongoDBSingleTableWithExport(ctx context.Context,
 		ServiceAccount  string `json:"serviceAccount"`
 		FileNamePattern string `json:"fileNamePattern"`
 	} `json:"destination"`
-	Format     string                            `json:"format"`
-	BackupType string                            `json:"backupType"`
-	Query      map[string]map[string]interface{} `json:"query"`
+	Format          string                            `json:"format"`
+	BackupType      string                            `json:"backupType"`
+	Query           map[string]map[string]interface{} `json:"query"`
+	CompressionType string                            `json:"compressionType"`
 }, tempDir string, task BackupTask, connStr string, dateStr string, collection string) error {
 	// Use full path to avoid command parsing issues
 	mongoexportPath, err := exec.LookPath("mongoexport")

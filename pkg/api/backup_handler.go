@@ -59,15 +59,16 @@ ORDER BY id ASC
 		}
 
 		var config struct {
-			Name        string                 `json:"name"`
-			SourceType  string                 `json:"sourceType"`
-			Database    map[string]interface{} `json:"database"`
-			Destination map[string]interface{} `json:"destination"`
-			Schedule    string                 `json:"schedule"`
-			Format      string                 `json:"format"`
-			BackupType  string                 `json:"backupType"`
-			Query       map[string]interface{} `json:"query"`
-			Status      string                 `json:"status"`
+			Name            string                 `json:"name"`
+			SourceType      string                 `json:"sourceType"`
+			Database        map[string]interface{} `json:"database"`
+			Destination     map[string]interface{} `json:"destination"`
+			Schedule        string                 `json:"schedule"`
+			Format          string                 `json:"format"`
+			BackupType      string                 `json:"backupType"`
+			Query           map[string]interface{} `json:"query"`
+			Status          string                 `json:"status"`
+			CompressionType string                 `json:"compressionType"`
 		}
 
 		if cfgJSON != "" {
@@ -85,19 +86,20 @@ ORDER BY id ASC
 		}
 
 		item := map[string]interface{}{
-			"id":             id,
-			"name":           config.Name,
-			"sourceType":     config.SourceType,
-			"database":       config.Database,
-			"destination":    config.Destination,
-			"schedule":       config.Schedule,
-			"format":         config.Format,
-			"backupType":     config.BackupType,
-			"query":          config.Query,
-			"status":         status,
-			"lastUpdateTime": convertTimeToJST(lastUpdate),
-			"lastBackupTime": convertTimeToJST(lastBackup),
-			"nextBackupTime": convertTimeToJST(nextBackup),
+			"id":              id,
+			"name":            config.Name,
+			"sourceType":      config.SourceType,
+			"database":        config.Database,
+			"destination":     config.Destination,
+			"schedule":        config.Schedule,
+			"format":          config.Format,
+			"backupType":      config.BackupType,
+			"query":           config.Query,
+			"status":          status,
+			"compressionType": config.CompressionType,
+			"lastUpdateTime":  convertTimeToJST(lastUpdate),
+			"lastBackupTime":  convertTimeToJST(lastBackup),
+			"nextBackupTime":  convertTimeToJST(nextBackup),
 		}
 
 		result = append(result, item)
@@ -125,14 +127,15 @@ func BackupCreateHandler(w http.ResponseWriter, r *http.Request) {
 	defer db.Close()
 
 	var req struct {
-		Name        string                 `json:"name"`
-		SourceType  string                 `json:"sourceType"`
-		Database    map[string]interface{} `json:"database"`
-		Destination map[string]interface{} `json:"destination"`
-		Schedule    string                 `json:"schedule"`
-		Format      string                 `json:"format"`
-		BackupType  string                 `json:"backupType"`
-		Query       map[string]interface{} `json:"query"`
+		Name            string                 `json:"name"`
+		SourceType      string                 `json:"sourceType"`
+		Database        map[string]interface{} `json:"database"`
+		Destination     map[string]interface{} `json:"destination"`
+		Schedule        string                 `json:"schedule"`
+		Format          string                 `json:"format"`
+		BackupType      string                 `json:"backupType"`
+		Query           map[string]interface{} `json:"query"`
+		CompressionType string                 `json:"compressionType"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -152,27 +155,29 @@ func BackupCreateHandler(w http.ResponseWriter, r *http.Request) {
 	nextBackupTime := calculateNextBackupTime(req.Schedule)
 
 	type configStruct struct {
-		Name        string                 `json:"name"`
-		SourceType  string                 `json:"sourceType"`
-		Database    map[string]interface{} `json:"database"`
-		Destination map[string]interface{} `json:"destination"`
-		Schedule    string                 `json:"schedule"`
-		Format      string                 `json:"format"`
-		BackupType  string                 `json:"backupType"`
-		Query       map[string]interface{} `json:"query"`
-		Status      string                 `json:"status"`
+		Name            string                 `json:"name"`
+		SourceType      string                 `json:"sourceType"`
+		Database        map[string]interface{} `json:"database"`
+		Destination     map[string]interface{} `json:"destination"`
+		Schedule        string                 `json:"schedule"`
+		Format          string                 `json:"format"`
+		BackupType      string                 `json:"backupType"`
+		Query           map[string]interface{} `json:"query"`
+		Status          string                 `json:"status"`
+		CompressionType string                 `json:"compressionType"`
 	}
 
 	cfgJSONStruct := configStruct{
-		Name:        req.Name,
-		SourceType:  req.SourceType,
-		Database:    req.Database,
-		Destination: req.Destination,
-		Schedule:    req.Schedule,
-		Format:      req.Format,
-		BackupType:  req.BackupType,
-		Query:       req.Query,
-		Status:      status,
+		Name:            req.Name,
+		SourceType:      req.SourceType,
+		Database:        req.Database,
+		Destination:     req.Destination,
+		Schedule:        req.Schedule,
+		Format:          req.Format,
+		BackupType:      req.BackupType,
+		Query:           req.Query,
+		Status:          status,
+		CompressionType: req.CompressionType,
 	}
 
 	cfgBytes, _ := json.Marshal(cfgJSONStruct)
@@ -342,14 +347,15 @@ func BackupUpdateHandler(w http.ResponseWriter, r *http.Request) {
 	defer db.Close()
 
 	var req struct {
-		Name        string                 `json:"name"`
-		SourceType  string                 `json:"sourceType"`
-		Database    map[string]interface{} `json:"database"`
-		Destination map[string]interface{} `json:"destination"`
-		Schedule    string                 `json:"schedule"`
-		Format      string                 `json:"format"`
-		BackupType  string                 `json:"backupType"`
-		Query       map[string]interface{} `json:"query"`
+		Name            string                 `json:"name"`
+		SourceType      string                 `json:"sourceType"`
+		Database        map[string]interface{} `json:"database"`
+		Destination     map[string]interface{} `json:"destination"`
+		Schedule        string                 `json:"schedule"`
+		Format          string                 `json:"format"`
+		BackupType      string                 `json:"backupType"`
+		Query           map[string]interface{} `json:"query"`
+		CompressionType string                 `json:"compressionType"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -390,27 +396,29 @@ func BackupUpdateHandler(w http.ResponseWriter, r *http.Request) {
 	nextBackupTime := calculateNextBackupTime(req.Schedule)
 
 	type configStruct struct {
-		Name        string                 `json:"name"`
-		SourceType  string                 `json:"sourceType"`
-		Database    map[string]interface{} `json:"database"`
-		Destination map[string]interface{} `json:"destination"`
-		Schedule    string                 `json:"schedule"`
-		Format      string                 `json:"format"`
-		BackupType  string                 `json:"backupType"`
-		Query       map[string]interface{} `json:"query"`
-		Status      string                 `json:"status"`
+		Name            string                 `json:"name"`
+		SourceType      string                 `json:"sourceType"`
+		Database        map[string]interface{} `json:"database"`
+		Destination     map[string]interface{} `json:"destination"`
+		Schedule        string                 `json:"schedule"`
+		Format          string                 `json:"format"`
+		BackupType      string                 `json:"backupType"`
+		Query           map[string]interface{} `json:"query"`
+		Status          string                 `json:"status"`
+		CompressionType string                 `json:"compressionType"`
 	}
 
 	cfgJSONStruct := configStruct{
-		Name:        req.Name,
-		SourceType:  req.SourceType,
-		Database:    req.Database,
-		Destination: req.Destination,
-		Schedule:    req.Schedule,
-		Format:      req.Format,
-		BackupType:  req.BackupType,
-		Query:       req.Query,
-		Status:      status,
+		Name:            req.Name,
+		SourceType:      req.SourceType,
+		Database:        req.Database,
+		Destination:     req.Destination,
+		Schedule:        req.Schedule,
+		Format:          req.Format,
+		BackupType:      req.BackupType,
+		Query:           req.Query,
+		Status:          status,
+		CompressionType: req.CompressionType,
 	}
 
 	cfgBytes, _ := json.Marshal(cfgJSONStruct)

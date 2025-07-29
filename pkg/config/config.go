@@ -18,9 +18,9 @@ type AdvancedSettings struct {
 	UploadToGcs     bool   `json:"uploadToGcs"`
 	GcsAddress      string `json:"gcsAddress"`
 	// Retry settings for change stream recovery
-	MaxRetries      int           `json:"maxRetries"`      // Maximum number of retry attempts (default: 10)
-	BaseRetryDelay  time.Duration `json:"baseRetryDelay"`  // Base delay between retries (default: 5s)
-	MaxRetryDelay   time.Duration `json:"maxRetryDelay"`   // Maximum delay between retries (default: 5m)
+	MaxRetries     int           `json:"maxRetries"`     // Maximum number of retry attempts (default: 10)
+	BaseRetryDelay time.Duration `json:"baseRetryDelay"` // Base delay between retries (default: 5s)
+	MaxRetryDelay  time.Duration `json:"maxRetryDelay"`  // Maximum delay between retries (default: 5m)
 }
 
 type TableMapping struct {

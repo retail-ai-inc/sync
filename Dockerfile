@@ -36,7 +36,8 @@ RUN apk update && apk add --no-cache \
     python3 \
     py3-pip \
     curl \
-    bash
+    bash \
+    zip
 
 # Install Google Cloud SDK for gsutil command
 RUN curl https://sdk.cloud.google.com | bash
