@@ -51,7 +51,16 @@ func InitLogger(logLevel string) *logrus.Logger {
 	logger.SetLevel(getLogLevel(logLevel))
 	logger.SetFormatter(&CustomTextFormatter{})
 
-	logger.AddHook(NewSQLiteHook())
+	// Check if SQLite logging is enabled via environment variable
+	// Default behavior: SQLite logging is DISABLED (not writing to SQLite)
+	enableSQLiteLogging := os.Getenv("ENABLE_SQLITE_LOGGING") == "true"
+	
+	if enableSQLiteLogging {
+		logger.AddHook(NewSQLiteHook())
+		logger.Info("SQLite logging is enabled via ENABLE_SQLITE_LOGGING environment variable")
+	} else {
+		logger.Debug("SQLite logging is disabled (default behavior)")
+	}
 
 	// Thread-safe update of global logger
 	logMutex.Lock()

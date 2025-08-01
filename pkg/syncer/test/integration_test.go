@@ -87,7 +87,7 @@ func TestSyncIntegration(t *testing.T) {
 
 		switch sc.Type {
 		case "mongodb":
-			s := syncer.NewMongoDBSyncer(sc, log)
+			s := syncer.NewMongoDBSyncer(sc, cfg, log)
 			go s.Start(ctx)
 		case "mysql":
 			s := syncer.NewMySQLSyncer(sc, log)

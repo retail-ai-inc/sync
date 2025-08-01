@@ -9,8 +9,8 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-func NewMongoDBSyncer(cfg config.SyncConfig, logger *logrus.Logger) *mongodb.MongoDBSyncer {
-	return mongodb.NewMongoDBSyncer(cfg, logger)
+func NewMongoDBSyncer(cfg config.SyncConfig, globalConfig *config.Config, logger *logrus.Logger) *mongodb.MongoDBSyncer {
+	return mongodb.NewMongoDBSyncer(cfg, globalConfig, logger)
 }
 
 func NewMySQLSyncer(cfg config.SyncConfig, logger *logrus.Logger) *mysql.MySQLSyncer {

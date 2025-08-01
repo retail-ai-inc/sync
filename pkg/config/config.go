@@ -70,18 +70,32 @@ func (s *SyncConfig) PGPlugin() string {
 	return s.PGPluginName
 }
 
+// GetSlackWebhookURL returns the Slack webhook URL from config
+func (c *Config) GetSlackWebhookURL() string {
+	return c.SlackWebhookURL
+}
+
+// GetSlackChannel returns the Slack channel from config
+func (c *Config) GetSlackChannel() string {
+	return c.SlackChannel
+}
+
 type Config struct {
 	EnableTableRowCountMonitoring bool
 	LogLevel                      string
 	SyncConfigs                   []SyncConfig
 	Logger                        *logrus.Logger
 	MonitorInterval               time.Duration
+	SlackWebhookURL               string
+	SlackChannel                  string
 }
 
 type globalConfig struct {
 	EnableTableRowCountMonitoring bool
 	LogLevel                      string
 	MonitorInterval               time.Duration
+	SlackWebhookURL               string
+	SlackChannel                  string
 }
 
 type FieldSecurityItem struct {
@@ -129,6 +143,8 @@ func NewConfig() *Config {
 		SyncConfigs:                   syncCfgs,
 		Logger:                        logrus.New(),
 		MonitorInterval:               gcfg.MonitorInterval,
+		SlackWebhookURL:               gcfg.SlackWebhookURL,
+		SlackChannel:                  gcfg.SlackChannel,
 	}
 }
 
@@ -136,11 +152,14 @@ func loadGlobalConfig(db *sql.DB) globalConfig {
 	var em int
 	var ll string
 	var mi int
+	var swu string
+	var sc string
 	err := db.QueryRow(`
-SELECT enable_table_row_count_monitoring, log_level, monitor_interval
+SELECT enable_table_row_count_monitoring, log_level, monitor_interval, 
+       COALESCE(slackWebhookURL, ''), COALESCE(slackChannel, '')
 FROM config_global
 WHERE id=1
-`).Scan(&em, &ll, &mi)
+`).Scan(&em, &ll, &mi, &swu, &sc)
 	if err != nil {
 		log.Fatalf("Failed to load config_global: %v", err)
 	}
@@ -148,6 +167,8 @@ WHERE id=1
 		EnableTableRowCountMonitoring: (em != 0),
 		LogLevel:                      ll,
 		MonitorInterval:               time.Duration(mi) * time.Second,
+		SlackWebhookURL:               swu,
+		SlackChannel:                  sc,
 	}
 }
 

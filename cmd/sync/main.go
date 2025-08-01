@@ -154,7 +154,7 @@ func startSyncTasks(ctx context.Context, cfg *config.Config, wg *sync.WaitGroup,
 		case "mongodb":
 			go func(sc config.SyncConfig) {
 				defer wg.Done()
-				syncer.NewMongoDBSyncer(sc, log).Start(ctx)
+				syncer.NewMongoDBSyncer(sc, cfg, log).Start(ctx)
 			}(syncCfg)
 		case "mysql", "mariadb":
 			go func(sc config.SyncConfig) {

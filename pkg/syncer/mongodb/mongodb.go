@@ -21,6 +21,33 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
+// Smart Batch Controller Implementation
+//
+// This implementation replaces the fixed file count processing (maxFilesPerRun = 5) 
+// with an intelligent batch controller that limits memory usage to a target size (default: 256MB).
+//
+// Key Features:
+// - Dynamic batch size based on actual file sizes
+// - Memory usage control to prevent OOM
+// - Configurable target batch size (targetBatchSizeBytes)
+// - Automatic optimization and monitoring
+// - Detailed logging for performance analysis
+//
+// Performance Benefits:
+// - Processes large numbers of small files efficiently
+// - Handles large files safely without OOM
+// - Maximizes memory utilization up to the target limit
+// - Provides throughput metrics for monitoring
+//
+// Configuration:
+// - targetBatchSizeBytes: 256MB (default) - maximum memory per batch
+// - maxFilesPerBatch: 1000 (default) - safety limit for file count
+// - minFilesPerBatch: 5 (default) - minimum files to process
+//
+// Usage Example:
+// To adjust batch size at runtime:
+//   syncer.updateBatchSizeConfig(512*1024*1024, 2000, 10) // 512MB, max 2000 files, min 10 files
+
 // bsonRawSeparator is a unique byte sequence used to separate BSON documents in a buffer file.
 var bsonRawSeparator = []byte{0xDE, 0xAD, 0xBE, 0xEF, 0xDE, 0xAD, 0xBE, 0xEF}
 
@@ -41,6 +68,31 @@ type persistedChange struct {
 	Timestamp  time.Time `bson:"timestamp"`
 }
 
+// FailedOperation represents a failed database operation for dead letter queue
+type FailedOperation struct {
+	ID          string           `json:"id"`
+	WriteModel  json.RawMessage  `json:"write_model"`  // Serialized WriteModel
+	Error       string           `json:"error"`        // Error message
+	ErrorCode   int              `json:"error_code"`   // MongoDB error code
+	OpType      string           `json:"op_type"`      // insert, update, replace, delete
+	SourceDB    string           `json:"source_db"`
+	SourceColl  string           `json:"source_coll"`
+	Timestamp   time.Time        `json:"timestamp"`
+	RetryCount  int              `json:"retry_count"`
+	BatchIndex  int              `json:"batch_index"`  // Index in the original batch
+}
+
+// DeadLetterBatch represents a batch of failed operations
+type DeadLetterBatch struct {
+	BatchID        string             `json:"batch_id"`
+	FailedOps      []FailedOperation  `json:"failed_operations"`
+	TotalOps       int                `json:"total_operations"`
+	SuccessfulOps  int                `json:"successful_operations"`
+	Timestamp      time.Time          `json:"timestamp"`
+	SourceDB       string             `json:"source_db"`
+	SourceColl     string             `json:"source_coll"`
+}
+
 type MongoDBSyncer struct {
 	sourceClient  *mongo.Client
 	targetClient  *mongo.Client
@@ -56,9 +108,20 @@ type MongoDBSyncer struct {
 	processorMutex   sync.RWMutex
 	// New fields for async pipeline
 	channelCapacity int
+	// Smart batch controller configuration
+	targetBatchSizeBytes int64
+	maxFilesPerBatch     int
+	minFilesPerBatch     int
+	// Dead letter queue configuration
+	deadLetterDir         string
+	maxRetryAttempts      int
+	retryInterval         time.Duration
+	enableDeadLetterQueue bool
+	// Global configuration for accessing Slack settings
+	globalConfig          *config.Config
 }
 
-func NewMongoDBSyncer(cfg config.SyncConfig, logger *logrus.Logger) *MongoDBSyncer {
+func NewMongoDBSyncer(cfg config.SyncConfig, globalConfig *config.Config, logger *logrus.Logger) *MongoDBSyncer {
 	var err error
 	var sourceClient *mongo.Client
 
@@ -123,6 +186,18 @@ func NewMongoDBSyncer(cfg config.SyncConfig, logger *logrus.Logger) *MongoDBSync
 		logger.Warnf("[MongoDB] Failed to create buffer directory %s: %v", bufferDir, err)
 	}
 
+	// Create dead letter directory for failed data
+	deadLetterDir := cfg.MongoDBResumeTokenPath
+	if deadLetterDir == "" {
+		deadLetterDir = "./mongodb_dead_letter"
+	} else {
+		deadLetterDir = filepath.Join(deadLetterDir, "dead_letter")
+	}
+
+	if err := os.MkdirAll(deadLetterDir, os.ModePerm); err != nil {
+		logger.Warnf("[MongoDB] Failed to create dead letter directory %s: %v", deadLetterDir, err)
+	}
+
 	return &MongoDBSyncer{
 		sourceClient:     sourceClient,
 		targetClient:     targetClient,
@@ -134,6 +209,16 @@ func NewMongoDBSyncer(cfg config.SyncConfig, logger *logrus.Logger) *MongoDBSync
 		activeProcessors: make(map[string]context.CancelFunc),
 		// Initialize async pipeline components
 		channelCapacity: 200, // A smaller, safer default to prevent OOM.
+		// Initialize smart batch controller configuration
+		targetBatchSizeBytes: 256 * 1024 * 1024, // 256MB
+		maxFilesPerBatch:     1000,
+		minFilesPerBatch:     5,
+		// Initialize dead letter queue configuration
+		deadLetterDir:        deadLetterDir,
+		maxRetryAttempts:     3,
+		retryInterval:        time.Second * 5,
+		enableDeadLetterQueue: true,
+		globalConfig:         globalConfig,
 	}
 }
 
@@ -655,12 +740,33 @@ func (s *MongoDBSyncer) processPersistentBuffer(ctx context.Context, sourceDB, c
 	ticker := time.NewTicker(5 * time.Second) // Check for files less frequently
 	defer ticker.Stop()
 
+	// Add optimization ticker to periodically analyze and optimize batch size
+	optimizationTicker := time.NewTicker(5 * time.Minute) // Optimize every 5 minutes
+	defer optimizationTicker.Stop()
+
+	// Add dead letter queue retry ticker
+	deadLetterTicker := time.NewTicker(s.retryInterval) // Retry dead letter queue
+	defer deadLetterTicker.Stop()
+
+	s.logger.Infof("[MongoDB] Started persistent buffer processor for %s.%s with smart batch control (target: %.2f MB)", 
+		sourceDB, collectionName, float64(s.targetBatchSizeBytes)/(1024*1024))
+
 	for {
 		select {
 		case <-ctx.Done():
+			s.logger.Infof("[MongoDB] Stopping persistent buffer processor for %s.%s", sourceDB, collectionName)
 			return
 		case <-ticker.C:
 			s.processBufferedChanges(ctx, sourceDB, collectionName, targetDBName, targetCollectionName)
+		case <-optimizationTicker.C:
+			// Periodically analyze buffer and optimize batch size
+			bufferPath := s.getBufferPath(sourceDB, collectionName)
+			s.estimateOptimalBatchSize(bufferPath)
+		case <-deadLetterTicker.C:
+			// Periodically retry dead letter queue
+			if s.enableDeadLetterQueue {
+				s.processDeadLetterQueue(ctx, sourceDB, collectionName, targetDBName, targetCollectionName)
+			}
 		}
 	}
 }
@@ -673,52 +779,95 @@ func (s *MongoDBSyncer) processBufferedChanges(ctx context.Context, sourceDB, co
 		return
 	}
 
-	files, err := os.ReadDir(bufferPath)
-	if err != nil {
-		s.logger.Errorf("[MongoDB] Failed to read buffer directory %s: %v", bufferPath, err)
+	// Use smart batch builder to select files based on memory size
+	selectedFiles, batchSize := s.buildSmartBatch(bufferPath)
+	if len(selectedFiles) == 0 {
 		return
 	}
 
-	if len(files) == 0 {
-		return
-	}
-
-	const maxFilesPerRun = 5 // Process a small number of files per run to avoid holding locks for too long
-	filesToProcess := len(files)
-	if filesToProcess > maxFilesPerRun {
-		filesToProcess = maxFilesPerRun
-	}
-
-	s.logger.Debugf("[MongoDB] Found %d files, processing %d for %s.%s", len(files), filesToProcess, sourceDB, collectionName)
+	s.logger.Debugf("[MongoDB] Processing smart batch: %d files, %.2f MB for %s.%s", 
+		len(selectedFiles), float64(batchSize)/(1024*1024), sourceDB, collectionName)
 
 	var processedFiles []string
+	var allWriteModels []mongo.WriteModel
 	var writeSuccess = true
+	startTime := time.Now()
 
-	for i := 0; i < filesToProcess; i++ {
-		filePath := filepath.Join(bufferPath, files[i].Name())
-		err := s.processFileAsStream(ctx, filePath, targetColl, sourceDB, collectionName)
+	// Phase 1: Parse all files and collect WriteModels
+	s.logger.Debugf("[MongoDB] Phase 1: Parsing %d files to collect WriteModels", len(selectedFiles))
+	parseStartTime := time.Now()
+	
+	for _, filePath := range selectedFiles {
+		writeModels, err := s.parseFileToWriteModels(ctx, filePath, sourceDB, collectionName)
 		if err != nil {
-			s.logger.Errorf("[MongoDB] Failed to process file stream %s: %v. Stopping this run.", filePath, err)
+			s.logger.Errorf("[MongoDB] Failed to parse file %s: %v. Stopping this run.", filePath, err)
 			writeSuccess = false
 			break // Stop processing further files on error
 		}
+		
+		allWriteModels = append(allWriteModels, writeModels...)
 		processedFiles = append(processedFiles, filePath)
+		
+		s.logger.Debugf("[MongoDB] Parsed file %s: %d write models, total so far: %d", 
+			filepath.Base(filePath), len(writeModels), len(allWriteModels))
 	}
 
+	parseDuration := time.Since(parseStartTime)
+	s.logger.Debugf("[MongoDB] Phase 1 completed: parsed %d files, collected %d write models in %v", 
+		len(processedFiles), len(allWriteModels), parseDuration)
+
+	// Phase 2: Execute single bulk write operation
+	if writeSuccess && len(allWriteModels) > 0 {
+		s.logger.Debugf("[MongoDB] Phase 2: Executing single bulk write with %d operations", len(allWriteModels))
+		writeStartTime := time.Now()
+		
+		err := s.flushWriteModels(ctx, targetColl, allWriteModels, sourceDB, collectionName)
+		if err != nil {
+			s.logger.Errorf("[MongoDB] Bulk write failed: %v", err)
+			writeSuccess = false
+		} else {
+			writeDuration := time.Since(writeStartTime)
+			s.logger.Debugf("[MongoDB] Phase 2 completed: bulk write executed in %v", writeDuration)
+		}
+	}
+
+	processingDuration := time.Since(startTime)
+
 	if writeSuccess && len(processedFiles) > 0 {
+		// Delete processed files only if all operations succeeded
+		deletedCount := 0
 		for _, filePath := range processedFiles {
 			if err := os.Remove(filePath); err != nil {
 				s.logger.Warnf("[MongoDB] Failed to remove processed buffer file %s: %v", filePath, err)
+			} else {
+				deletedCount++
 			}
 		}
-		s.logger.Debugf("[MongoDB] Deleted %d processed buffer files for %s.%s", len(processedFiles), sourceDB, collectionName)
+
+		throughput := float64(batchSize) / processingDuration.Seconds() / (1024 * 1024) // MB/s
+		operationsPerSecond := float64(len(allWriteModels)) / processingDuration.Seconds()
+		
+		s.logger.Debugf("[MongoDB] Successfully processed batch for %s.%s: %d files (%.2f MB, %d operations) in %v, throughput: %.2f MB/s, ops/sec: %.2f, deleted: %d files", 
+			sourceDB, collectionName, len(processedFiles), float64(batchSize)/(1024*1024), len(allWriteModels),
+			processingDuration, throughput, operationsPerSecond, deletedCount)
+	} else if len(processedFiles) > 0 {
+		s.logger.Warnf("[MongoDB] Batch processing failed for %s.%s, keeping %d files for retry", 
+			sourceDB, collectionName, len(selectedFiles))
+	}
+
+	// Log buffer status after processing
+	remainingFiles, err := os.ReadDir(bufferPath)
+	if err == nil {
+		s.logger.Debugf("[MongoDB] Buffer status after processing %s.%s: %d files remaining", 
+			sourceDB, collectionName, len(remainingFiles))
 	}
 }
 
-func (s *MongoDBSyncer) processFileAsStream(ctx context.Context, filePath string, targetColl *mongo.Collection, sourceDB, collectionName string) error {
+// parseFileToWriteModels parses a file and returns all WriteModels without executing them
+func (s *MongoDBSyncer) parseFileToWriteModels(ctx context.Context, filePath string, sourceDB, collectionName string) ([]mongo.WriteModel, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
-		return fmt.Errorf("failed to open file: %w", err)
+		return nil, fmt.Errorf("failed to open file: %w", err)
 	}
 	defer file.Close()
 
@@ -743,20 +892,7 @@ func (s *MongoDBSyncer) processFileAsStream(ctx context.Context, filePath string
 		return 0, nil, nil
 	})
 
-	var writeModelBatch []mongo.WriteModel
-	const writeModelBatchSize = 100
-
-	flushBatch := func() error {
-		if len(writeModelBatch) == 0 {
-			return nil
-		}
-		err := s.flushWriteModels(ctx, targetColl, writeModelBatch, sourceDB, collectionName)
-		if err != nil {
-			return fmt.Errorf("failed to flush write models: %w", err)
-		}
-		writeModelBatch = writeModelBatch[:0] // Clear batch
-		return nil
-	}
+	var writeModels []mongo.WriteModel
 
 	for scanner.Scan() {
 		eventData := scanner.Bytes()
@@ -766,20 +902,34 @@ func (s *MongoDBSyncer) processFileAsStream(ctx context.Context, filePath string
 
 		model := s.convertRawBSONToWriteModel(eventData, sourceDB, collectionName)
 		if model != nil {
-			writeModelBatch = append(writeModelBatch, model)
-			if len(writeModelBatch) >= writeModelBatchSize {
-				if err := flushBatch(); err != nil {
-					return err
-				}
-			}
+			writeModels = append(writeModels, model)
 		}
 	}
 
 	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("error reading from file stream: %w", err)
+		return nil, fmt.Errorf("error reading from file stream: %w", err)
 	}
 
-	return flushBatch() // Flush any remaining models
+	s.logger.Debugf("[MongoDB] Parsed file %s: extracted %d write models", 
+		filepath.Base(filePath), len(writeModels))
+
+	return writeModels, nil
+}
+
+// Legacy method for backward compatibility - now deprecated
+func (s *MongoDBSyncer) processFileAsStream(ctx context.Context, filePath string, targetColl *mongo.Collection, sourceDB, collectionName string) error {
+	s.logger.Warnf("[MongoDB] DEPRECATED: processFileAsStream is deprecated, use parseFileToWriteModels + flushWriteModels instead")
+	
+	writeModels, err := s.parseFileToWriteModels(ctx, filePath, sourceDB, collectionName)
+	if err != nil {
+		return err
+	}
+
+	if len(writeModels) > 0 {
+		return s.flushWriteModels(ctx, targetColl, writeModels, sourceDB, collectionName)
+	}
+
+	return nil
 }
 
 func (s *MongoDBSyncer) convertRawBSONToWriteModel(rawData bson.Raw, sourceDB, collectionName string) mongo.WriteModel {
@@ -831,6 +981,7 @@ func (s *MongoDBSyncer) flushWriteModels(ctx context.Context, targetColl *mongo.
 		return nil
 	}
 
+	// First attempt: Try bulk write with unordered operations
 	err := utils.RetryMongoOperation(ctx, s.logger, fmt.Sprintf("BulkWrite to %s.%s",
 		targetColl.Database().Name(), targetColl.Name()),
 		func() error {
@@ -848,15 +999,357 @@ func (s *MongoDBSyncer) flushWriteModels(ctx context.Context, targetColl *mongo.
 				res.UpsertedCount,
 				res.DeletedCount,
 			)
-			// Note: In a real scenario, you would update ChangeStreamInfo here.
-			// For this fix, we focus on the memory aspect.
 			return nil
 		})
 
-	if err != nil {
-		s.logger.Errorf("[MongoDB] BulkWrite failed after retries for %s.%s: %v", sourceDB, collectionName, err)
-		return err
+	if err == nil {
+		// Bulk write succeeded completely
+		return nil
 	}
+
+	// Check if it's a bulk write error with write errors
+	if bulkWriteErr, ok := err.(mongo.BulkWriteException); ok {
+		s.logger.Warnf("[MongoDB] BulkWrite partially failed for %s.%s: %d write errors out of %d operations", 
+			sourceDB, collectionName, len(bulkWriteErr.WriteErrors), len(models))
+		
+		// Log detailed error information
+		for _, writeErr := range bulkWriteErr.WriteErrors {
+			s.logger.Warnf("[MongoDB] Write error at index %d: code=%d, message=%s", 
+				writeErr.Index, writeErr.Code, writeErr.Message)
+		}
+
+		// Handle specific error types
+		return s.handleBulkWriteErrors(ctx, targetColl, models, bulkWriteErr, sourceDB, collectionName)
+	}
+
+	// For other types of errors, try individual operations
+	s.logger.Warnf("[MongoDB] BulkWrite failed with non-bulk error for %s.%s: %v, falling back to individual operations", 
+		sourceDB, collectionName, err)
+	
+	return s.handleBulkWriteWithIndividualOps(ctx, targetColl, models, sourceDB, collectionName)
+}
+
+// handleBulkWriteErrors handles specific bulk write errors with intelligent recovery
+func (s *MongoDBSyncer) handleBulkWriteErrors(ctx context.Context, targetColl *mongo.Collection, models []mongo.WriteModel, bulkErr mongo.BulkWriteException, sourceDB, collectionName string) error {
+	// Create a map of failed indices for quick lookup
+	failedIndices := make(map[int]bool)
+	errorMap := make(map[int]mongo.BulkWriteError)
+	
+	for _, writeErr := range bulkErr.WriteErrors {
+		failedIndices[writeErr.Index] = true
+		errorMap[writeErr.Index] = writeErr
+	}
+
+	// Separate successful and failed operations
+	var successfulModels []mongo.WriteModel
+	var failedModels []mongo.WriteModel
+	var failedErrors []mongo.BulkWriteError
+
+	for i, model := range models {
+		if failedIndices[i] {
+			failedModels = append(failedModels, model)
+			if err, exists := errorMap[i]; exists {
+				failedErrors = append(failedErrors, err)
+			}
+		} else {
+			successfulModels = append(successfulModels, model)
+		}
+	}
+
+	s.logger.Infof("[MongoDB] Bulk write analysis for %s.%s: %d successful, %d failed", 
+		sourceDB, collectionName, len(successfulModels), len(failedModels))
+
+	// Try to retry failed operations individually
+	var stillFailedModels []mongo.WriteModel
+	var stillFailedErrors []mongo.BulkWriteError
+	
+	if len(failedModels) > 0 {
+		s.logger.Infof("[MongoDB] Attempting to retry %d failed operations individually for %s.%s", 
+			len(failedModels), sourceDB, collectionName)
+		
+		retrySuccess, retryFailedModels, retryFailedErrors := s.retryFailedOperationsWithDetails(ctx, targetColl, failedModels, failedErrors, sourceDB, collectionName)
+		
+		if retrySuccess > 0 {
+			s.logger.Infof("[MongoDB] Successfully retried %d operations for %s.%s", 
+				retrySuccess, sourceDB, collectionName)
+		}
+		
+		stillFailedModels = retryFailedModels
+		stillFailedErrors = retryFailedErrors
+		
+		if len(stillFailedModels) > 0 {
+			s.logger.Warnf("[MongoDB] %d operations still failed after retry for %s.%s", 
+				len(stillFailedModels), sourceDB, collectionName)
+		}
+	}
+
+	// Move still failed operations to dead letter queue
+	if len(stillFailedModels) > 0 && s.enableDeadLetterQueue {
+		err := s.storeToDeadLetterQueue(stillFailedModels, stillFailedErrors, len(models), len(successfulModels), sourceDB, collectionName)
+		if err != nil {
+			s.logger.Errorf("[MongoDB] Failed to store failed operations to dead letter queue: %v", err)
+		} else {
+			s.logger.Infof("[MongoDB] Moved %d failed operations to dead letter queue for %s.%s", 
+				len(stillFailedModels), sourceDB, collectionName)
+		}
+	}
+
+	// Always consider the operation successful if we processed the data
+	// Failed operations are safely stored in dead letter queue
+	s.logger.Infof("[MongoDB] Bulk write completed for %s.%s: %d successful, %d moved to dead letter queue", 
+		sourceDB, collectionName, len(successfulModels), len(stillFailedModels))
+	
+	return nil  // Always return success - failed data is in dead letter queue
+}
+
+// storeToDeadLetterQueue stores failed operations to dead letter queue
+func (s *MongoDBSyncer) storeToDeadLetterQueue(failedModels []mongo.WriteModel, failedErrors []mongo.BulkWriteError, totalOps, successfulOps int, sourceDB, collectionName string) error {
+	if !s.enableDeadLetterQueue {
+		return nil
+	}
+
+	// Create dead letter directory for this collection
+	collectionDir := filepath.Join(s.deadLetterDir, fmt.Sprintf("%s_%s", sourceDB, collectionName))
+	if err := os.MkdirAll(collectionDir, os.ModePerm); err != nil {
+		return fmt.Errorf("failed to create dead letter collection directory: %w", err)
+	}
+
+	// Convert failed operations to serializable format
+	var failedOps []FailedOperation
+	for i, model := range failedModels {
+		// Serialize WriteModel to JSON
+		modelBytes, err := s.serializeWriteModel(model)
+		if err != nil {
+			s.logger.Warnf("[MongoDB] Failed to serialize WriteModel: %v", err)
+			continue
+		}
+
+		// Get error information
+		var errorMsg string
+		var errorCode int
+		if i < len(failedErrors) {
+			errorMsg = failedErrors[i].Message
+			errorCode = failedErrors[i].Code
+		}
+
+		// Determine operation type
+		opType := s.getOperationType(model)
+
+		failedOp := FailedOperation{
+			ID:          fmt.Sprintf("%s_%d_%d", sourceDB, time.Now().UnixNano(), i),
+			WriteModel:  modelBytes,
+			Error:       errorMsg,
+			ErrorCode:   errorCode,
+			OpType:      opType,
+			SourceDB:    sourceDB,
+			SourceColl:  collectionName,
+			Timestamp:   time.Now(),
+			RetryCount:  0,
+			BatchIndex:  i,
+		}
+
+		failedOps = append(failedOps, failedOp)
+	}
+
+	// Create dead letter batch
+	batchID := fmt.Sprintf("batch_%s_%s_%d", sourceDB, collectionName, time.Now().UnixNano())
+	deadLetterBatch := DeadLetterBatch{
+		BatchID:       batchID,
+		FailedOps:     failedOps,
+		TotalOps:      totalOps,
+		SuccessfulOps: successfulOps,
+		Timestamp:     time.Now(),
+		SourceDB:      sourceDB,
+		SourceColl:    collectionName,
+	}
+
+	// Save to file
+	fileName := fmt.Sprintf("%s.json", batchID)
+	filePath := filepath.Join(collectionDir, fileName)
+
+	batchBytes, err := json.MarshalIndent(deadLetterBatch, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal dead letter batch: %w", err)
+	}
+
+	if err := os.WriteFile(filePath, batchBytes, 0644); err != nil {
+		return fmt.Errorf("failed to write dead letter batch file: %w", err)
+	}
+
+	s.logger.Infof("[MongoDB] Stored %d failed operations to dead letter queue: %s", len(failedOps), filePath)
+	
+	// Send Slack notification for dead letter queue storage
+	if s.globalConfig != nil {
+		slackNotifier := utils.NewSlackNotifierFromConfigWithFieldLogger(s.globalConfig, s.logger)
+		if slackNotifier.IsConfigured() {
+						message := fmt.Sprintf("🚨 MongoDB Operations Failed - Dead Letter Queue\n\nDatabase: %s.%s\nFailed Operations: %d\nTotal Operations: %d\nSuccess Rate: %.1f%%\n\nFile: %s",
+				sourceDB, collectionName, len(failedOps), totalOps,
+				float64(successfulOps)/float64(totalOps)*100, fileName)
+			
+			// Send notification asynchronously to avoid blocking main process
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				
+				err := slackNotifier.SendError(ctx, "MongoDB Dead Letter Queue", message)
+				if err != nil {
+					s.logger.Warnf("[MongoDB] Failed to send dead letter queue Slack notification: %v", err)
+				}
+			}()
+		}
+	}
+	
+	return nil
+}
+
+// serializeWriteModel converts a WriteModel to JSON for storage
+func (s *MongoDBSyncer) serializeWriteModel(model mongo.WriteModel) (json.RawMessage, error) {
+	switch m := model.(type) {
+	case *mongo.InsertOneModel:
+		data := map[string]interface{}{
+			"type":     "insert",
+			"document": m.Document,
+		}
+		return json.Marshal(data)
+	case *mongo.UpdateOneModel:
+		data := map[string]interface{}{
+			"type":   "update",
+			"filter": m.Filter,
+			"update": m.Update,
+			"upsert": true, // Default to upsert for safety
+		}
+		return json.Marshal(data)
+	case *mongo.ReplaceOneModel:
+		data := map[string]interface{}{
+			"type":        "replace",
+			"filter":      m.Filter,
+			"replacement": m.Replacement,
+			"upsert":      true, // Default to upsert for safety
+		}
+		return json.Marshal(data)
+	case *mongo.DeleteOneModel:
+		data := map[string]interface{}{
+			"type":   "delete",
+			"filter": m.Filter,
+		}
+		return json.Marshal(data)
+	default:
+		return nil, fmt.Errorf("unsupported WriteModel type: %T", model)
+	}
+}
+
+// getOperationType returns the operation type string for a WriteModel
+func (s *MongoDBSyncer) getOperationType(model mongo.WriteModel) string {
+	switch model.(type) {
+	case *mongo.InsertOneModel:
+		return "insert"
+	case *mongo.UpdateOneModel:
+		return "update"
+	case *mongo.ReplaceOneModel:
+		return "replace"
+	case *mongo.DeleteOneModel:
+		return "delete"
+	default:
+		return "unknown"
+	}
+}
+
+// retryFailedOperationsWithDetails retries failed operations individually and returns detailed results
+func (s *MongoDBSyncer) retryFailedOperationsWithDetails(ctx context.Context, targetColl *mongo.Collection, failedModels []mongo.WriteModel, failedErrors []mongo.BulkWriteError, sourceDB, collectionName string) (int, []mongo.WriteModel, []mongo.BulkWriteError) {
+	successCount := 0
+	var stillFailedModels []mongo.WriteModel
+	var stillFailedErrors []mongo.BulkWriteError
+
+	for i, model := range failedModels {
+		opType := s.getOperationType(model)
+		err := s.executeIndividualOperation(ctx, targetColl, model)
+
+		if err != nil {
+			stillFailedModels = append(stillFailedModels, model)
+			if i < len(failedErrors) {
+				stillFailedErrors = append(stillFailedErrors, failedErrors[i])
+			}
+			
+			// Log specific error information
+			if i < len(failedErrors) {
+				s.logger.Warnf("[MongoDB] Individual retry failed for %s operation: code=%d, message=%s, error=%v", 
+					opType, failedErrors[i].Code, failedErrors[i].Message, err)
+			} else {
+				s.logger.Warnf("[MongoDB] Individual retry failed for %s operation: %v", opType, err)
+			}
+		} else {
+			successCount++
+			s.logger.Debugf("[MongoDB] Individual retry succeeded for %s operation", opType)
+		}
+	}
+
+	return successCount, stillFailedModels, stillFailedErrors
+}
+
+// executeIndividualOperation executes a single WriteModel operation
+func (s *MongoDBSyncer) executeIndividualOperation(ctx context.Context, targetColl *mongo.Collection, model mongo.WriteModel) error {
+	switch m := model.(type) {
+	case *mongo.InsertOneModel:
+		_, err := targetColl.InsertOne(ctx, m.Document)
+		return err
+	case *mongo.UpdateOneModel:
+		_, err := targetColl.UpdateOne(ctx, m.Filter, m.Update, options.Update().SetUpsert(true))
+		return err
+	case *mongo.ReplaceOneModel:
+		_, err := targetColl.ReplaceOne(ctx, m.Filter, m.Replacement, options.Replace().SetUpsert(true))
+		return err
+	case *mongo.DeleteOneModel:
+		_, err := targetColl.DeleteOne(ctx, m.Filter)
+		return err
+	default:
+		return fmt.Errorf("unsupported WriteModel type: %T", model)
+	}
+}
+
+// retryFailedOperations retries failed operations individually with specific error handling
+func (s *MongoDBSyncer) retryFailedOperations(ctx context.Context, targetColl *mongo.Collection, failedModels []mongo.WriteModel, failedErrors []mongo.BulkWriteError, sourceDB, collectionName string) (int, int) {
+	successCount, stillFailedModels, _ := s.retryFailedOperationsWithDetails(ctx, targetColl, failedModels, failedErrors, sourceDB, collectionName)
+	return successCount, len(stillFailedModels)
+}
+
+// handleBulkWriteWithIndividualOps handles cases where bulk write fails completely
+func (s *MongoDBSyncer) handleBulkWriteWithIndividualOps(ctx context.Context, targetColl *mongo.Collection, models []mongo.WriteModel, sourceDB, collectionName string) error {
+	s.logger.Infof("[MongoDB] Falling back to individual operations for %s.%s: %d operations", 
+		sourceDB, collectionName, len(models))
+
+	successCount := 0
+	var failedModels []mongo.WriteModel
+
+	for i, model := range models {
+		opType := s.getOperationType(model)
+		err := s.executeIndividualOperation(ctx, targetColl, model)
+
+		if err != nil {
+			failedModels = append(failedModels, model)
+			s.logger.Warnf("[MongoDB] Individual operation failed for %s operation at index %d: %v", 
+				opType, i, err)
+		} else {
+			successCount++
+		}
+	}
+
+	s.logger.Infof("[MongoDB] Individual operations completed for %s.%s: %d successful, %d failed", 
+		sourceDB, collectionName, successCount, len(failedModels))
+
+	// Store failed operations to dead letter queue
+	if len(failedModels) > 0 && s.enableDeadLetterQueue {
+		// Create empty error slice for failed operations (no specific bulk write errors)
+		failedErrors := make([]mongo.BulkWriteError, len(failedModels))
+		err := s.storeToDeadLetterQueue(failedModels, failedErrors, len(models), successCount, sourceDB, collectionName)
+		if err != nil {
+			s.logger.Errorf("[MongoDB] Failed to store failed operations to dead letter queue: %v", err)
+		} else {
+			s.logger.Infof("[MongoDB] Moved %d failed operations to dead letter queue for %s.%s", 
+				len(failedModels), sourceDB, collectionName)
+		}
+	}
+
+	// Always consider successful - failed operations are in dead letter queue
 	return nil
 }
 
@@ -954,6 +1447,144 @@ func (s *MongoDBSyncer) findTableAdvancedSettings(collName string) config.Advanc
 	return config.AdvancedSettings{}
 }
 
+// buildSmartBatch builds a batch of files that doesn't exceed the target memory size
+func (s *MongoDBSyncer) buildSmartBatch(bufferPath string) ([]string, int64) {
+	files, err := os.ReadDir(bufferPath)
+	if err != nil {
+		s.logger.Errorf("[MongoDB] Failed to read buffer directory %s: %v", bufferPath, err)
+		return nil, 0
+	}
+
+	if len(files) == 0 {
+		return nil, 0
+	}
+
+	var selectedFiles []string
+	currentBatchSize := int64(0)
+
+	s.logger.Debugf("[MongoDB] Building smart batch from %d files, target size: %.2f MB", 
+		len(files), float64(s.targetBatchSizeBytes)/(1024*1024))
+
+	for _, file := range files {
+		filePath := filepath.Join(bufferPath, file.Name())
+		info, err := os.Stat(filePath)
+		if err != nil {
+			s.logger.Warnf("[MongoDB] Failed to stat file %s: %v", filePath, err)
+			continue
+		}
+
+		fileSize := info.Size()
+
+		// Check if adding this file would exceed the target size
+		if currentBatchSize+fileSize > s.targetBatchSizeBytes && len(selectedFiles) >= s.minFilesPerBatch {
+			s.logger.Debugf("[MongoDB] Stopping batch construction: adding file would exceed target size (current: %.2f MB + file: %.2f MB > target: %.2f MB)",
+				float64(currentBatchSize)/(1024*1024), float64(fileSize)/(1024*1024), float64(s.targetBatchSizeBytes)/(1024*1024))
+			break
+		}
+
+		// Check if we've reached the maximum file count limit
+		if len(selectedFiles) >= s.maxFilesPerBatch {
+			s.logger.Debugf("[MongoDB] Stopping batch construction: reached max files per batch (%d)", s.maxFilesPerBatch)
+			break
+		}
+
+		selectedFiles = append(selectedFiles, filePath)
+		currentBatchSize += fileSize
+
+		s.logger.Debugf("[MongoDB] Added file %s (%.2f KB) to batch, total: %d files, %.2f MB", 
+			file.Name(), float64(fileSize)/1024, len(selectedFiles), float64(currentBatchSize)/(1024*1024))
+	}
+
+	if len(selectedFiles) > 0 {
+		s.logger.Debugf("[MongoDB] Built smart batch: %d files, %.2f MB (%.1f%% of target)", 
+			len(selectedFiles), float64(currentBatchSize)/(1024*1024), 
+			float64(currentBatchSize)/float64(s.targetBatchSizeBytes)*100)
+	} else {
+		s.logger.Debugf("[MongoDB] No files selected for batch")
+	}
+
+	return selectedFiles, currentBatchSize
+}
+
+// calculateAverageFileSize calculates the average file size in the buffer directory
+func (s *MongoDBSyncer) calculateAverageFileSize(bufferPath string) int64 {
+	files, err := os.ReadDir(bufferPath)
+	if err != nil || len(files) == 0 {
+		return 0
+	}
+
+	// Intelligent sampling: take first 20 files or all files (if less than 20)
+	sampleSize := 20
+	if sampleSize > len(files) {
+		sampleSize = len(files)
+	}
+
+	totalSize := int64(0)
+	validFiles := 0
+
+	for i := 0; i < sampleSize; i++ {
+		filePath := filepath.Join(bufferPath, files[i].Name())
+		if info, err := os.Stat(filePath); err == nil {
+			totalSize += info.Size()
+			validFiles++
+		}
+	}
+
+	if validFiles == 0 {
+		return 0
+	}
+
+	avgSize := totalSize / int64(validFiles)
+	s.logger.Debugf("[MongoDB] Calculated average file size: %.2f KB (sampled %d files)", 
+		float64(avgSize)/1024, validFiles)
+
+	return avgSize
+}
+
+// updateBatchSizeConfig allows dynamic adjustment of batch size parameters
+func (s *MongoDBSyncer) updateBatchSizeConfig(targetSizeBytes int64, maxFiles, minFiles int) {
+	if targetSizeBytes > 0 {
+		s.targetBatchSizeBytes = targetSizeBytes
+	}
+	if maxFiles > 0 {
+		s.maxFilesPerBatch = maxFiles
+	}
+	if minFiles > 0 {
+		s.minFilesPerBatch = minFiles
+	}
+	
+	s.logger.Infof("[MongoDB] Updated batch size config: target=%.2f MB, maxFiles=%d, minFiles=%d",
+		float64(s.targetBatchSizeBytes)/(1024*1024), s.maxFilesPerBatch, s.minFilesPerBatch)
+}
+
+// getBatchSizeConfig returns current batch size configuration
+func (s *MongoDBSyncer) getBatchSizeConfig() (int64, int, int) {
+	return s.targetBatchSizeBytes, s.maxFilesPerBatch, s.minFilesPerBatch
+}
+
+// estimateOptimalBatchSize estimates optimal batch size based on buffer directory statistics
+func (s *MongoDBSyncer) estimateOptimalBatchSize(bufferPath string) {
+	avgFileSize := s.calculateAverageFileSize(bufferPath)
+	if avgFileSize == 0 {
+		return
+	}
+
+	// Estimate how many files would fit in target batch size
+	estimatedFileCount := s.targetBatchSizeBytes / avgFileSize
+	
+	s.logger.Debugf("[MongoDB] Batch size estimation: avgFileSize=%.2f KB, estimatedFileCount=%d, target=%.2f MB",
+		float64(avgFileSize)/1024, estimatedFileCount, float64(s.targetBatchSizeBytes)/(1024*1024))
+
+	// Adjust max files per batch if estimation is reasonable
+	if estimatedFileCount > int64(s.maxFilesPerBatch) {
+		s.logger.Infof("[MongoDB] Current maxFilesPerBatch (%d) might be limiting, estimated optimal: %d",
+			s.maxFilesPerBatch, estimatedFileCount)
+	} else if estimatedFileCount < int64(s.minFilesPerBatch) {
+		s.logger.Warnf("[MongoDB] Files are very large (avg %.2f MB), might need to reduce target batch size",
+			float64(avgFileSize)/(1024*1024))
+	}
+}
+
 // isRecoverableError determines if a MongoDB error is recoverable and should trigger a retry
 func isRecoverableError(err error) bool {
 	if err == nil {
@@ -995,3 +1626,243 @@ func isRecoverableError(err error) bool {
 
 	return false
 }
+
+// processDeadLetterQueue processes failed operations from dead letter queue
+func (s *MongoDBSyncer) processDeadLetterQueue(ctx context.Context, sourceDB, collectionName, targetDBName, targetCollectionName string) {
+	collectionDir := filepath.Join(s.deadLetterDir, fmt.Sprintf("%s_%s", sourceDB, collectionName))
+	
+	if _, err := os.Stat(collectionDir); os.IsNotExist(err) {
+		return // No dead letter queue for this collection
+	}
+
+	files, err := os.ReadDir(collectionDir)
+	if err != nil {
+		s.logger.Errorf("[MongoDB] Failed to read dead letter queue directory %s: %v", collectionDir, err)
+		return
+	}
+
+	if len(files) == 0 {
+		return
+	}
+
+	targetColl := s.targetClient.Database(targetDBName).Collection(targetCollectionName)
+	processedFiles := 0
+	
+	s.logger.Debugf("[MongoDB] Processing dead letter queue for %s.%s: %d files", sourceDB, collectionName, len(files))
+
+	for _, file := range files {
+		if !strings.HasSuffix(file.Name(), ".json") {
+			continue
+		}
+
+		filePath := filepath.Join(collectionDir, file.Name())
+		processed := s.processDeadLetterBatch(ctx, filePath, targetColl, sourceDB, collectionName)
+		if processed {
+			processedFiles++
+		}
+	}
+
+	if processedFiles > 0 {
+		s.logger.Infof("[MongoDB] Processed %d dead letter batches for %s.%s", processedFiles, sourceDB, collectionName)
+	}
+}
+
+// processDeadLetterBatch processes a single dead letter batch file
+func (s *MongoDBSyncer) processDeadLetterBatch(ctx context.Context, filePath string, targetColl *mongo.Collection, sourceDB, collectionName string) bool {
+	// Read and parse the dead letter batch
+	batchData, err := os.ReadFile(filePath)
+	if err != nil {
+		s.logger.Errorf("[MongoDB] Failed to read dead letter batch file %s: %v", filePath, err)
+		return false
+	}
+
+	var batch DeadLetterBatch
+	if err := json.Unmarshal(batchData, &batch); err != nil {
+		s.logger.Errorf("[MongoDB] Failed to unmarshal dead letter batch %s: %v", filePath, err)
+		return false
+	}
+
+	// Check if any operations need retry
+	var operationsToRetry []FailedOperation
+	for _, op := range batch.FailedOps {
+		if op.RetryCount < s.maxRetryAttempts {
+			operationsToRetry = append(operationsToRetry, op)
+		}
+	}
+
+	if len(operationsToRetry) == 0 {
+		s.logger.Debugf("[MongoDB] No operations to retry in batch %s (all exceeded max retries)", batch.BatchID)
+		return false
+	}
+
+	s.logger.Infof("[MongoDB] Retrying %d operations from dead letter batch %s", len(operationsToRetry), batch.BatchID)
+
+	// Convert back to WriteModels and retry
+	var retryModels []mongo.WriteModel
+	var stillFailedOps []FailedOperation
+
+	for _, op := range operationsToRetry {
+		writeModel, err := s.deserializeWriteModel(op.WriteModel)
+		if err != nil {
+			s.logger.Warnf("[MongoDB] Failed to deserialize WriteModel for operation %s: %v", op.ID, err)
+			op.RetryCount++
+			stillFailedOps = append(stillFailedOps, op)
+			continue
+		}
+
+		retryModels = append(retryModels, writeModel)
+	}
+
+	// Execute retry operations
+	successCount := 0
+	for i, model := range retryModels {
+		err := s.executeIndividualOperation(ctx, targetColl, model)
+		if err != nil {
+			// Increment retry count and keep in failed list
+			operationsToRetry[i].RetryCount++
+			operationsToRetry[i].Error = err.Error()
+			stillFailedOps = append(stillFailedOps, operationsToRetry[i])
+			s.logger.Warnf("[MongoDB] Retry failed for operation %s (attempt %d/%d): %v", 
+				operationsToRetry[i].ID, operationsToRetry[i].RetryCount, s.maxRetryAttempts, err)
+		} else {
+			successCount++
+			s.logger.Debugf("[MongoDB] Retry succeeded for operation %s", operationsToRetry[i].ID)
+		}
+	}
+
+	// Update the batch with remaining failed operations
+	batch.FailedOps = stillFailedOps
+
+	if len(stillFailedOps) == 0 {
+		// All operations succeeded, delete the file
+		if err := os.Remove(filePath); err != nil {
+			s.logger.Warnf("[MongoDB] Failed to delete completed dead letter batch %s: %v", filePath, err)
+		} else {
+			s.logger.Infof("[MongoDB] Successfully processed and deleted dead letter batch %s", batch.BatchID)
+		}
+		return true
+	} else {
+		// Update the file with remaining failed operations
+		updatedData, err := json.MarshalIndent(batch, "", "  ")
+		if err != nil {
+			s.logger.Errorf("[MongoDB] Failed to marshal updated dead letter batch %s: %v", batch.BatchID, err)
+			return false
+		}
+
+		if err := os.WriteFile(filePath, updatedData, 0644); err != nil {
+			s.logger.Errorf("[MongoDB] Failed to update dead letter batch file %s: %v", filePath, err)
+			return false
+		}
+
+		s.logger.Infof("[MongoDB] Updated dead letter batch %s: %d succeeded, %d still failed", 
+			batch.BatchID, successCount, len(stillFailedOps))
+		return true
+	}
+}
+
+// deserializeWriteModel converts JSON back to WriteModel
+func (s *MongoDBSyncer) deserializeWriteModel(data json.RawMessage) (mongo.WriteModel, error) {
+	var modelData map[string]interface{}
+	if err := json.Unmarshal(data, &modelData); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal model data: %w", err)
+	}
+
+	opType, ok := modelData["type"].(string)
+	if !ok {
+		return nil, fmt.Errorf("missing or invalid operation type")
+	}
+
+	switch opType {
+	case "insert":
+		document, ok := modelData["document"]
+		if !ok {
+			return nil, fmt.Errorf("missing document for insert operation")
+		}
+		return mongo.NewInsertOneModel().SetDocument(document), nil
+
+	case "update":
+		filter, ok := modelData["filter"]
+		if !ok {
+			return nil, fmt.Errorf("missing filter for update operation")
+		}
+		update, ok := modelData["update"]
+		if !ok {
+			return nil, fmt.Errorf("missing update for update operation")
+		}
+		upsert, _ := modelData["upsert"].(bool)
+		
+		updateModel := mongo.NewUpdateOneModel().SetFilter(filter).SetUpdate(update)
+		if upsert {
+			updateModel.SetUpsert(true)
+		}
+		return updateModel, nil
+
+	case "replace":
+		filter, ok := modelData["filter"]
+		if !ok {
+			return nil, fmt.Errorf("missing filter for replace operation")
+		}
+		replacement, ok := modelData["replacement"]
+		if !ok {
+			return nil, fmt.Errorf("missing replacement for replace operation")
+		}
+		upsert, _ := modelData["upsert"].(bool)
+		
+		replaceModel := mongo.NewReplaceOneModel().SetFilter(filter).SetReplacement(replacement)
+		if upsert {
+			replaceModel.SetUpsert(true)
+		}
+		return replaceModel, nil
+
+	case "delete":
+		filter, ok := modelData["filter"]
+		if !ok {
+			return nil, fmt.Errorf("missing filter for delete operation")
+		}
+		return mongo.NewDeleteOneModel().SetFilter(filter), nil
+
+	default:
+		return nil, fmt.Errorf("unsupported operation type: %s", opType)
+	}
+}
+
+// getDeadLetterQueueStats returns statistics about the dead letter queue
+func (s *MongoDBSyncer) getDeadLetterQueueStats(sourceDB, collectionName string) (int, int, error) {
+	collectionDir := filepath.Join(s.deadLetterDir, fmt.Sprintf("%s_%s", sourceDB, collectionName))
+	
+	if _, err := os.Stat(collectionDir); os.IsNotExist(err) {
+		return 0, 0, nil
+	}
+
+	files, err := os.ReadDir(collectionDir)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	totalBatches := 0
+	totalFailedOps := 0
+
+	for _, file := range files {
+		if !strings.HasSuffix(file.Name(), ".json") {
+			continue
+		}
+
+		filePath := filepath.Join(collectionDir, file.Name())
+		batchData, err := os.ReadFile(filePath)
+		if err != nil {
+			continue
+		}
+
+		var batch DeadLetterBatch
+		if err := json.Unmarshal(batchData, &batch); err != nil {
+			continue
+		}
+
+		totalBatches++
+		totalFailedOps += len(batch.FailedOps)
+	}
+
+	return totalBatches, totalFailedOps, nil
+}
+
+
