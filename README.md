@@ -6,7 +6,7 @@
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/retail-ai-inc/sync)
 
-**Sync** is a real-time one-way database backup tool written in **Golang** to synchronize NOSQL and SQL data to Standalone instances, GCS using a UI and workflow engine for Data scientists, auditing, and various other purposes. **Sync** can synchronize MongoDB or SQL data from a **MongoDB replica set** or **sharded cluster**, or production SQL instance to a **standalone instance**, supports initial and incremental synchronization, including **indexes** with change stream monitoring.
+**Sync** is a real-time, one-way, and PII-proof database backup tool written in **Golang** to synchronize NOSQL and SQL data to standalone instances, GCS, using a UI and workflow engine for Data scientists, auditing, and various other purposes. **Sync** can synchronize MongoDB or SQL data from a **MongoDB replica set** or **sharded cluster**, or production SQL instance to a **standalone instance**, supports initial and incremental synchronization, including **indexes** with change stream monitoring.
 
 > [!NOTE]
 > - Sync now supports MongoDB, MySQL, PostgreSQL, MariaDB, and Redis. Next, `Sync` will support Elasticsearch.
