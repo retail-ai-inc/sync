@@ -58,20 +58,22 @@ func cleanQueryStringValues(queryObj map[string]interface{}) map[string]interfac
 	return cleaned
 }
 
+
 // processFileNamePattern Process file name pattern and replace date placeholders
 func processFileNamePattern(pattern, tableName string) string {
 	if pattern == "" {
-		// Fallback to default pattern if not specified
-		dateStr := utils.GetTodayDateString()
-		return fmt.Sprintf("%s-%s", tableName, dateStr)
+		// Fallback to default pattern if not specified, use yesterday's date
+		dateStr := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
+		return fmt.Sprintf("%s_%s", tableName, dateStr)
 	}
 
 	// Remove regex anchors if present
 	cleanPattern := strings.TrimPrefix(pattern, "^")
 	cleanPattern = strings.TrimSuffix(cleanPattern, "$")
 
-	// Replace date placeholders using utils function
-	result := utils.ReplaceDatePlaceholders(cleanPattern)
+	// Replace date placeholders using utils function with yesterday's date
+	yesterdayDate := time.Now().AddDate(0, 0, -1)
+	result := utils.ReplaceDatePlaceholdersWithDate(cleanPattern, yesterdayDate)
 
 	// If the pattern contains table placeholder, replace it
 	if strings.Contains(result, "{table}") || strings.Contains(result, "{TABLE}") {
@@ -82,9 +84,9 @@ func processFileNamePattern(pattern, tableName string) string {
 		ext := filepath.Ext(result)
 		if ext != "" {
 			nameWithoutExt := strings.TrimSuffix(result, ext)
-			result = fmt.Sprintf("%s-%s%s", tableName, nameWithoutExt, ext)
+			result = fmt.Sprintf("%s_%s%s", tableName, nameWithoutExt, ext)
 		} else {
-			result = fmt.Sprintf("%s-%s", tableName, result)
+			result = fmt.Sprintf("%s_%s", tableName, result)
 		}
 	}
 
@@ -442,7 +444,7 @@ func (e *BackupExecutor) exportMongoDBWithExport(ctx context.Context, config str
 			fileExt = "csv"
 		}
 
-		outputPath := filepath.Join(tempDir, fmt.Sprintf("%s-%s.%s",
+		outputPath := filepath.Join(tempDir, fmt.Sprintf("%s_%s.%s",
 			collection, dateStr, fileExt))
 
 		// Build field projection
@@ -786,7 +788,8 @@ func (e *BackupExecutor) exportMongoDBSingleTable(ctx context.Context, config st
 	Query           map[string]map[string]interface{} `json:"query"`
 	CompressionType string                            `json:"compressionType"`
 }, tempDir string, task BackupTask, tableName string) error {
-	dateStr := time.Now().Format("2006-01-02")
+	// Use yesterday's date since we're typically backing up yesterday's data
+	dateStr := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
 
 	// Build connection string
 	connStr := config.Database.URL
@@ -948,7 +951,7 @@ func (e *BackupExecutor) exportMongoDBSingleTableWithExport(ctx context.Context,
 		fileExt = "csv"
 	}
 
-	outputPath := filepath.Join(tempDir, fmt.Sprintf("%s-%s.%s",
+	outputPath := filepath.Join(tempDir, fmt.Sprintf("%s_%s.%s",
 		collection, dateStr, fileExt))
 
 	// Build field projection
