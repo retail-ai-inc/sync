@@ -210,7 +210,7 @@ func NewMongoDBSyncer(cfg config.SyncConfig, globalConfig *config.Config, logger
 		// Initialize async pipeline components
 		channelCapacity: 200, // A smaller, safer default to prevent OOM.
 		// Initialize smart batch controller configuration
-		targetBatchSizeBytes: 64 * 1024 * 1024, // 64MB - Reduced batch size for faster processing
+		targetBatchSizeBytes: 256 * 1024 * 1024, // 256MB - Increased batch size for higher throughput
 		maxFilesPerBatch:     1000,
 		minFilesPerBatch:     5,
 		// Initialize dead letter queue configuration
@@ -737,7 +737,7 @@ func (s *MongoDBSyncer) flushBufferToDisk(ctx context.Context, buffer *[]streamE
 }
 
 func (s *MongoDBSyncer) processPersistentBuffer(ctx context.Context, sourceDB, collectionName, targetDBName, targetCollectionName string) {
-	ticker := time.NewTicker(1 * time.Second) // Check for files more frequently for better responsiveness
+	ticker := time.NewTicker(100 * time.Millisecond) // Check for files every 100ms for better responsiveness
 	defer ticker.Stop()
 
 	// Add optimization ticker to periodically analyze and optimize batch size
