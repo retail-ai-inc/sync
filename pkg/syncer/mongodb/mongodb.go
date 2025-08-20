@@ -930,8 +930,6 @@ func (s *MongoDBSyncer) processBufferedChanges(ctx context.Context, sourceDB, co
 			batchID, len(selectedFiles), totalDuration)
 	}
 
-	// Bottleneck analysis
-	s.logBottleneckAnalysis(batchID, step1Duration, step2Duration, step4Duration, step5Duration, totalDuration)
 }
 
 // parseFilesParallel parses multiple files in parallel using worker goroutines
@@ -1062,47 +1060,6 @@ func (s *MongoDBSyncer) fileParseWorker(ctx context.Context, workerID int, jobs 
 	s.logger.Debugf("[MongoDB] [BatchID:%s] File parse worker %d completed", batchID, workerID)
 }
 
-// logBottleneckAnalysis analyzes and logs which step is the bottleneck
-func (s *MongoDBSyncer) logBottleneckAnalysis(batchID string, step1, step2, step4, step5, total time.Duration) {
-	steps := []struct {
-		name     string
-		duration time.Duration
-	}{
-		{"FileSelection", step1},
-		{"FileParsing", step2},
-		{"DatabaseWrite", step4},
-		{"FileCleanup", step5},
-	}
-
-	// Find the slowest step
-	maxDuration := time.Duration(0)
-	bottleneckStep := ""
-
-	for _, step := range steps {
-		if step.duration > maxDuration {
-			maxDuration = step.duration
-			bottleneckStep = step.name
-		}
-	}
-
-	if maxDuration > 0 {
-		percentage := float64(maxDuration) / float64(total) * 100
-		s.logger.Warnf("[MongoDB] [BatchID:%s] BOTTLENECK ANALYSIS: %s is the slowest step (%v, %.1f%% of total time)",
-			batchID, bottleneckStep, maxDuration, percentage)
-
-		// Provide optimization suggestions
-		switch bottleneckStep {
-		case "FileParsing":
-			s.logger.Warnf("[MongoDB] [BatchID:%s] SUGGESTION: File parsing is slow even with parallel processing - consider optimizing BSON parsing or increasing targetBatchSizeBytes", batchID)
-		case "DatabaseWrite":
-			s.logger.Warnf("[MongoDB] [BatchID:%s] SUGGESTION: Database write is slow - check target DB performance, network latency, or consider smaller batches", batchID)
-		case "FileSelection":
-			s.logger.Warnf("[MongoDB] [BatchID:%s] SUGGESTION: File selection is slow - check disk I/O performance", batchID)
-		case "FileCleanup":
-			s.logger.Warnf("[MongoDB] [BatchID:%s] SUGGESTION: File cleanup is slow - check disk I/O performance or filesystem issues", batchID)
-		}
-	}
-}
 
 // parseFileToWriteModels parses a file and returns all WriteModels without executing them
 func (s *MongoDBSyncer) parseFileToWriteModels(ctx context.Context, filePath string, sourceDB, collectionName string) ([]mongo.WriteModel, error) {
