@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -73,6 +74,24 @@ type BatchMetrics struct {
 	TotalSizeBytes     int64
 	WriteModelCount    int
 	RemainingFiles     int
+}
+
+// FileParseJob represents a file parsing job for parallel processing
+type FileParseJob struct {
+	FilePath     string
+	FileIndex    int
+	TotalFiles   int
+	SourceDB     string
+	CollectionName string
+}
+
+// FileParseResult represents the result of parsing a file
+type FileParseResult struct {
+	FilePath     string
+	FileIndex    int
+	WriteModels  []mongo.WriteModel
+	ParseTime    time.Duration
+	Error        error
 }
 
 // streamEvent represents the data passed from the Change Stream reader to the disk writer.
@@ -825,37 +844,20 @@ func (s *MongoDBSyncer) processBufferedChanges(ctx context.Context, sourceDB, co
 	var allWriteModels []mongo.WriteModel
 	var writeSuccess = true
 
-	// === STEP 2: File Parsing ===
+	// === STEP 2: File Parsing (Parallel) ===
 	step2StartTime := time.Now()
-	s.logger.Infof("[MongoDB] [BatchID:%s] Step 2/5: Starting file parsing - %d files to process", 
+	s.logger.Infof("[MongoDB] [BatchID:%s] Step 2/5: Starting parallel file parsing - %d files to process", 
 		batchID, len(selectedFiles))
 	
-	for i, filePath := range selectedFiles {
-		fileStartTime := time.Now()
-		
-		writeModels, err := s.parseFileToWriteModels(ctx, filePath, sourceDB, collectionName)
-		if err != nil {
-			s.logger.Errorf("[MongoDB] [BatchID:%s] Step 2/5: Failed to parse file %s (file %d/%d): %v. Stopping batch.", 
-				batchID, filepath.Base(filePath), i+1, len(selectedFiles), err)
-			writeSuccess = false
-			break
-		}
-		
-		fileDuration := time.Since(fileStartTime)
-		allWriteModels = append(allWriteModels, writeModels...)
-		processedFiles = append(processedFiles, filePath)
-		
-		// Log each file's parsing time
-		s.logger.Debugf("[MongoDB] [BatchID:%s] Step 2/5: Parsed file %s (%d/%d) - %d models in %v", 
-			batchID, filepath.Base(filePath), i+1, len(selectedFiles), len(writeModels), fileDuration)
-	}
+	// Use parallel parsing for better performance
+	allWriteModels, processedFiles, writeSuccess = s.parseFilesParallel(ctx, selectedFiles, sourceDB, collectionName, batchID)
 	
 	step2Duration := time.Since(step2StartTime)
 	avgParseTime := time.Duration(0)
 	if len(processedFiles) > 0 {
 		avgParseTime = time.Duration(int64(step2Duration) / int64(len(processedFiles)))
 	}
-	s.logger.Infof("[MongoDB] [BatchID:%s] Step 2/5: File parsing completed - processed %d files, collected %d write models in %v (avg: %v/file)", 
+	s.logger.Infof("[MongoDB] [BatchID:%s] Step 2/5: Parallel file parsing completed - processed %d files, collected %d write models in %v (avg: %v/file)", 
 		batchID, len(processedFiles), len(allWriteModels), step2Duration, avgParseTime)
 
 	// === STEP 3: Memory Accumulation ===
@@ -940,6 +942,134 @@ func (s *MongoDBSyncer) processBufferedChanges(ctx context.Context, sourceDB, co
 	s.logBottleneckAnalysis(batchID, step1Duration, step2Duration, step4Duration, step5Duration, totalDuration)
 }
 
+// parseFilesParallel parses multiple files in parallel using worker goroutines
+func (s *MongoDBSyncer) parseFilesParallel(ctx context.Context, selectedFiles []string, sourceDB, collectionName, batchID string) ([]mongo.WriteModel, []string, bool) {
+	// Determine optimal worker count based on CPU cores and file count
+	workerCount := runtime.NumCPU()
+	if workerCount > 8 {
+		workerCount = 8 // Cap at 8 workers to avoid too much contention
+	}
+	if len(selectedFiles) < workerCount {
+		workerCount = len(selectedFiles) // Don't create more workers than files
+	}
+
+	s.logger.Infof("[MongoDB] [BatchID:%s] Using %d parallel workers to parse %d files", 
+		batchID, workerCount, len(selectedFiles))
+
+	// Create channels for job distribution and result collection
+	jobs := make(chan FileParseJob, len(selectedFiles))
+	results := make(chan FileParseResult, len(selectedFiles))
+
+	// Start worker goroutines
+	var wg sync.WaitGroup
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+			s.fileParseWorker(ctx, workerID, jobs, results, batchID)
+		}(i)
+	}
+
+	// Send jobs to workers
+	for i, filePath := range selectedFiles {
+		jobs <- FileParseJob{
+			FilePath:       filePath,
+			FileIndex:      i,
+			TotalFiles:     len(selectedFiles),
+			SourceDB:       sourceDB,
+			CollectionName: collectionName,
+		}
+	}
+	close(jobs)
+
+	// Wait for all workers to complete
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	// Collect results
+	fileResults := make([]FileParseResult, len(selectedFiles))
+	var allWriteModels []mongo.WriteModel
+	var processedFiles []string
+	writeSuccess := true
+	totalParseTime := time.Duration(0)
+	maxParseTime := time.Duration(0)
+	minParseTime := time.Duration(1<<63 - 1)
+
+	for result := range results {
+		fileResults[result.FileIndex] = result
+		
+		if result.Error != nil {
+			s.logger.Errorf("[MongoDB] [BatchID:%s] Parallel parsing failed for file %s (index %d): %v", 
+				batchID, filepath.Base(result.FilePath), result.FileIndex, result.Error)
+			writeSuccess = false
+		} else {
+			allWriteModels = append(allWriteModels, result.WriteModels...)
+			processedFiles = append(processedFiles, result.FilePath)
+			totalParseTime += result.ParseTime
+			
+			if result.ParseTime > maxParseTime {
+				maxParseTime = result.ParseTime
+			}
+			if result.ParseTime < minParseTime {
+				minParseTime = result.ParseTime
+			}
+			
+			// Log individual file parsing time
+			s.logger.Debugf("[MongoDB] [BatchID:%s] Parsed file %s (%d/%d) - %d models in %v", 
+				batchID, filepath.Base(result.FilePath), result.FileIndex+1, len(selectedFiles), 
+				len(result.WriteModels), result.ParseTime)
+		}
+	}
+
+	// Calculate statistics
+	avgParseTime := time.Duration(0)
+	if len(processedFiles) > 0 {
+		avgParseTime = totalParseTime / time.Duration(len(processedFiles))
+	}
+
+	s.logger.Infof("[MongoDB] [BatchID:%s] Parallel parsing stats: processed=%d, avg=%v, min=%v, max=%v", 
+		batchID, len(processedFiles), avgParseTime, minParseTime, maxParseTime)
+
+	return allWriteModels, processedFiles, writeSuccess
+}
+
+// fileParseWorker is a worker goroutine that processes file parsing jobs
+func (s *MongoDBSyncer) fileParseWorker(ctx context.Context, workerID int, jobs <-chan FileParseJob, results chan<- FileParseResult, batchID string) {
+	s.logger.Debugf("[MongoDB] [BatchID:%s] Starting file parse worker %d", batchID, workerID)
+	
+	for job := range jobs {
+		select {
+		case <-ctx.Done():
+			// Context cancelled, send error result
+			results <- FileParseResult{
+				FilePath:  job.FilePath,
+				FileIndex: job.FileIndex,
+				Error:     ctx.Err(),
+			}
+			return
+		default:
+			// Process the file
+			startTime := time.Now()
+			writeModels, err := s.parseFileToWriteModels(ctx, job.FilePath, job.SourceDB, job.CollectionName)
+			parseTime := time.Since(startTime)
+			
+			result := FileParseResult{
+				FilePath:    job.FilePath,
+				FileIndex:   job.FileIndex,
+				WriteModels: writeModels,
+				ParseTime:   parseTime,
+				Error:       err,
+			}
+			
+			results <- result
+		}
+	}
+	
+	s.logger.Debugf("[MongoDB] [BatchID:%s] File parse worker %d completed", batchID, workerID)
+}
+
 // logBottleneckAnalysis analyzes and logs which step is the bottleneck
 func (s *MongoDBSyncer) logBottleneckAnalysis(batchID string, step1, step2, step4, step5, total time.Duration) {
 	steps := []struct {
@@ -971,7 +1101,7 @@ func (s *MongoDBSyncer) logBottleneckAnalysis(batchID string, step1, step2, step
 		// Provide optimization suggestions
 		switch bottleneckStep {
 		case "FileParsing":
-			s.logger.Warnf("[MongoDB] [BatchID:%s] SUGGESTION: File parsing is slow - consider implementing parallel file parsing or increasing targetBatchSizeBytes", batchID)
+			s.logger.Warnf("[MongoDB] [BatchID:%s] SUGGESTION: File parsing is slow even with parallel processing - consider optimizing BSON parsing or increasing targetBatchSizeBytes", batchID)
 		case "DatabaseWrite":
 			s.logger.Warnf("[MongoDB] [BatchID:%s] SUGGESTION: Database write is slow - check target DB performance, network latency, or consider smaller batches", batchID)
 		case "FileSelection":
