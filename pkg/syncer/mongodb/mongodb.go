@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -50,6 +52,28 @@ import (
 
 // bsonRawSeparator is a unique byte sequence used to separate BSON documents in a buffer file.
 var bsonRawSeparator = []byte{0xDE, 0xAD, 0xBE, 0xEF, 0xDE, 0xAD, 0xBE, 0xEF}
+
+// generateBatchID generates a unique batch ID for tracking performance
+func generateBatchID() string {
+	bytes := make([]byte, 8)
+	rand.Read(bytes)
+	return hex.EncodeToString(bytes)
+}
+
+// BatchMetrics holds performance metrics for a batch processing operation
+type BatchMetrics struct {
+	BatchID            string
+	StartTime          time.Time
+	FileSelectionTime  time.Duration
+	FileParsingTime    time.Duration
+	DatabaseWriteTime  time.Duration
+	FileDeletionTime   time.Duration
+	TotalTime          time.Duration
+	FileCount          int
+	TotalSizeBytes     int64
+	WriteModelCount    int
+	RemainingFiles     int
+}
 
 // streamEvent represents the data passed from the Change Stream reader to the disk writer.
 // It contains the raw BSON data and the corresponding resume token.
@@ -772,6 +796,10 @@ func (s *MongoDBSyncer) processPersistentBuffer(ctx context.Context, sourceDB, c
 }
 
 func (s *MongoDBSyncer) processBufferedChanges(ctx context.Context, sourceDB, collectionName, targetDBName, targetCollectionName string) {
+	// Generate unique batch ID for tracking
+	batchID := generateBatchID()
+	batchStartTime := time.Now()
+	
 	targetColl := s.targetClient.Database(targetDBName).Collection(targetCollectionName)
 	bufferPath := s.getBufferPath(sourceDB, collectionName)
 
@@ -779,87 +807,178 @@ func (s *MongoDBSyncer) processBufferedChanges(ctx context.Context, sourceDB, co
 		return
 	}
 
-	// Use smart batch builder to select files based on memory size
+	// === STEP 1: File Selection ===
+	step1StartTime := time.Now()
+	s.logger.Infof("[MongoDB] [BatchID:%s] Step 1/5: Starting file selection for %s.%s", 
+		batchID, sourceDB, collectionName)
+	
 	selectedFiles, batchSize := s.buildSmartBatch(bufferPath)
 	if len(selectedFiles) == 0 {
 		return
 	}
-
-	s.logger.Debugf("[MongoDB] Processing smart batch: %d files, %.2f MB for %s.%s", 
-		len(selectedFiles), float64(batchSize)/(1024*1024), sourceDB, collectionName)
+	
+	step1Duration := time.Since(step1StartTime)
+	s.logger.Infof("[MongoDB] [BatchID:%s] Step 1/5: File selection completed - selected %d files (%.2f MB) in %v", 
+		batchID, len(selectedFiles), float64(batchSize)/(1024*1024), step1Duration)
 
 	var processedFiles []string
 	var allWriteModels []mongo.WriteModel
 	var writeSuccess = true
-	startTime := time.Now()
 
-	// Phase 1: Parse all files and collect WriteModels
-	s.logger.Debugf("[MongoDB] Phase 1: Parsing %d files to collect WriteModels", len(selectedFiles))
-	parseStartTime := time.Now()
+	// === STEP 2: File Parsing ===
+	step2StartTime := time.Now()
+	s.logger.Infof("[MongoDB] [BatchID:%s] Step 2/5: Starting file parsing - %d files to process", 
+		batchID, len(selectedFiles))
 	
-	for _, filePath := range selectedFiles {
+	for i, filePath := range selectedFiles {
+		fileStartTime := time.Now()
+		
 		writeModels, err := s.parseFileToWriteModels(ctx, filePath, sourceDB, collectionName)
 		if err != nil {
-			s.logger.Errorf("[MongoDB] Failed to parse file %s: %v. Stopping this run.", filePath, err)
+			s.logger.Errorf("[MongoDB] [BatchID:%s] Step 2/5: Failed to parse file %s (file %d/%d): %v. Stopping batch.", 
+				batchID, filepath.Base(filePath), i+1, len(selectedFiles), err)
 			writeSuccess = false
-			break // Stop processing further files on error
+			break
 		}
 		
+		fileDuration := time.Since(fileStartTime)
 		allWriteModels = append(allWriteModels, writeModels...)
 		processedFiles = append(processedFiles, filePath)
 		
-		s.logger.Debugf("[MongoDB] Parsed file %s: %d write models, total so far: %d", 
-			filepath.Base(filePath), len(writeModels), len(allWriteModels))
+		// Log each file's parsing time
+		s.logger.Debugf("[MongoDB] [BatchID:%s] Step 2/5: Parsed file %s (%d/%d) - %d models in %v", 
+			batchID, filepath.Base(filePath), i+1, len(selectedFiles), len(writeModels), fileDuration)
 	}
+	
+	step2Duration := time.Since(step2StartTime)
+	avgParseTime := time.Duration(0)
+	if len(processedFiles) > 0 {
+		avgParseTime = time.Duration(int64(step2Duration) / int64(len(processedFiles)))
+	}
+	s.logger.Infof("[MongoDB] [BatchID:%s] Step 2/5: File parsing completed - processed %d files, collected %d write models in %v (avg: %v/file)", 
+		batchID, len(processedFiles), len(allWriteModels), step2Duration, avgParseTime)
 
-	parseDuration := time.Since(parseStartTime)
-	s.logger.Debugf("[MongoDB] Phase 1 completed: parsed %d files, collected %d write models in %v", 
-		len(processedFiles), len(allWriteModels), parseDuration)
+	// === STEP 3: Memory Accumulation ===
+	estimatedMemoryMB := float64(len(allWriteModels) * 1024) / (1024 * 1024) // Assume ~1KB per WriteModel
+	s.logger.Infof("[MongoDB] [BatchID:%s] Step 3/5: Memory accumulation completed - %d WriteModels (estimated %.2f MB in memory)", 
+		batchID, len(allWriteModels), estimatedMemoryMB)
 
-	// Phase 2: Execute single bulk write operation
+	// === STEP 4: Database Write ===
+	var step4Duration time.Duration
 	if writeSuccess && len(allWriteModels) > 0 {
-		s.logger.Debugf("[MongoDB] Phase 2: Executing single bulk write with %d operations", len(allWriteModels))
-		writeStartTime := time.Now()
+		step4StartTime := time.Now()
+		s.logger.Infof("[MongoDB] [BatchID:%s] Step 4/5: Starting database bulk write - %d operations to %s.%s", 
+			batchID, len(allWriteModels), targetDBName, targetCollectionName)
 		
 		err := s.flushWriteModels(ctx, targetColl, allWriteModels, sourceDB, collectionName)
 		if err != nil {
-			s.logger.Errorf("[MongoDB] Bulk write failed: %v", err)
+			s.logger.Errorf("[MongoDB] [BatchID:%s] Step 4/5: Database bulk write failed: %v", batchID, err)
 			writeSuccess = false
 		} else {
-			writeDuration := time.Since(writeStartTime)
-			s.logger.Debugf("[MongoDB] Phase 2 completed: bulk write executed in %v", writeDuration)
+			step4Duration = time.Since(step4StartTime)
+			opsPerSecond := float64(len(allWriteModels)) / step4Duration.Seconds()
+			s.logger.Infof("[MongoDB] [BatchID:%s] Step 4/5: Database bulk write completed - %d operations in %v (%.2f ops/sec)", 
+				batchID, len(allWriteModels), step4Duration, opsPerSecond)
 		}
 	}
 
-	processingDuration := time.Since(startTime)
-
+	// === STEP 5: File Cleanup ===
+	var step5Duration time.Duration
 	if writeSuccess && len(processedFiles) > 0 {
-		// Delete processed files only if all operations succeeded
+		step5StartTime := time.Now()
+		s.logger.Infof("[MongoDB] [BatchID:%s] Step 5/5: Starting file cleanup - %d files to delete", 
+			batchID, len(processedFiles))
+		
 		deletedCount := 0
+		failedDeletes := 0
 		for _, filePath := range processedFiles {
 			if err := os.Remove(filePath); err != nil {
-				s.logger.Warnf("[MongoDB] Failed to remove processed buffer file %s: %v", filePath, err)
+				s.logger.Warnf("[MongoDB] [BatchID:%s] Step 5/5: Failed to delete file %s: %v", 
+					batchID, filepath.Base(filePath), err)
+				failedDeletes++
 			} else {
 				deletedCount++
 			}
 		}
-
-		throughput := float64(batchSize) / processingDuration.Seconds() / (1024 * 1024) // MB/s
-		operationsPerSecond := float64(len(allWriteModels)) / processingDuration.Seconds()
 		
-		s.logger.Debugf("[MongoDB] Successfully processed batch for %s.%s: %d files (%.2f MB, %d operations) in %v, throughput: %.2f MB/s, ops/sec: %.2f, deleted: %d files", 
-			sourceDB, collectionName, len(processedFiles), float64(batchSize)/(1024*1024), len(allWriteModels),
-			processingDuration, throughput, operationsPerSecond, deletedCount)
-	} else if len(processedFiles) > 0 {
-		s.logger.Warnf("[MongoDB] Batch processing failed for %s.%s, keeping %d files for retry", 
-			sourceDB, collectionName, len(selectedFiles))
+		step5Duration = time.Since(step5StartTime)
+		s.logger.Infof("[MongoDB] [BatchID:%s] Step 5/5: File cleanup completed - deleted %d files, failed %d in %v", 
+			batchID, deletedCount, failedDeletes, step5Duration)
 	}
 
-	// Log buffer status after processing
-	remainingFiles, err := os.ReadDir(bufferPath)
-	if err == nil {
-		s.logger.Debugf("[MongoDB] Buffer status after processing %s.%s: %d files remaining", 
-			sourceDB, collectionName, len(remainingFiles))
+	// === BATCH SUMMARY ===
+	totalDuration := time.Since(batchStartTime)
+	
+	// Calculate remaining files
+	remainingFiles := 0
+	if remainingFileList, err := os.ReadDir(bufferPath); err == nil {
+		remainingFiles = len(remainingFileList)
+	}
+
+	// Performance metrics
+	throughputMBps := float64(batchSize) / totalDuration.Seconds() / (1024 * 1024)
+	operationsPerSecond := float64(len(allWriteModels)) / totalDuration.Seconds()
+
+	if writeSuccess {
+		s.logger.Infof("[MongoDB] [BatchID:%s] BATCH COMPLETED SUCCESSFULLY", batchID)
+		s.logger.Infof("[MongoDB] [BatchID:%s] Performance Summary:", batchID)
+		s.logger.Infof("[MongoDB] [BatchID:%s]   Step 1 (File Selection):  %v (%.1f%%)", batchID, step1Duration, float64(step1Duration)/float64(totalDuration)*100)
+		s.logger.Infof("[MongoDB] [BatchID:%s]   Step 2 (File Parsing):    %v (%.1f%%)", batchID, step2Duration, float64(step2Duration)/float64(totalDuration)*100)
+		s.logger.Infof("[MongoDB] [BatchID:%s]   Step 3 (Memory Accum):    negligible", batchID)
+		s.logger.Infof("[MongoDB] [BatchID:%s]   Step 4 (DB Write):        %v (%.1f%%)", batchID, step4Duration, float64(step4Duration)/float64(totalDuration)*100)
+		s.logger.Infof("[MongoDB] [BatchID:%s]   Step 5 (File Cleanup):    %v (%.1f%%)", batchID, step5Duration, float64(step5Duration)/float64(totalDuration)*100)
+		s.logger.Infof("[MongoDB] [BatchID:%s]   Total Duration:           %v", batchID, totalDuration)
+		s.logger.Infof("[MongoDB] [BatchID:%s] Throughput: %.2f MB/s, %.2f ops/sec", batchID, throughputMBps, operationsPerSecond)
+		s.logger.Infof("[MongoDB] [BatchID:%s] Files: processed=%d, remaining=%d", batchID, len(processedFiles), remainingFiles)
+	} else {
+		s.logger.Errorf("[MongoDB] [BatchID:%s] BATCH FAILED - keeping %d files for retry", batchID, len(selectedFiles))
+		s.logger.Errorf("[MongoDB] [BatchID:%s] Partial timing: selection=%v, parsing=%v, total=%v", 
+			batchID, step1Duration, step2Duration, totalDuration)
+	}
+
+	// Bottleneck analysis
+	s.logBottleneckAnalysis(batchID, step1Duration, step2Duration, step4Duration, step5Duration, totalDuration)
+}
+
+// logBottleneckAnalysis analyzes and logs which step is the bottleneck
+func (s *MongoDBSyncer) logBottleneckAnalysis(batchID string, step1, step2, step4, step5, total time.Duration) {
+	steps := []struct {
+		name     string
+		duration time.Duration
+	}{
+		{"FileSelection", step1},
+		{"FileParsing", step2},
+		{"DatabaseWrite", step4},
+		{"FileCleanup", step5},
+	}
+	
+	// Find the slowest step
+	maxDuration := time.Duration(0)
+	bottleneckStep := ""
+	
+	for _, step := range steps {
+		if step.duration > maxDuration {
+			maxDuration = step.duration
+			bottleneckStep = step.name
+		}
+	}
+	
+	if maxDuration > 0 {
+		percentage := float64(maxDuration) / float64(total) * 100
+		s.logger.Warnf("[MongoDB] [BatchID:%s] BOTTLENECK ANALYSIS: %s is the slowest step (%v, %.1f%% of total time)", 
+			batchID, bottleneckStep, maxDuration, percentage)
+		
+		// Provide optimization suggestions
+		switch bottleneckStep {
+		case "FileParsing":
+			s.logger.Warnf("[MongoDB] [BatchID:%s] SUGGESTION: File parsing is slow - consider implementing parallel file parsing or increasing targetBatchSizeBytes", batchID)
+		case "DatabaseWrite":
+			s.logger.Warnf("[MongoDB] [BatchID:%s] SUGGESTION: Database write is slow - check target DB performance, network latency, or consider smaller batches", batchID)
+		case "FileSelection":
+			s.logger.Warnf("[MongoDB] [BatchID:%s] SUGGESTION: File selection is slow - check disk I/O performance", batchID)
+		case "FileCleanup":
+			s.logger.Warnf("[MongoDB] [BatchID:%s] SUGGESTION: File cleanup is slow - check disk I/O performance or filesystem issues", batchID)
+		}
 	}
 }
 
