@@ -328,13 +328,7 @@ func (e *BackupExecutor) exportMongoDB(ctx context.Context, config struct {
 	dateStr := utils.GetTodayDateString()
 
 	// Build connection string
-	connStr := config.Database.URL
-	if config.Database.Username != "" && config.Database.Password != "" {
-		connStr = fmt.Sprintf("mongodb://%s:%s@%s/?authSource=admin",
-			config.Database.Username, config.Database.Password, config.Database.URL)
-	} else {
-		connStr = fmt.Sprintf("mongodb://%s", config.Database.URL)
-	}
+	connStr := buildMongoDBConnectionString(config.Database.URL, config.Database.Username, config.Database.Password)
 
 	// Choose mongodump or mongoexport based on format
 	if config.Format == "bson" {
@@ -580,9 +574,29 @@ func (e *BackupExecutor) exportMongoDBWithExport(ctx context.Context, config str
 			}
 		}
 
-		// Execute command
-		if err := executeCommand(cmd, "mongoexport"); err != nil {
-			return err
+		// Check collection size and use batch processing for large collections
+		totalCount, err := e.getCollectionDocumentCount(ctx, connStr, config.Database.Database, collection, config.Query[collection])
+		if err != nil {
+			logrus.Warnf("[BackupExecutor] Failed to get document count for %s, using single export: %v", collection, err)
+			if err := executeCommand(cmd, "mongoexport"); err != nil {
+				return err
+			}
+			continue
+		}
+
+		const batchThreshold = 500000 // Use batch processing for collections larger than 500k documents
+		const batchSize = 100000      // Process 100k documents per batch
+
+		if totalCount > batchThreshold {
+			logrus.Infof("[BackupExecutor] Large collection %s detected (%d documents), using batch processing", collection, totalCount)
+			if err := e.executeMongoExportInBatches(ctx, cmd, mongoexportPath, outputPath, totalCount, batchSize); err != nil {
+				return err
+			}
+		} else {
+			// Small collection, use single export
+			if err := executeCommand(cmd, "mongoexport"); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -839,13 +853,7 @@ func (e *BackupExecutor) exportMongoDBSingleTable(ctx context.Context, config st
 	dateStr := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
 
 	// Build connection string
-	connStr := config.Database.URL
-	if config.Database.Username != "" && config.Database.Password != "" {
-		connStr = fmt.Sprintf("mongodb://%s:%s@%s/?authSource=admin",
-			config.Database.Username, config.Database.Password, config.Database.URL)
-	} else {
-		connStr = fmt.Sprintf("mongodb://%s", config.Database.URL)
-	}
+	connStr := buildMongoDBConnectionString(config.Database.URL, config.Database.Username, config.Database.Password)
 
 	// Choose mongodump or mongoexport based on format
 	if config.Format == "bson" {
@@ -1084,9 +1092,22 @@ func (e *BackupExecutor) exportMongoDBSingleTableWithExport(ctx context.Context,
 		}
 	}
 
-	// Execute command
-	if err := executeCommand(cmd, "mongoexport"); err != nil {
-		return err
+	// Check collection size and use batch processing for large collections
+	totalCount, err := e.getCollectionDocumentCount(ctx, connStr, config.Database.Database, collection, config.Query[collection])
+	if err != nil {
+		logrus.Warnf("[BackupExecutor] Failed to get document count, using single export: %v", err)
+		return executeCommand(cmd, "mongoexport")
+	}
+
+	const batchThreshold = 500000 // Use batch processing for collections larger than 500k documents
+	const batchSize = 100000      // Process 100k documents per batch
+
+	if totalCount > batchThreshold {
+		logrus.Infof("[BackupExecutor] Large collection detected (%d documents), using batch processing", totalCount)
+		return e.executeMongoExportInBatches(ctx, cmd, mongoexportPath, outputPath, totalCount, batchSize)
+	} else {
+		// Small collection, use single export
+		return executeCommand(cmd, "mongoexport")
 	}
 
 	return nil
@@ -1125,13 +1146,7 @@ func (e *BackupExecutor) ExpandAndGroupTables(ctx context.Context, config *Execu
 func (e *BackupExecutor) getMongoDBCollections(ctx context.Context, config *ExecutorBackupConfig, pattern string) ([]string, error) {
 
 	// Build connection string
-	connStr := config.Database.URL
-	if config.Database.Username != "" && config.Database.Password != "" {
-		connStr = fmt.Sprintf("mongodb://%s:%s@%s/?authSource=admin",
-			config.Database.Username, config.Database.Password, config.Database.URL)
-	} else {
-		connStr = fmt.Sprintf("mongodb://%s", config.Database.URL)
-	}
+	connStr := buildMongoDBConnectionString(config.Database.URL, config.Database.Username, config.Database.Password)
 
 	// Connect to MongoDB
 	client, err := mongo.Connect(ctx, options.Client().ApplyURI(connStr))
@@ -1536,4 +1551,161 @@ func parseYear(yyyy string) (int, error) {
 	}
 
 	return year, nil
+}
+
+// buildMongoDBConnectionString Build MongoDB connection string with authentication
+func buildMongoDBConnectionString(url, username, password string) string {
+	if username != "" && password != "" {
+		return fmt.Sprintf("mongodb://%s:%s@%s/?authSource=admin", username, password, url)
+	}
+	return fmt.Sprintf("mongodb://%s", url)
+}
+
+// getCollectionDocumentCount Get total document count for a collection with query conditions
+func (e *BackupExecutor) getCollectionDocumentCount(ctx context.Context, connStr, database, collection string, queryObj map[string]interface{}) (int64, error) {
+	// Connect to MongoDB
+	client, err := mongo.Connect(ctx, options.Client().ApplyURI(connStr))
+	if err != nil {
+		return 0, fmt.Errorf("failed to connect to MongoDB: %w", err)
+	}
+	defer client.Disconnect(ctx)
+
+	// Get database and collection
+	db := client.Database(database)
+	coll := db.Collection(collection)
+
+	// Build query filter
+	var filter bson.M
+	if queryObj != nil && len(queryObj) > 0 {
+		// Clean and process query
+		cleanedQueryObj := cleanQueryStringValues(queryObj)
+		processedQueryObj, err := utils.ProcessTimeRangeQuery(cleanedQueryObj)
+		if err != nil {
+			return 0, fmt.Errorf("failed to process time range query: %w", err)
+		}
+
+		// Convert to BSON
+		queryBytes, err := json.Marshal(processedQueryObj)
+		if err != nil {
+			return 0, fmt.Errorf("failed to marshal query: %w", err)
+		}
+
+		if err := bson.UnmarshalExtJSON(queryBytes, false, &filter); err != nil {
+			return 0, fmt.Errorf("failed to unmarshal query to BSON: %w", err)
+		}
+	} else {
+		filter = bson.M{}
+	}
+
+	// Count documents
+	count, err := coll.CountDocuments(ctx, filter)
+	if err != nil {
+		return 0, fmt.Errorf("failed to count documents: %w", err)
+	}
+
+	return count, nil
+}
+
+// executeMongoExportInBatches Execute mongoexport in batches to reduce memory usage
+func (e *BackupExecutor) executeMongoExportInBatches(ctx context.Context, baseCmd *exec.Cmd, mongoexportPath, outputPath string, totalCount int64, batchSize int) error {
+	var batchFiles []string
+	batchCount := int((totalCount + int64(batchSize) - 1) / int64(batchSize)) // Ceiling division
+
+	logrus.Infof("[BackupExecutor] Exporting %d documents in %d batches of %d", totalCount, batchCount, batchSize)
+
+	for i := 0; i < batchCount; i++ {
+		skip := i * batchSize
+		limit := batchSize
+		if i == batchCount-1 {
+			// Last batch might be smaller
+			remaining := int(totalCount) - skip
+			if remaining < batchSize {
+				limit = remaining
+			}
+		}
+
+		// Create temp file for this batch
+		tempFile := fmt.Sprintf("%s.batch_%d", outputPath, i)
+		batchFiles = append(batchFiles, tempFile)
+
+		// Export single batch
+		if err := e.exportSingleBatch(ctx, baseCmd, mongoexportPath, i, skip, limit, tempFile); err != nil {
+			e.cleanupTempFiles(batchFiles)
+			return fmt.Errorf("batch %d failed: %w", i+1, err)
+		}
+
+		logrus.Infof("[BackupExecutor] Completed batch %d/%d (exported %d documents)", i+1, batchCount, limit)
+	}
+
+	// Merge all batch files
+	if err := e.mergeBatchFiles(batchFiles, outputPath); err != nil {
+		e.cleanupTempFiles(batchFiles)
+		return fmt.Errorf("failed to merge batch files: %w", err)
+	}
+
+	// Clean up temporary files
+	e.cleanupTempFiles(batchFiles)
+
+	logrus.Infof("[BackupExecutor] Successfully exported %d documents in %d batches", totalCount, batchCount)
+	return nil
+}
+
+// exportSingleBatch Execute single batch export
+func (e *BackupExecutor) exportSingleBatch(ctx context.Context, baseCmd *exec.Cmd, mongoexportPath string, batchIndex, skip, limit int, tempFile string) error {
+	// Create batch command by copying base command
+	batchCmd := exec.CommandContext(ctx, mongoexportPath)
+	batchCmd.Args = make([]string, len(baseCmd.Args))
+	copy(batchCmd.Args, baseCmd.Args)
+
+	// Update output path for this batch
+	for j, arg := range batchCmd.Args {
+		if arg == "--out" && j+1 < len(batchCmd.Args) {
+			batchCmd.Args[j+1] = tempFile
+			break
+		}
+	}
+
+	// Add batch parameters
+	batchCmd.Args = append(batchCmd.Args, "--limit", fmt.Sprintf("%d", limit))
+	batchCmd.Args = append(batchCmd.Args, "--skip", fmt.Sprintf("%d", skip))
+
+	// Execute batch command
+	return executeCommand(batchCmd, "mongoexport")
+}
+
+// mergeBatchFiles Merge multiple batch files into final output file
+func (e *BackupExecutor) mergeBatchFiles(batchFiles []string, finalOutputPath string) error {
+	finalFile, err := os.Create(finalOutputPath)
+	if err != nil {
+		return fmt.Errorf("failed to create final output file: %w", err)
+	}
+	defer finalFile.Close()
+
+	logrus.Infof("[BackupExecutor] Merging %d batch files into %s", len(batchFiles), finalOutputPath)
+
+	for _, batchFile := range batchFiles {
+		batchData, err := os.Open(batchFile)
+		if err != nil {
+			logrus.Warnf("[BackupExecutor] Failed to open batch file %s: %v", batchFile, err)
+			continue
+		}
+
+		// Copy batch data to final file
+		if _, err := finalFile.ReadFrom(batchData); err != nil {
+			batchData.Close()
+			return fmt.Errorf("failed to merge batch file %s: %w", batchFile, err)
+		}
+		batchData.Close()
+	}
+
+	return nil
+}
+
+// cleanupTempFiles Remove temporary batch files
+func (e *BackupExecutor) cleanupTempFiles(files []string) {
+	for _, file := range files {
+		if err := os.Remove(file); err != nil {
+			logrus.Warnf("[BackupExecutor] Failed to remove temp file %s: %v", file, err)
+		}
+	}
 }
