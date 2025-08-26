@@ -1882,7 +1882,10 @@ func (e *BackupExecutor) getBaseArgsWithoutOutput(args []string) []string {
 	var baseArgs []string
 	skipNext := false
 
-	for _, arg := range args {
+	// Skip args[0] which is the executable path, start from args[1]
+	for i := 1; i < len(args); i++ {
+		arg := args[i]
+		
 		if skipNext {
 			skipNext = false
 			continue
