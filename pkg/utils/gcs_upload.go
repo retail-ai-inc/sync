@@ -42,7 +42,7 @@ func UploadToGCS(ctx context.Context, localFile, gcsPath string) error {
 
 	// Log output for debugging
 	if len(output) > 0 {
-		logrus.Infof("[GCS] Command output: %s", string(output))
+		logrus.Debugf("[GCS] Command output: %s", string(output))
 	}
 
 	if err != nil {

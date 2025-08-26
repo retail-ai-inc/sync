@@ -8,16 +8,47 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/retail-ai-inc/sync/pkg/utils"
 	"github.com/sirupsen/logrus"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 // BackupExecutor Backup executor
 type BackupExecutor struct {
 	db *sql.DB
+}
+
+// ExecutorBackupConfig Configuration structure for backup operations
+type ExecutorBackupConfig struct {
+	Name       string `json:"name"`
+	SourceType string `json:"sourceType"`
+	Database   struct {
+		URL      string              `json:"url"`
+		Username string              `json:"username"`
+		Password string              `json:"password"`
+		Database string              `json:"database"`
+		Tables   []string            `json:"tables"`
+		Fields   map[string][]string `json:"fields"`
+	} `json:"database"`
+	Destination struct {
+		GCSPath         string `json:"gcsPath"`
+		Retention       int    `json:"retention"`
+		ServiceAccount  string `json:"serviceAccount"`
+		FileNamePattern string `json:"fileNamePattern"`
+	} `json:"destination"`
+	Format             string                            `json:"format"`
+	BackupType         string                            `json:"backupType"`
+	Query              map[string]map[string]interface{} `json:"query"`
+	CompressionType    string                            `json:"compressionType"`
+	TableSelectionMode string                            `json:"tableSelectionMode"`
+	RegexPattern       string                            `json:"regexPattern"`
 }
 
 // NewBackupExecutor Create a new backup executor
@@ -58,7 +89,6 @@ func cleanQueryStringValues(queryObj map[string]interface{}) map[string]interfac
 	return cleaned
 }
 
-
 // processFileNamePattern Process file name pattern and replace date placeholders
 func processFileNamePattern(pattern, tableName string) string {
 	if pattern == "" {
@@ -90,7 +120,7 @@ func processFileNamePattern(pattern, tableName string) string {
 		}
 	}
 
-	logrus.Infof("[BackupExecutor] Processed file name pattern '%s' for table '%s' -> '%s'", pattern, tableName, result)
+	logrus.Debugf("[BackupExecutor] Processed file name pattern '%s' for table '%s' -> '%s'", pattern, tableName, result)
 	return result
 }
 
@@ -103,67 +133,87 @@ func (e *BackupExecutor) Execute(ctx context.Context, taskID int) error {
 	}
 
 	// Parse configuration
-	var config struct {
-		Name       string `json:"name"`
-		SourceType string `json:"sourceType"`
-		Database   struct {
-			URL      string              `json:"url"`
-			Username string              `json:"username"`
-			Password string              `json:"password"`
-			Database string              `json:"database"`
-			Tables   []string            `json:"tables"`
-			Fields   map[string][]string `json:"fields"`
-		} `json:"database"`
-		Destination struct {
-			GCSPath         string `json:"gcsPath"`
-			Retention       int    `json:"retention"`
-			ServiceAccount  string `json:"serviceAccount"`
-			FileNamePattern string `json:"fileNamePattern"`
-		} `json:"destination"`
-		Format          string                            `json:"format"`
-		BackupType      string                            `json:"backupType"`
-		Query           map[string]map[string]interface{} `json:"query"`
-		CompressionType string                            `json:"compressionType"`
-	}
+	var config ExecutorBackupConfig
 
 	if err := json.Unmarshal([]byte(task.ConfigJSON), &config); err != nil {
 		return fmt.Errorf("failed to parse config: %w", err)
 	}
 
-	logrus.Infof("[BackupExecutor] Starting backup for task %d (%s, type: %s)",
+	logrus.Debugf("[BackupExecutor] Starting backup for task %d (%s, type: %s)",
 		taskID, config.Name, config.SourceType)
 
-	// Process each table separately
-	for _, table := range config.Database.Tables {
-		logrus.Infof("[BackupExecutor] Processing table: %s", table)
+	// Expand regex patterns and group tables for merging
+	tableGroups, err := e.ExpandAndGroupTables(ctx, &config)
+	if err != nil {
+		return fmt.Errorf("failed to expand table patterns: %w", err)
+	}
 
-		// Create temporary directory for this table
-		tempDir, err := os.MkdirTemp("", fmt.Sprintf("backup_%d_%s_", taskID, table))
+	// Process each table group separately
+	for groupName, tables := range tableGroups {
+		logrus.Debugf("[BackupExecutor] Processing table group: %s (%d tables)", groupName, len(tables))
+
+		// Create temporary directory for this table group
+		tempDir, err := os.MkdirTemp("", fmt.Sprintf("backup_%d_%s_", taskID, groupName))
 		if err != nil {
-			logrus.Errorf("[BackupExecutor] Failed to create temp directory for table %s: %v", table, err)
+			logrus.Errorf("[BackupExecutor] Failed to create temp directory for table group %s: %v", groupName, err)
 			continue
 		}
 
-		logrus.Infof("[BackupExecutor] Temporary directory created for table %s: %s", table, tempDir)
-
-		// Export single table
+		// Export table group (single table or merged tables)
 		var exportErr error
 		switch config.SourceType {
 		case "mongodb":
-			exportErr = e.exportMongoDBSingleTable(ctx, config, tempDir, task, table)
+			if len(tables) == 1 {
+				// Single table export - convert config to old format
+				oldConfig := struct {
+					Name       string `json:"name"`
+					SourceType string `json:"sourceType"`
+					Database   struct {
+						URL      string              `json:"url"`
+						Username string              `json:"username"`
+						Password string              `json:"password"`
+						Database string              `json:"database"`
+						Tables   []string            `json:"tables"`
+						Fields   map[string][]string `json:"fields"`
+					} `json:"database"`
+					Destination struct {
+						GCSPath         string `json:"gcsPath"`
+						Retention       int    `json:"retention"`
+						ServiceAccount  string `json:"serviceAccount"`
+						FileNamePattern string `json:"fileNamePattern"`
+					} `json:"destination"`
+					Format          string                            `json:"format"`
+					BackupType      string                            `json:"backupType"`
+					Query           map[string]map[string]interface{} `json:"query"`
+					CompressionType string                            `json:"compressionType"`
+				}{
+					Name:            config.Name,
+					SourceType:      config.SourceType,
+					Database:        config.Database,
+					Destination:     config.Destination,
+					Format:          config.Format,
+					BackupType:      config.BackupType,
+					Query:           config.Query,
+					CompressionType: config.CompressionType,
+				}
+				exportErr = e.exportMongoDBSingleTable(ctx, oldConfig, tempDir, task, tables[0])
+			} else {
+				// Merged table export
+				exportErr = e.exportMongoDBMergedTables(ctx, &config, tempDir, task, tables, groupName)
+			}
 		default:
 			exportErr = fmt.Errorf("unsupported database type: %s", config.SourceType)
 		}
 
 		if exportErr != nil {
-			logrus.Errorf("[BackupExecutor] Export failed for table %s: %v", table, exportErr)
+			logrus.Errorf("[BackupExecutor] Export failed for table group %s: %v", groupName, exportErr)
 			os.RemoveAll(tempDir) // Clean up failed export
 			continue
 		}
 
-		// Create compressed file for this table using pattern
+		// Create compressed file for this table group using pattern
 		tempParentDir := filepath.Dir(tempDir)
-		archiveBaseName := processFileNamePattern(config.Destination.FileNamePattern, table)
+		archiveBaseName := processFileNamePattern(config.Destination.FileNamePattern, groupName)
 
 		// Determine compression type and file extension
 		compressionType := config.CompressionType
@@ -195,18 +245,15 @@ func (e *BackupExecutor) Execute(ctx context.Context, taskID int) error {
 
 		archivePath := filepath.Join(tempParentDir, archiveBaseName)
 
-		logrus.Infof("[BackupExecutor] Starting compression for table %s: %s -> %s using %s", table, tempDir, archivePath, compressionType)
 		if err := e.CompressDirectory(tempDir, archivePath, compressionType); err != nil {
-			logrus.Errorf("[BackupExecutor] Compression failed for table %s: %v", table, err)
+			logrus.Errorf("[BackupExecutor] Compression failed for table group %s: %v", groupName, err)
 			os.RemoveAll(tempDir) // Clean up temp directory only
 			continue
 		}
-		logrus.Infof("[BackupExecutor] Archive file created for table %s: %s", table, archivePath)
 
 		// Upload to GCS
-		logrus.Infof("[BackupExecutor] Starting upload to GCS for table %s", table)
 		if err := utils.UploadToGCS(ctx, archivePath, config.Destination.GCSPath); err != nil {
-			logrus.Errorf("[BackupExecutor] Upload to GCS failed for table %s: %v", table, err)
+			logrus.Errorf("[BackupExecutor] Upload to GCS failed for table group %s: %v", groupName, err)
 			logrus.Warnf("[BackupExecutor] Archive file preserved for debugging: %s", archivePath)
 			// Clean up temp directory only, keep archive file for debugging
 			os.RemoveAll(tempDir)
@@ -216,10 +263,10 @@ func (e *BackupExecutor) Execute(ctx context.Context, taskID int) error {
 		// Clean up temporary files after successful upload
 		os.RemoveAll(tempDir)
 		os.Remove(archivePath)
-		logrus.Infof("[BackupExecutor] Backup completed successfully for table %s", table)
+		logrus.Infof("[BackupExecutor] ✅ Backup completed successfully for table group: %s", groupName)
 	}
 
-	logrus.Infof("[BackupExecutor] All table backups completed for task %d", taskID)
+	logrus.Debugf("[BackupExecutor] All table backups completed for task %d", taskID)
 	return nil
 }
 
@@ -373,7 +420,7 @@ func (e *BackupExecutor) exportMongoDBWithDump(ctx context.Context, config struc
 			// Add query condition
 			jsonStr := string(queryBytes)
 			cmd.Args = append(cmd.Args, "--query", jsonStr)
-			logrus.Infof("[BackupExecutor] MongoDB query for collection %s: %s", collection, jsonStr)
+
 		}
 
 		// Handle incremental backup
@@ -484,7 +531,7 @@ func (e *BackupExecutor) exportMongoDBWithExport(ctx context.Context, config str
 			// Use JSON directly without any quotes
 			jsonStr := string(queryBytes)
 			query = fmt.Sprintf("--query=%s", jsonStr)
-			logrus.Infof("[BackupExecutor] MongoDB query for collection %s: %s", collection, jsonStr)
+
 		}
 
 		// Build command
@@ -544,14 +591,14 @@ func (e *BackupExecutor) exportMongoDBWithExport(ctx context.Context, config str
 
 // CompressDirectory Compress directory with specified compression type
 func (e *BackupExecutor) CompressDirectory(sourceDir, destFile, compressionType string) error {
-	logrus.Infof("[BackupExecutor] Starting compression of directory: %s", sourceDir)
+	logrus.Debugf("[BackupExecutor] Starting compression of directory: %s", sourceDir)
 
 	// Set default compression type to zip if empty
 	if compressionType == "" {
 		compressionType = "zip"
 	}
 
-	logrus.Infof("[BackupExecutor] Using compression type: %s", compressionType)
+	logrus.Debugf("[BackupExecutor] Using compression type: %s", compressionType)
 
 	// Check if compression tool is available
 	if err := e.checkCompressionToolAvailable(compressionType); err != nil {
@@ -575,7 +622,7 @@ func (e *BackupExecutor) CompressDirectory(sourceDir, destFile, compressionType 
 			// Support JSON, SQL and BSON files
 			if ext == ".json" || ext == ".sql" || ext == ".bson" {
 				allFiles = append(allFiles, path)
-				logrus.Infof("[BackupExecutor] Found file to compress: %s (size: %.2f MB)",
+				logrus.Debugf("[BackupExecutor] Found file to compress: %s (size: %.2f MB)",
 					path, float64(info.Size())/1024/1024)
 			} else {
 				logrus.Debugf("[BackupExecutor] Skipping file with unsupported extension: %s", path)
@@ -585,7 +632,7 @@ func (e *BackupExecutor) CompressDirectory(sourceDir, destFile, compressionType 
 	}
 
 	// Recursively traverse directory
-	logrus.Infof("[BackupExecutor] Scanning directory for compressible files: %s", sourceDir)
+	logrus.Debugf("[BackupExecutor] Scanning directory for compressible files: %s", sourceDir)
 	if err := filepath.Walk(sourceDir, findFiles); err != nil {
 		logrus.Errorf("[BackupExecutor] Failed to walk directory %s: %v", sourceDir, err)
 		return fmt.Errorf("failed to walk directory: %w", err)
@@ -617,7 +664,7 @@ func (e *BackupExecutor) CompressDirectory(sourceDir, destFile, compressionType 
 		}
 	}
 
-	logrus.Infof("[BackupExecutor] Compressing %d files (total size: %.2f MB) using %s compression",
+	logrus.Debugf("[BackupExecutor] Compressing %d files (total size: %.2f MB) using %s compression",
 		len(allFiles), float64(totalSize)/1024/1024, compressionType)
 
 	// Execute compression based on type
@@ -702,7 +749,7 @@ func (e *BackupExecutor) compressWithZip(sourceDir, destFile string, allFiles []
 	cmd := exec.Command(zipPath, args...)
 	cmd.Dir = sourceDir // Set working directory to source directory
 
-	logrus.Infof("[BackupExecutor] Executing zip command in directory: %s", sourceDir)
+	logrus.Debugf("[BackupExecutor] Executing zip command in directory: %s", sourceDir)
 
 	// Execute command
 	if err := executeCommand(cmd, "zip"); err != nil {
@@ -712,7 +759,7 @@ func (e *BackupExecutor) compressWithZip(sourceDir, destFile string, allFiles []
 
 	// Check if compressed file was created and get its size
 	if info, err := os.Stat(destFile); err == nil {
-		logrus.Infof("[BackupExecutor] ZIP compression completed successfully. Archive size: %.2f MB",
+		logrus.Debugf("[BackupExecutor] ZIP compression completed successfully. Archive size: %.2f MB",
 			float64(info.Size())/1024/1024)
 	} else {
 		logrus.Warnf("[BackupExecutor] Could not stat compressed file %s: %v", destFile, err)
@@ -863,8 +910,6 @@ func (e *BackupExecutor) exportMongoDBSingleTableWithDump(ctx context.Context, c
 	if queryObj, ok := config.Query[collection]; ok && len(queryObj) > 0 {
 		// Clean query string values to remove extra escaping
 		cleanedQueryObj := cleanQueryStringValues(queryObj)
-		logrus.Infof("[BackupExecutor] Original query for collection %s: %+v", collection, queryObj)
-		logrus.Infof("[BackupExecutor] Cleaned query for collection %s: %+v", collection, cleanedQueryObj)
 
 		// Process time range query if needed
 		processedQueryObj, err := utils.ProcessTimeRangeQuery(cleanedQueryObj)
@@ -883,7 +928,7 @@ func (e *BackupExecutor) exportMongoDBSingleTableWithDump(ctx context.Context, c
 		// Add query condition
 		jsonStr := string(queryBytes)
 		cmd.Args = append(cmd.Args, "--query", jsonStr)
-		logrus.Infof("[BackupExecutor] MongoDB query for collection %s: %s", collection, jsonStr)
+
 	}
 
 	// Handle incremental backup
@@ -971,8 +1016,6 @@ func (e *BackupExecutor) exportMongoDBSingleTableWithExport(ctx context.Context,
 	if queryObj, ok := config.Query[collection]; ok && len(queryObj) > 0 {
 		// Clean query string values to remove extra escaping
 		cleanedQueryObj := cleanQueryStringValues(queryObj)
-		logrus.Infof("[BackupExecutor] Original query for collection %s: %+v", collection, queryObj)
-		logrus.Infof("[BackupExecutor] Cleaned query for collection %s: %+v", collection, cleanedQueryObj)
 
 		// Process time range query if needed
 		processedQueryObj, err := utils.ProcessTimeRangeQuery(cleanedQueryObj)
@@ -991,7 +1034,7 @@ func (e *BackupExecutor) exportMongoDBSingleTableWithExport(ctx context.Context,
 		// Use JSON directly without any quotes
 		jsonStr := string(queryBytes)
 		query = fmt.Sprintf("--query=%s", jsonStr)
-		logrus.Infof("[BackupExecutor] MongoDB query for collection %s: %s", collection, jsonStr)
+
 	}
 
 	// Build command
@@ -1047,4 +1090,450 @@ func (e *BackupExecutor) exportMongoDBSingleTableWithExport(ctx context.Context,
 	}
 
 	return nil
+}
+
+// expandAndGroupTables Expand regex patterns and group tables for merging
+func (e *BackupExecutor) ExpandAndGroupTables(ctx context.Context, config *ExecutorBackupConfig) (map[string][]string, error) {
+
+	tableGroups := make(map[string][]string)
+
+	// Check if regex mode is enabled
+	if config.TableSelectionMode == "regex" && config.RegexPattern != "" {
+		// Get actual collections from MongoDB using regex pattern
+		actualTables, err := e.getMongoDBCollections(ctx, config, config.RegexPattern)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get MongoDB collections: %w", err)
+		}
+
+		// Group tables by common prefix
+		tableGroups = e.groupTablesByPrefix(actualTables)
+		logrus.Debugf("[BackupExecutor] Regex mode enabled, found %d table groups from pattern %s",
+			len(tableGroups), config.RegexPattern)
+	} else {
+		// Normal mode: each table is its own group
+		for _, table := range config.Database.Tables {
+			tableGroups[table] = []string{table}
+		}
+		logrus.Infof("[BackupExecutor] Normal mode enabled, processing %d individual tables",
+			len(tableGroups))
+	}
+
+	return tableGroups, nil
+}
+
+// getMongoDBCollections Get collections from MongoDB that match the regex pattern
+func (e *BackupExecutor) getMongoDBCollections(ctx context.Context, config *ExecutorBackupConfig, pattern string) ([]string, error) {
+
+	// Build connection string
+	connStr := config.Database.URL
+	if config.Database.Username != "" && config.Database.Password != "" {
+		connStr = fmt.Sprintf("mongodb://%s:%s@%s/?authSource=admin",
+			config.Database.Username, config.Database.Password, config.Database.URL)
+	} else {
+		connStr = fmt.Sprintf("mongodb://%s", config.Database.URL)
+	}
+
+	// Connect to MongoDB
+	client, err := mongo.Connect(ctx, options.Client().ApplyURI(connStr))
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to MongoDB: %w", err)
+	}
+	defer client.Disconnect(ctx)
+
+	// Get database
+	database := client.Database(config.Database.Database)
+
+	// List collections matching the pattern
+	filter := bson.M{"name": primitive.Regex{Pattern: pattern, Options: ""}}
+	cursor, err := database.ListCollections(ctx, filter)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list collections: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var collections []string
+	for cursor.Next(ctx) {
+		var result bson.M
+		if err := cursor.Decode(&result); err != nil {
+			continue
+		}
+		if name, ok := result["name"].(string); ok {
+			collections = append(collections, name)
+		}
+	}
+
+	logrus.Infof("[BackupExecutor] Found %d collections matching pattern %s: %v",
+		len(collections), pattern, collections)
+	return collections, nil
+}
+
+// groupTablesByPrefix Group tables by common prefix for merging
+func (e *BackupExecutor) groupTablesByPrefix(tables []string) map[string][]string {
+	groups := make(map[string][]string)
+
+	for _, table := range tables {
+		// Extract prefix by removing date/month suffixes
+		prefix := e.extractTablePrefix(table)
+		groups[prefix] = append(groups[prefix], table)
+	}
+
+	return groups
+}
+
+// extractTablePrefix Extract common prefix from table name
+func (e *BackupExecutor) extractTablePrefix(tableName string) string {
+	// Common patterns for date-based table names
+	patterns := []string{
+		`_\d{6}$`, // _YYYYMM (monthly)
+		`_\d{8}$`, // _YYYYMMDD (daily)
+		`_\d{4}$`, // _YYYY (yearly)
+		`\d{6}$`,  // YYYYMM (monthly without underscore)
+		`\d{8}$`,  // YYYYMMDD (daily without underscore)
+	}
+
+	for _, pattern := range patterns {
+		re := regexp.MustCompile(pattern)
+		if re.MatchString(tableName) {
+			return re.ReplaceAllString(tableName, "")
+		}
+	}
+
+	// If no pattern matches, return the original table name
+	return tableName
+}
+
+// exportMongoDBMergedTables Export and merge multiple MongoDB collections
+func (e *BackupExecutor) exportMongoDBMergedTables(ctx context.Context, config *ExecutorBackupConfig, tempDir string, task BackupTask, tables []string, groupName string) error {
+
+	dateStr := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
+	var allDocuments []interface{}
+
+	// Filter tables based on query time range if query conditions exist
+	relevantTables := e.filterRelevantTables(tables, config.Query, groupName)
+	if len(relevantTables) < len(tables) {
+		logrus.Debugf("[BackupExecutor] Filtered %d tables to %d relevant tables based on time range", len(tables), len(relevantTables))
+	}
+
+	// Export each relevant table and collect documents
+	for _, tableName := range relevantTables {
+
+		// Create temporary config for single table export
+		tempTableDir := filepath.Join(tempDir, tableName+"_temp")
+		if err := os.MkdirAll(tempTableDir, 0755); err != nil {
+			return fmt.Errorf("failed to create temp directory for table %s: %w", tableName, err)
+		}
+
+		// Export single table using existing method - convert config to old format
+		oldConfig := struct {
+			Name       string `json:"name"`
+			SourceType string `json:"sourceType"`
+			Database   struct {
+				URL      string              `json:"url"`
+				Username string              `json:"username"`
+				Password string              `json:"password"`
+				Database string              `json:"database"`
+				Tables   []string            `json:"tables"`
+				Fields   map[string][]string `json:"fields"`
+			} `json:"database"`
+			Destination struct {
+				GCSPath         string `json:"gcsPath"`
+				Retention       int    `json:"retention"`
+				ServiceAccount  string `json:"serviceAccount"`
+				FileNamePattern string `json:"fileNamePattern"`
+			} `json:"destination"`
+			Format          string                            `json:"format"`
+			BackupType      string                            `json:"backupType"`
+			Query           map[string]map[string]interface{} `json:"query"`
+			CompressionType string                            `json:"compressionType"`
+		}{
+			Name:            config.Name,
+			SourceType:      config.SourceType,
+			Database:        config.Database,
+			Destination:     config.Destination,
+			Format:          config.Format,
+			BackupType:      config.BackupType,
+			Query:           config.Query,
+			CompressionType: config.CompressionType,
+		}
+		if err := e.exportMongoDBSingleTable(ctx, oldConfig, tempTableDir, task, tableName); err != nil {
+			logrus.Warnf("[BackupExecutor] Failed to export table %s: %v", tableName, err)
+			continue
+		}
+
+		// Read the exported file and collect documents
+		documents, err := e.readJSONFile(tempTableDir, tableName, dateStr)
+		if err != nil {
+			logrus.Warnf("[BackupExecutor] Failed to read exported file for table %s: %v", tableName, err)
+			continue
+		}
+
+		allDocuments = append(allDocuments, documents...)
+		logrus.Debugf("[BackupExecutor] ✓ Collected %d documents from table: %s", len(documents), tableName)
+
+		// Clean up temporary directory
+		os.RemoveAll(tempTableDir)
+	}
+
+	// Write merged documents to final file
+	if len(allDocuments) > 0 {
+		finalFileName := fmt.Sprintf("%s_%s.json", groupName, dateStr)
+		finalFilePath := filepath.Join(tempDir, finalFileName)
+
+		if err := e.writeJSONFile(finalFilePath, allDocuments); err != nil {
+			return fmt.Errorf("failed to write merged file: %w", err)
+		}
+
+		logrus.Infof("[BackupExecutor] ✅ Merged %d documents from %d tables into: %s",
+			len(allDocuments), len(relevantTables), finalFileName)
+	} else {
+		logrus.Warnf("[BackupExecutor] No documents found in any of the tables: %v", relevantTables)
+	}
+
+	return nil
+}
+
+// readJSONFile Read JSON documents from exported file
+func (e *BackupExecutor) readJSONFile(tempDir, tableName, dateStr string) ([]interface{}, error) {
+	fileName := fmt.Sprintf("%s_%s.json", tableName, dateStr)
+	filePath := filepath.Join(tempDir, fileName)
+
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read file %s: %w", filePath, err)
+	}
+
+	// MongoDB mongoexport outputs each document on a separate line (JSONL format)
+	// We need to parse each line as a separate JSON object
+	var documents []interface{}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+
+	for i, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue // Skip empty lines
+		}
+
+		var doc interface{}
+		if err := json.Unmarshal([]byte(line), &doc); err != nil {
+			logrus.Warnf("[BackupExecutor] Failed to parse JSON line %d in %s: %v", i+1, filePath, err)
+			continue
+		}
+		documents = append(documents, doc)
+	}
+
+	return documents, nil
+}
+
+// writeJSONFile Write JSON documents to file in JSONL format (one JSON object per line)
+func (e *BackupExecutor) writeJSONFile(filePath string, documents []interface{}) error {
+	file, err := os.Create(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to create file %s: %w", filePath, err)
+	}
+	defer file.Close()
+
+	// Write each document as a separate line (JSONL format)
+	for _, doc := range documents {
+		docBytes, err := json.Marshal(doc)
+		if err != nil {
+			return fmt.Errorf("failed to marshal JSON document: %w", err)
+		}
+
+		// Write document followed by newline
+		if _, err := file.Write(docBytes); err != nil {
+			return fmt.Errorf("failed to write document to file: %w", err)
+		}
+		if _, err := file.WriteString("\n"); err != nil {
+			return fmt.Errorf("failed to write newline to file: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// filterRelevantTables Filter tables based on query time range to avoid unnecessary exports
+func (e *BackupExecutor) filterRelevantTables(tables []string, queryConditions map[string]map[string]interface{}, groupName string) []string {
+	// If no query conditions exist, return all tables
+	if len(queryConditions) == 0 {
+		return tables
+	}
+
+	// Look for time range query in any table's query conditions
+	var timeRange *TimeRange
+	for _, query := range queryConditions {
+		if tr := e.extractTimeRange(query); tr != nil {
+			timeRange = tr
+			break
+		}
+	}
+
+	// If no time range found, return all tables
+	if timeRange == nil {
+		return tables
+	}
+
+	var relevantTables []string
+	for _, table := range tables {
+		if e.isTableRelevantForTimeRange(table, timeRange) {
+			relevantTables = append(relevantTables, table)
+		} else {
+			logrus.Debugf("[BackupExecutor] ⏭ Skipping table %s (outside time range)", table)
+		}
+	}
+
+	// If no relevant tables found, return the first table as fallback
+	if len(relevantTables) == 0 {
+		logrus.Warnf("[BackupExecutor] No tables match time range, using first table as fallback: %s", tables[0])
+		return []string{tables[0]}
+	}
+
+	return relevantTables
+}
+
+// TimeRange represents a time range for filtering
+type TimeRange struct {
+	Start time.Time
+	End   time.Time
+}
+
+// extractTimeRange Extract time range from query conditions
+func (e *BackupExecutor) extractTimeRange(query map[string]interface{}) *TimeRange {
+	for _, value := range query {
+		if timeQuery, ok := value.(map[string]interface{}); ok {
+			if timeType, exists := timeQuery["type"]; exists && timeType == "daily" {
+				// Parse offset values
+				startOffset := -1
+				endOffset := 0
+
+				if so, ok := timeQuery["startOffset"]; ok {
+					if offset, ok := so.(float64); ok {
+						startOffset = int(offset)
+					}
+				}
+				if eo, ok := timeQuery["endOffset"]; ok {
+					if offset, ok := eo.(float64); ok {
+						endOffset = int(offset)
+					}
+				}
+
+				// Calculate JST time range
+				now := time.Now()
+				jst := time.FixedZone("JST", 9*3600)
+
+				startJST := now.In(jst).AddDate(0, 0, startOffset).Truncate(24 * time.Hour)
+				endJST := now.In(jst).AddDate(0, 0, endOffset+1).Truncate(24 * time.Hour)
+
+				// Convert to UTC
+				startUTC := startJST.Add(-9 * time.Hour)
+				endUTC := endJST.Add(-9 * time.Hour)
+
+				return &TimeRange{
+					Start: startUTC,
+					End:   endUTC,
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// isTableRelevantForTimeRange Check if a table is relevant for the given time range
+func (e *BackupExecutor) isTableRelevantForTimeRange(tableName string, timeRange *TimeRange) bool {
+	// Extract table time pattern
+	tableTime := e.extractTableTimePattern(tableName)
+	if tableTime == nil {
+		// If we can't determine table time, include it to be safe
+		return true
+	}
+
+	// Check if table time range overlaps with query time range
+	return !(tableTime.End.Before(timeRange.Start) || tableTime.Start.After(timeRange.End))
+}
+
+// extractTableTimePattern Extract time pattern from table name and return its time range
+func (e *BackupExecutor) extractTableTimePattern(tableName string) *TimeRange {
+	// Pattern for YYYYMM (monthly tables)
+	if re := regexp.MustCompile(`_(\d{6})$`); re.MatchString(tableName) {
+		matches := re.FindStringSubmatch(tableName)
+		if len(matches) >= 2 {
+			if year, month, err := parseYearMonth(matches[1]); err == nil {
+				start := time.Date(year, month, 1, 0, 0, 0, 0, time.UTC)
+				end := start.AddDate(0, 1, 0)
+				return &TimeRange{Start: start, End: end}
+			}
+		}
+	}
+
+	// Pattern for YYYYMMDD (daily tables)
+	if re := regexp.MustCompile(`_(\d{8})$`); re.MatchString(tableName) {
+		matches := re.FindStringSubmatch(tableName)
+		if len(matches) >= 2 {
+			if date, err := time.Parse("20060102", matches[1]); err == nil {
+				start := date.UTC()
+				end := start.AddDate(0, 0, 1)
+				return &TimeRange{Start: start, End: end}
+			}
+		}
+	}
+
+	// Pattern for YYYY (yearly tables)
+	if re := regexp.MustCompile(`_(\d{4})$`); re.MatchString(tableName) {
+		matches := re.FindStringSubmatch(tableName)
+		if len(matches) >= 2 {
+			if year, err := parseYear(matches[1]); err == nil {
+				start := time.Date(year, 1, 1, 0, 0, 0, 0, time.UTC)
+				end := start.AddDate(1, 0, 0)
+				return &TimeRange{Start: start, End: end}
+			}
+		}
+	}
+
+	return nil
+}
+
+// parseYearMonth Parse YYYYMM string to year and month
+func parseYearMonth(yyyymm string) (int, time.Month, error) {
+	if len(yyyymm) != 6 {
+		return 0, 0, fmt.Errorf("invalid YYYYMM format: %s", yyyymm)
+	}
+
+	year := 0
+	month := 0
+
+	for _, r := range yyyymm[:4] {
+		if r < '0' || r > '9' {
+			return 0, 0, fmt.Errorf("invalid year: %s", yyyymm[:4])
+		}
+		year = year*10 + int(r-'0')
+	}
+
+	for _, r := range yyyymm[4:] {
+		if r < '0' || r > '9' {
+			return 0, 0, fmt.Errorf("invalid month: %s", yyyymm[4:])
+		}
+		month = month*10 + int(r-'0')
+	}
+
+	if month < 1 || month > 12 {
+		return 0, 0, fmt.Errorf("invalid month: %d", month)
+	}
+
+	return year, time.Month(month), nil
+}
+
+// parseYear Parse YYYY string to year
+func parseYear(yyyy string) (int, error) {
+	if len(yyyy) != 4 {
+		return 0, fmt.Errorf("invalid YYYY format: %s", yyyy)
+	}
+
+	year := 0
+	for _, r := range yyyy {
+		if r < '0' || r > '9' {
+			return 0, fmt.Errorf("invalid year: %s", yyyy)
+		}
+		year = year*10 + int(r-'0')
+	}
+
+	return year, nil
 }
