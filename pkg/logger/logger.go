@@ -54,7 +54,7 @@ func InitLogger(logLevel string) *logrus.Logger {
 	// Check if SQLite logging is enabled via environment variable
 	// Default behavior: SQLite logging is DISABLED (not writing to SQLite)
 	enableSQLiteLogging := os.Getenv("ENABLE_SQLITE_LOGGING") == "true"
-	
+
 	if enableSQLiteLogging {
 		logger.AddHook(NewSQLiteHook())
 		logger.Info("SQLite logging is enabled via ENABLE_SQLITE_LOGGING environment variable")

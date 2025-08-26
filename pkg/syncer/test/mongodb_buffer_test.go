@@ -84,11 +84,11 @@ func TestMongoDBSyncerCreation(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-					// Create independent logger instance for each test
-		log := createTestLogger()
-		globalConfig := createMockGlobalConfig()
+			// Create independent logger instance for each test
+			log := createTestLogger()
+			globalConfig := createMockGlobalConfig()
 
-		syncer := syncer.NewMongoDBSyncer(tc.config, globalConfig, log)
+			syncer := syncer.NewMongoDBSyncer(tc.config, globalConfig, log)
 
 			if tc.expectNil && syncer != nil {
 				t.Errorf("Expected nil syncer for invalid config, got non-nil")

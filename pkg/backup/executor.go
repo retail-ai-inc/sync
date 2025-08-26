@@ -1,14 +1,18 @@
 package backup
 
 import (
+	"bufio"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -585,11 +589,11 @@ func (e *BackupExecutor) exportMongoDBWithExport(ctx context.Context, config str
 		}
 
 		const batchThreshold = 500000 // Use batch processing for collections larger than 500k documents
-		const batchSize = 100000      // Process 100k documents per batch
+		const batchSize = 50000       // Reduced batch size to lower memory per batch
 
 		if totalCount > batchThreshold {
-			logrus.Infof("[BackupExecutor] Large collection %s detected (%d documents), using batch processing", collection, totalCount)
-			if err := e.executeMongoExportInBatches(ctx, cmd, mongoexportPath, outputPath, totalCount, batchSize); err != nil {
+			logrus.Infof("[BackupExecutor] Large collection %s detected (%d documents), using stream merge processing", collection, totalCount)
+			if err := e.executeMongoExportWithStreamMerge(ctx, cmd, mongoexportPath, outputPath, totalCount, batchSize); err != nil {
 				return err
 			}
 		} else {
@@ -692,29 +696,62 @@ func (e *BackupExecutor) CompressDirectory(sourceDir, destFile, compressionType 
 	}
 }
 
-// executeCommand General function to execute commands
+// executeCommand General function to execute commands (deprecated - use executeCommandStreaming)
 func executeCommand(cmd *exec.Cmd, commandName string) error {
-	// Print full command
+	return executeCommandStreaming(cmd, commandName)
+}
+
+// executeCommandStreaming Execute command with streaming output to reduce memory usage
+func executeCommandStreaming(cmd *exec.Cmd, commandName string) error {
 	logrus.Infof("[BackupExecutor] Executing command: %s %s", filepath.Base(cmd.Path), strings.Join(cmd.Args[1:], " "))
-	output, err := cmd.CombinedOutput()
 
-	// Log full output to view export line count
-	logrus.Infof("[BackupExecutor] Command output: %s", string(output))
-
+	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return fmt.Errorf("%s command failed: %w, output: %s",
-			commandName, err, string(output))
+		return fmt.Errorf("failed to create stdout pipe: %w", err)
 	}
 
-	// Parse and log export line count
-	if strings.Contains(string(output), "exported") {
-		lines := strings.Split(string(output), "\n")
-		for _, line := range lines {
-			if strings.Contains(line, "exported") {
-				logrus.Infof("[BackupExecutor] %s", line)
-				break
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("failed to create stderr pipe: %w", err)
+	}
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("failed to start command: %w", err)
+	}
+
+	// Process stdout in streaming fashion, only keep key information
+	var exportedCount string
+	go func() {
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			line := scanner.Text()
+			if strings.Contains(line, "exported") && strings.Contains(line, "records") {
+				exportedCount = strings.TrimSpace(line)
 			}
+			// Other output is discarded to save memory
 		}
+	}()
+
+	// Collect error output (errors need to be preserved)
+	var errorLines []string
+	go func() {
+		scanner := bufio.NewScanner(stderr)
+		for scanner.Scan() {
+			errorLines = append(errorLines, scanner.Text())
+		}
+	}()
+
+	// Wait for command completion
+	err = cmd.Wait()
+
+	// Log only key information
+	if exportedCount != "" {
+		logrus.Infof("[BackupExecutor] %s: %s", commandName, exportedCount)
+	}
+
+	if err != nil {
+		errorMsg := strings.Join(errorLines, "\n")
+		return fmt.Errorf("%s command failed: %w, output: %s", commandName, err, errorMsg)
 	}
 
 	return nil
@@ -1100,11 +1137,11 @@ func (e *BackupExecutor) exportMongoDBSingleTableWithExport(ctx context.Context,
 	}
 
 	const batchThreshold = 500000 // Use batch processing for collections larger than 500k documents
-	const batchSize = 100000      // Process 100k documents per batch
+	const batchSize = 50000       // Reduced batch size to lower memory per batch
 
 	if totalCount > batchThreshold {
-		logrus.Infof("[BackupExecutor] Large collection detected (%d documents), using batch processing", totalCount)
-		return e.executeMongoExportInBatches(ctx, cmd, mongoexportPath, outputPath, totalCount, batchSize)
+		logrus.Infof("[BackupExecutor] Large collection detected (%d documents), using stream merge processing", totalCount)
+		return e.executeMongoExportWithStreamMerge(ctx, cmd, mongoexportPath, outputPath, totalCount, batchSize)
 	} else {
 		// Small collection, use single export
 		return executeCommand(cmd, "mongoexport")
@@ -1635,7 +1672,25 @@ func (e *BackupExecutor) executeMongoExportInBatches(ctx context.Context, baseCm
 		}
 
 		logrus.Infof("[BackupExecutor] Completed batch %d/%d (exported %d documents)", i+1, batchCount, limit)
+
+		// Force garbage collection after every 5 batches to free memory
+		if (i+1)%5 == 0 {
+			logrus.Debugf("[BackupExecutor] Running garbage collection after batch %d", i+1)
+			runtime.GC()
+			runtime.GC() // Call twice for more aggressive cleanup
+		}
 	}
+
+	// Final garbage collection before merge
+	logrus.Debugf("[BackupExecutor] Running final GC before merging %d files", len(batchFiles))
+	runtime.GC()
+	runtime.GC()
+
+	// Log memory stats before merge
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	logrus.Infof("[BackupExecutor] Memory before merge: Alloc=%dMB, Sys=%dMB",
+		m.Alloc/1024/1024, m.Sys/1024/1024)
 
 	// Merge all batch files
 	if err := e.mergeBatchFiles(batchFiles, outputPath); err != nil {
@@ -1645,6 +1700,13 @@ func (e *BackupExecutor) executeMongoExportInBatches(ctx context.Context, baseCm
 
 	// Clean up temporary files
 	e.cleanupTempFiles(batchFiles)
+
+	// Final cleanup and memory stats
+	runtime.GC()
+	runtime.GC()
+	runtime.ReadMemStats(&m)
+	logrus.Infof("[BackupExecutor] Memory after cleanup: Alloc=%dMB, Sys=%dMB",
+		m.Alloc/1024/1024, m.Sys/1024/1024)
 
 	logrus.Infof("[BackupExecutor] Successfully exported %d documents in %d batches", totalCount, batchCount)
 	return nil
@@ -1708,4 +1770,131 @@ func (e *BackupExecutor) cleanupTempFiles(files []string) {
 			logrus.Warnf("[BackupExecutor] Failed to remove temp file %s: %v", file, err)
 		}
 	}
+}
+
+// executeMongoExportWithStreamMerge Execute mongoexport with stream merge to minimize memory usage
+func (e *BackupExecutor) executeMongoExportWithStreamMerge(ctx context.Context, baseCmd *exec.Cmd, mongoexportPath, outputPath string, totalCount int64, batchSize int) error {
+	batchCount := int((totalCount + int64(batchSize) - 1) / int64(batchSize))
+
+	logrus.Infof("[BackupExecutor] Starting stream merge export: %d documents in %d batches of %d", totalCount, batchCount, batchSize)
+
+	// Create final output file
+	finalFile, err := os.Create(outputPath)
+	if err != nil {
+		return fmt.Errorf("failed to create final output file: %w", err)
+	}
+	defer finalFile.Close()
+
+	// Extract base arguments without --out parameter
+	baseArgs := e.getBaseArgsWithoutOutput(baseCmd.Args)
+
+	for i := 0; i < batchCount; i++ {
+		skip := i * batchSize
+		limit := batchSize
+		if i == batchCount-1 {
+			remaining := int(totalCount) - skip
+			if remaining < batchSize {
+				limit = remaining
+			}
+		}
+
+		// Create temporary file for this batch
+		tempFile := fmt.Sprintf("%s.stream_temp_%d", outputPath, i)
+
+		// Export single batch with optimized parameters
+		if err := e.exportSingleBatchOptimized(ctx, mongoexportPath, baseArgs, tempFile, skip, limit); err != nil {
+			os.Remove(tempFile) // Clean up failed temp file
+			return fmt.Errorf("batch %d failed: %w", i+1, err)
+		}
+
+		// Immediately stream append to final file and delete temp file
+		if err := e.streamAppendAndCleanup(tempFile, finalFile); err != nil {
+			return fmt.Errorf("failed to merge batch %d: %w", i+1, err)
+		}
+
+		logrus.Infof("[BackupExecutor] Completed batch %d/%d (merged %d documents)", i+1, batchCount, limit)
+
+		// Force garbage collection every 3 batches to free memory
+		if (i+1)%3 == 0 {
+			runtime.GC()
+			runtime.GC() // Call twice for more aggressive cleanup
+
+			// Log memory status for debugging
+			var m runtime.MemStats
+			runtime.ReadMemStats(&m)
+			logrus.Debugf("[BackupExecutor] Memory after batch %d: Alloc=%dMB", i+1, m.Alloc/1024/1024)
+		}
+	}
+
+	// Final cleanup
+	runtime.GC()
+	runtime.GC()
+
+	logrus.Infof("[BackupExecutor] Stream merge completed: %d documents exported", totalCount)
+	return nil
+}
+
+// exportSingleBatchOptimized Export single batch with memory-optimized parameters
+func (e *BackupExecutor) exportSingleBatchOptimized(ctx context.Context, mongoexportPath string, baseArgs []string, tempFile string, skip, limit int) error {
+	// Build complete argument list, avoiding multiple memory allocations
+	args := make([]string, 0, len(baseArgs)+6)
+	args = append(args, baseArgs...)
+	args = append(args, "--out", tempFile)
+	args = append(args, "--limit", strconv.Itoa(limit))
+	args = append(args, "--skip", strconv.Itoa(skip))
+
+	cmd := exec.CommandContext(ctx, mongoexportPath, args...)
+
+	// Use streaming output processing
+	return executeCommandStreaming(cmd, "mongoexport")
+}
+
+// streamAppendAndCleanup Stream append temp file content to final file and delete temp file
+func (e *BackupExecutor) streamAppendAndCleanup(tempFile string, finalFile *os.File) error {
+	// Open temporary file
+	temp, err := os.Open(tempFile)
+	if err != nil {
+		return fmt.Errorf("failed to open temp file %s: %w", tempFile, err)
+	}
+	defer temp.Close()
+
+	// Stream copy to final file (no memory buffer)
+	_, err = io.Copy(finalFile, temp)
+	if err != nil {
+		return fmt.Errorf("failed to copy temp file content: %w", err)
+	}
+
+	// Force flush to disk
+	if err := finalFile.Sync(); err != nil {
+		logrus.Warnf("[BackupExecutor] Failed to sync file: %v", err)
+	}
+
+	// Immediately delete temporary file
+	if err := os.Remove(tempFile); err != nil {
+		logrus.Warnf("[BackupExecutor] Failed to remove temp file %s: %v", tempFile, err)
+	}
+
+	return nil
+}
+
+// getBaseArgsWithoutOutput Extract base arguments excluding --out parameter for reuse
+func (e *BackupExecutor) getBaseArgsWithoutOutput(args []string) []string {
+	var baseArgs []string
+	skipNext := false
+
+	for _, arg := range args {
+		if skipNext {
+			skipNext = false
+			continue
+		}
+
+		if arg == "--out" {
+			skipNext = true // Skip next argument (file path)
+			continue
+		}
+
+		baseArgs = append(baseArgs, arg)
+	}
+
+	return baseArgs
 }

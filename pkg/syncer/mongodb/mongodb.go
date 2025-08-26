@@ -1060,7 +1060,6 @@ func (s *MongoDBSyncer) fileParseWorker(ctx context.Context, workerID int, jobs 
 	s.logger.Debugf("[MongoDB] [BatchID:%s] File parse worker %d completed", batchID, workerID)
 }
 
-
 // parseFileToWriteModels parses a file and returns all WriteModels without executing them
 func (s *MongoDBSyncer) parseFileToWriteModels(ctx context.Context, filePath string, sourceDB, collectionName string) ([]mongo.WriteModel, error) {
 	file, err := os.Open(filePath)
