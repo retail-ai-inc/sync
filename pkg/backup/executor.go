@@ -62,6 +62,30 @@ func NewBackupExecutor(db *sql.DB) *BackupExecutor {
 	return &BackupExecutor{db: db}
 }
 
+// copyFile Copy file from source to destination
+func (e *BackupExecutor) copyFile(src, dst string) error {
+	sourceFile, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer sourceFile.Close()
+
+	// Create destination directory if it doesn't exist
+	dstDir := filepath.Dir(dst)
+	if err := os.MkdirAll(dstDir, 0755); err != nil {
+		return err
+	}
+
+	destFile, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer destFile.Close()
+
+	_, err = io.Copy(destFile, sourceFile)
+	return err
+}
+
 // cleanQueryStringValues Clean string values in query condition to remove extra escaping
 func cleanQueryStringValues(queryObj map[string]interface{}) map[string]interface{} {
 	cleaned := make(map[string]interface{})
@@ -220,10 +244,10 @@ func (e *BackupExecutor) Execute(ctx context.Context, taskID int) error {
 		// 🔍 CRITICAL: Log memory after export completes but BEFORE compression starts
 		var memStats runtime.MemStats
 		runtime.ReadMemStats(&memStats)
-		logrus.Infof("[BackupExecutor] 📊 Memory after EXPORT completes, before compression: Alloc=%.2fMB, Sys=%.2fMB, Free=%.2fMB, NumGoroutines=%d", 
-			float64(memStats.Alloc)/1024/1024, 
+		logrus.Infof("[BackupExecutor] 📊 Memory after EXPORT completes, before compression: Alloc=%.2fMB, Sys=%.2fMB, Free=%.2fMB, NumGoroutines=%d",
+			float64(memStats.Alloc)/1024/1024,
 			float64(memStats.Sys)/1024/1024,
-			float64(memStats.Sys-memStats.Alloc)/1024/1024, 
+			float64(memStats.Sys-memStats.Alloc)/1024/1024,
 			runtime.NumGoroutine())
 
 		// Create compressed file for this table group using pattern
@@ -262,8 +286,8 @@ func (e *BackupExecutor) Execute(ctx context.Context, taskID int) error {
 
 		// Log memory before compression phase
 		runtime.ReadMemStats(&memStats)
-		logrus.Infof("[BackupExecutor] Memory before compression phase - Alloc: %.2f MB, Sys: %.2f MB, Free: %.2f MB", 
-			float64(memStats.Alloc)/1024/1024, 
+		logrus.Infof("[BackupExecutor] Memory before compression phase - Alloc: %.2f MB, Sys: %.2f MB, Free: %.2f MB",
+			float64(memStats.Alloc)/1024/1024,
 			float64(memStats.Sys)/1024/1024,
 			float64(memStats.Sys-memStats.Alloc)/1024/1024)
 
@@ -273,10 +297,10 @@ func (e *BackupExecutor) Execute(ctx context.Context, taskID int) error {
 			continue
 		}
 
-		// Log memory before GCS upload phase  
+		// Log memory before GCS upload phase
 		runtime.ReadMemStats(&memStats)
-		logrus.Infof("[BackupExecutor] Memory before GCS upload - Alloc: %.2f MB, Sys: %.2f MB, Free: %.2f MB", 
-			float64(memStats.Alloc)/1024/1024, 
+		logrus.Infof("[BackupExecutor] Memory before GCS upload - Alloc: %.2f MB, Sys: %.2f MB, Free: %.2f MB",
+			float64(memStats.Alloc)/1024/1024,
 			float64(memStats.Sys)/1024/1024,
 			float64(memStats.Sys-memStats.Alloc)/1024/1024)
 
@@ -291,24 +315,24 @@ func (e *BackupExecutor) Execute(ctx context.Context, taskID int) error {
 
 		// Log memory after GCS upload and before cleanup
 		runtime.ReadMemStats(&memStats)
-		logrus.Infof("[BackupExecutor] Memory after GCS upload - Alloc: %.2f MB, Sys: %.2f MB, Free: %.2f MB", 
-			float64(memStats.Alloc)/1024/1024, 
+		logrus.Infof("[BackupExecutor] Memory after GCS upload - Alloc: %.2f MB, Sys: %.2f MB, Free: %.2f MB",
+			float64(memStats.Alloc)/1024/1024,
 			float64(memStats.Sys)/1024/1024,
 			float64(memStats.Sys-memStats.Alloc)/1024/1024)
 
 		// Clean up temporary files after successful upload
 		os.RemoveAll(tempDir)
 		os.Remove(archivePath)
-		
+
 		// Force garbage collection after cleanup
 		runtime.GC()
 		debug.FreeOSMemory()
 		runtime.ReadMemStats(&memStats)
-		logrus.Infof("[BackupExecutor] Memory after cleanup and GC - Alloc: %.2f MB, Sys: %.2f MB, Free: %.2f MB", 
-			float64(memStats.Alloc)/1024/1024, 
+		logrus.Infof("[BackupExecutor] Memory after cleanup and GC - Alloc: %.2f MB, Sys: %.2f MB, Free: %.2f MB",
+			float64(memStats.Alloc)/1024/1024,
 			float64(memStats.Sys)/1024/1024,
 			float64(memStats.Sys-memStats.Alloc)/1024/1024)
-		
+
 		logrus.Infof("[BackupExecutor] ✅ Backup completed successfully for table group: %s", groupName)
 	}
 
@@ -652,12 +676,12 @@ func (e *BackupExecutor) exportMongoDBWithExport(ctx context.Context, config str
 // CompressDirectory Compress directory with specified compression type
 func (e *BackupExecutor) CompressDirectory(sourceDir, destFile, compressionType string) error {
 	logrus.Infof("[BackupExecutor] 🗜️ STARTING CompressDirectory: sourceDir=%s, destFile=%s, type=%s", sourceDir, destFile, compressionType)
-	
+
 	// 🔍 Memory at the very start of compression
 	var memStats runtime.MemStats
 	runtime.ReadMemStats(&memStats)
-	logrus.Infof("[BackupExecutor] 🗜️ Memory at START of CompressDirectory: Alloc=%.2fMB, Sys=%.2fMB, Free=%.2fMB, NumGoroutines=%d", 
-		float64(memStats.Alloc)/1024/1024, 
+	logrus.Infof("[BackupExecutor] 🗜️ Memory at START of CompressDirectory: Alloc=%.2fMB, Sys=%.2fMB, Free=%.2fMB, NumGoroutines=%d",
+		float64(memStats.Alloc)/1024/1024,
 		float64(memStats.Sys)/1024/1024,
 		float64(memStats.Sys-memStats.Alloc)/1024/1024,
 		runtime.NumGoroutine())
@@ -702,23 +726,23 @@ func (e *BackupExecutor) CompressDirectory(sourceDir, destFile, compressionType 
 
 	// Recursively traverse directory
 	logrus.Debugf("[BackupExecutor] Scanning directory for compressible files: %s", sourceDir)
-	
+
 	// 🔍 Memory before directory scanning
 	runtime.ReadMemStats(&memStats)
-	logrus.Infof("[BackupExecutor] 📁 Memory BEFORE directory scanning: Alloc=%.2fMB, Sys=%.2fMB, Free=%.2fMB", 
-		float64(memStats.Alloc)/1024/1024, 
+	logrus.Infof("[BackupExecutor] 📁 Memory BEFORE directory scanning: Alloc=%.2fMB, Sys=%.2fMB, Free=%.2fMB",
+		float64(memStats.Alloc)/1024/1024,
 		float64(memStats.Sys)/1024/1024,
 		float64(memStats.Sys-memStats.Alloc)/1024/1024)
-	
+
 	if err := filepath.Walk(sourceDir, findFiles); err != nil {
 		logrus.Errorf("[BackupExecutor] Failed to walk directory %s: %v", sourceDir, err)
 		return fmt.Errorf("failed to walk directory: %w", err)
 	}
-	
+
 	// 🔍 Memory after directory scanning
 	runtime.ReadMemStats(&memStats)
-	logrus.Infof("[BackupExecutor] 📁 Memory AFTER directory scanning: Alloc=%.2fMB, Sys=%.2fMB, Free=%.2fMB, FoundFiles=%d", 
-		float64(memStats.Alloc)/1024/1024, 
+	logrus.Infof("[BackupExecutor] 📁 Memory AFTER directory scanning: Alloc=%.2fMB, Sys=%.2fMB, Free=%.2fMB, FoundFiles=%d",
+		float64(memStats.Alloc)/1024/1024,
 		float64(memStats.Sys)/1024/1024,
 		float64(memStats.Sys-memStats.Alloc)/1024/1024,
 		len(allFiles))
@@ -754,9 +778,9 @@ func (e *BackupExecutor) CompressDirectory(sourceDir, destFile, compressionType 
 
 	// 🔍 Memory BEFORE actual compression method call
 	runtime.ReadMemStats(&memStats)
-	logrus.Infof("[BackupExecutor] 🗜️ Memory BEFORE calling compression method (%s): Alloc=%.2fMB, Sys=%.2fMB, Free=%.2fMB", 
+	logrus.Infof("[BackupExecutor] 🗜️ Memory BEFORE calling compression method (%s): Alloc=%.2fMB, Sys=%.2fMB, Free=%.2fMB",
 		compressionType,
-		float64(memStats.Alloc)/1024/1024, 
+		float64(memStats.Alloc)/1024/1024,
 		float64(memStats.Sys)/1024/1024,
 		float64(memStats.Sys-memStats.Alloc)/1024/1024)
 
@@ -770,15 +794,15 @@ func (e *BackupExecutor) CompressDirectory(sourceDir, destFile, compressionType 
 	default:
 		compressionErr = fmt.Errorf("unsupported compression type: %s", compressionType)
 	}
-	
+
 	// 🔍 Memory AFTER compression method completes
 	runtime.ReadMemStats(&memStats)
-	logrus.Infof("[BackupExecutor] 🗜️ Memory AFTER compression method (%s): Alloc=%.2fMB, Sys=%.2fMB, Free=%.2fMB", 
+	logrus.Infof("[BackupExecutor] 🗜️ Memory AFTER compression method (%s): Alloc=%.2fMB, Sys=%.2fMB, Free=%.2fMB",
 		compressionType,
-		float64(memStats.Alloc)/1024/1024, 
+		float64(memStats.Alloc)/1024/1024,
 		float64(memStats.Sys)/1024/1024,
 		float64(memStats.Sys-memStats.Alloc)/1024/1024)
-	
+
 	return compressionErr
 }
 
@@ -805,16 +829,26 @@ func executeCommandStreaming(cmd *exec.Cmd, commandName string) error {
 		return fmt.Errorf("failed to start command: %w", err)
 	}
 
-	// Process stdout in streaming fashion, only keep key information
+	// Process stdout in streaming fashion, log detailed progress
 	var exportedCount string
+	var progressLines []string
 	go func() {
 		scanner := bufio.NewScanner(stdout)
 		for scanner.Scan() {
 			line := scanner.Text()
-			if strings.Contains(line, "exported") && strings.Contains(line, "records") {
-				exportedCount = strings.TrimSpace(line)
+			// Log all important lines for debugging
+			if strings.Contains(line, "exported") || strings.Contains(line, "documents") || strings.Contains(line, "records") || strings.Contains(line, "progress") {
+				logrus.Infof("[BackupExecutor] %s output: %s", commandName, line)
+				progressLines = append(progressLines, line)
+				if strings.Contains(line, "exported") && strings.Contains(line, "records") {
+					exportedCount = strings.TrimSpace(line)
+				}
+			} else {
+				// Log other output periodically to avoid spam but maintain visibility
+				if len(progressLines)%100 == 0 {
+					logrus.Debugf("[BackupExecutor] %s: %s", commandName, line)
+				}
 			}
-			// Other output is discarded to save memory
 		}
 	}()
 
@@ -865,8 +899,8 @@ func (e *BackupExecutor) compressWithZip(sourceDir, destFile string, allFiles []
 	// Log memory before compression
 	var memStats runtime.MemStats
 	runtime.ReadMemStats(&memStats)
-	logrus.Infof("[BackupExecutor] Memory before streaming ZIP compression - Alloc: %.2f MB, Sys: %.2f MB, Free: %.2f MB", 
-		float64(memStats.Alloc)/1024/1024, 
+	logrus.Infof("[BackupExecutor] Memory before streaming ZIP compression - Alloc: %.2f MB, Sys: %.2f MB, Free: %.2f MB",
+		float64(memStats.Alloc)/1024/1024,
 		float64(memStats.Sys)/1024/1024,
 		float64(memStats.Sys-memStats.Alloc)/1024/1024)
 
@@ -892,7 +926,7 @@ func (e *BackupExecutor) compressWithZip(sourceDir, destFile string, allFiles []
 		if (i+1)%5 == 0 || i == len(allFiles)-1 {
 			runtime.GC()
 			runtime.ReadMemStats(&memStats)
-			logrus.Debugf("[BackupExecutor] ZIP progress: %d/%d files, Memory: %.2f MB", 
+			logrus.Debugf("[BackupExecutor] ZIP progress: %d/%d files, Memory: %.2f MB",
 				i+1, len(allFiles), float64(memStats.Alloc)/1024/1024)
 		}
 	}
@@ -906,8 +940,8 @@ func (e *BackupExecutor) compressWithZip(sourceDir, destFile string, allFiles []
 	runtime.GC()
 	debug.FreeOSMemory()
 	runtime.ReadMemStats(&memStats)
-	logrus.Infof("[BackupExecutor] Memory after streaming ZIP compression - Alloc: %.2f MB, Sys: %.2f MB, Free: %.2f MB", 
-		float64(memStats.Alloc)/1024/1024, 
+	logrus.Infof("[BackupExecutor] Memory after streaming ZIP compression - Alloc: %.2f MB, Sys: %.2f MB, Free: %.2f MB",
+		float64(memStats.Alloc)/1024/1024,
 		float64(memStats.Sys)/1024/1024,
 		float64(memStats.Sys-memStats.Alloc)/1024/1024)
 
@@ -960,7 +994,7 @@ func (e *BackupExecutor) addFileToZipStreaming(zipWriter *zip.Writer, sourceDir,
 	// Stream copy with limited buffer to control memory usage
 	bufferSize := 32 * 1024 // 32KB buffer - much smaller than system zip
 	buffer := make([]byte, bufferSize)
-	
+
 	totalBytes := int64(0)
 	for {
 		n, err := sourceFile.Read(buffer)
@@ -970,14 +1004,14 @@ func (e *BackupExecutor) addFileToZipStreaming(zipWriter *zip.Writer, sourceDir,
 			}
 			totalBytes += int64(n)
 		}
-		
+
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
 			return fmt.Errorf("failed to read source file: %w", err)
 		}
-		
+
 		// Force GC every 10MB to prevent memory accumulation
 		if totalBytes%10485760 == 0 { // 10MB
 			runtime.GC()
@@ -1018,8 +1052,8 @@ func (e *BackupExecutor) compressWithGzip(sourceDir, destFile string, allFiles [
 	// Log memory before compression
 	var memStats runtime.MemStats
 	runtime.ReadMemStats(&memStats)
-	logrus.Infof("[BackupExecutor] Memory before GZIP compression - Alloc: %.2f MB, Sys: %.2f MB, Free: %.2f MB", 
-		float64(memStats.Alloc)/1024/1024, 
+	logrus.Infof("[BackupExecutor] Memory before GZIP compression - Alloc: %.2f MB, Sys: %.2f MB, Free: %.2f MB",
+		float64(memStats.Alloc)/1024/1024,
 		float64(memStats.Sys)/1024/1024,
 		float64(memStats.Sys-memStats.Alloc)/1024/1024)
 
@@ -1033,8 +1067,8 @@ func (e *BackupExecutor) compressWithGzip(sourceDir, destFile string, allFiles [
 	runtime.GC()
 	debug.FreeOSMemory()
 	runtime.ReadMemStats(&memStats)
-	logrus.Infof("[BackupExecutor] Memory after GZIP compression - Alloc: %.2f MB, Sys: %.2f MB, Free: %.2f MB", 
-		float64(memStats.Alloc)/1024/1024, 
+	logrus.Infof("[BackupExecutor] Memory after GZIP compression - Alloc: %.2f MB, Sys: %.2f MB, Free: %.2f MB",
+		float64(memStats.Alloc)/1024/1024,
 		float64(memStats.Sys)/1024/1024,
 		float64(memStats.Sys-memStats.Alloc)/1024/1024)
 
@@ -1089,14 +1123,14 @@ func (e *BackupExecutor) exportMongoDBSingleTable(ctx context.Context, config st
 		logrus.Infof("[BackupExecutor] 📄 About to call exportMongoDBSingleTableWithExport for table %s...", tableName)
 		exportErr = e.exportMongoDBSingleTableWithExport(ctx, config, tempDir, task, connStr, dateStr, tableName)
 	}
-	
+
 	// Log status after export method returns
 	if exportErr != nil {
 		logrus.Errorf("[BackupExecutor] ❌ Export method returned error: %v", exportErr)
 	} else {
 		logrus.Infof("[BackupExecutor] ✅ Export method completed successfully for table %s", tableName)
 	}
-	
+
 	return exportErr
 }
 
@@ -1337,27 +1371,65 @@ func (e *BackupExecutor) exportMongoDBSingleTableWithExport(ctx context.Context,
 	const batchThreshold = 500000 // Use batch processing for collections larger than 500k documents
 	const batchSize = 50000       // Reduced batch size to lower memory per batch
 
+	// 🧪 SKIP EXPORT MODE: Check for existing exported files to skip time-consuming mongoexport
+	// Try common patterns for existing files
+	existingFilePatterns := []string{
+		"/mnt/state/RetailerRecommendationAnalytics_202508_2025-08-26.json",
+		fmt.Sprintf("/mnt/state/%s_%s.json", collection, dateStr),
+		fmt.Sprintf("/mnt/state/%s.json", collection),
+	}
+
+	for _, existingFile := range existingFilePatterns {
+		if _, err := os.Stat(existingFile); err == nil {
+			logrus.Infof("[BackupExecutor] ⚡ SKIP EXPORT MODE: Found existing file %s, copying to output path %s", existingFile, outputPath)
+
+			// Copy existing file to expected output path
+			if err := e.copyFile(existingFile, outputPath); err != nil {
+				return fmt.Errorf("failed to copy existing file: %w", err)
+			}
+
+			// Verify file size
+			if stat, err := os.Stat(outputPath); err == nil {
+				logrus.Infof("[BackupExecutor] ✅ Successfully copied existing file: %s (%.2f GB)", outputPath, float64(stat.Size())/1024/1024/1024)
+			}
+
+			// Log memory after copy
+			var memStats runtime.MemStats
+			runtime.ReadMemStats(&memStats)
+			logrus.Infof("[BackupExecutor] 🧪 Memory after copying existing file: Alloc=%.2fMB, Sys=%.2fMB, Free=%.2fMB, NumGoroutines=%d",
+				float64(memStats.Alloc)/1024/1024,
+				float64(memStats.Sys)/1024/1024,
+				float64(memStats.Sys-memStats.Alloc)/1024/1024,
+				runtime.NumGoroutine())
+
+			logrus.Infof("[BackupExecutor] ⚡ Skipped mongoexport, continuing to compression phase...")
+			return nil
+		}
+	}
+
+	logrus.Infof("[BackupExecutor] No existing file found, proceeding with mongoexport...")
+
 	if totalCount > batchThreshold {
 		logrus.Infof("[BackupExecutor] Large collection detected (%d documents), using stream merge processing", totalCount)
-		
+
 		// Execute stream merge and monitor memory immediately after
 		logrus.Infof("[BackupExecutor] 🚀 About to call executeMongoExportWithStreamMerge...")
 		streamErr := e.executeMongoExportWithStreamMerge(ctx, cmd, mongoexportPath, outputPath, totalCount, batchSize)
-		
+
 		// Log memory immediately after stream merge returns
 		var memStats runtime.MemStats
 		runtime.ReadMemStats(&memStats)
-		logrus.Infof("[BackupExecutor] 🔍 Memory IMMEDIATELY after stream merge return: Alloc=%.2fMB, Sys=%.2fMB, Free=%.2fMB, NumGoroutines=%d", 
-			float64(memStats.Alloc)/1024/1024, 
+		logrus.Infof("[BackupExecutor] 🔍 Memory IMMEDIATELY after stream merge return: Alloc=%.2fMB, Sys=%.2fMB, Free=%.2fMB, NumGoroutines=%d",
+			float64(memStats.Alloc)/1024/1024,
 			float64(memStats.Sys)/1024/1024,
-			float64(memStats.Sys-memStats.Alloc)/1024/1024, 
+			float64(memStats.Sys-memStats.Alloc)/1024/1024,
 			runtime.NumGoroutine())
-		
+
 		if streamErr != nil {
 			logrus.Errorf("[BackupExecutor] ❌ executeMongoExportWithStreamMerge returned error: %v", streamErr)
 			return streamErr
 		}
-		
+
 		logrus.Infof("[BackupExecutor] ✅ executeMongoExportWithStreamMerge completed successfully, returning to caller...")
 		return streamErr
 	} else {
@@ -1823,7 +1895,7 @@ func (e *BackupExecutor) getCollectionDocumentCount(ctx context.Context, connStr
 	// Optimize for minimal memory usage - single connection, no pooling for count operations
 	clientOpts.SetMaxPoolSize(1)
 	clientOpts.SetMaxConnIdleTime(time.Second * 10)
-	
+
 	client, err := mongo.Connect(ctx, clientOpts)
 	if err != nil {
 		return 0, fmt.Errorf("failed to connect to MongoDB: %w", err)
@@ -1864,17 +1936,17 @@ func (e *BackupExecutor) getCollectionDocumentCount(ctx context.Context, connStr
 
 	// Count documents with memory monitoring
 	logrus.Debugf("[BackupExecutor] Counting documents in collection %s.%s", database, collection)
-	
+
 	count, err := coll.CountDocuments(ctx, filter)
 	if err != nil {
 		return 0, fmt.Errorf("failed to count documents: %w", err)
 	}
 
 	logrus.Infof("[BackupExecutor] Collection %s.%s contains %d documents", database, collection, count)
-	
+
 	// Force GC after count operation to ensure connection resources are freed
 	runtime.GC()
-	
+
 	return count, nil
 }
 
@@ -1996,7 +2068,7 @@ func (e *BackupExecutor) mergeBatchFiles(batchFiles []string, finalOutputPath st
 		// Set buffer size to 64KB (much smaller than ReadFrom's potential GB buffer)
 		buf := make([]byte, 0, 64*1024)
 		scanner.Buffer(buf, 64*1024)
-		
+
 		lineCount := 0
 		for scanner.Scan() {
 			if _, err := bufWriter.Write(scanner.Bytes()); err != nil {
@@ -2008,7 +2080,7 @@ func (e *BackupExecutor) mergeBatchFiles(batchFiles []string, finalOutputPath st
 				return fmt.Errorf("failed to write newline: %w", err)
 			}
 			lineCount++
-			
+
 			// Flush buffer periodically to avoid memory accumulation
 			if lineCount%1000 == 0 {
 				if err := bufWriter.Flush(); err != nil {
@@ -2022,16 +2094,16 @@ func (e *BackupExecutor) mergeBatchFiles(batchFiles []string, finalOutputPath st
 			batchData.Close()
 			return fmt.Errorf("error scanning batch file %s: %w", batchFile, err)
 		}
-		
+
 		batchData.Close()
-		
+
 		// Force buffer flush after each file
 		if err := bufWriter.Flush(); err != nil {
 			return fmt.Errorf("failed to flush buffer after file %s: %w", batchFile, err)
 		}
-		
+
 		logrus.Debugf("[BackupExecutor] Merged batch file %d/%d: %s (%d lines)", i+1, len(batchFiles), filepath.Base(batchFile), lineCount)
-		
+
 		// Force GC every few files to prevent memory accumulation
 		if (i+1)%5 == 0 {
 			runtime.GC()
@@ -2101,7 +2173,7 @@ func (e *BackupExecutor) executeMongoExportWithStreamMerge(ctx context.Context, 
 			// Log detailed memory status for debugging
 			var m runtime.MemStats
 			runtime.ReadMemStats(&m)
-			logrus.Infof("[BackupExecutor] Memory after batch %d: Alloc=%dMB, Sys=%dMB, HeapAlloc=%dMB, HeapSys=%dMB, NumGoroutines=%d", 
+			logrus.Infof("[BackupExecutor] Memory after batch %d: Alloc=%dMB, Sys=%dMB, HeapAlloc=%dMB, HeapSys=%dMB, NumGoroutines=%d",
 				i+1, m.Alloc/1024/1024, m.Sys/1024/1024, m.HeapAlloc/1024/1024, m.HeapSys/1024/1024, runtime.NumGoroutine())
 		}
 	}
@@ -2109,17 +2181,17 @@ func (e *BackupExecutor) executeMongoExportWithStreamMerge(ctx context.Context, 
 	// Final cleanup with aggressive memory release
 	runtime.GC()
 	runtime.GC()
-	
+
 	// Force return memory to OS
 	debug.FreeOSMemory()
-	
+
 	// Final memory stats
 	var finalMem runtime.MemStats
 	runtime.ReadMemStats(&finalMem)
 	numGoroutines := runtime.NumGoroutine()
-	logrus.Infof("[BackupExecutor] Final memory stats: Alloc=%dMB, Sys=%dMB, NumGoroutines=%d", 
+	logrus.Infof("[BackupExecutor] Final memory stats: Alloc=%dMB, Sys=%dMB, NumGoroutines=%d",
 		finalMem.Alloc/1024/1024, finalMem.Sys/1024/1024, numGoroutines)
-		
+
 	// 🚨 CRITICAL: Check for goroutine leak
 	if numGoroutines > 100 {
 		logrus.Warnf("[BackupExecutor] 🚨 GOROUTINE LEAK DETECTED! %d goroutines running (expected < 100)", numGoroutines)
@@ -2189,7 +2261,7 @@ func (e *BackupExecutor) getBaseArgsWithoutOutput(args []string) []string {
 	// Skip args[0] which is the executable path, start from args[1]
 	for i := 1; i < len(args); i++ {
 		arg := args[i]
-		
+
 		if skipNext {
 			skipNext = false
 			continue
