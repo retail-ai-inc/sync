@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/sirupsen/logrus"
@@ -25,8 +26,16 @@ func UploadToGCS(ctx context.Context, localFile, gcsPath string) error {
 		return fmt.Errorf("failed to stat local file: %w", err)
 	}
 
-	logrus.Infof("[GCS] Starting upload of %s (size: %.2f MB) to %s",
+	logrus.Infof("[GCS] 🌤️ Starting upload of %s (size: %.2f MB) to %s",
 		fileName, float64(fileInfo.Size())/1024/1024, destPath)
+	
+	// 🔍 Memory before GCS upload
+	var memStats runtime.MemStats
+	runtime.ReadMemStats(&memStats)
+	logrus.Infof("[GCS] 🌤️ Memory BEFORE GCS upload: Alloc=%.2fMB, Sys=%.2fMB, Free=%.2fMB", 
+		float64(memStats.Alloc)/1024/1024, 
+		float64(memStats.Sys)/1024/1024,
+		float64(memStats.Sys-memStats.Alloc)/1024/1024)
 
 	// Use full path to avoid command parsing issues
 	gsutilPath, err := exec.LookPath("gsutil")
@@ -97,6 +106,13 @@ func UploadToGCS(ctx context.Context, localFile, gcsPath string) error {
 		}
 		return fmt.Errorf("gsutil command failed: %w", err)
 	}
+
+	// 🔍 Memory after GCS upload
+	runtime.ReadMemStats(&memStats)
+	logrus.Infof("[GCS] 🌤️ Memory AFTER GCS upload: Alloc=%.2fMB, Sys=%.2fMB, Free=%.2fMB", 
+		float64(memStats.Alloc)/1024/1024, 
+		float64(memStats.Sys)/1024/1024,
+		float64(memStats.Sys-memStats.Alloc)/1024/1024)
 
 	logrus.Infof("[GCS] Successfully uploaded %s to %s", fileName, destPath)
 	return nil

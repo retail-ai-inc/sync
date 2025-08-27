@@ -217,6 +217,15 @@ func (e *BackupExecutor) Execute(ctx context.Context, taskID int) error {
 			continue
 		}
 
+		// 🔍 CRITICAL: Log memory after export completes but BEFORE compression starts
+		var memStats runtime.MemStats
+		runtime.ReadMemStats(&memStats)
+		logrus.Infof("[BackupExecutor] 📊 Memory after EXPORT completes, before compression: Alloc=%.2fMB, Sys=%.2fMB, Free=%.2fMB, NumGoroutines=%d", 
+			float64(memStats.Alloc)/1024/1024, 
+			float64(memStats.Sys)/1024/1024,
+			float64(memStats.Sys-memStats.Alloc)/1024/1024, 
+			runtime.NumGoroutine())
+
 		// Create compressed file for this table group using pattern
 		tempParentDir := filepath.Dir(tempDir)
 		archiveBaseName := processFileNamePattern(config.Destination.FileNamePattern, groupName)
@@ -252,7 +261,6 @@ func (e *BackupExecutor) Execute(ctx context.Context, taskID int) error {
 		archivePath := filepath.Join(tempParentDir, archiveBaseName)
 
 		// Log memory before compression phase
-		var memStats runtime.MemStats
 		runtime.ReadMemStats(&memStats)
 		logrus.Infof("[BackupExecutor] Memory before compression phase - Alloc: %.2f MB, Sys: %.2f MB, Free: %.2f MB", 
 			float64(memStats.Alloc)/1024/1024, 
@@ -643,7 +651,16 @@ func (e *BackupExecutor) exportMongoDBWithExport(ctx context.Context, config str
 
 // CompressDirectory Compress directory with specified compression type
 func (e *BackupExecutor) CompressDirectory(sourceDir, destFile, compressionType string) error {
-	logrus.Debugf("[BackupExecutor] Starting compression of directory: %s", sourceDir)
+	logrus.Infof("[BackupExecutor] 🗜️ STARTING CompressDirectory: sourceDir=%s, destFile=%s, type=%s", sourceDir, destFile, compressionType)
+	
+	// 🔍 Memory at the very start of compression
+	var memStats runtime.MemStats
+	runtime.ReadMemStats(&memStats)
+	logrus.Infof("[BackupExecutor] 🗜️ Memory at START of CompressDirectory: Alloc=%.2fMB, Sys=%.2fMB, Free=%.2fMB, NumGoroutines=%d", 
+		float64(memStats.Alloc)/1024/1024, 
+		float64(memStats.Sys)/1024/1024,
+		float64(memStats.Sys-memStats.Alloc)/1024/1024,
+		runtime.NumGoroutine())
 
 	// Set default compression type to zip if empty
 	if compressionType == "" {
@@ -685,10 +702,26 @@ func (e *BackupExecutor) CompressDirectory(sourceDir, destFile, compressionType 
 
 	// Recursively traverse directory
 	logrus.Debugf("[BackupExecutor] Scanning directory for compressible files: %s", sourceDir)
+	
+	// 🔍 Memory before directory scanning
+	runtime.ReadMemStats(&memStats)
+	logrus.Infof("[BackupExecutor] 📁 Memory BEFORE directory scanning: Alloc=%.2fMB, Sys=%.2fMB, Free=%.2fMB", 
+		float64(memStats.Alloc)/1024/1024, 
+		float64(memStats.Sys)/1024/1024,
+		float64(memStats.Sys-memStats.Alloc)/1024/1024)
+	
 	if err := filepath.Walk(sourceDir, findFiles); err != nil {
 		logrus.Errorf("[BackupExecutor] Failed to walk directory %s: %v", sourceDir, err)
 		return fmt.Errorf("failed to walk directory: %w", err)
 	}
+	
+	// 🔍 Memory after directory scanning
+	runtime.ReadMemStats(&memStats)
+	logrus.Infof("[BackupExecutor] 📁 Memory AFTER directory scanning: Alloc=%.2fMB, Sys=%.2fMB, Free=%.2fMB, FoundFiles=%d", 
+		float64(memStats.Alloc)/1024/1024, 
+		float64(memStats.Sys)/1024/1024,
+		float64(memStats.Sys-memStats.Alloc)/1024/1024,
+		len(allFiles))
 
 	if len(allFiles) == 0 {
 		// Detailed logging to help debugging
@@ -719,15 +752,34 @@ func (e *BackupExecutor) CompressDirectory(sourceDir, destFile, compressionType 
 	logrus.Debugf("[BackupExecutor] Compressing %d files (total size: %.2f MB) using %s compression",
 		len(allFiles), float64(totalSize)/1024/1024, compressionType)
 
+	// 🔍 Memory BEFORE actual compression method call
+	runtime.ReadMemStats(&memStats)
+	logrus.Infof("[BackupExecutor] 🗜️ Memory BEFORE calling compression method (%s): Alloc=%.2fMB, Sys=%.2fMB, Free=%.2fMB", 
+		compressionType,
+		float64(memStats.Alloc)/1024/1024, 
+		float64(memStats.Sys)/1024/1024,
+		float64(memStats.Sys-memStats.Alloc)/1024/1024)
+
 	// Execute compression based on type
+	var compressionErr error
 	switch compressionType {
 	case "zip":
-		return e.compressWithZip(sourceDir, destFile, allFiles)
+		compressionErr = e.compressWithZip(sourceDir, destFile, allFiles)
 	case "gzip":
-		return e.compressWithGzip(sourceDir, destFile, allFiles)
+		compressionErr = e.compressWithGzip(sourceDir, destFile, allFiles)
 	default:
-		return fmt.Errorf("unsupported compression type: %s", compressionType)
+		compressionErr = fmt.Errorf("unsupported compression type: %s", compressionType)
 	}
+	
+	// 🔍 Memory AFTER compression method completes
+	runtime.ReadMemStats(&memStats)
+	logrus.Infof("[BackupExecutor] 🗜️ Memory AFTER compression method (%s): Alloc=%.2fMB, Sys=%.2fMB, Free=%.2fMB", 
+		compressionType,
+		float64(memStats.Alloc)/1024/1024, 
+		float64(memStats.Sys)/1024/1024,
+		float64(memStats.Sys-memStats.Alloc)/1024/1024)
+	
+	return compressionErr
 }
 
 // executeCommand General function to execute commands (deprecated - use executeCommandStreaming)
@@ -1275,7 +1327,20 @@ func (e *BackupExecutor) exportMongoDBSingleTableWithExport(ctx context.Context,
 
 	if totalCount > batchThreshold {
 		logrus.Infof("[BackupExecutor] Large collection detected (%d documents), using stream merge processing", totalCount)
-		return e.executeMongoExportWithStreamMerge(ctx, cmd, mongoexportPath, outputPath, totalCount, batchSize)
+		
+		// Execute stream merge and monitor memory immediately after
+		streamErr := e.executeMongoExportWithStreamMerge(ctx, cmd, mongoexportPath, outputPath, totalCount, batchSize)
+		
+		// Log memory immediately after stream merge returns
+		var memStats runtime.MemStats
+		runtime.ReadMemStats(&memStats)
+		logrus.Infof("[BackupExecutor] 🔍 Memory IMMEDIATELY after stream merge return: Alloc=%.2fMB, Sys=%.2fMB, Free=%.2fMB, NumGoroutines=%d", 
+			float64(memStats.Alloc)/1024/1024, 
+			float64(memStats.Sys)/1024/1024,
+			float64(memStats.Sys-memStats.Alloc)/1024/1024, 
+			runtime.NumGoroutine())
+		
+		return streamErr
 	} else {
 		// Small collection, use single export
 		return executeCommand(cmd, "mongoexport")
