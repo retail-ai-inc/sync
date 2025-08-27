@@ -64,6 +64,12 @@ func NewBackupExecutor(db *sql.DB) *BackupExecutor {
 
 // copyFile Copy file from source to destination
 func (e *BackupExecutor) copyFile(src, dst string) error {
+	// Log memory before file copy
+	var memStatsBefore runtime.MemStats
+	runtime.ReadMemStats(&memStatsBefore)
+	logrus.Infof("[BackupExecutor] 📋 Memory BEFORE copyFile: Alloc=%.2fMB, Sys=%.2fMB", 
+		float64(memStatsBefore.Alloc)/1024/1024, float64(memStatsBefore.Sys)/1024/1024)
+
 	sourceFile, err := os.Open(src)
 	if err != nil {
 		return err
@@ -82,8 +88,37 @@ func (e *BackupExecutor) copyFile(src, dst string) error {
 	}
 	defer destFile.Close()
 
-	_, err = io.Copy(destFile, sourceFile)
-	return err
+	// Use buffered copy with controlled buffer size to avoid memory spike
+	bufSize := 64 * 1024 // 64KB buffer instead of default 32KB
+	buf := make([]byte, bufSize)
+	
+	logrus.Infof("[BackupExecutor] 📋 Starting file copy with %dKB buffer...", bufSize/1024)
+	
+	for {
+		n, readErr := sourceFile.Read(buf)
+		if n > 0 {
+			_, writeErr := destFile.Write(buf[:n])
+			if writeErr != nil {
+				return writeErr
+			}
+		}
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			return readErr
+		}
+	}
+
+	// Log memory after file copy
+	var memStatsAfter runtime.MemStats
+	runtime.ReadMemStats(&memStatsAfter)
+	logrus.Infof("[BackupExecutor] 📋 Memory AFTER copyFile: Alloc=%.2fMB, Sys=%.2fMB (Delta: +%.2fMB)", 
+		float64(memStatsAfter.Alloc)/1024/1024, 
+		float64(memStatsAfter.Sys)/1024/1024,
+		float64(memStatsAfter.Alloc-memStatsBefore.Alloc)/1024/1024)
+
+	return nil
 }
 
 // cleanQueryStringValues Clean string values in query condition to remove extra escaping
@@ -1402,6 +1437,19 @@ func (e *BackupExecutor) exportMongoDBSingleTableWithExport(ctx context.Context,
 				float64(memStats.Sys-memStats.Alloc)/1024/1024,
 				runtime.NumGoroutine())
 
+			// Force garbage collection after large file copy to see if memory can be reclaimed
+			runtime.GC()
+			runtime.GC() // Double GC to ensure cleanup
+			
+			// Check memory after forced GC
+			var memStatsAfterGC runtime.MemStats
+			runtime.ReadMemStats(&memStatsAfterGC)
+			logrus.Infof("[BackupExecutor] 🗑️ Memory after forced GC: Alloc=%.2fMB, Sys=%.2fMB, Free=%.2fMB, NumGoroutines=%d", 
+				float64(memStatsAfterGC.Alloc)/1024/1024, 
+				float64(memStatsAfterGC.Sys)/1024/1024,
+				float64(memStatsAfterGC.Sys-memStatsAfterGC.Alloc)/1024/1024, 
+				runtime.NumGoroutine())
+			
 			logrus.Infof("[BackupExecutor] ⚡ Skipped mongoexport, continuing to compression phase...")
 			return nil
 		}
