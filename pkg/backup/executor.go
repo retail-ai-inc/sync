@@ -118,39 +118,6 @@ func (e *BackupExecutor) copyFile(src, dst string) error {
 	return nil
 }
 
-// cleanQueryStringValues Clean string values in query condition to remove extra escaping
-func cleanQueryStringValues(queryObj map[string]interface{}) map[string]interface{} {
-	cleaned := make(map[string]interface{})
-
-	for key, value := range queryObj {
-		switch v := value.(type) {
-		case string:
-			// Remove surrounding quotes if they exist (handle over-escaping)
-			cleanValue := v
-			// Remove extra double quotes from the beginning and end
-			if strings.HasPrefix(cleanValue, `"`) && strings.HasSuffix(cleanValue, `"`) {
-				cleanValue = strings.TrimPrefix(cleanValue, `"`)
-				cleanValue = strings.TrimSuffix(cleanValue, `"`)
-			}
-			// Remove extra single quotes from the beginning and end
-			if strings.HasPrefix(cleanValue, `'`) && strings.HasSuffix(cleanValue, `'`) {
-				cleanValue = strings.TrimPrefix(cleanValue, `'`)
-				cleanValue = strings.TrimSuffix(cleanValue, `'`)
-			}
-			cleaned[key] = cleanValue
-			logrus.Debugf("[BackupExecutor] Cleaned string value for key %s: '%s' -> '%s'", key, v, cleanValue)
-		case map[string]interface{}:
-			// Recursively clean nested objects
-			cleaned[key] = cleanQueryStringValues(v)
-		default:
-			// Keep other types as is
-			cleaned[key] = value
-		}
-	}
-
-	return cleaned
-}
-
 // processFileNamePattern Process file name pattern and replace date placeholders
 func processFileNamePattern(pattern, tableName string) string {
 	if pattern == "" {
@@ -229,11 +196,12 @@ func (e *BackupExecutor) Execute(ctx context.Context, taskID int) error {
 				// 单表导出：直接使用外部命令模式
 				logrus.Infof("[BackupExecutor] 🚀 Starting external command backup for single table: %s", tables[0])
 				connStr := buildMongoDBConnectionString(config.Database.URL, config.Database.Username, config.Database.Password)
-				exportErr = e.executeExternalMongoExportSimple(ctx, connStr, config.Database.Database, tables[0], tempDir)
+				exportErr = e.executeExternalMongoExportSimple(ctx, connStr, config.Database.Database, tables[0], tempDir, config)
 			} else {
-				// 多表合并导出：暂时不支持外部命令模式
-				logrus.Warnf("[BackupExecutor] ⚠️ Multi-table merge not supported in external command mode, skipping %d tables", len(tables))
-				exportErr = fmt.Errorf("multi-table merge not supported in external command mode")
+				// 多表合并导出：使用外部命令模式
+				logrus.Infof("[BackupExecutor] 🚀 Starting external command backup for %d merged tables: %v", len(tables), tables)
+				connStr := buildMongoDBConnectionString(config.Database.URL, config.Database.Username, config.Database.Password)
+				exportErr = e.exportMongoDBMergedTables(ctx, connStr, config.Database.Database, tables, tempDir, config)
 			}
 		default:
 			exportErr = fmt.Errorf("unsupported database type: %s", config.SourceType)
@@ -247,7 +215,9 @@ func (e *BackupExecutor) Execute(ctx context.Context, taskID int) error {
 
 		// 🎉 外部命令模式已经完成完整备份流程（导出+压缩+上传）
 		logrus.Infof("[BackupExecutor] ✅ External command backup completed successfully for table group: %s", groupName)
-		os.RemoveAll(tempDir) // Clean up temp directory
+		logrus.Infof("[BackupExecutor] 🔍 Keeping temp directory for debugging: %s", tempDir)
+		// 暂时不删除临时目录，保留用于调试分析
+		// os.RemoveAll(tempDir) // Clean up temp directory
 	}
 
 	logrus.Debugf("[BackupExecutor] All table backups completed for task %d", taskID)
@@ -371,16 +341,50 @@ func (e *BackupExecutor) ExpandAndGroupTables(ctx context.Context, config *Execu
 		}
 
 		// Group tables by common prefix
-		tableGroups = e.groupTablesByPrefix(actualTables)
-		logrus.Debugf("[BackupExecutor] Regex mode enabled, found %d table groups from pattern %s",
+		tempGroups := e.groupTablesByPrefix(actualTables)
+
+		// Apply time range filtering to each group
+		for groupName, tables := range tempGroups {
+			filteredTables := e.filterRelevantTables(tables, config.Query, groupName)
+			if len(filteredTables) > 0 {
+				tableGroups[groupName] = filteredTables
+				logrus.Infof("[BackupExecutor] Regex mode: filtered %d/%d tables for group %s: %v",
+					len(filteredTables), len(tables), groupName, filteredTables)
+			}
+		}
+		logrus.Debugf("[BackupExecutor] Regex mode enabled, found %d table groups from pattern %s (after filtering)",
 			len(tableGroups), config.RegexPattern)
 	} else {
-		// Normal mode: each table is its own group
-		for _, table := range config.Database.Tables {
-			tableGroups[table] = []string{table}
+		// Manual mode: group tables by common prefix for merging
+		tempGroups := e.groupTablesByPrefix(config.Database.Tables)
+
+		// If only one group found with multiple tables, merge them
+		if len(tempGroups) == 1 {
+			for groupName, tables := range tempGroups {
+				if len(tables) > 1 {
+					// Apply time range filtering for merged tables
+					filteredTables := e.filterRelevantTables(tables, config.Query, groupName)
+					if len(filteredTables) > 0 {
+						tableGroups[groupName] = filteredTables
+						logrus.Infof("[BackupExecutor] Manual mode: found %d/%d related tables for merging: %v",
+							len(filteredTables), len(tables), filteredTables)
+					}
+				} else {
+					// Single table, treat as individual
+					tableGroups[tables[0]] = []string{tables[0]}
+				}
+			}
+		} else {
+			// Multiple groups or no grouping possible, treat each table individually
+			for _, table := range config.Database.Tables {
+				// Apply time range filtering for individual tables
+				filteredTables := e.filterRelevantTables([]string{table}, config.Query, table)
+				if len(filteredTables) > 0 {
+					tableGroups[table] = filteredTables
+				}
+			}
+			logrus.Infof("[BackupExecutor] Manual mode: processing %d individual tables (after filtering)", len(tableGroups))
 		}
-		logrus.Infof("[BackupExecutor] Normal mode enabled, processing %d individual tables",
-			len(tableGroups))
 	}
 
 	return tableGroups, nil
@@ -393,6 +397,7 @@ func (e *BackupExecutor) getMongoDBCollections(ctx context.Context, config *Exec
 	connStr := buildMongoDBConnectionString(config.Database.URL, config.Database.Username, config.Database.Password)
 
 	// Connect to MongoDB
+	logrus.Infof("[BackupExecutor] Connecting to MongoDB: %s", connStr)
 	client, err := mongo.Connect(ctx, options.Client().ApplyURI(connStr))
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to MongoDB: %w", err)
@@ -448,12 +453,20 @@ func (e *BackupExecutor) extractTablePrefix(tableName string) string {
 		`_\d{4}$`, // _YYYY (yearly)
 		`\d{6}$`,  // YYYYMM (monthly without underscore)
 		`\d{8}$`,  // YYYYMMDD (daily without underscore)
+		`\d+$`,    // Simple number suffix (e.g., users1, users2)
 	}
 
 	for _, pattern := range patterns {
 		re := regexp.MustCompile(pattern)
 		if re.MatchString(tableName) {
-			return re.ReplaceAllString(tableName, "")
+			result := re.ReplaceAllString(tableName, "")
+			// For simple number suffix, ensure we have a meaningful prefix
+			if pattern == `\d+$` && len(result) > 0 {
+				logrus.Debugf("[BackupExecutor] Extracted prefix '%s' from table '%s'", result, tableName)
+				return result
+			} else if pattern != `\d+$` {
+				return result
+			}
 		}
 	}
 
@@ -709,8 +722,18 @@ func parseYear(yyyy string) (int, error) {
 
 // buildMongoDBConnectionString Build MongoDB connection string with authentication
 func buildMongoDBConnectionString(url, username, password string) string {
-	if username != "" && password != "" {
-		return fmt.Sprintf("mongodb://%s:%s@%s/?authSource=admin", username, password, url)
+	// Ensure localhost is preserved and not replaced
+	if strings.Contains(url, "localhost") {
+		logrus.Infof("[BackupExecutor] Using localhost MongoDB connection: %s", url)
 	}
-	return fmt.Sprintf("mongodb://%s", url)
+
+	var connStr string
+	if username != "" && password != "" {
+		connStr = fmt.Sprintf("mongodb://%s:%s@%s/?authSource=admin&directConnection=true", username, password, url)
+	} else {
+		connStr = fmt.Sprintf("mongodb://%s/?directConnection=true", url)
+	}
+
+	logrus.Infof("[BackupExecutor] Final connection string: %s", connStr)
+	return connStr
 }
