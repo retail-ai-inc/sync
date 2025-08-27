@@ -1079,13 +1079,25 @@ func (e *BackupExecutor) exportMongoDBSingleTable(ctx context.Context, config st
 	connStr := buildMongoDBConnectionString(config.Database.URL, config.Database.Username, config.Database.Password)
 
 	// Choose mongodump or mongoexport based on format
+	var exportErr error
 	if config.Format == "bson" {
 		// Use mongodump for BSON format
-		return e.exportMongoDBSingleTableWithDump(ctx, config, tempDir, task, connStr, dateStr, tableName)
+		logrus.Infof("[BackupExecutor] 🗄️ About to call exportMongoDBSingleTableWithDump for table %s...", tableName)
+		exportErr = e.exportMongoDBSingleTableWithDump(ctx, config, tempDir, task, connStr, dateStr, tableName)
 	} else {
 		// Use mongoexport for JSON or CSV format
-		return e.exportMongoDBSingleTableWithExport(ctx, config, tempDir, task, connStr, dateStr, tableName)
+		logrus.Infof("[BackupExecutor] 📄 About to call exportMongoDBSingleTableWithExport for table %s...", tableName)
+		exportErr = e.exportMongoDBSingleTableWithExport(ctx, config, tempDir, task, connStr, dateStr, tableName)
 	}
+	
+	// Log status after export method returns
+	if exportErr != nil {
+		logrus.Errorf("[BackupExecutor] ❌ Export method returned error: %v", exportErr)
+	} else {
+		logrus.Infof("[BackupExecutor] ✅ Export method completed successfully for table %s", tableName)
+	}
+	
+	return exportErr
 }
 
 // exportMongoDBSingleTableWithDump Export single table BSON format using mongodump
@@ -1329,6 +1341,7 @@ func (e *BackupExecutor) exportMongoDBSingleTableWithExport(ctx context.Context,
 		logrus.Infof("[BackupExecutor] Large collection detected (%d documents), using stream merge processing", totalCount)
 		
 		// Execute stream merge and monitor memory immediately after
+		logrus.Infof("[BackupExecutor] 🚀 About to call executeMongoExportWithStreamMerge...")
 		streamErr := e.executeMongoExportWithStreamMerge(ctx, cmd, mongoexportPath, outputPath, totalCount, batchSize)
 		
 		// Log memory immediately after stream merge returns
@@ -1340,6 +1353,12 @@ func (e *BackupExecutor) exportMongoDBSingleTableWithExport(ctx context.Context,
 			float64(memStats.Sys-memStats.Alloc)/1024/1024, 
 			runtime.NumGoroutine())
 		
+		if streamErr != nil {
+			logrus.Errorf("[BackupExecutor] ❌ executeMongoExportWithStreamMerge returned error: %v", streamErr)
+			return streamErr
+		}
+		
+		logrus.Infof("[BackupExecutor] ✅ executeMongoExportWithStreamMerge completed successfully, returning to caller...")
 		return streamErr
 	} else {
 		// Small collection, use single export
@@ -2097,8 +2116,23 @@ func (e *BackupExecutor) executeMongoExportWithStreamMerge(ctx context.Context, 
 	// Final memory stats
 	var finalMem runtime.MemStats
 	runtime.ReadMemStats(&finalMem)
+	numGoroutines := runtime.NumGoroutine()
 	logrus.Infof("[BackupExecutor] Final memory stats: Alloc=%dMB, Sys=%dMB, NumGoroutines=%d", 
-		finalMem.Alloc/1024/1024, finalMem.Sys/1024/1024, runtime.NumGoroutine())
+		finalMem.Alloc/1024/1024, finalMem.Sys/1024/1024, numGoroutines)
+		
+	// 🚨 CRITICAL: Check for goroutine leak
+	if numGoroutines > 100 {
+		logrus.Warnf("[BackupExecutor] 🚨 GOROUTINE LEAK DETECTED! %d goroutines running (expected < 100)", numGoroutines)
+		// Print goroutine stack trace for debugging
+		buf := make([]byte, 1<<20) // 1MB buffer
+		stackSize := runtime.Stack(buf, true)
+		// Show first 2KB of stack trace
+		traceSize := stackSize
+		if traceSize > 2048 {
+			traceSize = 2048
+		}
+		logrus.Warnf("[BackupExecutor] 🔍 Goroutine stack trace (first 2KB):\n%s", string(buf[:traceSize]))
+	}
 
 	logrus.Infof("[BackupExecutor] Stream merge completed: %d documents exported", totalCount)
 	return nil
