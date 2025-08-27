@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"os"
@@ -36,19 +37,65 @@ func UploadToGCS(ctx context.Context, localFile, gcsPath string) error {
 
 	cmd := exec.CommandContext(ctx, gsutilPath, "cp", localFile, destPath)
 
-	// Execute command with detailed logging
+	// Execute command with streaming output to avoid memory buffering
 	logrus.Infof("[GCS] Executing command: %s %s", filepath.Base(cmd.Path), strings.Join(cmd.Args[1:], " "))
-	output, err := cmd.CombinedOutput()
+	
+	// Use streaming output to avoid buffering large command output
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("failed to create stdout pipe: %w", err)
+	}
+	
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("failed to create stderr pipe: %w", err)
+	}
 
-	// Log output for debugging
-	if len(output) > 0 {
-		logrus.Debugf("[GCS] Command output: %s", string(output))
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("failed to start gsutil command: %w", err)
+	}
+
+	// Process output streams without buffering full content
+	var lastProgressLine string
+	var errorLines []string
+	
+	// Monitor stdout for progress updates
+	go func() {
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			line := scanner.Text()
+			// Only keep progress updates to reduce memory usage
+			if strings.Contains(line, "Copying") || strings.Contains(line, "Uploading") || 
+			   strings.Contains(line, "Operation completed") {
+				lastProgressLine = line
+			}
+		}
+	}()
+
+	// Collect error output (errors need to be preserved)  
+	go func() {
+		scanner := bufio.NewScanner(stderr)
+		for scanner.Scan() {
+			errorLines = append(errorLines, scanner.Text())
+		}
+	}()
+
+	// Wait for command completion
+	err = cmd.Wait()
+	
+	// Log progress information if available
+	if lastProgressLine != "" {
+		logrus.Infof("[GCS] %s", lastProgressLine)
 	}
 
 	if err != nil {
 		logrus.Errorf("[GCS] Upload failed for %s: %v", fileName, err)
-		logrus.Errorf("[GCS] Command output: %s", string(output))
-		return fmt.Errorf("gsutil command failed: %w, output: %s", err, string(output))
+		if len(errorLines) > 0 {
+			errorOutput := strings.Join(errorLines, "\n")
+			logrus.Errorf("[GCS] Error output: %s", errorOutput)
+			return fmt.Errorf("gsutil command failed: %w, errors: %s", err, errorOutput)
+		}
+		return fmt.Errorf("gsutil command failed: %w", err)
 	}
 
 	logrus.Infof("[GCS] Successfully uploaded %s to %s", fileName, destPath)

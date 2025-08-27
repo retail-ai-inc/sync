@@ -1,6 +1,7 @@
 package backup
 
 import (
+	"archive/zip"
 	"bufio"
 	"context"
 	"database/sql"
@@ -12,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -249,11 +251,26 @@ func (e *BackupExecutor) Execute(ctx context.Context, taskID int) error {
 
 		archivePath := filepath.Join(tempParentDir, archiveBaseName)
 
+		// Log memory before compression phase
+		var memStats runtime.MemStats
+		runtime.ReadMemStats(&memStats)
+		logrus.Infof("[BackupExecutor] Memory before compression phase - Alloc: %.2f MB, Sys: %.2f MB, Free: %.2f MB", 
+			float64(memStats.Alloc)/1024/1024, 
+			float64(memStats.Sys)/1024/1024,
+			float64(memStats.Sys-memStats.Alloc)/1024/1024)
+
 		if err := e.CompressDirectory(tempDir, archivePath, compressionType); err != nil {
 			logrus.Errorf("[BackupExecutor] Compression failed for table group %s: %v", groupName, err)
 			os.RemoveAll(tempDir) // Clean up temp directory only
 			continue
 		}
+
+		// Log memory before GCS upload phase  
+		runtime.ReadMemStats(&memStats)
+		logrus.Infof("[BackupExecutor] Memory before GCS upload - Alloc: %.2f MB, Sys: %.2f MB, Free: %.2f MB", 
+			float64(memStats.Alloc)/1024/1024, 
+			float64(memStats.Sys)/1024/1024,
+			float64(memStats.Sys-memStats.Alloc)/1024/1024)
 
 		// Upload to GCS
 		if err := utils.UploadToGCS(ctx, archivePath, config.Destination.GCSPath); err != nil {
@@ -264,9 +281,26 @@ func (e *BackupExecutor) Execute(ctx context.Context, taskID int) error {
 			continue
 		}
 
+		// Log memory after GCS upload and before cleanup
+		runtime.ReadMemStats(&memStats)
+		logrus.Infof("[BackupExecutor] Memory after GCS upload - Alloc: %.2f MB, Sys: %.2f MB, Free: %.2f MB", 
+			float64(memStats.Alloc)/1024/1024, 
+			float64(memStats.Sys)/1024/1024,
+			float64(memStats.Sys-memStats.Alloc)/1024/1024)
+
 		// Clean up temporary files after successful upload
 		os.RemoveAll(tempDir)
 		os.Remove(archivePath)
+		
+		// Force garbage collection after cleanup
+		runtime.GC()
+		debug.FreeOSMemory()
+		runtime.ReadMemStats(&memStats)
+		logrus.Infof("[BackupExecutor] Memory after cleanup and GC - Alloc: %.2f MB, Sys: %.2f MB, Free: %.2f MB", 
+			float64(memStats.Alloc)/1024/1024, 
+			float64(memStats.Sys)/1024/1024,
+			float64(memStats.Sys-memStats.Alloc)/1024/1024)
+		
 		logrus.Infof("[BackupExecutor] ✅ Backup completed successfully for table group: %s", groupName)
 	}
 
@@ -774,48 +808,131 @@ func (e *BackupExecutor) checkCompressionToolAvailable(compressionType string) e
 	return nil
 }
 
-// compressWithZip Compress files using zip
+// compressWithZip Compress files using memory-optimized streaming ZIP
 func (e *BackupExecutor) compressWithZip(sourceDir, destFile string, allFiles []string) error {
-	// Use full path to avoid command parsing issues
-	zipPath, err := exec.LookPath("zip")
+	// Log memory before compression
+	var memStats runtime.MemStats
+	runtime.ReadMemStats(&memStats)
+	logrus.Infof("[BackupExecutor] Memory before streaming ZIP compression - Alloc: %.2f MB, Sys: %.2f MB, Free: %.2f MB", 
+		float64(memStats.Alloc)/1024/1024, 
+		float64(memStats.Sys)/1024/1024,
+		float64(memStats.Sys-memStats.Alloc)/1024/1024)
+
+	// Create output ZIP file
+	zipFile, err := os.Create(destFile)
 	if err != nil {
-		zipPath = "zip" // If not found, use default command name
-		logrus.Warnf("[BackupExecutor] zip command not found in PATH, using default name")
+		return fmt.Errorf("failed to create ZIP file: %w", err)
 	}
+	defer zipFile.Close()
 
-	// Make all file paths relative to source directory
-	var relativeFiles []string
-	for _, file := range allFiles {
-		relFile, err := filepath.Rel(sourceDir, file)
-		if err != nil {
-			logrus.Warnf("[BackupExecutor] Failed to get relative path for %s: %v", file, err)
-			continue
+	// Create ZIP writer with buffering
+	zipWriter := zip.NewWriter(zipFile)
+	defer zipWriter.Close()
+
+	logrus.Infof("[BackupExecutor] Starting streaming ZIP compression of %d files", len(allFiles))
+
+	for i, file := range allFiles {
+		if err := e.addFileToZipStreaming(zipWriter, sourceDir, file); err != nil {
+			return fmt.Errorf("failed to add file %s to ZIP: %w", file, err)
 		}
-		relativeFiles = append(relativeFiles, relFile)
+
+		// Log progress and force GC every 5 files to control memory
+		if (i+1)%5 == 0 || i == len(allFiles)-1 {
+			runtime.GC()
+			runtime.ReadMemStats(&memStats)
+			logrus.Debugf("[BackupExecutor] ZIP progress: %d/%d files, Memory: %.2f MB", 
+				i+1, len(allFiles), float64(memStats.Alloc)/1024/1024)
+		}
 	}
 
-	// Build zip command: zip -r destFile files...
-	args := []string{"-r", destFile}
-	args = append(args, relativeFiles...)
-	cmd := exec.Command(zipPath, args...)
-	cmd.Dir = sourceDir // Set working directory to source directory
-
-	logrus.Debugf("[BackupExecutor] Executing zip command in directory: %s", sourceDir)
-
-	// Execute command
-	if err := executeCommand(cmd, "zip"); err != nil {
-		logrus.Errorf("[BackupExecutor] ZIP compression failed: %v", err)
-		return err
+	// Close ZIP writer to finalize compression
+	if err := zipWriter.Close(); err != nil {
+		return fmt.Errorf("failed to finalize ZIP file: %w", err)
 	}
 
-	// Check if compressed file was created and get its size
+	// Force garbage collection and log memory after compression
+	runtime.GC()
+	debug.FreeOSMemory()
+	runtime.ReadMemStats(&memStats)
+	logrus.Infof("[BackupExecutor] Memory after streaming ZIP compression - Alloc: %.2f MB, Sys: %.2f MB, Free: %.2f MB", 
+		float64(memStats.Alloc)/1024/1024, 
+		float64(memStats.Sys)/1024/1024,
+		float64(memStats.Sys-memStats.Alloc)/1024/1024)
+
+	// Check compressed file size
 	if info, err := os.Stat(destFile); err == nil {
-		logrus.Debugf("[BackupExecutor] ZIP compression completed successfully. Archive size: %.2f MB",
+		logrus.Infof("[BackupExecutor] Streaming ZIP compression completed. Archive size: %.2f MB",
 			float64(info.Size())/1024/1024)
 	} else {
 		logrus.Warnf("[BackupExecutor] Could not stat compressed file %s: %v", destFile, err)
 	}
 
+	return nil
+}
+
+// addFileToZipStreaming Add a single file to ZIP archive using streaming I/O
+func (e *BackupExecutor) addFileToZipStreaming(zipWriter *zip.Writer, sourceDir, filePath string) error {
+	// Get relative path for ZIP entry
+	relPath, err := filepath.Rel(sourceDir, filePath)
+	if err != nil {
+		return fmt.Errorf("failed to get relative path: %w", err)
+	}
+
+	// Open source file
+	sourceFile, err := os.Open(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to open source file: %w", err)
+	}
+	defer sourceFile.Close()
+
+	// Get file info for ZIP header
+	fileInfo, err := sourceFile.Stat()
+	if err != nil {
+		return fmt.Errorf("failed to stat source file: %w", err)
+	}
+
+	// Create ZIP entry header
+	header, err := zip.FileInfoHeader(fileInfo)
+	if err != nil {
+		return fmt.Errorf("failed to create ZIP header: %w", err)
+	}
+	header.Name = relPath
+	header.Method = zip.Deflate // Use deflate compression
+
+	// Create ZIP entry writer
+	entryWriter, err := zipWriter.CreateHeader(header)
+	if err != nil {
+		return fmt.Errorf("failed to create ZIP entry: %w", err)
+	}
+
+	// Stream copy with limited buffer to control memory usage
+	bufferSize := 32 * 1024 // 32KB buffer - much smaller than system zip
+	buffer := make([]byte, bufferSize)
+	
+	totalBytes := int64(0)
+	for {
+		n, err := sourceFile.Read(buffer)
+		if n > 0 {
+			if _, writeErr := entryWriter.Write(buffer[:n]); writeErr != nil {
+				return fmt.Errorf("failed to write to ZIP entry: %w", writeErr)
+			}
+			totalBytes += int64(n)
+		}
+		
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("failed to read source file: %w", err)
+		}
+		
+		// Force GC every 10MB to prevent memory accumulation
+		if totalBytes%10485760 == 0 { // 10MB
+			runtime.GC()
+		}
+	}
+
+	logrus.Debugf("[BackupExecutor] Added %s to ZIP (%.2f MB)", relPath, float64(totalBytes)/1024/1024)
 	return nil
 }
 
@@ -846,11 +963,28 @@ func (e *BackupExecutor) compressWithGzip(sourceDir, destFile string, allFiles [
 
 	logrus.Infof("[BackupExecutor] Executing tar command")
 
+	// Log memory before compression
+	var memStats runtime.MemStats
+	runtime.ReadMemStats(&memStats)
+	logrus.Infof("[BackupExecutor] Memory before GZIP compression - Alloc: %.2f MB, Sys: %.2f MB, Free: %.2f MB", 
+		float64(memStats.Alloc)/1024/1024, 
+		float64(memStats.Sys)/1024/1024,
+		float64(memStats.Sys-memStats.Alloc)/1024/1024)
+
 	// Execute command
-	if err := executeCommand(cmd, "tar"); err != nil {
+	if err := executeCommandStreaming(cmd, "tar"); err != nil {
 		logrus.Errorf("[BackupExecutor] GZIP compression failed: %v", err)
 		return err
 	}
+
+	// Force garbage collection and log memory after compression
+	runtime.GC()
+	debug.FreeOSMemory()
+	runtime.ReadMemStats(&memStats)
+	logrus.Infof("[BackupExecutor] Memory after GZIP compression - Alloc: %.2f MB, Sys: %.2f MB, Free: %.2f MB", 
+		float64(memStats.Alloc)/1024/1024, 
+		float64(memStats.Sys)/1024/1024,
+		float64(memStats.Sys-memStats.Alloc)/1024/1024)
 
 	// Check if compressed file was created and get its size
 	if info, err := os.Stat(destFile); err == nil {
@@ -1600,12 +1734,22 @@ func buildMongoDBConnectionString(url, username, password string) string {
 
 // getCollectionDocumentCount Get total document count for a collection with query conditions
 func (e *BackupExecutor) getCollectionDocumentCount(ctx context.Context, connStr, database, collection string, queryObj map[string]interface{}) (int64, error) {
-	// Connect to MongoDB
-	client, err := mongo.Connect(ctx, options.Client().ApplyURI(connStr))
+	// Connect to MongoDB with optimized connection settings for count operations
+	clientOpts := options.Client().ApplyURI(connStr)
+	// Optimize for minimal memory usage - single connection, no pooling for count operations
+	clientOpts.SetMaxPoolSize(1)
+	clientOpts.SetMaxConnIdleTime(time.Second * 10)
+	
+	client, err := mongo.Connect(ctx, clientOpts)
 	if err != nil {
 		return 0, fmt.Errorf("failed to connect to MongoDB: %w", err)
 	}
-	defer client.Disconnect(ctx)
+	defer func() {
+		// Ensure connection is properly closed and resources released
+		if disconnectErr := client.Disconnect(ctx); disconnectErr != nil {
+			logrus.Warnf("[BackupExecutor] Failed to disconnect MongoDB client: %v", disconnectErr)
+		}
+	}()
 
 	// Get database and collection
 	db := client.Database(database)
@@ -1634,12 +1778,19 @@ func (e *BackupExecutor) getCollectionDocumentCount(ctx context.Context, connStr
 		filter = bson.M{}
 	}
 
-	// Count documents
+	// Count documents with memory monitoring
+	logrus.Debugf("[BackupExecutor] Counting documents in collection %s.%s", database, collection)
+	
 	count, err := coll.CountDocuments(ctx, filter)
 	if err != nil {
 		return 0, fmt.Errorf("failed to count documents: %w", err)
 	}
 
+	logrus.Infof("[BackupExecutor] Collection %s.%s contains %d documents", database, collection, count)
+	
+	// Force GC after count operation to ensure connection resources are freed
+	runtime.GC()
+	
 	return count, nil
 }
 
@@ -1689,8 +1840,8 @@ func (e *BackupExecutor) executeMongoExportInBatches(ctx context.Context, baseCm
 	// Log memory stats before merge
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
-	logrus.Infof("[BackupExecutor] Memory before merge: Alloc=%dMB, Sys=%dMB",
-		m.Alloc/1024/1024, m.Sys/1024/1024)
+	logrus.Infof("[BackupExecutor] Memory before batch merge: Alloc=%.2fMB, Sys=%.2fMB, Free=%.2fMB, NumGoroutines=%d",
+		float64(m.Alloc)/1024/1024, float64(m.Sys)/1024/1024, float64(m.Sys-m.Alloc)/1024/1024, runtime.NumGoroutine())
 
 	// Merge all batch files
 	if err := e.mergeBatchFiles(batchFiles, outputPath); err != nil {
@@ -1705,8 +1856,8 @@ func (e *BackupExecutor) executeMongoExportInBatches(ctx context.Context, baseCm
 	runtime.GC()
 	runtime.GC()
 	runtime.ReadMemStats(&m)
-	logrus.Infof("[BackupExecutor] Memory after cleanup: Alloc=%dMB, Sys=%dMB",
-		m.Alloc/1024/1024, m.Sys/1024/1024)
+	logrus.Infof("[BackupExecutor] Memory after batch cleanup: Alloc=%.2fMB, Sys=%.2fMB, Free=%.2fMB, NumGoroutines=%d",
+		float64(m.Alloc)/1024/1024, float64(m.Sys)/1024/1024, float64(m.Sys-m.Alloc)/1024/1024, runtime.NumGoroutine())
 
 	logrus.Infof("[BackupExecutor] Successfully exported %d documents in %d batches", totalCount, batchCount)
 	return nil
@@ -1735,7 +1886,7 @@ func (e *BackupExecutor) exportSingleBatch(ctx context.Context, baseCmd *exec.Cm
 	return executeCommand(batchCmd, "mongoexport")
 }
 
-// mergeBatchFiles Merge multiple batch files into final output file
+// mergeBatchFiles Merge multiple batch files into final output file with streaming (MEMORY OPTIMIZED)
 func (e *BackupExecutor) mergeBatchFiles(batchFiles []string, finalOutputPath string) error {
 	finalFile, err := os.Create(finalOutputPath)
 	if err != nil {
@@ -1743,21 +1894,65 @@ func (e *BackupExecutor) mergeBatchFiles(batchFiles []string, finalOutputPath st
 	}
 	defer finalFile.Close()
 
-	logrus.Infof("[BackupExecutor] Merging %d batch files into %s", len(batchFiles), finalOutputPath)
+	logrus.Infof("[BackupExecutor] Streaming merge %d batch files into %s", len(batchFiles), finalOutputPath)
 
-	for _, batchFile := range batchFiles {
+	// Use buffered writer for better performance
+	bufWriter := bufio.NewWriter(finalFile)
+	defer bufWriter.Flush()
+
+	for i, batchFile := range batchFiles {
 		batchData, err := os.Open(batchFile)
 		if err != nil {
 			logrus.Warnf("[BackupExecutor] Failed to open batch file %s: %v", batchFile, err)
 			continue
 		}
 
-		// Copy batch data to final file
-		if _, err := finalFile.ReadFrom(batchData); err != nil {
-			batchData.Close()
-			return fmt.Errorf("failed to merge batch file %s: %w", batchFile, err)
+		// Stream copy with limited buffer to avoid memory accumulation
+		scanner := bufio.NewScanner(batchData)
+		// Set buffer size to 64KB (much smaller than ReadFrom's potential GB buffer)
+		buf := make([]byte, 0, 64*1024)
+		scanner.Buffer(buf, 64*1024)
+		
+		lineCount := 0
+		for scanner.Scan() {
+			if _, err := bufWriter.Write(scanner.Bytes()); err != nil {
+				batchData.Close()
+				return fmt.Errorf("failed to write line from batch file %s: %w", batchFile, err)
+			}
+			if _, err := bufWriter.WriteString("\n"); err != nil {
+				batchData.Close()
+				return fmt.Errorf("failed to write newline: %w", err)
+			}
+			lineCount++
+			
+			// Flush buffer periodically to avoid memory accumulation
+			if lineCount%1000 == 0 {
+				if err := bufWriter.Flush(); err != nil {
+					batchData.Close()
+					return fmt.Errorf("failed to flush buffer: %w", err)
+				}
+			}
 		}
+
+		if err := scanner.Err(); err != nil {
+			batchData.Close()
+			return fmt.Errorf("error scanning batch file %s: %w", batchFile, err)
+		}
+		
 		batchData.Close()
+		
+		// Force buffer flush after each file
+		if err := bufWriter.Flush(); err != nil {
+			return fmt.Errorf("failed to flush buffer after file %s: %w", batchFile, err)
+		}
+		
+		logrus.Debugf("[BackupExecutor] Merged batch file %d/%d: %s (%d lines)", i+1, len(batchFiles), filepath.Base(batchFile), lineCount)
+		
+		// Force GC every few files to prevent memory accumulation
+		if (i+1)%5 == 0 {
+			runtime.GC()
+			debug.FreeOSMemory()
+		}
 	}
 
 	return nil
@@ -1819,16 +2014,26 @@ func (e *BackupExecutor) executeMongoExportWithStreamMerge(ctx context.Context, 
 			runtime.GC()
 			runtime.GC() // Call twice for more aggressive cleanup
 
-			// Log memory status for debugging
+			// Log detailed memory status for debugging
 			var m runtime.MemStats
 			runtime.ReadMemStats(&m)
-			logrus.Debugf("[BackupExecutor] Memory after batch %d: Alloc=%dMB", i+1, m.Alloc/1024/1024)
+			logrus.Infof("[BackupExecutor] Memory after batch %d: Alloc=%dMB, Sys=%dMB, HeapAlloc=%dMB, HeapSys=%dMB, NumGoroutines=%d", 
+				i+1, m.Alloc/1024/1024, m.Sys/1024/1024, m.HeapAlloc/1024/1024, m.HeapSys/1024/1024, runtime.NumGoroutine())
 		}
 	}
 
-	// Final cleanup
+	// Final cleanup with aggressive memory release
 	runtime.GC()
 	runtime.GC()
+	
+	// Force return memory to OS
+	debug.FreeOSMemory()
+	
+	// Final memory stats
+	var finalMem runtime.MemStats
+	runtime.ReadMemStats(&finalMem)
+	logrus.Infof("[BackupExecutor] Final memory stats: Alloc=%dMB, Sys=%dMB, NumGoroutines=%d", 
+		finalMem.Alloc/1024/1024, finalMem.Sys/1024/1024, runtime.NumGoroutine())
 
 	logrus.Infof("[BackupExecutor] Stream merge completed: %d documents exported", totalCount)
 	return nil
