@@ -188,17 +188,17 @@ func (e *BackupExecutor) Execute(ctx context.Context, taskID int) error {
 			continue
 		}
 
-		// 🚀 直接使用外部命令模式进行备份
+		// 🚀 Use external command mode directly for backup
 		var exportErr error
 		switch config.SourceType {
 		case "mongodb":
 			if len(tables) == 1 {
-				// 单表导出：直接使用外部命令模式
+				// Single table export: use external command mode directly
 				logrus.Infof("[BackupExecutor] 🚀 Starting external command backup for single table: %s", tables[0])
 				connStr := buildMongoDBConnectionString(config.Database.URL, config.Database.Username, config.Database.Password)
 				exportErr = e.executeExternalMongoExportSimple(ctx, connStr, config.Database.Database, tables[0], tempDir, config)
 			} else {
-				// 多表合并导出：使用外部命令模式
+				// Multi-table merged export: use external command mode
 				logrus.Infof("[BackupExecutor] 🚀 Starting external command backup for %d merged tables: %v", len(tables), tables)
 				connStr := buildMongoDBConnectionString(config.Database.URL, config.Database.Username, config.Database.Password)
 				exportErr = e.exportMongoDBMergedTables(ctx, connStr, config.Database.Database, tables, tempDir, config)
@@ -213,11 +213,15 @@ func (e *BackupExecutor) Execute(ctx context.Context, taskID int) error {
 			continue
 		}
 
-		// 🎉 外部命令模式已经完成完整备份流程（导出+压缩+上传）
+		// 🎉 External command mode has completed the full backup workflow (export + compression + upload)
 		logrus.Infof("[BackupExecutor] ✅ External command backup completed successfully for table group: %s", groupName)
-		logrus.Infof("[BackupExecutor] 🔍 Keeping temp directory for debugging: %s", tempDir)
-		// 暂时不删除临时目录，保留用于调试分析
-		// os.RemoveAll(tempDir) // Clean up temp directory
+
+		// Clean up temporary directory
+		if err := os.RemoveAll(tempDir); err != nil {
+			logrus.Warnf("[BackupExecutor] Failed to remove temp directory %s: %v", tempDir, err)
+		} else {
+			logrus.Debugf("[BackupExecutor] 🗑️  Cleaned up temp directory: %s", tempDir)
+		}
 	}
 
 	logrus.Debugf("[BackupExecutor] All table backups completed for task %d", taskID)

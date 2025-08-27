@@ -15,23 +15,34 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// ExecuteExternalMongoBackup 使用外部命令执行MongoDB备份
-// 避免Go内存管理问题，直接调用系统命令
+// JSONFilenameSeparator defines the separator used between collection name and date in JSON filenames
+// Change this to customize JSON filename format (e.g., "-", "_", ".")
+const JSONFilenameSeparator = "_"
+
+// ZIPFilenameSeparator defines the separator used between collection name and date in ZIP filenames
+// Change this to customize ZIP filename format (e.g., "-", "_", ".")
+const ZIPFilenameSeparator = "-"
+
+// ExecuteExternalMongoBackup executes MongoDB backup using external commands
+// Avoids Go memory management issues by directly calling system commands
 func (e *BackupExecutor) ExecuteExternalMongoBackup(ctx context.Context, config ExecutorBackupConfig, tempDir string, task BackupTask, collection string) error {
 	logrus.Infof("[BackupExecutor] 🚀 Using EXTERNAL COMMAND mode for collection: %s", collection)
 
-	// 记录Go进程内存 (应该保持稳定)
+	// Log Go process memory (should remain stable)
 	e.logMemoryUsage("EXTERNAL_MODE_START")
 
-	// 构建连接字符串
+	// Build connection string
 	connStr := buildMongoDBConnectionString(config.Database.URL, config.Database.Username, config.Database.Password)
 
-	// 文件路径
-	dateStr := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
-	outputPath := fmt.Sprintf("%s/%s_%s.json", tempDir, collection, dateStr)
-	zipPath := fmt.Sprintf("%s/%s_%s.zip", tempDir, collection, dateStr)
+	// Clean collection name and generate file paths
+	baseCollectionName := e.extractTablePrefix(collection)
+	logrus.Infof("[BackupExecutor] 🔍 Original collection name: %s, extracted base name: %s", collection, baseCollectionName)
 
-	// Step 1: 外部mongoexport命令
+	dateStr := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
+	outputPath := fmt.Sprintf("%s/%s%s%s.json", tempDir, baseCollectionName, JSONFilenameSeparator, dateStr)
+	zipPath := fmt.Sprintf("%s/%s%s%s.zip", tempDir, baseCollectionName, ZIPFilenameSeparator, dateStr)
+
+	// Step 1: External mongoexport command
 	logrus.Infof("[BackupExecutor] 📤 Step 1: External mongoexport")
 	if err := e.executeExternalMongoExport(ctx, connStr, config.Database.Database, collection, outputPath); err != nil {
 		return fmt.Errorf("external mongoexport failed: %w", err)
@@ -39,7 +50,7 @@ func (e *BackupExecutor) ExecuteExternalMongoBackup(ctx context.Context, config 
 
 	e.logMemoryUsage("AFTER_MONGOEXPORT")
 
-	// Step 2: 外部zip命令
+	// Step 2: External zip command
 	logrus.Infof("[BackupExecutor] 🗜️ Step 2: External zip compression")
 	if err := e.executeExternalZip(ctx, tempDir, outputPath, zipPath); err != nil {
 		return fmt.Errorf("external zip failed: %w", err)
@@ -47,10 +58,10 @@ func (e *BackupExecutor) ExecuteExternalMongoBackup(ctx context.Context, config 
 
 	e.logMemoryUsage("AFTER_ZIP")
 
-	// Step 3: 外部gsutil上传 (如果配置了GCS)
+	// Step 3: External gsutil upload (if GCS is configured)
 	if config.Destination.GCSPath != "" {
 		logrus.Infof("[BackupExecutor] ☁️ Step 3: External GCS upload")
-		gcsPath := fmt.Sprintf("%s/%s_%s.zip", config.Destination.GCSPath, collection, dateStr)
+		gcsPath := fmt.Sprintf("%s/%s%s%s.zip", config.Destination.GCSPath, baseCollectionName, ZIPFilenameSeparator, dateStr)
 		if err := e.executeExternalGCSUpload(ctx, zipPath, gcsPath); err != nil {
 			return fmt.Errorf("external GCS upload failed: %w", err)
 		}
@@ -58,16 +69,24 @@ func (e *BackupExecutor) ExecuteExternalMongoBackup(ctx context.Context, config 
 
 	e.logMemoryUsage("EXTERNAL_MODE_COMPLETE")
 
-	// 暂时不删除临时文件，保留用于调试分析
-	logrus.Infof("[BackupExecutor] 🔍 Keeping JSON file for debugging: %s", outputPath)
-	logrus.Infof("[BackupExecutor] 🔍 Keeping ZIP file for debugging: %s", zipPath)
-	// 保留所有文件供调试分析
+	// Clean up temporary files
+	if err := os.Remove(outputPath); err != nil {
+		logrus.Warnf("[BackupExecutor] Failed to remove JSON file %s: %v", outputPath, err)
+	} else {
+		logrus.Debugf("[BackupExecutor] 🗑️  Cleaned up JSON file: %s", outputPath)
+	}
+
+	if err := os.Remove(zipPath); err != nil {
+		logrus.Warnf("[BackupExecutor] Failed to remove ZIP file %s: %v", zipPath, err)
+	} else {
+		logrus.Debugf("[BackupExecutor] 🗑️  Cleaned up ZIP file: %s", zipPath)
+	}
 
 	logrus.Infof("[BackupExecutor] ✅ External backup completed for collection: %s", collection)
 	return nil
 }
 
-// executeExternalMongoExport 执行外部mongoexport命令
+// executeExternalMongoExport executes external mongoexport command
 func (e *BackupExecutor) executeExternalMongoExport(ctx context.Context, connStr, database, collection, outputPath string) error {
 	cmd := exec.CommandContext(ctx, "mongoexport",
 		"--uri", connStr,
@@ -83,12 +102,12 @@ func (e *BackupExecutor) executeExternalMongoExport(ctx context.Context, connStr
 		return fmt.Errorf("mongoexport failed: %w, output: %s", err, string(output))
 	}
 
-	// 检查输出文件
+	// Check output file
 	if _, err := os.Stat(outputPath); err != nil {
 		return fmt.Errorf("mongoexport output file not created: %w", err)
 	}
 
-	// 记录文件大小
+	// Log file size
 	if stat, err := os.Stat(outputPath); err == nil {
 		logrus.Infof("[BackupExecutor] ✅ Mongoexport completed: %.2f MB", float64(stat.Size())/1024/1024)
 	}
@@ -96,9 +115,9 @@ func (e *BackupExecutor) executeExternalMongoExport(ctx context.Context, connStr
 	return nil
 }
 
-// executeExternalZip 执行外部zip命令
+// executeExternalZip executes external zip command
 func (e *BackupExecutor) executeExternalZip(ctx context.Context, workDir, inputFile, outputFile string) error {
-	// 使用系统zip命令
+	// Use system zip command
 	cmd := exec.CommandContext(ctx, "zip", "-j", outputFile, inputFile)
 	cmd.Dir = workDir
 
@@ -109,12 +128,12 @@ func (e *BackupExecutor) executeExternalZip(ctx context.Context, workDir, inputF
 		return fmt.Errorf("zip failed: %w, output: %s", err, string(output))
 	}
 
-	// 检查输出文件
+	// Check output file
 	if _, err := os.Stat(outputFile); err != nil {
 		return fmt.Errorf("zip output file not created: %w", err)
 	}
 
-	// 记录压缩效果
+	// Log compression results
 	if stat, err := os.Stat(outputFile); err == nil {
 		logrus.Infof("[BackupExecutor] ✅ Zip completed: %.2f MB", float64(stat.Size())/1024/1024)
 	}
@@ -122,7 +141,7 @@ func (e *BackupExecutor) executeExternalZip(ctx context.Context, workDir, inputF
 	return nil
 }
 
-// executeExternalGCSUpload 执行外部gsutil上传
+// executeExternalGCSUpload executes external gsutil upload
 func (e *BackupExecutor) executeExternalGCSUpload(ctx context.Context, localFile, gcsPath string) error {
 	cmd := exec.CommandContext(ctx, "gsutil", "cp", localFile, gcsPath)
 
@@ -137,40 +156,7 @@ func (e *BackupExecutor) executeExternalGCSUpload(ctx context.Context, localFile
 	return nil
 }
 
-// copyExistingFile 复制现有数据文件用于测试
-func (e *BackupExecutor) copyExistingFile(src, dst string) error {
-	// 记录开始时内存
-	var memStats runtime.MemStats
-	runtime.ReadMemStats(&memStats)
-	logrus.Infof("[BackupExecutor] 🔄 Memory BEFORE file copy: Alloc=%.2fMB, Sys=%.2fMB",
-		float64(memStats.Alloc)/1024/1024,
-		float64(memStats.Sys)/1024/1024)
-
-	// 使用系统cp命令复制文件以避免Go内存使用
-	cmd := exec.CommandContext(context.Background(), "cp", src, dst)
-
-	logrus.Infof("[BackupExecutor] 🔄 Executing: cp %s %s", src, dst)
-
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("cp command failed: %w, output: %s", err, string(output))
-	}
-
-	// 验证复制结果
-	if _, err := os.Stat(dst); err != nil {
-		return fmt.Errorf("copied file not found: %w", err)
-	}
-
-	// 记录复制后内存
-	runtime.ReadMemStats(&memStats)
-	logrus.Infof("[BackupExecutor] 🔄 Memory AFTER file copy: Alloc=%.2fMB, Sys=%.2fMB",
-		float64(memStats.Alloc)/1024/1024,
-		float64(memStats.Sys)/1024/1024)
-
-	return nil
-}
-
-// logMemoryUsage 记录内存使用情况
+// logMemoryUsage logs memory usage information
 func (e *BackupExecutor) logMemoryUsage(phase string) {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
@@ -182,59 +168,30 @@ func (e *BackupExecutor) logMemoryUsage(phase string) {
 		runtime.NumGoroutine())
 }
 
-// executeExternalMongoExportSimple 完整的外部命令备份：mongoexport -> zip -> GCS upload
+// executeExternalMongoExportSimple complete external command backup: mongoexport -> zip -> GCS upload
 func (e *BackupExecutor) executeExternalMongoExportSimple(ctx context.Context, connStr, database, collection, tempDir string, config ExecutorBackupConfig) error {
 	logrus.Infof("[BackupExecutor] 🚀 Starting COMPLETE external command backup for collection: %s", collection)
 
-	// 记录Go进程内存 (应该保持稳定)
+	// Log Go process memory (should remain stable)
 	e.logMemoryUsage("EXTERNAL_FULL_START")
 
-	// 文件路径
+	// Clean collection name and generate file paths
+	baseCollectionName := e.extractTablePrefix(collection)
+	logrus.Infof("[BackupExecutor] 🔍 Original collection name: %s, extracted base name: %s", collection, baseCollectionName)
+
 	dateStr := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
-	outputPath := fmt.Sprintf("%s/%s_%s.json", tempDir, collection, dateStr)
-	zipPath := fmt.Sprintf("%s/%s_%s.zip", tempDir, collection, dateStr)
+	outputPath := fmt.Sprintf("%s/%s%s%s.json", tempDir, baseCollectionName, JSONFilenameSeparator, dateStr)
+	zipPath := fmt.Sprintf("%s/%s%s%s.zip", tempDir, baseCollectionName, ZIPFilenameSeparator, dateStr)
 
-	// Step 1: 使用现有数据文件 (跳过mongoexport以节省时间)
-	logrus.Infof("[BackupExecutor] 📤 Step 1: Using existing data file (SKIP mongoexport)")
-
-	// 检查现有数据文件路径 (支持本地测试)
-	existingFiles := []string{
-		"/mnt/state/RetailerRecommendationAnalytics_202508_2025-08-26.json",     // 服务器路径
-		"/tmp/mnt/state/RetailerRecommendationAnalytics_202508_2025-08-26.json", // 本地测试路径
-	}
-
-	var existingFile string
-	for _, file := range existingFiles {
-		if _, err := os.Stat(file); err == nil {
-			existingFile = file
-			break
-		}
-	}
-
-	if existingFile != "" {
-		logrus.Infof("[BackupExecutor] ✅ Found existing file: %s", existingFile)
-
-		// 复制现有文件到输出路径
-		if err := e.copyExistingFile(existingFile, outputPath); err != nil {
-			return fmt.Errorf("failed to copy existing file: %w", err)
-		}
-		logrus.Infof("[BackupExecutor] ✅ Copied existing file to: %s", outputPath)
-
-		// 记录文件大小
-		if stat, err := os.Stat(outputPath); err == nil {
-			logrus.Infof("[BackupExecutor] 📊 Data file size: %.2f MB", float64(stat.Size())/1024/1024)
-		}
-	} else {
-		// 如果没有现有文件，回退到mongoexport with query conditions
-		logrus.Infof("[BackupExecutor] ⚠️ Existing file not found, falling back to mongoexport with query conditions")
-		if err := e.executeExternalMongoExportWithOptions(ctx, connStr, database, collection, outputPath, config); err != nil {
-			return fmt.Errorf("external mongoexport failed: %w", err)
-		}
+	// Step 1: Use mongoexport to export data
+	logrus.Infof("[BackupExecutor] 📤 Step 1: External mongoexport")
+	if err := e.executeExternalMongoExportWithOptions(ctx, connStr, database, collection, outputPath, config); err != nil {
+		return fmt.Errorf("external mongoexport failed: %w", err)
 	}
 
 	e.logMemoryUsage("AFTER_EXTERNAL_EXPORT")
 
-	// Step 2: 外部zip命令
+	// Step 2: External zip command
 	logrus.Infof("[BackupExecutor] 🗜️ Step 2: External zip compression")
 	if err := e.executeExternalZip(ctx, tempDir, outputPath, zipPath); err != nil {
 		return fmt.Errorf("external zip failed: %w", err)
@@ -242,9 +199,9 @@ func (e *BackupExecutor) executeExternalMongoExportSimple(ctx context.Context, c
 
 	e.logMemoryUsage("AFTER_EXTERNAL_ZIP")
 
-	// Step 3: 外部GCS上传 (需要配置GCS路径)
-	// TODO: 从配置中获取GCS路径
-	gcsPath := fmt.Sprintf("gs://logs-router-bucketbk/external/%s_%s.zip", collection, dateStr)
+	// Step 3: External GCS upload
+	zipFileName := fmt.Sprintf("%s%s%s.zip", baseCollectionName, ZIPFilenameSeparator, dateStr)
+	gcsPath := fmt.Sprintf("%s/%s", config.Destination.GCSPath, zipFileName)
 	logrus.Infof("[BackupExecutor] ☁️ Step 3: External GCS upload")
 	if err := e.executeExternalGCSUpload(ctx, zipPath, gcsPath); err != nil {
 		return fmt.Errorf("external GCS upload failed: %w", err)
@@ -252,29 +209,37 @@ func (e *BackupExecutor) executeExternalMongoExportSimple(ctx context.Context, c
 
 	e.logMemoryUsage("EXTERNAL_FULL_COMPLETE")
 
-	// 暂时不删除临时文件，保留用于调试分析
-	logrus.Infof("[BackupExecutor] 🔍 Keeping JSON file for debugging: %s", outputPath)
-	logrus.Infof("[BackupExecutor] 🔍 Keeping ZIP file for debugging: %s", zipPath)
-	// 保留所有文件供调试分析
+	// Clean up temporary files
+	if err := os.Remove(outputPath); err != nil {
+		logrus.Warnf("[BackupExecutor] Failed to remove JSON file %s: %v", outputPath, err)
+	} else {
+		logrus.Debugf("[BackupExecutor] 🗑️  Cleaned up JSON file: %s", outputPath)
+	}
+
+	if err := os.Remove(zipPath); err != nil {
+		logrus.Warnf("[BackupExecutor] Failed to remove ZIP file %s: %v", zipPath, err)
+	} else {
+		logrus.Debugf("[BackupExecutor] 🗑️  Cleaned up ZIP file: %s", zipPath)
+	}
 
 	logrus.Infof("[BackupExecutor] ✅ COMPLETE external backup workflow completed for collection: %s", collection)
 
 	return nil
 }
 
-// UseExternalCommands 检查是否应该使用外部命令模式
+// UseExternalCommands checks whether to use external command mode
 func (e *BackupExecutor) UseExternalCommands() bool {
-	// 可以通过环境变量控制
+	// Can be controlled through environment variables
 	if os.Getenv("USE_EXTERNAL_BACKUP") == "true" {
 		return true
 	}
 
-	// 也可以检查可用内存，如果内存不足自动切换到外部命令模式
+	// Can also check available memory, automatically switch to external command mode if memory is insufficient
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
 	currentMB := float64(m.Alloc) / 1024 / 1024
 
-	if currentMB > 2000 { // 如果Go进程已经使用超过2GB，切换到外部模式
+	if currentMB > 2000 { // If Go process is already using more than 2GB, switch to external mode
 		logrus.Warnf("[BackupExecutor] High memory usage detected (%.2fMB), switching to external command mode", currentMB)
 		return true
 	}
@@ -282,56 +247,48 @@ func (e *BackupExecutor) UseExternalCommands() bool {
 	return false
 }
 
-// exportMongoDBMergedTables 使用外部命令进行多表合并备份
-// 处理跨月数据导出场景，支持多个集合的合并，参考executeExternalMongoExportSimple的实现模式
+// exportMongoDBMergedTables performs multi-table merged backup using external commands
+// Handles cross-month data export scenarios, supports merging multiple collections, following the implementation pattern of executeExternalMongoExportSimple
 func (e *BackupExecutor) exportMongoDBMergedTables(ctx context.Context, connStr, database string, tables []string, tempDir string, config ExecutorBackupConfig) error {
 	logrus.Infof("[BackupExecutor] 🚀 Starting multi-table merge backup for %d tables: %v", len(tables), tables)
 
-	// 记录Go进程内存 (应该保持稳定)
+	// Log Go process memory (should remain stable)
 	e.logMemoryUsage("MERGED_TABLES_START")
 
-	// 提取基础名称（去掉日期后缀）
+	// Extract base name (remove date suffix)
 	baseCollectionName := e.extractTablePrefix(tables[0])
+	logrus.Infof("[BackupExecutor] 🔍 Original table name: %s, extracted base name: %s", tables[0], baseCollectionName)
 
-	// 使用 processFileNamePattern 生成正确的文件名
-	fileName := processFileNamePattern(config.Destination.FileNamePattern, baseCollectionName)
+	// Generate file names: use cleaned base collection name + date
+	dateStr := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
+	jsonFileName := fmt.Sprintf("%s%s%s.json", baseCollectionName, JSONFilenameSeparator, dateStr)
+	zipFileName := fmt.Sprintf("%s%s%s.zip", baseCollectionName, ZIPFilenameSeparator, dateStr)
+	logrus.Infof("[BackupExecutor] 🔍 Generated file names - JSON: %s, ZIP: %s", jsonFileName, zipFileName)
 
-	// 确保扩展名为 .json
-	if !strings.HasSuffix(fileName, ".json") {
-		fileName = strings.TrimSuffix(fileName, filepath.Ext(fileName)) + ".json"
-	}
-
-	mergedJsonPath := filepath.Join(tempDir, fileName)
-
-	// 生成对应的zip文件名
-	zipFileName := strings.TrimSuffix(fileName, ".json") + ".zip"
+	mergedJsonPath := filepath.Join(tempDir, jsonFileName)
 	zipPath := filepath.Join(tempDir, zipFileName)
 
-	// Step 1: 分别导出每个表并合并
+	// Step 1: Export each table separately and merge
 	logrus.Infof("[BackupExecutor] 📤 Step 1: Exporting and merging %d tables", len(tables))
 
-	// 创建合并文件
+	// Create merged file
 	mergedFile, err := os.Create(mergedJsonPath)
 	if err != nil {
 		return fmt.Errorf("failed to create merged file: %w", err)
 	}
 	defer mergedFile.Close()
 
-	// 写入JSON数组开始符号
-	if _, err := mergedFile.WriteString("[\n"); err != nil {
-		return fmt.Errorf("failed to write array start: %w", err)
-	}
+	// No JSON array wrapper for JSONL format - each line is a separate JSON object
 
 	for i, table := range tables {
 		logrus.Infof("[BackupExecutor] 📄 Exporting table %d/%d: %s", i+1, len(tables), table)
 
-		// 为每个表创建临时文件
-		dateStr := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
-		tempTablePath := fmt.Sprintf("%s/%s_%s_temp.json", tempDir, table, dateStr)
+		// Create temporary file for each table
+		tempTablePath := fmt.Sprintf("%s/%s%s%s_temp.json", tempDir, table, JSONFilenameSeparator, dateStr) // _temp suffix for temporary files
 
-		// 使用mongoexport导出单个表，应用查询条件和字段选择
+		// Use mongoexport to export single table, apply query conditions and field selection
 		if err := e.executeExternalMongoExportWithOptions(ctx, connStr, database, table, tempTablePath, config); err != nil {
-			// 如果是因为没有查询条件而跳过，则继续处理下一个表
+			// If skipped due to no query conditions, continue processing next table
 			if strings.Contains(err.Error(), "no query conditions specified") {
 				logrus.Infof("[BackupExecutor] ⏭️  Skipping table %s (no query conditions)", table)
 				continue
@@ -339,54 +296,32 @@ func (e *BackupExecutor) exportMongoDBMergedTables(ctx context.Context, connStr,
 			return fmt.Errorf("failed to export table %s: %w", table, err)
 		}
 
-		// 读取临时文件并合并到主文件
+		// Read temporary file and merge to main file
 		tempFile, err := os.Open(tempTablePath)
 		if err != nil {
 			return fmt.Errorf("failed to open temp file for table %s: %w", table, err)
 		}
 
-		// 读取JSONL格式文件内容（mongoexport默认输出格式）
+		// Read JSONL format file content (mongoexport default output format)
 		content, err := os.ReadFile(tempTablePath)
 		if err != nil {
 			tempFile.Close()
 			return fmt.Errorf("failed to read temp file for table %s: %w", table, err)
 		}
 
-		// mongoexport输出的是JSONL格式（每行一个JSON对象），不是JSON数组
-		// 需要将每行转换为数组元素
+		// mongoexport outputs JSONL format (one JSON object per line)
+		// Write directly in JSONL format, maintaining original format
 		contentStr := strings.TrimSpace(string(content))
 
 		if len(contentStr) > 0 {
-			// 将JSONL格式转换为JSON数组元素
+			// Directly append JSONL content to merged file
 			lines := strings.Split(contentStr, "\n")
-			var validLines []string
 
 			for _, line := range lines {
 				line = strings.TrimSpace(line)
 				if line != "" && strings.HasPrefix(line, "{") {
-					validLines = append(validLines, line)
-				}
-			}
-
-			// 如果有有效数据行
-			if len(validLines) > 0 {
-				// 如果不是第一个表，添加逗号分隔符
-				if i > 0 {
-					if _, err := mergedFile.WriteString(",\n"); err != nil {
-						tempFile.Close()
-						return fmt.Errorf("failed to write separator: %w", err)
-					}
-				}
-
-				// 写入每个JSON对象，用逗号分隔
-				for j, line := range validLines {
-					if j > 0 {
-						if _, err := mergedFile.WriteString(",\n"); err != nil {
-							tempFile.Close()
-							return fmt.Errorf("failed to write line separator: %w", err)
-						}
-					}
-					if _, err := mergedFile.WriteString(line); err != nil {
+					// Write each JSON object line directly, separated by newlines (JSONL format)
+					if _, err := mergedFile.WriteString(line + "\n"); err != nil {
 						tempFile.Close()
 						return fmt.Errorf("failed to write line data for %s: %w", table, err)
 					}
@@ -395,42 +330,27 @@ func (e *BackupExecutor) exportMongoDBMergedTables(ctx context.Context, connStr,
 		}
 
 		tempFile.Close()
-		// 暂时不删除临时文件，保留用于调试
-		logrus.Infof("[BackupExecutor] 🔍 Keeping temp file for debugging: %s", tempTablePath)
+		// Clean up temporary files
+		if err := os.Remove(tempTablePath); err != nil {
+			logrus.Warnf("[BackupExecutor] Failed to remove temp file %s: %v", tempTablePath, err)
+		} else {
+			logrus.Debugf("[BackupExecutor] 🗑️  Cleaned up temp file: %s", tempTablePath)
+		}
 
 		logrus.Infof("[BackupExecutor] ✅ Table %s merged successfully", table)
 	}
 
-	// 写入JSON数组结束符号
-	if _, err := mergedFile.WriteString("\n]"); err != nil {
-		return fmt.Errorf("failed to write array end: %w", err)
-	}
+	// No JSON array end needed for JSONL format
 	mergedFile.Close()
 
-	// 检查合并文件
 	if stat, err := os.Stat(mergedJsonPath); err == nil {
 		logrus.Infof("[BackupExecutor] ✅ Merge completed: %.2f MB", float64(stat.Size())/1024/1024)
 
-		// 额外调试：显示文件内容的前几行和后几行
-		if content, readErr := os.ReadFile(mergedJsonPath); readErr == nil {
-			contentStr := string(content)
-			lines := strings.Split(contentStr, "\n")
-			logrus.Infof("[BackupExecutor] 🔍 Merged file has %d lines", len(lines))
-
-			// 显示前3行
-			for i := 0; i < 3 && i < len(lines); i++ {
-				logrus.Infof("[BackupExecutor] 🔍 Line %d: %s", i+1, lines[i])
-			}
-
-			// 显示后3行
-			if len(lines) > 3 {
-				logrus.Infof("[BackupExecutor] 🔍 ...")
-				for i := len(lines) - 3; i < len(lines); i++ {
-					if i >= 0 {
-						logrus.Infof("[BackupExecutor] 🔍 Line %d: %s", i+1, lines[i])
-					}
-				}
-			}
+		// Count records but don't output specific content
+		if recordCount, fileSize, countErr := e.countRecordsInFile(mergedJsonPath); countErr == nil {
+			logrus.Infof("[BackupExecutor] 🔍 Merged file contains %d records, %.2f MB", recordCount, fileSize)
+		} else {
+			logrus.Warnf("[BackupExecutor] ⚠️  Failed to count records: %v", countErr)
 		}
 	} else {
 		logrus.Errorf("[BackupExecutor] ❌ Failed to stat merged file: %v", err)
@@ -438,7 +358,7 @@ func (e *BackupExecutor) exportMongoDBMergedTables(ctx context.Context, connStr,
 
 	e.logMemoryUsage("AFTER_MERGE")
 
-	// Step 2: 外部zip命令
+	// Step 2: External zip command
 	logrus.Infof("[BackupExecutor] 🗜️ Step 2: External zip compression")
 	if err := e.executeExternalZip(ctx, tempDir, mergedJsonPath, zipPath); err != nil {
 		return fmt.Errorf("external zip failed: %w", err)
@@ -446,11 +366,8 @@ func (e *BackupExecutor) exportMongoDBMergedTables(ctx context.Context, connStr,
 
 	e.logMemoryUsage("AFTER_EXTERNAL_ZIP")
 
-	// Step 3: 外部GCS上传
+	// Step 3: External GCS upload
 	gcsPath := fmt.Sprintf("%s/%s", config.Destination.GCSPath, zipFileName)
-	if !strings.HasPrefix(gcsPath, "gs://") {
-		gcsPath = fmt.Sprintf("gs://logs-router-bucketbk/external/%s", zipFileName)
-	}
 	logrus.Infof("[BackupExecutor] ☁️ Step 3: External GCS upload")
 	if err := e.executeExternalGCSUpload(ctx, zipPath, gcsPath); err != nil {
 		return fmt.Errorf("external GCS upload failed: %w", err)
@@ -458,16 +375,24 @@ func (e *BackupExecutor) exportMongoDBMergedTables(ctx context.Context, connStr,
 
 	e.logMemoryUsage("MERGED_TABLES_COMPLETE")
 
-	// 暂时不删除临时文件，保留用于调试
-	logrus.Infof("[BackupExecutor] 🔍 Keeping merged file for debugging: %s", mergedJsonPath)
-	logrus.Infof("[BackupExecutor] 🔍 Keeping zip file for debugging: %s", zipPath)
-	// 保留所有文件供后续调试分析
+	// Clean up temporary files
+	if err := os.Remove(mergedJsonPath); err != nil {
+		logrus.Warnf("[BackupExecutor] Failed to remove merged file %s: %v", mergedJsonPath, err)
+	} else {
+		logrus.Debugf("[BackupExecutor] 🗑️  Cleaned up merged file: %s", mergedJsonPath)
+	}
+
+	if err := os.Remove(zipPath); err != nil {
+		logrus.Warnf("[BackupExecutor] Failed to remove ZIP file %s: %v", zipPath, err)
+	} else {
+		logrus.Debugf("[BackupExecutor] 🗑️  Cleaned up ZIP file: %s", zipPath)
+	}
 
 	logrus.Infof("[BackupExecutor] ✅ Multi-table merge backup completed successfully for %d tables", len(tables))
 	return nil
 }
 
-// executeExternalMongoExportWithOptions 执行外部mongoexport命令，支持查询条件和字段选择
+// executeExternalMongoExportWithOptions executes external mongoexport command with support for query conditions and field selection
 func (e *BackupExecutor) executeExternalMongoExportWithOptions(ctx context.Context, connStr, database, collection, outputPath string, config ExecutorBackupConfig) error {
 	args := []string{
 		"--uri", connStr,
@@ -477,12 +402,12 @@ func (e *BackupExecutor) executeExternalMongoExportWithOptions(ctx context.Conte
 		"--quiet",
 	}
 
-	// 添加查询条件
+	// Add query conditions
 	if queryConditions, exists := config.Query[collection]; exists && len(queryConditions) > 0 {
-		// 清理查询条件中的多余引号
+		// Clean extra quotes in query conditions
 		cleanedQuery := cleanQueryStringValues(queryConditions)
 
-		// 转换动态时间查询为具体的MongoDB查询
+		// Convert dynamic time queries to specific MongoDB queries
 		finalQuery := e.convertTimeRangeQuery(cleanedQuery)
 
 		queryJSON, err := json.Marshal(finalQuery)
@@ -493,12 +418,12 @@ func (e *BackupExecutor) executeExternalMongoExportWithOptions(ctx context.Conte
 			logrus.Infof("[BackupExecutor] Applied query for collection %s: %s", collection, string(queryJSON))
 		}
 	} else {
-		// 如果没有查询条件，跳过该表的导出
+		// If no query conditions, skip export for this table
 		logrus.Warnf("[BackupExecutor] ⚠️  No query conditions found for collection %s, skipping export", collection)
 		return fmt.Errorf("no query conditions specified for collection %s", collection)
 	}
 
-	// 添加字段选择
+	// Add field selection
 	if fields, exists := config.Database.Fields[collection]; exists && len(fields) > 0 && fields[0] != "all" {
 		fieldsStr := strings.Join(fields, ",")
 		args = append(args, "--fields", fieldsStr)
@@ -507,7 +432,7 @@ func (e *BackupExecutor) executeExternalMongoExportWithOptions(ctx context.Conte
 
 	cmd := exec.CommandContext(ctx, "mongoexport", args...)
 
-	// 显示完整的命令行参数，包括query参数
+	// Display complete command line arguments including query parameters
 	logrus.Infof("[BackupExecutor] Executing: %s", strings.Join(append([]string{"mongoexport"}, args...), " "))
 
 	output, err := cmd.CombinedOutput()
@@ -515,16 +440,16 @@ func (e *BackupExecutor) executeExternalMongoExportWithOptions(ctx context.Conte
 		return fmt.Errorf("mongoexport failed: %w, output: %s", err, string(output))
 	}
 
-	// 检查输出文件
+	// Check output file
 	if _, err := os.Stat(outputPath); err != nil {
 		return fmt.Errorf("mongoexport output file not created: %w", err)
 	}
 
-	// 统计导出的记录数和文件大小
+	// Count exported records and file size
 	recordCount, fileSize, err := e.countRecordsInFile(outputPath)
 	if err != nil {
 		logrus.Warnf("[BackupExecutor] Failed to count records in %s: %v", outputPath, err)
-		// 回退到只显示文件大小
+		// Fall back to only showing file size
 		if stat, err := os.Stat(outputPath); err == nil {
 			logrus.Infof("[BackupExecutor] ✅ Mongoexport completed: %.2f MB", float64(stat.Size())/1024/1024)
 		}
@@ -535,7 +460,7 @@ func (e *BackupExecutor) executeExternalMongoExportWithOptions(ctx context.Conte
 	return nil
 }
 
-// countRecordsInFile 统计JSON文件中的记录数量
+// countRecordsInFile counts the number of records in JSONL file
 func (e *BackupExecutor) countRecordsInFile(filePath string) (int, float64, error) {
 	stat, err := os.Stat(filePath)
 	if err != nil {
@@ -555,12 +480,9 @@ func (e *BackupExecutor) countRecordsInFile(filePath string) (int, float64, erro
 
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-		// 跳过空行和JSON数组标记
-		if line != "" && line != "[" && line != "]" && line != "," {
-			// 简单检查是否是JSON对象（以{开头）
-			if strings.HasPrefix(line, "{") || (strings.HasPrefix(line, ",") && strings.Contains(line, "{")) {
-				count++
-			}
+		// For JSONL format, each non-empty line that starts with '{' is a record
+		if line != "" && strings.HasPrefix(line, "{") {
+			count++
 		}
 	}
 
