@@ -234,6 +234,30 @@ func TestSyncIntegration(t *testing.T) {
 		TestSlackNotifierCoverage(t)
 	})
 
+	t.Run("TC37_UtilitiesCoverage", func(t *testing.T) {
+		TestUtilitiesCoverage(t)
+	})
+
+	t.Run("TC38_MonitoringCoverage", func(t *testing.T) {
+		TestMonitoringStartupCoverage(t)
+	})
+
+	t.Run("TC39_UtilityHelpers", func(t *testing.T) {
+		TestUtilityHelperFunctions(t)
+	})
+
+	t.Run("TC40_APICoverage", func(t *testing.T) {
+		TestAPICoverage(t)
+	})
+
+	t.Run("TC41_APIResponses", func(t *testing.T) {
+		TestAPIResponseHandling(t)
+	})
+
+	t.Run("TC42_APIIntegration", func(t *testing.T) {
+		TestAPIIntegrationScenarios(t)
+	})
+
 	time.Sleep(3 * time.Second)
 
 }
