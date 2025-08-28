@@ -401,7 +401,6 @@ func (e *BackupExecutor) getMongoDBCollections(ctx context.Context, config *Exec
 	connStr := buildMongoDBConnectionString(config.Database.URL, config.Database.Username, config.Database.Password)
 
 	// Connect to MongoDB
-	logrus.Infof("[BackupExecutor] Connecting to MongoDB: %s", connStr)
 	client, err := mongo.Connect(ctx, options.Client().ApplyURI(connStr))
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to MongoDB: %w", err)
