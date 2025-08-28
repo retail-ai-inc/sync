@@ -23,6 +23,19 @@ func createTestLogger() *logrus.Logger {
 	return log
 }
 
+// createMockGlobalConfig creates a mock global config for testing
+func createMockGlobalConfig() *config.Config {
+	return &config.Config{
+		EnableTableRowCountMonitoring: false,
+		LogLevel:                      "info",
+		SyncConfigs:                   []config.SyncConfig{},
+		Logger:                        createTestLogger(),
+		MonitorInterval:               5 * time.Minute,
+		SlackWebhookURL:               "",
+		SlackChannel:                  "",
+	}
+}
+
 // TestMongoDBSyncerCreation tests MongoDB syncer creation
 func TestMongoDBSyncerCreation(t *testing.T) {
 	testCases := []struct {

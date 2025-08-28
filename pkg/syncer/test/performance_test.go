@@ -41,6 +41,11 @@ func testTC21Performance(t *testing.T, syncConfigs []config.SyncConfig) {
 
 	// Concurrent write test
 	t.Run("ConcurrentWrites", func(t *testing.T) {
+		if len(syncConfigs) == 0 {
+			t.Skip("No sync configurations available for concurrent writes test")
+			return
+		}
+		
 		syncConfig := syncConfigs[0]
 		// Concurrent writes to source database
 		performConcurrentWrites(t, syncConfig, 100) // 100 concurrent writes

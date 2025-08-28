@@ -32,6 +32,10 @@ func testTC20ErrorHandling(t *testing.T, syncConfigs []config.SyncConfig) {
 
 	// Auto reconnect test
 	t.Run("AutoReconnect", func(t *testing.T) {
+		if len(syncConfigs) == 0 {
+			t.Skip("No sync configurations available for auto reconnect test")
+			return
+		}
 		syncConfig := syncConfigs[0]
 		// Simulate database restart
 		restartDatabase(t, syncConfig)
