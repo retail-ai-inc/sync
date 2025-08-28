@@ -258,6 +258,34 @@ func TestSyncIntegration(t *testing.T) {
 		TestAPIIntegrationScenarios(t)
 	})
 
+	t.Run("TC43_MainCoverage", func(t *testing.T) {
+		TestMainFunctionsCoverage(t)
+	})
+
+	t.Run("TC44_MainUtilities", func(t *testing.T) {
+		TestMainUtilityFunctions(t)
+	})
+
+	t.Run("TC45_ApplicationLifecycle", func(t *testing.T) {
+		TestApplicationLifecycle(t)
+	})
+
+	t.Run("TC46_CronJobHandlers", func(t *testing.T) {
+		TestCronJobHandlersCoverage(t)
+	})
+
+	t.Run("TC47_BackgroundTasks", func(t *testing.T) {
+		TestBackgroundTaskExecution(t)
+	})
+
+	t.Run("TC48_CronJobIntegration", func(t *testing.T) {
+		TestAPIIntegrationWithCronJobs(t)
+	})
+
+	t.Run("TC49_BackupExecutorDeep", func(t *testing.T) {
+		TestBackupExecutorDeepCoverage(t)
+	})
+
 	time.Sleep(3 * time.Second)
 
 }
