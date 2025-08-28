@@ -432,8 +432,8 @@ func (e *BackupExecutor) executeExternalMongoExportWithOptions(ctx context.Conte
 
 	cmd := exec.CommandContext(ctx, "mongoexport", args...)
 
-	// Display complete command line arguments including query parameters
-	logrus.Infof("[BackupExecutor] Executing: %s", strings.Join(append([]string{"mongoexport"}, args...), " "))
+	// Display command line arguments with URI credentials masked
+	logrus.Infof("[BackupExecutor] Executing: %s", e.maskSensitiveArgs(append([]string{"mongoexport"}, args...)))
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -476,6 +476,11 @@ func (e *BackupExecutor) countRecordsInFile(filePath string) (int, float64, erro
 	defer file.Close()
 
 	scanner := bufio.NewScanner(file)
+	// Increase buffer size to handle large JSON lines (default is 64KB, set to 1MB)
+	const maxCapacity = 1024 * 1024 // 1MB
+	buf := make([]byte, maxCapacity)
+	scanner.Buffer(buf, maxCapacity)
+	
 	count := 0
 
 	for scanner.Scan() {
@@ -491,6 +496,39 @@ func (e *BackupExecutor) countRecordsInFile(filePath string) (int, float64, erro
 	}
 
 	return count, fileSize, nil
+}
+
+// maskSensitiveArgs masks sensitive information like passwords in command arguments
+func (e *BackupExecutor) maskSensitiveArgs(args []string) string {
+	maskedArgs := make([]string, len(args))
+	copy(maskedArgs, args)
+	
+	for i, arg := range maskedArgs {
+		if arg == "--uri" && i+1 < len(maskedArgs) {
+			// Mask credentials in URI
+			uri := maskedArgs[i+1]
+			if strings.Contains(uri, "://") && strings.Contains(uri, "@") {
+				// Format: mongodb://username:password@host:port/...
+				parts := strings.Split(uri, "://")
+				if len(parts) == 2 {
+					protocolPart := parts[0] + "://"
+					remaining := parts[1]
+					
+					if atIndex := strings.Index(remaining, "@"); atIndex != -1 {
+						hostPart := remaining[atIndex:]
+						credPart := remaining[:atIndex]
+						
+						// Check if there are credentials
+						if strings.Contains(credPart, ":") {
+							maskedArgs[i+1] = protocolPart + "***:***" + hostPart
+						}
+					}
+				}
+			}
+		}
+	}
+	
+	return strings.Join(maskedArgs, " ")
 }
 
 // convertTimeRangeQuery Convert dynamic time range query to concrete MongoDB query
