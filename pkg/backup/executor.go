@@ -738,6 +738,5 @@ func buildMongoDBConnectionString(url, username, password string) string {
 		connStr = fmt.Sprintf("mongodb://%s/?directConnection=true", url)
 	}
 
-	logrus.Infof("[BackupExecutor] Final connection string: %s", connStr)
 	return connStr
 }
