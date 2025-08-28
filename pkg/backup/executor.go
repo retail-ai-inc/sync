@@ -726,9 +726,9 @@ func parseYear(yyyy string) (int, error) {
 // buildMongoDBConnectionString Build MongoDB connection string with authentication
 func buildMongoDBConnectionString(url, username, password string) string {
 	// Ensure localhost is preserved and not replaced
-	if strings.Contains(url, "localhost") {
-		logrus.Infof("[BackupExecutor] Using localhost MongoDB connection: %s", url)
-	}
+	// if strings.Contains(url, "localhost") {
+	// 	logrus.Infof("[BackupExecutor] Using localhost MongoDB connection: %s", url)
+	// }
 
 	var connStr string
 	if username != "" && password != "" {
