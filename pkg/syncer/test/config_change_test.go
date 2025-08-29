@@ -39,6 +39,10 @@ func testTC23ConfigurationChanges(t *testing.T, syncConfigs []config.SyncConfig)
 	// })
 
 	t.Run("SchemaChange", func(t *testing.T) {
+		if len(syncConfigs) == 0 {
+			t.Skip("No sync configurations available for schema change test")
+			return
+		}
 		syncConfig := syncConfigs[0]
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()

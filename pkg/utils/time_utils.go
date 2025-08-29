@@ -24,15 +24,28 @@ type MongoDBTimeRange struct {
 // ReplaceDatePlaceholders replaces date placeholders in a pattern with actual date values
 func ReplaceDatePlaceholders(pattern string) string {
 	now := time.Now()
+	return ReplaceDatePlaceholdersWithDate(pattern, now)
+}
+
+// ReplaceDatePlaceholdersWithDate replaces date placeholders in a pattern with the specified date
+func ReplaceDatePlaceholdersWithDate(pattern string, targetDate time.Time) string {
 	result := pattern
 
-	// Replace various date format placeholders
-	result = strings.ReplaceAll(result, "YYYY", now.Format("2006"))
-	result = strings.ReplaceAll(result, "MM", now.Format("01"))
-	result = strings.ReplaceAll(result, "DD", now.Format("02"))
-	result = strings.ReplaceAll(result, "yyyy", now.Format("2006"))
-	result = strings.ReplaceAll(result, "mm", now.Format("01"))
-	result = strings.ReplaceAll(result, "dd", now.Format("02"))
+	// Replace various date format placeholders with and without braces
+	result = strings.ReplaceAll(result, "{YYYY}", targetDate.Format("2006"))
+	result = strings.ReplaceAll(result, "{MM}", targetDate.Format("01"))
+	result = strings.ReplaceAll(result, "{DD}", targetDate.Format("02"))
+	result = strings.ReplaceAll(result, "{yyyy}", targetDate.Format("2006"))
+	result = strings.ReplaceAll(result, "{mm}", targetDate.Format("01"))
+	result = strings.ReplaceAll(result, "{dd}", targetDate.Format("02"))
+
+	// Replace without braces for backward compatibility
+	result = strings.ReplaceAll(result, "YYYY", targetDate.Format("2006"))
+	result = strings.ReplaceAll(result, "MM", targetDate.Format("01"))
+	result = strings.ReplaceAll(result, "DD", targetDate.Format("02"))
+	result = strings.ReplaceAll(result, "yyyy", targetDate.Format("2006"))
+	result = strings.ReplaceAll(result, "mm", targetDate.Format("01"))
+	result = strings.ReplaceAll(result, "dd", targetDate.Format("02"))
 
 	return result
 }
@@ -64,7 +77,7 @@ func ProcessTimeRangeQuery(queryObj map[string]interface{}) (map[string]interfac
 						result[key] = value
 					} else {
 						result[key] = mongoTimeRange
-						logrus.Infof("[TimeUtils] Converted time range query for field: %s", key)
+						logrus.Debugf("[TimeUtils] Converted time range query for field: %s", key)
 					}
 				} else {
 					// Not a daily time range query, keep as is
@@ -133,7 +146,7 @@ func convertToMongoDBTimeRange(timeRangeObj map[string]interface{}) (map[string]
 		},
 	}
 
-	logrus.Infof("[TimeUtils] Converted time range query: start=%s, end=%s (JST) -> start=%s, end=%s (UTC)",
+	logrus.Debugf("[TimeUtils] Converted time range query: start=%s, end=%s (JST) -> start=%s, end=%s (UTC)",
 		startOfDay.Format("2006-01-02T15:04:05 JST"),
 		endOfDay.Format("2006-01-02T15:04:05 JST"),
 		startUTC.Format("2006-01-02T15:04:05.000Z"),

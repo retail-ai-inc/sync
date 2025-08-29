@@ -125,7 +125,7 @@ func BackupExecuteHandler(w http.ResponseWriter, r *http.Request) {
 
 		// Update task status to completed
 		updateBackupTaskStatus(taskID, "completed", "Backup executed successfully", nil)
-		logrus.Infof("[BackupExecutor] Background backup task %s completed successfully", taskID)
+		logrus.Debugf("[BackupExecutor] Background backup task %s completed successfully", taskID)
 	}()
 
 	// Return immediate response with task ID

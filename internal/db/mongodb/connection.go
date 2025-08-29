@@ -64,8 +64,6 @@ func ConnectMongoDBFromTaskID(ctx context.Context, taskID string, logger *logrus
 		logger = logrus.StandardLogger()
 	}
 
-	logger.Infof("[MongoDB] Connecting to MongoDB for task ID: %s", taskID)
-
 	// Open the local SQLite database
 	db, err := openLocalDB()
 	if err != nil {

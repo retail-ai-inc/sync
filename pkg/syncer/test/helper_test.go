@@ -26,7 +26,12 @@ func createSyncer(cfg config.SyncConfig) Syncer {
 	case "mysql":
 		return syncer.NewMySQLSyncer(cfg, logger.Log)
 	case "mongodb":
-		return syncer.NewMongoDBSyncer(cfg, logger.Log)
+		// Create a mock global config for testing
+		globalConfig := &config.Config{
+			SlackWebhookURL: "",
+			SlackChannel:    "",
+		}
+		return syncer.NewMongoDBSyncer(cfg, globalConfig, logger.Log)
 	case "postgresql":
 		return syncer.NewPostgreSQLSyncer(cfg, logger.Log)
 	case "redis":

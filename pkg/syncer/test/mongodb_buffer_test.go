@@ -23,6 +23,19 @@ func createTestLogger() *logrus.Logger {
 	return log
 }
 
+// createMockGlobalConfig creates a mock global config for testing
+func createMockGlobalConfig() *config.Config {
+	return &config.Config{
+		EnableTableRowCountMonitoring: false,
+		LogLevel:                      "info",
+		SyncConfigs:                   []config.SyncConfig{},
+		Logger:                        createTestLogger(),
+		MonitorInterval:               5 * time.Minute,
+		SlackWebhookURL:               "",
+		SlackChannel:                  "",
+	}
+}
+
 // TestMongoDBSyncerCreation tests MongoDB syncer creation
 func TestMongoDBSyncerCreation(t *testing.T) {
 	testCases := []struct {
@@ -86,8 +99,9 @@ func TestMongoDBSyncerCreation(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			// Create independent logger instance for each test
 			log := createTestLogger()
+			globalConfig := createMockGlobalConfig()
 
-			syncer := syncer.NewMongoDBSyncer(tc.config, log)
+			syncer := syncer.NewMongoDBSyncer(tc.config, globalConfig, log)
 
 			if tc.expectNil && syncer != nil {
 				t.Errorf("Expected nil syncer for invalid config, got non-nil")
@@ -119,7 +133,7 @@ func TestMongoDBBufferDirectory(t *testing.T) {
 	// Create independent logger instance for each test
 	log := createTestLogger()
 
-	syncer := syncer.NewMongoDBSyncer(config, log)
+	syncer := syncer.NewMongoDBSyncer(config, createMockGlobalConfig(), log)
 
 	// Even if connections fail, syncer should be created and buffer directory should exist
 	if syncer == nil {
@@ -176,7 +190,7 @@ func TestMongoDBResumeTokenPath(t *testing.T) {
 			// Create independent logger instance for each test
 			log := createTestLogger()
 
-			syncer := syncer.NewMongoDBSyncer(config, log)
+			syncer := syncer.NewMongoDBSyncer(config, createMockGlobalConfig(), log)
 
 			if syncer == nil {
 				t.Skip("Syncer creation failed, skipping resume token path test")
@@ -237,7 +251,7 @@ func TestMongoDBSyncerConfiguration(t *testing.T) {
 	}
 
 	log := createTestLogger()
-	syncer := syncer.NewMongoDBSyncer(config, log)
+	syncer := syncer.NewMongoDBSyncer(config, createMockGlobalConfig(), log)
 
 	if syncer == nil {
 		t.Skip("Syncer creation failed, skipping configuration test")
@@ -294,7 +308,7 @@ func TestMongoDBConnectionHandling(t *testing.T) {
 			}
 
 			log := createTestLogger()
-			syncer := syncer.NewMongoDBSyncer(config, log)
+			syncer := syncer.NewMongoDBSyncer(config, createMockGlobalConfig(), log)
 
 			if tc.expectSuccess && syncer == nil {
 				t.Errorf("Expected successful syncer creation for valid connections")
@@ -318,7 +332,7 @@ func TestMongoDBSyncerProcessRate(t *testing.T) {
 	}
 
 	log := createTestLogger()
-	syncer := syncer.NewMongoDBSyncer(config, log)
+	syncer := syncer.NewMongoDBSyncer(config, createMockGlobalConfig(), log)
 
 	if syncer == nil {
 		t.Skip("Syncer creation failed, skipping process rate test")
@@ -403,7 +417,7 @@ func TestMongoDBMappingValidation(t *testing.T) {
 			}
 
 			log := createTestLogger()
-			syncer := syncer.NewMongoDBSyncer(config, log)
+			syncer := syncer.NewMongoDBSyncer(config, createMockGlobalConfig(), log)
 
 			if syncer == nil && !tc.expectIssues {
 				t.Errorf("Syncer creation failed unexpectedly for valid mappings")
@@ -427,7 +441,7 @@ func TestMongoDBSyncerBufferEnabled(t *testing.T) {
 	}
 
 	log := createTestLogger()
-	syncer := syncer.NewMongoDBSyncer(config, log)
+	syncer := syncer.NewMongoDBSyncer(config, createMockGlobalConfig(), log)
 
 	if syncer == nil {
 		t.Skip("Syncer creation failed, skipping buffer enabled test")
@@ -456,7 +470,7 @@ func TestMongoDBResumeTokenHandling(t *testing.T) {
 	}
 
 	log := createTestLogger()
-	syncer := syncer.NewMongoDBSyncer(config, log)
+	syncer := syncer.NewMongoDBSyncer(config, createMockGlobalConfig(), log)
 
 	if syncer == nil {
 		t.Skip("Syncer creation failed, skipping resume token handling test")
@@ -502,7 +516,7 @@ func TestMongoDBSyncerErrorHandling(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			log := createTestLogger()
-			syncer := syncer.NewMongoDBSyncer(tc.config, log)
+			syncer := syncer.NewMongoDBSyncer(tc.config, createMockGlobalConfig(), log)
 
 			if tc.expectError && syncer != nil {
 				t.Logf("Syncer created despite expected error (may be due to lazy connection)")
@@ -525,7 +539,7 @@ func TestMongoDBContextHandling(t *testing.T) {
 	}
 
 	log := createTestLogger()
-	syncer := syncer.NewMongoDBSyncer(config, log)
+	syncer := syncer.NewMongoDBSyncer(config, createMockGlobalConfig(), log)
 
 	if syncer == nil {
 		t.Skip("Syncer creation failed, skipping context handling test")

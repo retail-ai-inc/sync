@@ -36,7 +36,8 @@ RUN apk update && apk add --no-cache \
     python3 \
     py3-pip \
     curl \
-    bash
+    bash \
+    zip
 
 # Install Google Cloud SDK for gsutil command
 RUN curl https://sdk.cloud.google.com | bash
@@ -57,6 +58,10 @@ ENV SYNC_DB_PATH=/mnt/state/sync.db
 
 # Copy the extracted UI files
 COPY --from=builder /app/ui /app/ui
+
+# Copy the cloudbuild.sh script for Slack notifications
+COPY cloudbuild.sh /app/cloudbuild.sh
+RUN chmod +x /app/cloudbuild.sh
 
 # Copy and setup the startup script
 COPY start.sh /app/start.sh

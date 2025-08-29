@@ -10,6 +10,10 @@ import (
 func testTC22DataConsistency(t *testing.T, syncConfigs []config.SyncConfig) {
 	// Special character handling test
 	t.Run("SpecialCharacters", func(t *testing.T) {
+		if len(syncConfigs) == 0 {
+			t.Skip("No sync configurations available for special characters test")
+			return
+		}
 		syncConfig := syncConfigs[0]
 		specialChars := []string{
 			"'", "\"", "\n", "\r", "\t",
@@ -24,6 +28,10 @@ func testTC22DataConsistency(t *testing.T, syncConfigs []config.SyncConfig) {
 
 	// NULL value handling test
 	t.Run("NullValues", func(t *testing.T) {
+		if len(syncConfigs) == 0 {
+			t.Skip("No sync configurations available for null values test")
+			return
+		}
 		syncConfig := syncConfigs[0]
 		testData := map[string]interface{}{
 			"null_string": nil,
@@ -37,6 +45,10 @@ func testTC22DataConsistency(t *testing.T, syncConfigs []config.SyncConfig) {
 
 	// Large field sync test
 	t.Run("LargeFields", func(t *testing.T) {
+		if len(syncConfigs) == 0 {
+			t.Skip("No sync configurations available for large fields test")
+			return
+		}
 		syncConfig := syncConfigs[0]
 		largeText := generateLargeText(5 * 1024 * 1024) // 5MB
 		testLargeFieldSync(t, syncConfig, largeText)

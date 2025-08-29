@@ -11,6 +11,10 @@ import (
 func testTC24MonitoringAndAlerts(t *testing.T, syncConfigs []config.SyncConfig) {
 	// Sync latency monitoring test
 	t.Run("SyncLatency", func(t *testing.T) {
+		if len(syncConfigs) == 0 {
+			t.Skip("No sync configurations available for sync latency test")
+			return
+		}
 		syncConfig := syncConfigs[0]
 		// Wait for syncer to start
 		time.Sleep(2 * time.Second)
@@ -27,6 +31,10 @@ func testTC24MonitoringAndAlerts(t *testing.T, syncConfigs []config.SyncConfig) 
 
 	// Error alert test
 	t.Run("ErrorAlerts", func(t *testing.T) {
+		if len(syncConfigs) == 0 {
+			t.Skip("No sync configurations available for error alerts test")
+			return
+		}
 		syncConfig := syncConfigs[0]
 
 		// Inject error condition
@@ -39,6 +47,10 @@ func testTC24MonitoringAndAlerts(t *testing.T, syncConfigs []config.SyncConfig) 
 
 	// Resource usage monitoring test
 	t.Run("ResourceUsage", func(t *testing.T) {
+		if len(syncConfigs) == 0 {
+			t.Skip("No sync configurations available for resource usage test")
+			return
+		}
 		syncConfig := syncConfigs[0]
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
