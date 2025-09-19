@@ -1160,6 +1160,14 @@ func (s *MongoDBSyncer) convertRawBSONToWriteModel(rawData bson.Raw, sourceDB, c
 			return mongo.NewReplaceOneModel().SetFilter(bson.M{"_id": docID}).SetReplacement(fullDoc).SetUpsert(true)
 		}
 	case "delete":
+		// Check if delete operations should be ignored for this collection
+		advancedSettings := s.findTableAdvancedSettings(collectionName)
+		if advancedSettings.IgnoreDeleteOps {
+			s.logger.Debugf("[MongoDB] Ignoring delete operation for %s.%s (ignoreDeleteOps=true)", 
+				sourceDB, collectionName)
+			return nil
+		}
+		
 		var docID interface{}
 		if dk, ok := event["documentKey"].(bson.M); ok {
 			docID = dk["_id"]
@@ -1899,7 +1907,7 @@ func (s *MongoDBSyncer) processDeadLetterBatch(ctx context.Context, filePath str
 	var stillFailedOps []FailedOperation
 
 	for _, op := range operationsToRetry {
-		writeModel, err := s.deserializeWriteModel(op.WriteModel)
+		writeModel, err := s.deserializeWriteModel(op.WriteModel, collectionName)
 		if err != nil {
 			s.logger.Warnf("[MongoDB] Failed to deserialize WriteModel for operation %s: %v", op.ID, err)
 			op.RetryCount++
@@ -1907,7 +1915,10 @@ func (s *MongoDBSyncer) processDeadLetterBatch(ctx context.Context, filePath str
 			continue
 		}
 
-		retryModels = append(retryModels, writeModel)
+		// Skip nil models (e.g., when delete operations are ignored)
+		if writeModel != nil {
+			retryModels = append(retryModels, writeModel)
+		}
 	}
 
 	// Execute retry operations
@@ -1958,7 +1969,7 @@ func (s *MongoDBSyncer) processDeadLetterBatch(ctx context.Context, filePath str
 }
 
 // deserializeWriteModel converts JSON back to WriteModel
-func (s *MongoDBSyncer) deserializeWriteModel(data json.RawMessage) (mongo.WriteModel, error) {
+func (s *MongoDBSyncer) deserializeWriteModel(data json.RawMessage, collectionName string) (mongo.WriteModel, error) {
 	var modelData map[string]interface{}
 	if err := json.Unmarshal(data, &modelData); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal model data: %w", err)
@@ -2012,6 +2023,14 @@ func (s *MongoDBSyncer) deserializeWriteModel(data json.RawMessage) (mongo.Write
 		return replaceModel, nil
 
 	case "delete":
+		// Check if delete operations should be ignored for this collection
+		advancedSettings := s.findTableAdvancedSettings(collectionName)
+		if advancedSettings.IgnoreDeleteOps {
+			s.logger.Debugf("[MongoDB] Ignoring delete operation during retry for %s (ignoreDeleteOps=true)", 
+				collectionName)
+			return nil, nil
+		}
+		
 		filter, ok := modelData["filter"]
 		if !ok {
 			return nil, fmt.Errorf("missing filter for delete operation")
