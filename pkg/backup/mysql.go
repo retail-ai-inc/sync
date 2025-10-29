@@ -183,11 +183,12 @@ func (e *BackupExecutor) executeExternalMySQLCSV(ctx context.Context, host, port
 	}
 
 	// Add database and query
+	// Note: Do NOT use --raw flag as it disables escaping which causes issues with special characters
+	// Without --raw, MySQL will properly escape tabs (\t) and newlines (\n) in field values
 	mysqlArgs = append(mysqlArgs,
 		database,
 		"-e", selectQuery,
 		"--batch", // Output in batch mode (TSV format)
-		"--raw",   // Disable escaping
 	)
 
 	// Python script for TSV to CSV conversion with proper special character handling
