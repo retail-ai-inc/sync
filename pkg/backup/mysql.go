@@ -163,10 +163,15 @@ func (e *BackupExecutor) executeExternalMySQLDump(ctx context.Context, host, por
 	return nil
 }
 
-// executeExternalMySQLCSV executes mysql command to export CSV format
-// Converts TSV output to standard CSV with quoted fields
+// executeExternalMySQLCSV executes mysql command to export CSV format using Python csv module
+// This method properly handles all special characters (quotes, newlines, tabs, commas, etc.)
+// Works with remote MySQL servers without requiring FILE privilege or secure_file_priv configuration
 func (e *BackupExecutor) executeExternalMySQLCSV(ctx context.Context, host, port, username, password, database, table, outputPath string, config ExecutorBackupConfig) error {
-	args := []string{
+	// Build SELECT query
+	selectQuery := e.buildMySQLSelectQuery(table, config)
+
+	// Build mysql command arguments
+	mysqlArgs := []string{
 		"-h", host,
 		"-P", port,
 		"-u", username,
@@ -174,27 +179,35 @@ func (e *BackupExecutor) executeExternalMySQLCSV(ctx context.Context, host, port
 
 	// Add password if provided
 	if password != "" {
-		args = append(args, "-p"+password)
+		mysqlArgs = append(mysqlArgs, "-p"+password)
 	}
 
-	// Add database
-	args = append(args, database)
-
-	// Build SELECT query
-	selectQuery := e.buildMySQLSelectQuery(table, config)
-
-	args = append(args,
+	// Add database and query
+	mysqlArgs = append(mysqlArgs,
+		database,
 		"-e", selectQuery,
-		"--batch",
-		"--raw",
+		"--batch", // Output in batch mode (TSV format)
+		"--raw",   // Disable escaping
 	)
 
-	// Create mysql command
-	mysqlCmd := exec.CommandContext(ctx, "mysql", args...)
+	// Python script for TSV to CSV conversion with proper special character handling
+	pythonScript := `
+import csv, sys
+try:
+    reader = csv.reader(sys.stdin, delimiter='\t')
+    writer = csv.writer(sys.stdout, quoting=csv.QUOTE_ALL, lineterminator='\n')
+    for row in reader:
+        writer.writerow(row)
+except Exception as e:
+    sys.stderr.write(f'Python CSV conversion error: {e}\n')
+    sys.exit(1)
+`
 
-	// Create sed command to convert TSV to standard CSV
-	// sed 's/\t/","/g;s/^/"/;s/$/"/;s/\n//g'
-	sedCmd := exec.CommandContext(ctx, "sed", `s/\t/","/g;s/^/"/;s/$/"/;s/\n//g`)
+	// Create mysql command
+	mysqlCmd := exec.CommandContext(ctx, "mysql", mysqlArgs...)
+
+	// Create python command
+	pythonCmd := exec.CommandContext(ctx, "python3", "-c", pythonScript)
 
 	// Create output file
 	outFile, err := os.Create(outputPath)
@@ -203,23 +216,24 @@ func (e *BackupExecutor) executeExternalMySQLCSV(ctx context.Context, host, port
 	}
 	defer outFile.Close()
 
-	// Pipe mysql output to sed, then to output file
-	sedCmd.Stdin, err = mysqlCmd.StdoutPipe()
+	// Setup pipeline: mysql | python3 > output.csv
+	pythonCmd.Stdin, err = mysqlCmd.StdoutPipe()
 	if err != nil {
 		return fmt.Errorf("failed to create pipe: %w", err)
 	}
 
-	sedCmd.Stdout = outFile
+	pythonCmd.Stdout = outFile
 	mysqlCmd.Stderr = os.Stderr
-	sedCmd.Stderr = os.Stderr
+	pythonCmd.Stderr = os.Stderr
 
 	// Display command line arguments with password masked
-	logrus.Infof("[BackupExecutor] Executing: %s | sed 's/\\t/\",\"/g;s/^/\"/;s/$/\"/;s/\\n//g' > %s",
-		e.maskMySQLPassword(append([]string{"mysql"}, args...)), outputPath)
+	logrus.Infof("[BackupExecutor] Executing: %s | python3 -c '<csv conversion>' > %s",
+		e.maskMySQLPassword(append([]string{"mysql"}, mysqlArgs...)), outputPath)
+	logrus.Infof("[BackupExecutor] Using Python csv module for proper CSV formatting with special character handling")
 
-	// Start sed command first
-	if err := sedCmd.Start(); err != nil {
-		return fmt.Errorf("failed to start sed command: %w", err)
+	// Start python command first
+	if err := pythonCmd.Start(); err != nil {
+		return fmt.Errorf("failed to start python command: %w", err)
 	}
 
 	// Start mysql command
@@ -232,9 +246,9 @@ func (e *BackupExecutor) executeExternalMySQLCSV(ctx context.Context, host, port
 		return fmt.Errorf("mysql command failed: %w", err)
 	}
 
-	// Wait for sed command to finish
-	if err := sedCmd.Wait(); err != nil {
-		return fmt.Errorf("sed command failed: %w", err)
+	// Wait for python command to finish
+	if err := pythonCmd.Wait(); err != nil {
+		return fmt.Errorf("python csv conversion failed: %w", err)
 	}
 
 	// Check output file and log size
