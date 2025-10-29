@@ -191,14 +191,31 @@ func (e *BackupExecutor) executeExternalMySQLCSV(ctx context.Context, host, port
 		"--batch", // Output in batch mode (TSV format)
 	)
 
-	// Python script for TSV to CSV conversion with proper special character handling
+	// Python script for TSV to CSV conversion with MySQL escape sequence handling
+	// MySQL --batch mode uses its own escape sequences: \n \t \\ \N (NULL)
 	pythonScript := `
 import csv, sys
+
+def unescape_mysql(value):
+    """Unescape MySQL batch mode escape sequences"""
+    if value == '\\N':  # MySQL NULL representation
+        return ''
+    # Replace MySQL escape sequences
+    value = value.replace('\\\\', '\x00')  # Temporarily replace \\ with placeholder
+    value = value.replace('\\n', '\n')     # \n -> newline
+    value = value.replace('\\t', '\t')     # \t -> tab
+    value = value.replace('\\r', '\r')     # \r -> carriage return
+    value = value.replace('\\0', '\0')     # \0 -> null byte
+    value = value.replace('\x00', '\\')    # Restore backslash
+    return value
+
 try:
-    reader = csv.reader(sys.stdin, delimiter='\t')
     writer = csv.writer(sys.stdout, quoting=csv.QUOTE_ALL, lineterminator='\n')
-    for row in reader:
-        writer.writerow(row)
+    for line in sys.stdin:
+        line = line.rstrip('\n\r')  # Remove line ending
+        fields = line.split('\t')   # Split by tab
+        fields = [unescape_mysql(f) for f in fields]  # Unescape each field
+        writer.writerow(fields)
 except Exception as e:
     sys.stderr.write(f'Python CSV conversion error: {e}\n')
     sys.exit(1)
