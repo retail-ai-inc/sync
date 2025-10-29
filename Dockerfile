@@ -28,11 +28,12 @@ RUN mkdir -p /app/ui && unzip -o /app/ui/dist.zip -d /app/ui/
 # Use a smaller base image to run the application
 FROM alpine:latest
 
-# Install runtime dependencies including MongoDB tools and Google Cloud SDK
+# Install runtime dependencies including MongoDB tools, MySQL tools and Google Cloud SDK
 RUN apk update && apk add --no-cache \
     tzdata \
     sqlite \
     mongodb-tools \
+    mysql-client \
     python3 \
     py3-pip \
     curl \
