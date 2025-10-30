@@ -15,49 +15,104 @@ import (
 
 // TestMySQLBackupFunctions tests MySQL backup related functionality
 func TestMySQLBackupFunctions(t *testing.T) {
-	t.Run("MySQLConnectionParsing", func(t *testing.T) {
+	t.Run("MySQLConnectionStringBuilding", func(t *testing.T) {
 		testCases := []struct {
-			name     string
-			url      string
-			username string
-			password string
+			name         string
+			url          string
+			username     string
+			password     string
+			expectedHost string
+			expectedPort string
 		}{
 			{
-				name:     "localhost with port",
-				url:      "localhost:3306",
-				username: "root",
-				password: "password123",
+				name:         "full connection",
+				url:          "localhost:3306",
+				username:     "root",
+				password:     "secret",
+				expectedHost: "localhost",
+				expectedPort: "3306",
 			},
 			{
-				name:     "IP address with port",
-				url:      "192.168.1.100:3307",
-				username: "dbuser",
-				password: "secret",
+				name:         "no password",
+				url:          "localhost:3306",
+				username:     "admin",
+				password:     "",
+				expectedHost: "localhost",
+				expectedPort: "3306",
 			},
 			{
-				name:     "hostname only",
-				url:      "mysql-server",
-				username: "admin",
-				password: "pass",
-			},
-			{
-				name:     "empty credentials",
-				url:      "localhost:3306",
-				username: "",
-				password: "",
+				name:         "custom port",
+				url:          "db-server:3307",
+				username:     "user",
+				password:     "pass123",
+				expectedHost: "db-server",
+				expectedPort: "3307",
 			},
 		}
 
 		for _, tc := range testCases {
 			t.Run(tc.name, func(t *testing.T) {
-				// Test connection string building logic
-				if tc.url == "" {
-					t.Error("URL should not be empty")
+				// Call the actual function via test helper
+				host, port, user, pass := backup.TestBuildMySQLConnectionString(tc.url, tc.username, tc.password)
+				if host != tc.expectedHost {
+					t.Errorf("Expected host %s, got %s", tc.expectedHost, host)
 				}
-				if tc.username != "" && len(tc.username) < 1 {
-					t.Error("Username validation failed")
+				if port != tc.expectedPort {
+					t.Errorf("Expected port %s, got %s", tc.expectedPort, port)
 				}
-				t.Logf("Testing connection: %s with user: %s", tc.url, tc.username)
+				if user != tc.username {
+					t.Errorf("Expected user %s, got %s", tc.username, user)
+				}
+				if pass != tc.password {
+					t.Errorf("Expected pass %s, got %s", tc.password, pass)
+				}
+			})
+		}
+	})
+
+	t.Run("MySQLConnectionParsing", func(t *testing.T) {
+		testCases := []struct {
+			name         string
+			url          string
+			expectedHost string
+			expectedPort string
+		}{
+			{
+				name:         "localhost with port",
+				url:          "localhost:3306",
+				expectedHost: "localhost",
+				expectedPort: "3306",
+			},
+			{
+				name:         "IP address with port",
+				url:          "192.168.1.100:3307",
+				expectedHost: "192.168.1.100",
+				expectedPort: "3307",
+			},
+			{
+				name:         "hostname only",
+				url:          "mysql-server",
+				expectedHost: "mysql-server",
+				expectedPort: "3306",
+			},
+			{
+				name:         "empty URL",
+				url:          "",
+				expectedHost: "localhost",
+				expectedPort: "3306",
+			},
+		}
+
+		for _, tc := range testCases {
+			t.Run(tc.name, func(t *testing.T) {
+				// Call the actual function via test helper
+				host, port, _, _ := backup.TestParseMySQLConnectionURL(tc.url)
+				if host != tc.expectedHost {
+					t.Errorf("Expected host %s, got %s", tc.expectedHost, host)
+				}
+				if port != tc.expectedPort {
+					t.Errorf("Expected port %s, got %s", tc.expectedPort, port)
+				}
 			})
 		}
 	})
@@ -103,22 +158,10 @@ func TestMySQLBackupFunctions(t *testing.T) {
 
 		for _, tc := range testCases {
 			t.Run(tc.tableName, func(t *testing.T) {
-				// Test table prefix extraction logic
-				if len(tc.tableName) == 0 {
-					t.Error("Table name should not be empty")
-				}
-				
-				// Test that prefix extraction would work
-				if len(tc.expectedPrefix) > len(tc.tableName) {
-					t.Errorf("Expected prefix %s should not be longer than table name %s", 
-						tc.expectedPrefix, tc.tableName)
-				}
-
-				t.Logf("Table: %s -> Expected prefix: %s", tc.tableName, tc.expectedPrefix)
-				
-				// Test with executor
-				if executor == nil {
-					t.Error("Executor should not be nil")
+				// Call the actual function via test helper
+				result := executor.TestExtractTablePrefix(tc.tableName)
+				if result != tc.expectedPrefix {
+					t.Errorf("Expected prefix %s, got %s", tc.expectedPrefix, result)
 				}
 			})
 		}
@@ -173,26 +216,28 @@ func TestMySQLBackupFunctions(t *testing.T) {
 			},
 		}
 
+		db, err := sql.Open("sqlite3", ":memory:")
+		if err != nil {
+			t.Fatalf("Failed to create test database: %v", err)
+		}
+		defer db.Close()
+
+		executor := backup.NewBackupExecutor(db)
+
 		for _, tc := range testCases {
 			t.Run(tc.name, func(t *testing.T) {
-				// Test query structure validation
-				if tc.query == nil && tc.expectValid {
-					t.Error("Expected valid query but got nil")
+				// Call the actual function via test helper
+				result := executor.TestConvertTimeRangeQueryForMySQL(tc.query)
+				
+				// For empty query, expect empty result
+				if len(tc.query) == 0 && result != "" {
+					t.Errorf("Expected empty result for empty query, got: %s", result)
 				}
-
-				// Test query marshaling (simulates config parsing)
-				jsonData, err := json.Marshal(tc.query)
-				if err != nil {
-					t.Fatalf("Failed to marshal query: %v", err)
+				
+				// For non-empty query, expect some output
+				if len(tc.query) > 0 && tc.expectValid {
+					t.Logf("Query conversion result: %s", result)
 				}
-
-				var unmarshalledQuery map[string]interface{}
-				err = json.Unmarshal(jsonData, &unmarshalledQuery)
-				if err != nil {
-					t.Fatalf("Failed to unmarshal query: %v", err)
-				}
-
-				t.Logf("Query type: %s - Valid: %v", tc.name, tc.expectValid)
 			})
 		}
 	})
@@ -232,23 +277,39 @@ func TestMySQLBackupFunctions(t *testing.T) {
 			},
 		}
 
+		db, err := sql.Open("sqlite3", ":memory:")
+		if err != nil {
+			t.Fatalf("Failed to create test database: %v", err)
+		}
+		defer db.Close()
+
+		executor := backup.NewBackupExecutor(db)
+
 		for _, tc := range testCases {
 			t.Run(tc.name, func(t *testing.T) {
-				if tc.table == "" {
-					t.Error("Table name should not be empty")
+				// Build config
+				config := backup.ExecutorBackupConfig{}
+				config.Database.Fields = make(map[string][]string)
+				if len(tc.fields) > 0 && tc.fields[0] != "all" {
+					config.Database.Fields[tc.table] = tc.fields
+				}
+				config.Query = make(map[string]map[string]interface{})
+				if len(tc.query) > 0 {
+					config.Query[tc.table] = tc.query
 				}
 
-				if len(tc.fields) == 0 {
-					t.Error("Fields should not be empty")
-				}
-
-				// Simulate SELECT query construction
-				query := fmt.Sprintf("SELECT %s FROM %s", "*", tc.table)
-				if query == "" {
+				// Call the actual function via test helper
+				result := executor.TestBuildMySQLSelectQuery(tc.table, config)
+				if result == "" {
 					t.Error("Query should not be empty")
 				}
-
-				t.Logf("Built query for table %s: %s", tc.table, query)
+				
+				// Verify table name is in the query
+				if !containsString(result, tc.table) {
+					t.Errorf("Query should contain table name %s, got: %s", tc.table, result)
+				}
+				
+				t.Logf("Built query for table %s: %s", tc.table, result)
 			})
 		}
 	})
@@ -281,28 +342,31 @@ func TestMySQLBackupFunctions(t *testing.T) {
 			},
 		}
 
+		db, err := sql.Open("sqlite3", ":memory:")
+		if err != nil {
+			t.Fatalf("Failed to create test database: %v", err)
+		}
+		defer db.Close()
+
+		executor := backup.NewBackupExecutor(db)
+
 		for _, tc := range testCases {
 			t.Run(tc.name, func(t *testing.T) {
-				// Test password masking logic
-				maskedArgs := make([]string, len(tc.args))
-				copy(maskedArgs, tc.args)
-
-				for i, arg := range maskedArgs {
-					if len(arg) > 2 && arg[:2] == "-p" {
-						maskedArgs[i] = "-p***"
+				// Call the actual function via test helper
+				result := executor.TestMaskMySQLPassword(tc.args)
+				
+				// Build expected string
+				expectedStr := ""
+				for i, arg := range tc.expected {
+					if i > 0 {
+						expectedStr += " "
 					}
+					expectedStr += arg
 				}
-
-				// Verify masking worked
-				for i, arg := range maskedArgs {
-					if len(tc.expected) > i {
-						if arg != tc.expected[i] {
-							t.Errorf("Expected arg %d to be %s, got %s", i, tc.expected[i], arg)
-						}
-					}
+				
+				if result != expectedStr {
+					t.Errorf("Expected '%s', got '%s'", expectedStr, result)
 				}
-
-				t.Logf("Masked command: %v", maskedArgs)
 			})
 		}
 	})
@@ -676,6 +740,26 @@ func TestMySQLBackupFormats(t *testing.T) {
 			})
 		}
 	})
+}
+
+// Helper function to check if string contains substring
+func containsString(s, substr string) bool {
+	if len(substr) == 0 {
+		return true
+	}
+	for i := 0; i <= len(s)-len(substr); i++ {
+		match := true
+		for j := 0; j < len(substr); j++ {
+			if s[i+j] != substr[j] {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
 }
 
 // Helper function to normalize format strings
