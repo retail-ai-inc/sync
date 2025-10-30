@@ -333,7 +333,7 @@ func TestExecuteWithUnsupportedSourceType(t *testing.T) {
 // TestCompressDirectoryFunction tests directory compression functionality
 func TestCompressDirectoryFunction(t *testing.T) {
 	t.Skip("CompressDirectory method not implemented, skipping test")
-	
+
 	// Create a temporary directory with test files
 	tempDir, err := ioutil.TempDir("", "test_compress")
 	if err != nil {
@@ -957,7 +957,7 @@ func TestExecuteWithComplexQueries(t *testing.T) {
 // TestCompressDirectoryMethod tests the CompressDirectory method directly
 func TestCompressDirectoryMethod(t *testing.T) {
 	t.Skip("CompressDirectory method not implemented, skipping test")
-	
+
 	db, err := sql.Open("sqlite3", ":memory:")
 	if err != nil {
 		t.Fatalf("Failed to create test database: %v", err)
@@ -1091,7 +1091,7 @@ func TestCompressDirectoryMethod(t *testing.T) {
 // TestCompressDirectoryWithLargFiles tests compression with larger files
 func TestCompressDirectoryWithLargeFiles(t *testing.T) {
 	t.Skip("CompressDirectory method not implemented, skipping test")
-	
+
 	db, err := sql.Open("sqlite3", ":memory:")
 	if err != nil {
 		t.Fatalf("Failed to create test database: %v", err)
@@ -1166,7 +1166,7 @@ func TestCompressDirectoryWithLargeFiles(t *testing.T) {
 // TestCompressDirectoryErrorCases tests error handling in compression
 func TestCompressDirectoryErrorCases(t *testing.T) {
 	t.Skip("CompressDirectory method not implemented, skipping test")
-	
+
 	db, err := sql.Open("sqlite3", ":memory:")
 	if err != nil {
 		t.Fatalf("Failed to create test database: %v", err)

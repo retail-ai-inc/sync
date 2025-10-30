@@ -1163,11 +1163,11 @@ func (s *MongoDBSyncer) convertRawBSONToWriteModel(rawData bson.Raw, sourceDB, c
 		// Check if delete operations should be ignored for this collection
 		advancedSettings := s.findTableAdvancedSettings(collectionName)
 		if advancedSettings.IgnoreDeleteOps {
-			s.logger.Debugf("[MongoDB] Ignoring delete operation for %s.%s (ignoreDeleteOps=true)", 
+			s.logger.Debugf("[MongoDB] Ignoring delete operation for %s.%s (ignoreDeleteOps=true)",
 				sourceDB, collectionName)
 			return nil
 		}
-		
+
 		var docID interface{}
 		if dk, ok := event["documentKey"].(bson.M); ok {
 			docID = dk["_id"]
@@ -2026,11 +2026,11 @@ func (s *MongoDBSyncer) deserializeWriteModel(data json.RawMessage, collectionNa
 		// Check if delete operations should be ignored for this collection
 		advancedSettings := s.findTableAdvancedSettings(collectionName)
 		if advancedSettings.IgnoreDeleteOps {
-			s.logger.Debugf("[MongoDB] Ignoring delete operation during retry for %s (ignoreDeleteOps=true)", 
+			s.logger.Debugf("[MongoDB] Ignoring delete operation during retry for %s (ignoreDeleteOps=true)",
 				collectionName)
 			return nil, nil
 		}
-		
+
 		filter, ok := modelData["filter"]
 		if !ok {
 			return nil, fmt.Errorf("missing filter for delete operation")

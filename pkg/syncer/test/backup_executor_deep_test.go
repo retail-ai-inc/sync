@@ -34,7 +34,7 @@ func TestBackupExecutorDeepCoverage(t *testing.T) {
 			last_backup_time TEXT
 		);
 		`
-		
+
 		if _, err := db.Exec(schema); err != nil {
 			t.Fatalf("Failed to create schema: %v", err)
 		}
@@ -60,21 +60,21 @@ func TestBackupExecutorDeepCoverage(t *testing.T) {
 				}`,
 			},
 			{
-				name:   "Invalid JSON config", 
-				id:     2,
-				enable: 1,
+				name:       "Invalid JSON config",
+				id:         2,
+				enable:     1,
 				configJSON: `{"invalid": json}`,
 			},
 			{
-				name:   "Empty config",
-				id:     3,
-				enable: 1,
+				name:       "Empty config",
+				id:         3,
+				enable:     1,
 				configJSON: `{}`,
 			},
 			{
-				name:   "Disabled task",
-				id:     4,
-				enable: 0,
+				name:       "Disabled task",
+				id:         4,
+				enable:     0,
 				configJSON: `{"sourceType": "mongodb"}`,
 			},
 		}
@@ -135,7 +135,7 @@ func TestBackupExecutorDeepCoverage(t *testing.T) {
 		}{
 			{"small.json", `{"id":1,"data":"test"}`, 0},
 			{"medium.json", strings.Repeat(`{"id":2,"data":"medium data"},`, 100), 0},
-			{"large.json", strings.Repeat(`{"id":3,"data":"` + strings.Repeat("x", 1000) + `"},`, 50), 0},
+			{"large.json", strings.Repeat(`{"id":3,"data":"`+strings.Repeat("x", 1000)+`"},`, 50), 0},
 			{"empty.json", "", 0},
 		}
 
@@ -145,7 +145,7 @@ func TestBackupExecutorDeepCoverage(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Failed to create test file %s: %v", tf.name, err)
 			}
-			
+
 			// Update size for verification
 			testFiles[i].size = len(tf.content)
 		}
@@ -158,12 +158,12 @@ func TestBackupExecutorDeepCoverage(t *testing.T) {
 
 		totalSize := 0
 		fileCount := 0
-		
+
 		for _, file := range files {
 			if !file.IsDir() && strings.HasSuffix(file.Name(), ".json") {
 				fileCount++
 				totalSize += int(file.Size())
-				
+
 				// Test file content reading (simulate counting records)
 				filePath := filepath.Join(tempDir, file.Name())
 				content, err := ioutil.ReadFile(filePath)
@@ -171,7 +171,7 @@ func TestBackupExecutorDeepCoverage(t *testing.T) {
 					t.Errorf("Failed to read file %s: %v", file.Name(), err)
 					continue
 				}
-				
+
 				// Simulate record counting logic
 				lines := strings.Split(string(content), "\n")
 				recordCount := 0
@@ -181,7 +181,7 @@ func TestBackupExecutorDeepCoverage(t *testing.T) {
 						recordCount++
 					}
 				}
-				
+
 				t.Logf("File %s: size=%d bytes, records=%d", file.Name(), len(content), recordCount)
 			}
 		}
@@ -344,7 +344,7 @@ func TestBackupExecutorDeepCoverage(t *testing.T) {
 
 		for i, test := range configTests {
 			taskID := i + 1
-			
+
 			// Insert test config
 			_, err := db.Exec(
 				"INSERT INTO backup_tasks (id, config_json) VALUES (?, ?)",
@@ -359,7 +359,7 @@ func TestBackupExecutorDeepCoverage(t *testing.T) {
 				defer cancel()
 
 				err := executor.Execute(ctx, taskID)
-				
+
 				if test.expectErr && err == nil {
 					t.Errorf("Expected error for test %s", test.name)
 				} else if !test.expectErr && err != nil {

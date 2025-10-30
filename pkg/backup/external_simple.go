@@ -474,7 +474,7 @@ func (e *BackupExecutor) countRecordsInFile(filePath string) (int, float64, erro
 	const maxCapacity = 1024 * 1024 // 1MB
 	buf := make([]byte, maxCapacity)
 	scanner.Buffer(buf, maxCapacity)
-	
+
 	count := 0
 
 	for scanner.Scan() {
@@ -496,7 +496,7 @@ func (e *BackupExecutor) countRecordsInFile(filePath string) (int, float64, erro
 func (e *BackupExecutor) maskSensitiveArgs(args []string) string {
 	maskedArgs := make([]string, len(args))
 	copy(maskedArgs, args)
-	
+
 	for i, arg := range maskedArgs {
 		if arg == "--uri" && i+1 < len(maskedArgs) {
 			// Mask credentials in URI
@@ -507,11 +507,11 @@ func (e *BackupExecutor) maskSensitiveArgs(args []string) string {
 				if len(parts) == 2 {
 					protocolPart := parts[0] + "://"
 					remaining := parts[1]
-					
+
 					if atIndex := strings.Index(remaining, "@"); atIndex != -1 {
 						hostPart := remaining[atIndex:]
 						credPart := remaining[:atIndex]
-						
+
 						// Check if there are credentials
 						if strings.Contains(credPart, ":") {
 							maskedArgs[i+1] = protocolPart + "***:***" + hostPart
@@ -521,7 +521,7 @@ func (e *BackupExecutor) maskSensitiveArgs(args []string) string {
 			}
 		}
 	}
-	
+
 	return strings.Join(maskedArgs, " ")
 }
 
