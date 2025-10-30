@@ -16,6 +16,7 @@ import (
 
 	"github.com/retail-ai-inc/sync/pkg/api"
 	"github.com/retail-ai-inc/sync/pkg/utils"
+
 	// goredis "github.com/redis/go-redis/v9"
 
 	// "go.mongodb.org/mongo-driver/bson"
@@ -286,6 +287,22 @@ func TestSyncIntegration(t *testing.T) {
 		TestBackupExecutorDeepCoverage(t)
 	})
 
+	t.Run("TC50_MySQLBackupFunctions", func(t *testing.T) {
+		TestMySQLBackupFunctions(t)
+	})
+
+	t.Run("TC51_MySQLBackupExecution", func(t *testing.T) {
+		TestMySQLBackupExecution(t)
+	})
+
+	t.Run("TC52_MySQLBackupFormats", func(t *testing.T) {
+		TestMySQLBackupFormats(t)
+	})
+
+	t.Run("TC53_MySQLBackupEdgeCases", func(t *testing.T) {
+		TestMySQLBackupEdgeCases(t)
+	})
+
 	time.Sleep(3 * time.Second)
 
 }
@@ -294,62 +311,62 @@ func TestSyncIntegration(t *testing.T) {
 func TestSlackNotifierIntegration(t *testing.T) {
 	t.Run("SlackNotifierCreation", func(t *testing.T) {
 		logger := createTestLogger()
-		
+
 		// Test creating notifier with empty config
 		notifier := utils.NewSlackNotifier("", "", logger)
 		if notifier.IsConfigured() {
 			t.Error("Expected notifier to not be configured with empty parameters")
 		}
-		
+
 		// Test creating notifier with webhook URL
 		notifier = utils.NewSlackNotifier("https://hooks.slack.com/test", "#general", logger)
 		// Note: IsConfigured() may still return false if cloudbuild.sh script is not found
-		
+
 		t.Log("Slack notifier creation test completed")
 	})
-	
+
 	t.Run("SlackNotificationOptions", func(t *testing.T) {
 		logger := createTestLogger()
 		notifier := utils.NewSlackNotifier("https://hooks.slack.com/test", "#general", logger)
-		
+
 		ctx := context.Background()
-		
+
 		// Test SendSuccess (won't actually send due to missing script)
 		err := notifier.SendSuccess(ctx, "Test Operation", "Test details")
 		// Should not return error even if not configured (just logs debug message)
 		if err != nil {
 			t.Logf("SendSuccess returned: %v (expected if script not found)", err)
 		}
-		
+
 		// Test SendWarning
 		err = notifier.SendWarning(ctx, "Test Operation", "Test warning")
 		if err != nil {
 			t.Logf("SendWarning returned: %v (expected if script not found)", err)
 		}
-		
+
 		// Test SendError
 		err = notifier.SendError(ctx, "Test Operation", "Test error")
 		if err != nil {
 			t.Logf("SendError returned: %v (expected if script not found)", err)
 		}
-		
+
 		t.Log("Slack notification options test completed")
 	})
-	
+
 	t.Run("SlackConfigProvider", func(t *testing.T) {
 		// Create a mock config provider
 		mockConfig := &mockConfigProvider{
 			webhookURL: "https://hooks.slack.com/test",
 			channel:    "#test",
 		}
-		
+
 		logger := createTestLogger()
 		notifier := utils.NewSlackNotifierFromConfig(mockConfig, logger)
-		
+
 		if notifier == nil {
 			t.Error("Expected notifier to be created from config")
 		}
-		
+
 		t.Log("Slack config provider test completed")
 	})
 }
@@ -368,19 +385,19 @@ func (m *mockConfigProvider) GetSlackChannel() string {
 	return m.channel
 }
 
-// TestBackupAPIIntegration tests backup API functionality  
+// TestBackupAPIIntegration tests backup API functionality
 func TestBackupAPIIntegration(t *testing.T) {
 	t.Run("BackupHandler", func(t *testing.T) {
 		// Test backup list endpoint
 		req := httptest.NewRequest("GET", "/api/backup", nil)
 		w := httptest.NewRecorder()
-		
+
 		api.BackupListHandler(w, req)
-		
+
 		if w.Code != http.StatusOK {
 			t.Logf("BackupListHandler returned status %d", w.Code)
 		}
-		
+
 		t.Log("Backup handler test completed")
 	})
 }
@@ -390,22 +407,22 @@ func TestUtilityFunctionsIntegration(t *testing.T) {
 	t.Run("FileOperations", func(t *testing.T) {
 		// Test file size formatting (if available in utils)
 		tempFile := "/tmp/test_file_" + fmt.Sprintf("%d", time.Now().UnixNano())
-		
+
 		// Create a test file
 		err := ioutil.WriteFile(tempFile, []byte("test content"), 0644)
 		if err != nil {
 			t.Fatalf("Failed to create test file: %v", err)
 		}
 		defer os.Remove(tempFile)
-		
+
 		// Check file exists
 		if _, err := os.Stat(tempFile); os.IsNotExist(err) {
 			t.Error("Test file should exist")
 		}
-		
+
 		t.Log("File operations test completed")
 	})
-	
+
 	t.Run("StringOperations", func(t *testing.T) {
 		// Test string operations that might be used in backup functionality
 		testStrings := []string{
@@ -413,13 +430,13 @@ func TestUtilityFunctionsIntegration(t *testing.T) {
 			"collection-2025-01-01",
 			"backup_file.json",
 		}
-		
+
 		for _, str := range testStrings {
 			if len(str) == 0 {
 				t.Error("String should not be empty")
 			}
 		}
-		
+
 		t.Log("String operations test completed")
 	})
 }
