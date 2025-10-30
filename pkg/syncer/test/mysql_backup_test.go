@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/retail-ai-inc/sync/pkg/backup"
 	_ "github.com/mattn/go-sqlite3"
+	"github.com/retail-ai-inc/sync/pkg/backup"
 )
 
 // TestMySQLBackupFunctions tests MySQL backup related functionality
@@ -228,12 +228,12 @@ func TestMySQLBackupFunctions(t *testing.T) {
 			t.Run(tc.name, func(t *testing.T) {
 				// Call the actual function via test helper
 				result := executor.TestConvertTimeRangeQueryForMySQL(tc.query)
-				
+
 				// For empty query, expect empty result
 				if len(tc.query) == 0 && result != "" {
 					t.Errorf("Expected empty result for empty query, got: %s", result)
 				}
-				
+
 				// For non-empty query, expect some output
 				if len(tc.query) > 0 && tc.expectValid {
 					t.Logf("Query conversion result: %s", result)
@@ -303,12 +303,12 @@ func TestMySQLBackupFunctions(t *testing.T) {
 				if result == "" {
 					t.Error("Query should not be empty")
 				}
-				
+
 				// Verify table name is in the query
 				if !containsString(result, tc.table) {
 					t.Errorf("Query should contain table name %s, got: %s", tc.table, result)
 				}
-				
+
 				t.Logf("Built query for table %s: %s", tc.table, result)
 			})
 		}
@@ -321,23 +321,23 @@ func TestMySQLBackupFunctions(t *testing.T) {
 			expected []string
 		}{
 			{
-				name: "mysql command with password",
-				args: []string{"mysql", "-h", "localhost", "-u", "root", "-pSecret123"},
+				name:     "mysql command with password",
+				args:     []string{"mysql", "-h", "localhost", "-u", "root", "-pSecret123"},
 				expected: []string{"mysql", "-h", "localhost", "-u", "root", "-p***"},
 			},
 			{
-				name: "mysqldump with password",
-				args: []string{"mysqldump", "-h", "localhost", "-P", "3306", "-u", "admin", "-pMyPassword"},
+				name:     "mysqldump with password",
+				args:     []string{"mysqldump", "-h", "localhost", "-P", "3306", "-u", "admin", "-pMyPassword"},
 				expected: []string{"mysqldump", "-h", "localhost", "-P", "3306", "-u", "admin", "-p***"},
 			},
 			{
-				name: "command without password",
-				args: []string{"mysql", "-h", "localhost", "-u", "root"},
+				name:     "command without password",
+				args:     []string{"mysql", "-h", "localhost", "-u", "root"},
 				expected: []string{"mysql", "-h", "localhost", "-u", "root"},
 			},
 			{
-				name: "empty password flag",
-				args: []string{"mysql", "-p"},
+				name:     "empty password flag",
+				args:     []string{"mysql", "-p"},
 				expected: []string{"mysql", "-p"},
 			},
 		}
@@ -354,7 +354,7 @@ func TestMySQLBackupFunctions(t *testing.T) {
 			t.Run(tc.name, func(t *testing.T) {
 				// Call the actual function via test helper
 				result := executor.TestMaskMySQLPassword(tc.args)
-				
+
 				// Build expected string
 				expectedStr := ""
 				for i, arg := range tc.expected {
@@ -363,7 +363,7 @@ func TestMySQLBackupFunctions(t *testing.T) {
 					}
 					expectedStr += arg
 				}
-				
+
 				if result != expectedStr {
 					t.Errorf("Expected '%s', got '%s'", expectedStr, result)
 				}
@@ -566,7 +566,7 @@ func TestMySQLBackupExecution(t *testing.T) {
 					t.Error("Executor should not be nil")
 				}
 
-				t.Logf("Testing grouping for %d tables: %v (expected %d groups)", 
+				t.Logf("Testing grouping for %d tables: %v (expected %d groups)",
 					len(tc.tables), tc.tables, tc.expectedGroups)
 			})
 		}
@@ -628,7 +628,7 @@ func TestMySQLBackupExecution(t *testing.T) {
 					t.Fatalf("Failed to stat file: %v", err)
 				}
 
-				t.Logf("Created test file: %s (size: %d bytes, format: %s)", 
+				t.Logf("Created test file: %s (size: %d bytes, format: %s)",
 					tf.name, fileInfo.Size(), tf.format)
 			})
 		}
@@ -636,9 +636,9 @@ func TestMySQLBackupExecution(t *testing.T) {
 
 	t.Run("TimeRangeFiltering", func(t *testing.T) {
 		testCases := []struct {
-			name       string
-			tableName  string
-			timeRange  struct {
+			name      string
+			tableName string
+			timeRange struct {
 				start time.Time
 				end   time.Time
 			}
@@ -776,6 +776,631 @@ func normalizeFormat(format string) string {
 	}
 }
 
+// TestTableGrouping tests table grouping by prefix functionality
+func TestTableGrouping(t *testing.T) {
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create test database: %v", err)
+	}
+	defer db.Close()
+
+	executor := backup.NewBackupExecutor(db)
+
+	testCases := []struct {
+		name           string
+		tables         []string
+		expectedGroups map[string][]string
+	}{
+		{
+			name:   "monthly partitioned tables",
+			tables: []string{"orders_202501", "orders_202502", "orders_202503"},
+			expectedGroups: map[string][]string{
+				"orders": {"orders_202501", "orders_202502", "orders_202503"},
+			},
+		},
+		{
+			name:   "daily partitioned tables",
+			tables: []string{"logs_20250101", "logs_20250102", "logs_20250103"},
+			expectedGroups: map[string][]string{
+				"logs": {"logs_20250101", "logs_20250102", "logs_20250103"},
+			},
+		},
+		{
+			name:   "unrelated tables",
+			tables: []string{"users", "products", "categories"},
+			expectedGroups: map[string][]string{
+				"users":      {"users"},
+				"products":   {"products"},
+				"categories": {"categories"},
+			},
+		},
+		{
+			name:   "mixed tables",
+			tables: []string{"orders_202501", "users", "orders_202502"},
+			expectedGroups: map[string][]string{
+				"orders": {"orders_202501", "orders_202502"},
+				"users":  {"users"},
+			},
+		},
+		{
+			name:   "yearly partitioned tables",
+			tables: []string{"archive_2023", "archive_2024", "archive_2025"},
+			expectedGroups: map[string][]string{
+				"archive": {"archive_2023", "archive_2024", "archive_2025"},
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			groups := executor.TestGroupTablesByPrefix(tc.tables)
+
+			if len(groups) != len(tc.expectedGroups) {
+				t.Errorf("Expected %d groups, got %d", len(tc.expectedGroups), len(groups))
+			}
+
+			for groupName, expectedTables := range tc.expectedGroups {
+				actualTables, exists := groups[groupName]
+				if !exists {
+					t.Errorf("Expected group %s not found", groupName)
+					continue
+				}
+
+				if len(actualTables) != len(expectedTables) {
+					t.Errorf("Group %s: expected %d tables, got %d", groupName, len(expectedTables), len(actualTables))
+				}
+			}
+
+			t.Logf("Grouped %d tables into %d groups", len(tc.tables), len(groups))
+		})
+	}
+}
+
+// TestTimeRangeExtraction tests time range extraction from query conditions
+func TestTimeRangeExtraction(t *testing.T) {
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create test database: %v", err)
+	}
+	defer db.Close()
+
+	executor := backup.NewBackupExecutor(db)
+
+	testCases := []struct {
+		name        string
+		query       map[string]interface{}
+		expectRange bool
+	}{
+		{
+			name: "daily time range query",
+			query: map[string]interface{}{
+				"created_at": map[string]interface{}{
+					"type":        "daily",
+					"startOffset": float64(-1),
+					"endOffset":   float64(0),
+				},
+			},
+			expectRange: true,
+		},
+		{
+			name: "weekly time range query",
+			query: map[string]interface{}{
+				"updated_at": map[string]interface{}{
+					"type":        "daily",
+					"startOffset": float64(-7),
+					"endOffset":   float64(0),
+				},
+			},
+			expectRange: true,
+		},
+		{
+			name: "simple equality query",
+			query: map[string]interface{}{
+				"status": "active",
+			},
+			expectRange: false,
+		},
+		{
+			name:        "empty query",
+			query:       map[string]interface{}{},
+			expectRange: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			timeRange := executor.TestExtractTimeRange(tc.query)
+
+			if tc.expectRange && timeRange == nil {
+				t.Error("Expected time range to be extracted, got nil")
+			} else if !tc.expectRange && timeRange != nil {
+				t.Error("Expected no time range, but got one")
+			}
+
+			if timeRange != nil {
+				t.Logf("Extracted time range: %v to %v", timeRange.Start, timeRange.End)
+			}
+		})
+	}
+}
+
+// TestTableTimePatternExtraction tests extracting time patterns from table names
+func TestTableTimePatternExtraction(t *testing.T) {
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create test database: %v", err)
+	}
+	defer db.Close()
+
+	executor := backup.NewBackupExecutor(db)
+
+	testCases := []struct {
+		name        string
+		tableName   string
+		expectRange bool
+	}{
+		{
+			name:        "monthly table",
+			tableName:   "orders_202501",
+			expectRange: true,
+		},
+		{
+			name:        "daily table",
+			tableName:   "logs_20250101",
+			expectRange: true,
+		},
+		{
+			name:        "yearly table",
+			tableName:   "archive_2025",
+			expectRange: true,
+		},
+		{
+			name:        "table without date",
+			tableName:   "users",
+			expectRange: false,
+		},
+		{
+			name:        "table with numeric suffix",
+			tableName:   "data_123",
+			expectRange: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			timeRange := executor.TestExtractTableTimePattern(tc.tableName)
+
+			if tc.expectRange && timeRange == nil {
+				t.Errorf("Expected time range for %s, got nil", tc.tableName)
+			} else if !tc.expectRange && timeRange != nil {
+				t.Logf("No time range expected for %s, correctly got nil or range", tc.tableName)
+			}
+
+			if timeRange != nil {
+				t.Logf("Table %s time range: %v to %v", tc.tableName, timeRange.Start, timeRange.End)
+			}
+		})
+	}
+}
+
+// TestMongoDBConnectionString tests MongoDB connection string building
+func TestMongoDBConnectionString(t *testing.T) {
+	testCases := []struct {
+		name     string
+		url      string
+		username string
+		password string
+	}{
+		{
+			name:     "with credentials",
+			url:      "localhost:27017",
+			username: "admin",
+			password: "secret",
+		},
+		{
+			name:     "without credentials",
+			url:      "localhost:27017",
+			username: "",
+			password: "",
+		},
+		{
+			name:     "custom host and port",
+			url:      "mongo-server:27018",
+			username: "user",
+			password: "pass",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			connStr := backup.TestBuildMongoDBConnectionString(tc.url, tc.username, tc.password)
+
+			if connStr == "" {
+				t.Error("Connection string should not be empty")
+			}
+
+			if !containsString(connStr, "mongodb://") {
+				t.Error("Connection string should start with mongodb://")
+			}
+
+			if tc.username != "" && !containsString(connStr, "@") {
+				t.Error("Connection string with credentials should contain @")
+			}
+
+			t.Logf("Generated connection string for %s (credentials redacted)", tc.url)
+		})
+	}
+}
+
+// TestSensitiveArgsMasking tests masking of sensitive information
+func TestSensitiveArgsMasking(t *testing.T) {
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create test database: %v", err)
+	}
+	defer db.Close()
+
+	executor := backup.NewBackupExecutor(db)
+
+	testCases := []struct {
+		name     string
+		args     []string
+		expected string
+	}{
+		{
+			name:     "MongoDB URI with credentials",
+			args:     []string{"mongoexport", "--uri", "mongodb://admin:secret@localhost:27017/db"},
+			expected: "mongoexport --uri mongodb://***:***@localhost:27017/db",
+		},
+		{
+			name:     "MongoDB URI without credentials",
+			args:     []string{"mongoexport", "--uri", "mongodb://localhost:27017/db"},
+			expected: "mongoexport --uri mongodb://localhost:27017/db",
+		},
+		{
+			name:     "command without sensitive data",
+			args:     []string{"mongoexport", "--db", "testdb", "--collection", "users"},
+			expected: "mongoexport --db testdb --collection users",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := executor.TestMaskSensitiveArgs(tc.args)
+
+			if result == "" {
+				t.Error("Masked result should not be empty")
+			}
+
+			// Verify password is masked
+			if containsString(result, "secret") || containsString(result, "password") {
+				t.Error("Result should not contain sensitive data")
+			}
+
+			t.Logf("Masked command: %s", result)
+		})
+	}
+}
+
+// TestMongoDBTimeRangeConversion tests MongoDB time range query conversion
+func TestMongoDBTimeRangeConversion(t *testing.T) {
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create test database: %v", err)
+	}
+	defer db.Close()
+
+	executor := backup.NewBackupExecutor(db)
+
+	testCases := []struct {
+		name        string
+		query       map[string]interface{}
+		expectValid bool
+	}{
+		{
+			name: "daily time range",
+			query: map[string]interface{}{
+				"created_at": map[string]interface{}{
+					"type":        "daily",
+					"startOffset": float64(-1),
+					"endOffset":   float64(0),
+				},
+			},
+			expectValid: true,
+		},
+		{
+			name: "weekly range",
+			query: map[string]interface{}{
+				"updated_at": map[string]interface{}{
+					"type":        "daily",
+					"startOffset": float64(-7),
+					"endOffset":   float64(0),
+				},
+			},
+			expectValid: true,
+		},
+		{
+			name: "simple equality",
+			query: map[string]interface{}{
+				"status": "active",
+			},
+			expectValid: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := executor.TestConvertTimeRangeQuery(tc.query)
+
+			if result == nil {
+				t.Error("Result should not be nil")
+			}
+
+			t.Logf("Converted query: %v", result)
+		})
+	}
+}
+
+// TestQueryStringCleaning tests cleaning of query string values
+func TestQueryStringCleaning(t *testing.T) {
+	testCases := []struct {
+		name     string
+		query    map[string]interface{}
+		expected map[string]interface{}
+	}{
+		{
+			name: "remove double quotes",
+			query: map[string]interface{}{
+				"status": `"active"`,
+			},
+			expected: map[string]interface{}{
+				"status": "active",
+			},
+		},
+		{
+			name: "remove single quotes",
+			query: map[string]interface{}{
+				"type": `'pending'`,
+			},
+			expected: map[string]interface{}{
+				"type": "pending",
+			},
+		},
+		{
+			name: "nested query",
+			query: map[string]interface{}{
+				"created_at": map[string]interface{}{
+					"type": `"daily"`,
+				},
+			},
+			expected: map[string]interface{}{
+				"created_at": map[string]interface{}{
+					"type": "daily",
+				},
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := backup.TestCleanQueryStringValues(tc.query)
+
+			if result == nil {
+				t.Error("Result should not be nil")
+			}
+
+			t.Logf("Cleaned query: %v", result)
+		})
+	}
+}
+
+// TestYearMonthParsing tests year and month parsing
+func TestYearMonthParsing(t *testing.T) {
+	testCases := []struct {
+		name          string
+		input         string
+		expectError   bool
+		expectedYear  int
+		expectedMonth int
+	}{
+		{
+			name:          "valid YYYYMM",
+			input:         "202501",
+			expectError:   false,
+			expectedYear:  2025,
+			expectedMonth: 1,
+		},
+		{
+			name:          "valid YYYYMM December",
+			input:         "202512",
+			expectError:   false,
+			expectedYear:  2025,
+			expectedMonth: 12,
+		},
+		{
+			name:        "invalid month",
+			input:       "202513",
+			expectError: true,
+		},
+		{
+			name:        "invalid format",
+			input:       "2025",
+			expectError: true,
+		},
+		{
+			name:        "non-numeric",
+			input:       "20250a",
+			expectError: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			year, month, err := backup.TestParseYearMonth(tc.input)
+
+			if tc.expectError && err == nil {
+				t.Error("Expected error but got none")
+			} else if !tc.expectError && err != nil {
+				t.Errorf("Unexpected error: %v", err)
+			}
+
+			if !tc.expectError {
+				if year != tc.expectedYear {
+					t.Errorf("Expected year %d, got %d", tc.expectedYear, year)
+				}
+				if month != tc.expectedMonth {
+					t.Errorf("Expected month %d, got %d", tc.expectedMonth, month)
+				}
+			}
+		})
+	}
+}
+
+// TestYearParsing tests year parsing
+func TestYearParsing(t *testing.T) {
+	testCases := []struct {
+		name         string
+		input        string
+		expectError  bool
+		expectedYear int
+	}{
+		{
+			name:         "valid year",
+			input:        "2025",
+			expectError:  false,
+			expectedYear: 2025,
+		},
+		{
+			name:         "valid year 2000",
+			input:        "2000",
+			expectError:  false,
+			expectedYear: 2000,
+		},
+		{
+			name:        "invalid format",
+			input:       "25",
+			expectError: true,
+		},
+		{
+			name:        "non-numeric",
+			input:       "202a",
+			expectError: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			year, err := backup.TestParseYear(tc.input)
+
+			if tc.expectError && err == nil {
+				t.Error("Expected error but got none")
+			} else if !tc.expectError && err != nil {
+				t.Errorf("Unexpected error: %v", err)
+			}
+
+			if !tc.expectError && year != tc.expectedYear {
+				t.Errorf("Expected year %d, got %d", tc.expectedYear, year)
+			}
+		})
+	}
+}
+
+// TestFileNamePatternProcessing tests file name pattern processing
+func TestFileNamePatternProcessing(t *testing.T) {
+	testCases := []struct {
+		name      string
+		pattern   string
+		tableName string
+	}{
+		{
+			name:      "empty pattern uses default",
+			pattern:   "",
+			tableName: "users",
+		},
+		{
+			name:      "pattern with table placeholder",
+			pattern:   "{table}_backup",
+			tableName: "orders",
+		},
+		{
+			name:      "pattern with date only",
+			pattern:   "backup_{YYYY}-{MM}-{DD}",
+			tableName: "logs",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := backup.TestProcessFileNamePattern(tc.pattern, tc.tableName)
+
+			if result == "" {
+				t.Error("Result should not be empty")
+			}
+
+			if !containsString(result, tc.tableName) && tc.pattern == "" {
+				t.Errorf("Result should contain table name %s", tc.tableName)
+			}
+
+			t.Logf("Processed pattern for %s: %s", tc.tableName, result)
+		})
+	}
+}
+
+// TestTableRelevanceForTimeRange tests checking if tables are relevant for time ranges
+func TestTableRelevanceForTimeRange(t *testing.T) {
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create test database: %v", err)
+	}
+	defer db.Close()
+
+	executor := backup.NewBackupExecutor(db)
+
+	now := time.Now()
+	testCases := []struct {
+		name           string
+		tableName      string
+		timeRange      *backup.TimeRange
+		expectRelevant bool
+	}{
+		{
+			name:      "current month table",
+			tableName: fmt.Sprintf("orders_%s", now.Format("200601")),
+			timeRange: &backup.TimeRange{
+				Start: now.AddDate(0, 0, -1),
+				End:   now,
+			},
+			expectRelevant: true,
+		},
+		{
+			name:      "old table",
+			tableName: "archive_202301",
+			timeRange: &backup.TimeRange{
+				Start: now.AddDate(0, 0, -1),
+				End:   now,
+			},
+			expectRelevant: false,
+		},
+		{
+			name:      "table without date pattern",
+			tableName: "users",
+			timeRange: &backup.TimeRange{
+				Start: now.AddDate(0, 0, -1),
+				End:   now,
+			},
+			expectRelevant: true, // Should include tables without date patterns
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := executor.TestIsTableRelevantForTimeRange(tc.tableName, tc.timeRange)
+
+			t.Logf("Table %s relevance: %v (expected: %v)", tc.tableName, result, tc.expectRelevant)
+		})
+	}
+}
+
 // TestMySQLBackupEdgeCases tests edge cases in MySQL backup
 func TestMySQLBackupEdgeCases(t *testing.T) {
 	t.Run("EmptyTableList", func(t *testing.T) {
@@ -845,4 +1470,3 @@ func TestMySQLBackupEdgeCases(t *testing.T) {
 		}
 	})
 }
-
