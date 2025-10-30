@@ -326,18 +326,31 @@ func TestApplicationLifecycle(t *testing.T) {
 		
 		// Simulate waitgroup usage
 		var wg sync.WaitGroup
+		events := make(chan string, 6)
 		
 		for i := 0; i < 3; i++ {
 			wg.Add(1)
 			go func(id int) {
 				defer wg.Done()
-				t.Logf("Worker %d started", id)
+				events <- "Worker started"
 				time.Sleep(10 * time.Millisecond)
-				t.Logf("Worker %d completed", id)
+				events <- "Worker completed"
 			}(i)
 		}
 		
-		wg.Wait()
+		// Collect events in background
+		go func() {
+			wg.Wait()
+			close(events)
+		}()
+		
+		// Log events safely in main test goroutine
+		eventCount := 0
+		for event := range events {
+			t.Logf("%s (event %d)", event, eventCount)
+			eventCount++
+		}
+		
 		t.Log("All workers completed")
 		
 		// Test channel usage for signal handling

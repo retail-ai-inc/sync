@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"github.com/retail-ai-inc/sync/pkg/api"
@@ -280,9 +281,14 @@ func TestAPIIntegrationScenarios(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		
+		var wg sync.WaitGroup
+		results := make(chan int, 5)
+		
 		// Launch multiple concurrent requests
 		for i := 0; i < 5; i++ {
+			wg.Add(1)
 			go func(id int) {
+				defer wg.Done()
 				select {
 				case <-ctx.Done():
 					return
@@ -290,14 +296,23 @@ func TestAPIIntegrationScenarios(t *testing.T) {
 					req := httptest.NewRequest("GET", "/api/backup", nil)
 					w := httptest.NewRecorder()
 					api.BackupListHandler(w, req)
-					t.Logf("Concurrent request %d returned status: %d", id, w.Code)
+					results <- w.Code
 				}
 			}(i)
 		}
 		
-		// Give some time for requests to complete
-		// In a real test, you'd use proper synchronization
-		// Here we just ensure the test doesn't hang
+		// Wait for all goroutines to complete
+		go func() {
+			wg.Wait()
+			close(results)
+		}()
+		
+		// Collect results safely in the main test goroutine
+		requestCount := 0
+		for code := range results {
+			t.Logf("Concurrent request %d returned status: %d", requestCount, code)
+			requestCount++
+		}
 		
 		t.Log("Concurrent requests test completed")
 	})
