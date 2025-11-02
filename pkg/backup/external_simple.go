@@ -288,11 +288,6 @@ func (e *BackupExecutor) exportMongoDBMergedTables(ctx context.Context, connStr,
 
 		// Use mongoexport to export single table, apply query conditions and field selection
 		if err := e.executeExternalMongoExportWithOptions(ctx, connStr, database, table, tempTablePath, config); err != nil {
-			// If skipped due to no query conditions, continue processing next table
-			if strings.Contains(err.Error(), "no query conditions specified") {
-				logrus.Infof("[BackupExecutor] ⏭️  Skipping table %s (no query conditions)", table)
-				continue
-			}
 			return fmt.Errorf("failed to export table %s: %w", table, err)
 		}
 
@@ -418,9 +413,8 @@ func (e *BackupExecutor) executeExternalMongoExportWithOptions(ctx context.Conte
 			logrus.Infof("[BackupExecutor] Applied query for collection %s: %s", collection, string(queryJSON))
 		}
 	} else {
-		// If no query conditions, skip export for this table
-		logrus.Warnf("[BackupExecutor] ⚠️  No query conditions found for collection %s, skipping export", collection)
-		return fmt.Errorf("no query conditions specified for collection %s", collection)
+		// If no query conditions, export all data
+		logrus.Infof("[BackupExecutor] No query conditions found for collection %s, exporting all data", collection)
 	}
 
 	// Add field selection
@@ -480,7 +474,7 @@ func (e *BackupExecutor) countRecordsInFile(filePath string) (int, float64, erro
 	const maxCapacity = 1024 * 1024 // 1MB
 	buf := make([]byte, maxCapacity)
 	scanner.Buffer(buf, maxCapacity)
-	
+
 	count := 0
 
 	for scanner.Scan() {
@@ -502,7 +496,7 @@ func (e *BackupExecutor) countRecordsInFile(filePath string) (int, float64, erro
 func (e *BackupExecutor) maskSensitiveArgs(args []string) string {
 	maskedArgs := make([]string, len(args))
 	copy(maskedArgs, args)
-	
+
 	for i, arg := range maskedArgs {
 		if arg == "--uri" && i+1 < len(maskedArgs) {
 			// Mask credentials in URI
@@ -513,11 +507,11 @@ func (e *BackupExecutor) maskSensitiveArgs(args []string) string {
 				if len(parts) == 2 {
 					protocolPart := parts[0] + "://"
 					remaining := parts[1]
-					
+
 					if atIndex := strings.Index(remaining, "@"); atIndex != -1 {
 						hostPart := remaining[atIndex:]
 						credPart := remaining[:atIndex]
-						
+
 						// Check if there are credentials
 						if strings.Contains(credPart, ":") {
 							maskedArgs[i+1] = protocolPart + "***:***" + hostPart
@@ -527,7 +521,7 @@ func (e *BackupExecutor) maskSensitiveArgs(args []string) string {
 			}
 		}
 	}
-	
+
 	return strings.Join(maskedArgs, " ")
 }
 

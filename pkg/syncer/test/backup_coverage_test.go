@@ -86,7 +86,7 @@ func TestBackupExecutorCoverage(t *testing.T) {
 		}
 
 		executor := backup.NewBackupExecutor(db)
-		
+
 		// Test Execute with invalid JSON config
 		err = executor.Execute(context.Background(), 1)
 		if err == nil {
@@ -137,7 +137,7 @@ func TestBackupExecutorCoverage(t *testing.T) {
 
 		// Don't create the backup_tasks table to trigger an error
 		executor := backup.NewBackupExecutor(db)
-		
+
 		// Test Execute with database error
 		err = executor.Execute(context.Background(), 1)
 		if err == nil {
@@ -150,7 +150,7 @@ func TestBackupExecutorCoverage(t *testing.T) {
 	t.Run("TimeUtilities", func(t *testing.T) {
 		// Test time-related utilities used in backup
 		now := time.Now()
-		
+
 		// Test time formatting
 		timeStr := now.Format("2006-01-02 15:04:05")
 		if timeStr == "" {
@@ -164,7 +164,7 @@ func TestBackupExecutorCoverage(t *testing.T) {
 		}
 
 		if parsedTime.Format("2006-01-02 15:04:05") != now.Format("2006-01-02 15:04:05") {
-			t.Errorf("Parsed time (%s) should match original time (%s)", 
+			t.Errorf("Parsed time (%s) should match original time (%s)",
 				parsedTime.Format("2006-01-02 15:04:05"), now.Format("2006-01-02 15:04:05"))
 		}
 
@@ -183,7 +183,7 @@ func TestBackupExecutorCoverage(t *testing.T) {
 		defer db.Close()
 
 		executor := backup.NewBackupExecutor(db)
-		
+
 		// Test with cancelled context
 		cancel()
 		err = executor.Execute(ctx, 1)
@@ -210,7 +210,7 @@ func TestBackupUtilities(t *testing.T) {
 			if len(str) == 0 {
 				t.Error("String should not be empty")
 			}
-			
+
 			// Test basic string operations
 			if !contains(str, "_") && !contains(str, "-") && !contains(str, ".") {
 				t.Logf("String %s contains no separators", str)
@@ -246,7 +246,7 @@ func TestBackupUtilities(t *testing.T) {
 
 // Helper function for string contains check
 func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(substr) == 0 || 
+	return len(s) >= len(substr) && (s == substr || len(substr) == 0 ||
 		(len(s) > len(substr) && findSubstring(s, substr)))
 }
 
@@ -272,17 +272,17 @@ func TestSlackNotifierCoverage(t *testing.T) {
 	t.Run("SlackAlertTypes", func(t *testing.T) {
 		logger := logrus.New()
 		logger.SetOutput(ioutil.Discard) // Suppress log output in tests
-		
+
 		notifier := utils.NewSlackNotifier("https://hooks.slack.com/test", "#test", logger)
-		
+
 		ctx := context.Background()
-		
+
 		// Test all alert types
 		err := notifier.SendSyncStatus(ctx, "MongoDB", "source_db", "target_db", 100, 5*time.Second)
 		if err != nil {
 			t.Logf("SendSyncStatus returned: %v (expected if script not found)", err)
 		}
-		
+
 		err = notifier.SendBackupStatus(ctx, "MongoDB", "test_table", "backup.json", 1024*1024)
 		if err != nil {
 			t.Logf("SendBackupStatus returned: %v (expected if script not found)", err)
@@ -294,12 +294,12 @@ func TestSlackNotifierCoverage(t *testing.T) {
 	t.Run("SlackFieldLogger", func(t *testing.T) {
 		logger := logrus.New()
 		fieldLogger := logger.WithField("component", "test")
-		
+
 		mockConfig := &mockSlackConfig{
 			webhookURL: "https://hooks.slack.com/test",
 			channel:    "#test",
 		}
-		
+
 		notifier := utils.NewSlackNotifierFromConfigWithFieldLogger(mockConfig, fieldLogger)
 		if notifier == nil {
 			t.Error("Expected notifier to be created with field logger")

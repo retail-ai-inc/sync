@@ -203,6 +203,16 @@ func (e *BackupExecutor) Execute(ctx context.Context, taskID int) error {
 				connStr := buildMongoDBConnectionString(config.Database.URL, config.Database.Username, config.Database.Password)
 				exportErr = e.exportMongoDBMergedTables(ctx, connStr, config.Database.Database, tables, tempDir, config)
 			}
+		case "mysql":
+			if len(tables) == 1 {
+				// Single table export: use external command mode directly
+				logrus.Infof("[BackupExecutor] 🚀 Starting external MySQL backup for single table: %s", tables[0])
+				exportErr = e.executeExternalMySQLBackupSimple(ctx, config.Database.URL, config.Database.Database, tables[0], tempDir, config)
+			} else {
+				// Multi-table merged export: use external command mode
+				logrus.Infof("[BackupExecutor] 🚀 Starting external MySQL backup for %d merged tables: %v", len(tables), tables)
+				exportErr = e.exportMySQLMergedTables(ctx, config.Database.URL, config.Database.Database, tables, tempDir, config)
+			}
 		default:
 			exportErr = fmt.Errorf("unsupported database type: %s", config.SourceType)
 		}
@@ -338,10 +348,23 @@ func (e *BackupExecutor) ExpandAndGroupTables(ctx context.Context, config *Execu
 
 	// Check if regex mode is enabled
 	if config.TableSelectionMode == "regex" && config.RegexPattern != "" {
-		// Get actual collections from MongoDB using regex pattern
-		actualTables, err := e.getMongoDBCollections(ctx, config, config.RegexPattern)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get MongoDB collections: %w", err)
+		var actualTables []string
+		var err error
+
+		// Get actual tables based on database type
+		switch config.SourceType {
+		case "mongodb":
+			actualTables, err = e.getMongoDBCollections(ctx, config, config.RegexPattern)
+			if err != nil {
+				return nil, fmt.Errorf("failed to get MongoDB collections: %w", err)
+			}
+		case "mysql":
+			actualTables, err = e.getMySQLTables(ctx, config, config.RegexPattern)
+			if err != nil {
+				return nil, fmt.Errorf("failed to get MySQL tables: %w", err)
+			}
+		default:
+			return nil, fmt.Errorf("regex mode not supported for database type: %s", config.SourceType)
 		}
 
 		// Group tables by common prefix
