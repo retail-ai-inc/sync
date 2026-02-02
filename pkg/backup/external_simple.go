@@ -291,40 +291,39 @@ func (e *BackupExecutor) exportMongoDBMergedTables(ctx context.Context, connStr,
 			return fmt.Errorf("failed to export table %s: %w", table, err)
 		}
 
-		// Read temporary file and merge to main file
+		// Read temporary file and merge to main file using streaming to avoid OOM
 		tempFile, err := os.Open(tempTablePath)
 		if err != nil {
 			return fmt.Errorf("failed to open temp file for table %s: %w", table, err)
 		}
 
-		// Read JSONL format file content (mongoexport default output format)
-		content, err := os.ReadFile(tempTablePath)
-		if err != nil {
-			tempFile.Close()
-			return fmt.Errorf("failed to read temp file for table %s: %w", table, err)
-		}
+		// Use bufio.Scanner for streaming line-by-line processing to avoid loading entire file into memory
+		scanner := bufio.NewScanner(tempFile)
+		// Increase buffer size to handle large JSON lines (default is 64KB, set to 1MB)
+		const maxCapacity = 1024 * 1024 // 1MB
+		buf := make([]byte, maxCapacity)
+		scanner.Buffer(buf, maxCapacity)
 
-		// mongoexport outputs JSONL format (one JSON object per line)
-		// Write directly in JSONL format, maintaining original format
-		contentStr := strings.TrimSpace(string(content))
-
-		if len(contentStr) > 0 {
-			// Directly append JSONL content to merged file
-			lines := strings.Split(contentStr, "\n")
-
-			for _, line := range lines {
-				line = strings.TrimSpace(line)
-				if line != "" && strings.HasPrefix(line, "{") {
-					// Write each JSON object line directly, separated by newlines (JSONL format)
-					if _, err := mergedFile.WriteString(line + "\n"); err != nil {
-						tempFile.Close()
-						return fmt.Errorf("failed to write line data for %s: %w", table, err)
-					}
+		lineCount := 0
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line != "" && strings.HasPrefix(line, "{") {
+				// Write each JSON object line directly, separated by newlines (JSONL format)
+				if _, err := mergedFile.WriteString(line + "\n"); err != nil {
+					tempFile.Close()
+					return fmt.Errorf("failed to write line data for %s: %w", table, err)
 				}
+				lineCount++
 			}
 		}
 
+		if err := scanner.Err(); err != nil {
+			tempFile.Close()
+			return fmt.Errorf("failed to scan temp file for table %s: %w", table, err)
+		}
+
 		tempFile.Close()
+		logrus.Debugf("[BackupExecutor] Merged %d lines from table %s", lineCount, table)
 		// Clean up temporary files
 		if err := os.Remove(tempTablePath); err != nil {
 			logrus.Warnf("[BackupExecutor] Failed to remove temp file %s: %v", tempTablePath, err)
