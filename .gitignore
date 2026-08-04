@@ -65,3 +65,6 @@ CLAUDE.md
 .cursor
 decrypt
 decode_bson.js
+
+# Ignore internal docs
+docs/
