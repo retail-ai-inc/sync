@@ -114,6 +114,11 @@ func (e *BackupExecutor) executeExternalMySQLBackupSimple(ctx context.Context, c
 // executeExternalMySQLDump executes mysqldump command with options
 func (e *BackupExecutor) executeExternalMySQLDump(ctx context.Context, host, port, username, password, database, table, outputPath string, config ExecutorBackupConfig) error {
 	args := []string{
+		// Pin the connection charset so 4-byte characters (emoji, rare CJK)
+		// survive the dump instead of being replaced with '?'. Relying on the
+		// client default is fragile: it varies by client build and utf8mb3 is
+		// deprecated in both MySQL 8.0 and MariaDB.
+		"--default-character-set=utf8mb4",
 		"-h", host,
 		"-P", port,
 		"-u", username,
@@ -182,6 +187,9 @@ func (e *BackupExecutor) executeExternalMySQLCSV(ctx context.Context, host, port
 
 	// Build mysql command arguments
 	mysqlArgs := []string{
+		// See executeExternalMySQLDump: pin the charset rather than inheriting
+		// the client default, so 4-byte characters are not lost as '?'.
+		"--default-character-set=utf8mb4",
 		"-h", host,
 		"-P", port,
 		"-u", username,
