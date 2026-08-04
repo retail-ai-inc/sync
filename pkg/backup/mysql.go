@@ -66,19 +66,27 @@ func (e *BackupExecutor) executeExternalMySQLBackupSimple(ctx context.Context, c
 
 	e.logMemoryUsage("AFTER_MYSQL_EXPORT")
 
-	// Step 2: External zip command (both formats use zip)
-	logrus.Infof("[BackupExecutor] 🗜️ Step 2: External zip compression")
-	if err := e.executeExternalZip(ctx, tempDir, outputPath, zipPath); err != nil {
-		return fmt.Errorf("external zip failed: %w", err)
+	// Step 2: External zip command, unless compression is explicitly disabled
+	uploadPath := zipPath
+	uploadName := fmt.Sprintf("%s%s%s.zip", baseTableName, ZIPFilenameSeparator, dateStr)
+	skipCompression := isCompressionDisabled(config.CompressionType)
+
+	if skipCompression {
+		uploadPath = outputPath
+		uploadName = filepath.Base(outputPath)
+		logrus.Infof("[BackupExecutor] ⏭️  Step 2: Compression disabled, uploading %s as-is", uploadName)
+	} else {
+		logrus.Infof("[BackupExecutor] 🗜️ Step 2: External zip compression")
+		if err := e.executeExternalZip(ctx, tempDir, outputPath, zipPath); err != nil {
+			return fmt.Errorf("external zip failed: %w", err)
+		}
+		e.logMemoryUsage("AFTER_ZIP")
 	}
 
-	e.logMemoryUsage("AFTER_ZIP")
-
 	// Step 3: External GCS upload
-	zipFileName := fmt.Sprintf("%s%s%s.zip", baseTableName, ZIPFilenameSeparator, dateStr)
-	gcsPath := fmt.Sprintf("%s/%s", config.Destination.GCSPath, zipFileName)
+	gcsPath := fmt.Sprintf("%s/%s", config.Destination.GCSPath, uploadName)
 	logrus.Infof("[BackupExecutor] ☁️ Step 3: External GCS upload")
-	if err := e.executeExternalGCSUpload(ctx, zipPath, gcsPath); err != nil {
+	if err := e.executeExternalGCSUpload(ctx, uploadPath, gcsPath); err != nil {
 		return fmt.Errorf("external GCS upload failed: %w", err)
 	}
 
@@ -91,10 +99,12 @@ func (e *BackupExecutor) executeExternalMySQLBackupSimple(ctx context.Context, c
 		logrus.Debugf("[BackupExecutor] 🗑️  Cleaned up output file: %s", outputPath)
 	}
 
-	if err := os.Remove(zipPath); err != nil {
-		logrus.Warnf("[BackupExecutor] Failed to remove ZIP file %s: %v", zipPath, err)
-	} else {
-		logrus.Debugf("[BackupExecutor] 🗑️  Cleaned up ZIP file: %s", zipPath)
+	if !skipCompression {
+		if err := os.Remove(zipPath); err != nil {
+			logrus.Warnf("[BackupExecutor] Failed to remove ZIP file %s: %v", zipPath, err)
+		} else {
+			logrus.Debugf("[BackupExecutor] 🗑️  Cleaned up ZIP file: %s", zipPath)
+		}
 	}
 
 	logrus.Infof("[BackupExecutor] ✅ MySQL backup workflow completed for table: %s", table)
@@ -481,18 +491,27 @@ func (e *BackupExecutor) exportMySQLMergedTables(ctx context.Context, connection
 
 	e.logMemoryUsage("AFTER_MYSQL_MERGE")
 
-	// Step 2: External zip command
-	logrus.Infof("[BackupExecutor] 🗜️ Step 2: External zip compression")
-	if err := e.executeExternalZip(ctx, tempDir, mergedFilePath, zipPath); err != nil {
-		return fmt.Errorf("external zip failed: %w", err)
+	// Step 2: External zip command, unless compression is explicitly disabled
+	uploadPath := zipPath
+	uploadName := zipFileName
+	skipCompression := isCompressionDisabled(config.CompressionType)
+
+	if skipCompression {
+		uploadPath = mergedFilePath
+		uploadName = fileName
+		logrus.Infof("[BackupExecutor] ⏭️  Step 2: Compression disabled, uploading %s as-is", uploadName)
+	} else {
+		logrus.Infof("[BackupExecutor] 🗜️ Step 2: External zip compression")
+		if err := e.executeExternalZip(ctx, tempDir, mergedFilePath, zipPath); err != nil {
+			return fmt.Errorf("external zip failed: %w", err)
+		}
+		e.logMemoryUsage("AFTER_ZIP")
 	}
 
-	e.logMemoryUsage("AFTER_ZIP")
-
 	// Step 3: External GCS upload
-	gcsPath := fmt.Sprintf("%s/%s", config.Destination.GCSPath, zipFileName)
+	gcsPath := fmt.Sprintf("%s/%s", config.Destination.GCSPath, uploadName)
 	logrus.Infof("[BackupExecutor] ☁️ Step 3: External GCS upload")
-	if err := e.executeExternalGCSUpload(ctx, zipPath, gcsPath); err != nil {
+	if err := e.executeExternalGCSUpload(ctx, uploadPath, gcsPath); err != nil {
 		return fmt.Errorf("external GCS upload failed: %w", err)
 	}
 
@@ -505,10 +524,12 @@ func (e *BackupExecutor) exportMySQLMergedTables(ctx context.Context, connection
 		logrus.Debugf("[BackupExecutor] 🗑️  Cleaned up merged file: %s", mergedFilePath)
 	}
 
-	if err := os.Remove(zipPath); err != nil {
-		logrus.Warnf("[BackupExecutor] Failed to remove ZIP file %s: %v", zipPath, err)
-	} else {
-		logrus.Debugf("[BackupExecutor] 🗑️  Cleaned up ZIP file: %s", zipPath)
+	if !skipCompression {
+		if err := os.Remove(zipPath); err != nil {
+			logrus.Warnf("[BackupExecutor] Failed to remove ZIP file %s: %v", zipPath, err)
+		} else {
+			logrus.Debugf("[BackupExecutor] 🗑️  Cleaned up ZIP file: %s", zipPath)
+		}
 	}
 
 	logrus.Infof("[BackupExecutor] ✅ MySQL multi-table merge backup completed successfully for %d tables", len(tables))
@@ -600,6 +621,13 @@ func buildMySQLConnectionString(url, username, password string) (host, port, use
 	user = username
 	pass = password
 	return
+}
+
+// isCompressionDisabled reports whether the backup output should be uploaded
+// uncompressed. Anything other than an explicit "none" keeps the historical
+// behaviour of zipping, so existing tasks are unaffected.
+func isCompressionDisabled(compressionType string) bool {
+	return strings.EqualFold(strings.TrimSpace(compressionType), "none")
 }
 
 // maskMySQLPassword masks MySQL password in command arguments
