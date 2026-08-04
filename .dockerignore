@@ -1,0 +1,13 @@
+# The UI is delivered as ui/dist.zip and unpacked during the build. A locally
+# extracted ui/dist must not be copied in: unzip -o only overwrites matching
+# names, so stale content-hashed chunks would survive into the image.
+ui/dist
+
+# Build output and local state, rebuilt inside the image
+sync
+sync.db-wal
+sync.db-shm
+
+# Not needed to build, and keeps credentials out of the build context
+.git
+docs
