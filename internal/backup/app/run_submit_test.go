@@ -72,7 +72,7 @@ func TestSubmitRunRegistersARunImmediately(t *testing.T) {
 	if !strings.HasPrefix(taskID, "backup_7_") {
 		t.Errorf("taskID = %q, want a backup_7_ prefix", taskID)
 	}
-	run, ok := LookupRun(taskID)
+	run, ok := snapshotRun(t, taskID)
 	if !ok {
 		t.Fatal("the run was not registered")
 	}
@@ -116,7 +116,7 @@ func TestABackgroundRunOnAMissingJobFails(t *testing.T) {
 
 	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
-		if run, ok := LookupRun(taskID); ok && domain.IsTerminal(run.Status) {
+		if run, ok := snapshotRun(t, taskID); ok && domain.IsTerminal(run.Status) {
 			if run.Status != domain.RunFailed {
 				t.Fatalf("Status = %q for a job that does not exist, want %q",
 					run.Status, domain.RunFailed)
@@ -145,7 +145,7 @@ func TestABackgroundRunFailsWhenTheDatabaseCannotBeOpened(t *testing.T) {
 
 	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
-		if run, ok := LookupRun(taskID); ok && run.Status == domain.RunFailed {
+		if run, ok := snapshotRun(t, taskID); ok && run.Status == domain.RunFailed {
 			if run.Message != "Failed to open database" {
 				t.Errorf("Message = %q, want %q", run.Message, "Failed to open database")
 			}
@@ -176,4 +176,22 @@ func TestTwoSubmissionsInTheSameSecondCollide(t *testing.T) {
 		t.Fatalf("the register holds %d runs for two submissions with the same id, "+
 			"want 1 — collisions appear to be handled now, so assert that instead", n)
 	}
+}
+
+// snapshotRun copies a recorded run while holding the register's own lock.
+//
+// LookupRun hands back the live *domain.Run that the background goroutine keeps
+// mutating, and Run has no synchronisation of its own, so reading its fields
+// after LookupRun returns is a data race — one production shares (T-214). This
+// helper reaches for runsLock directly, which a test in this package can do and
+// an HTTP handler cannot.
+func snapshotRun(t *testing.T, taskID string) (domain.Run, bool) {
+	t.Helper()
+
+	runsLock.Lock()
+	defer runsLock.Unlock()
+	if run, ok := runs[taskID]; ok {
+		return *run, true
+	}
+	return domain.Run{}, false
 }
