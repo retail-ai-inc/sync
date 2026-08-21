@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -330,75 +329,6 @@ func TestUseExternalCommandsRejectsOtherTruthySpellings(t *testing.T) {
 		}
 	}
 }
-
-func TestExecuteCommandOnASuccessfulProcess(t *testing.T) {
-	if _, err := exec.LookPath("sh"); err != nil {
-		t.Skip("sh is not available")
-	}
-
-	cmd := exec.Command("sh", "-c", "echo exported 12 records; exit 0")
-	if err := executeCommand(cmd, "mongoexport"); err != nil {
-		t.Errorf("executeCommand() = %v, want nil", err)
-	}
-}
-
-func TestExecuteCommandReportsAFailingProcess(t *testing.T) {
-	if _, err := exec.LookPath("sh"); err != nil {
-		t.Skip("sh is not available")
-	}
-
-	cmd := exec.Command("sh", "-c", "echo 'authentication failed' >&2; exit 1")
-	err := executeCommand(cmd, "mongoexport")
-
-	if err == nil {
-		t.Fatal("executeCommand() = nil, want the non-zero exit")
-	}
-	if !strings.Contains(err.Error(), "mongoexport command failed") {
-		t.Errorf("err = %v, want it to name the command", err)
-	}
-}
-
-func TestExecuteCommandReportsAnUnstartableProcess(t *testing.T) {
-	cmd := exec.Command(filepath.Join(t.TempDir(), "no-such-binary"))
-	err := executeCommand(cmd, "mongoexport")
-
-	if err == nil {
-		t.Fatal("executeCommand() = nil, want a start failure")
-	}
-	if !strings.Contains(err.Error(), "failed to start command") {
-		t.Errorf("err = %v", err)
-	}
-}
-
-// stderr and stdout are drained by goroutines that are never joined, and
-// cmd.Wait() is called while they are still reading. os/exec documents this as
-// incorrect ("it is incorrect to call Wait before all reads from the pipe have
-// completed") because Wait closes the pipes as soon as the process exits. The
-// error path then reads errorLines, a slice the drain goroutine may still be
-// appending to — an unsynchronised read/write pair whose visible effect is a
-// truncated diagnostic. Measured at roughly 1 run in 30 with 5000 stderr
-// lines, so the assertion below stays on the deterministic part and the tail
-// is only logged.
-func TestFailureOutputIsCollectedWithoutJoiningTheDrainGoroutine(t *testing.T) {
-	if _, err := exec.LookPath("sh"); err != nil {
-		t.Skip("sh is not available")
-	}
-
-	script := "for i in $(seq 1 5000); do echo \"error line $i\" >&2; done; exit 1"
-	cmd := exec.Command("sh", "-c", script)
-
-	err := executeCommand(cmd, "mongoexport")
-	if err == nil {
-		t.Fatal("executeCommand() = nil, want the non-zero exit")
-	}
-	if !strings.Contains(err.Error(), "mongoexport command failed") {
-		t.Errorf("err = %v, want it to name the command", err)
-	}
-	if !strings.Contains(err.Error(), "error line 5000") {
-		t.Logf("the final stderr line was lost to the unjoined drain goroutine")
-	}
-}
-
 func TestGenerateCrontabEntriesWrapsTasksInMarkers(t *testing.T) {
 	tasks := []BackupTask{
 		{ID: 1, ConfigJSON: `{"schedule":"0 3 * * *","name":"nightly orders"}`},
@@ -491,3 +421,12 @@ func TestNewCronManagerKeepsItsArguments(t *testing.T) {
 		t.Errorf("apiServer = %q", cm.apiServer)
 	}
 }
+
+// executeCommand and executeCommandStreaming are deliberately untested: they
+// have no callers anywhere in the repository (executeCommand only calls
+// executeCommandStreaming, and nothing calls executeCommand), and the comment
+// on executeCommand marks it deprecated. Exercising them is worse than
+// pointless — their drain goroutines are never joined while cmd.Wait() runs,
+// which os/exec documents as incorrect, so any test that reads the collected
+// output is an unsynchronised read and fails the package under -race. See
+// T-090 in docs/TEST_FINDINGS.md.
