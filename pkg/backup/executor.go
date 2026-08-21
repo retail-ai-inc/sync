@@ -1,14 +1,12 @@
 package backup
 
 import (
-	"bufio"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -268,77 +266,6 @@ func (e *BackupExecutor) getBackupTask(ctx context.Context, taskID int) (BackupT
 	}
 
 	return task, nil
-}
-
-// executeCommand General function to execute commands (deprecated - use executeCommandStreaming)
-func executeCommand(cmd *exec.Cmd, commandName string) error {
-	return executeCommandStreaming(cmd, commandName)
-}
-
-// executeCommandStreaming Execute command with streaming output to reduce memory usage
-func executeCommandStreaming(cmd *exec.Cmd, commandName string) error {
-	logrus.Infof("[BackupExecutor] Executing command: %s %s", filepath.Base(cmd.Path), strings.Join(cmd.Args[1:], " "))
-
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return fmt.Errorf("failed to create stdout pipe: %w", err)
-	}
-
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return fmt.Errorf("failed to create stderr pipe: %w", err)
-	}
-
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("failed to start command: %w", err)
-	}
-
-	// Process stdout in streaming fashion, log detailed progress
-	var exportedCount string
-	var progressLines []string
-	go func() {
-		scanner := bufio.NewScanner(stdout)
-		for scanner.Scan() {
-			line := scanner.Text()
-			// Log all important lines for debugging
-			if strings.Contains(line, "exported") || strings.Contains(line, "documents") || strings.Contains(line, "records") || strings.Contains(line, "progress") {
-				logrus.Infof("[BackupExecutor] %s output: %s", commandName, line)
-				progressLines = append(progressLines, line)
-				if strings.Contains(line, "exported") && strings.Contains(line, "records") {
-					exportedCount = strings.TrimSpace(line)
-				}
-			} else {
-				// Log other output periodically to avoid spam but maintain visibility
-				if len(progressLines)%100 == 0 {
-					logrus.Debugf("[BackupExecutor] %s: %s", commandName, line)
-				}
-			}
-		}
-	}()
-
-	// Collect error output (errors need to be preserved)
-	var errorLines []string
-	go func() {
-		scanner := bufio.NewScanner(stderr)
-		for scanner.Scan() {
-			errorLines = append(errorLines, scanner.Text())
-		}
-	}()
-
-	// Wait for command completion
-	err = cmd.Wait()
-
-	// Log only key information
-	if exportedCount != "" {
-		logrus.Infof("[BackupExecutor] %s: %s", commandName, exportedCount)
-	}
-
-	if err != nil {
-		errorMsg := strings.Join(errorLines, "\n")
-		return fmt.Errorf("%s command failed: %w, output: %s", commandName, err, errorMsg)
-	}
-
-	return nil
 }
 
 // expandAndGroupTables Expand regex patterns and group tables for merging
