@@ -1,4 +1,4 @@
-package identity
+package infra
 
 import (
 	"database/sql"
@@ -9,6 +9,7 @@ import (
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
+	"github.com/retail-ai-inc/sync/internal/identity/domain"
 )
 
 // useTempDB points the package at a throwaway SQLite file carrying the same
@@ -296,7 +297,7 @@ func TestSaveGoogleUserCreatesAndUpdates(t *testing.T) {
 	})
 }
 
-// TestGeneratedGooglePasswordIsPredictable records that generateRandomPassword
+// TestGeneratedGooglePasswordIsPredictable records that domain.GenerateRandomPassword
 // is not random. It returns "google_" followed by the current time formatted to
 // the second, so the credential for an account created by Google sign-in can be
 // reconstructed by anyone who knows roughly when it was created — a few hundred
@@ -306,19 +307,19 @@ func TestSaveGoogleUserCreatesAndUpdates(t *testing.T) {
 // including ones created through Google, so a predictable password is a way
 // into the account without going through Google at all.
 func TestGeneratedGooglePasswordIsPredictable(t *testing.T) {
-	got := generateRandomPassword()
+	got := domain.GenerateRandomPassword()
 
 	if !regexp.MustCompile(`^google_\d{14}$`).MatchString(got) {
-		t.Fatalf("generateRandomPassword produced %q; the scheme may have changed, "+
+		t.Fatalf("domain.GenerateRandomPassword produced %q; the scheme may have changed, "+
 			"so assert the new one instead", got)
 	}
 	// Reconstructing it needs nothing but a clock.
 	if want := "google_" + time.Now().Format("20060102150405"); got != want {
-		t.Errorf("generateRandomPassword = %q, and the current second gives %q; "+
+		t.Errorf("domain.GenerateRandomPassword = %q, and the current second gives %q; "+
 			"they normally match", got, want)
 	}
 	// Two calls inside one second are identical, which is the whole problem.
-	if second := generateRandomPassword(); second != got {
+	if second := domain.GenerateRandomPassword(); second != got {
 		t.Logf("the two calls straddled a second boundary (%q vs %q)", got, second)
 	}
 }

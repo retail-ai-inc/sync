@@ -6,7 +6,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/retail-ai-inc/sync/internal/backup"
 	"github.com/retail-ai-inc/sync/internal/dbinspect"
-	"github.com/retail-ai-inc/sync/internal/identity"
+	identityhttp "github.com/retail-ai-inc/sync/internal/identity/http"
 	monitoringhttp "github.com/retail-ai-inc/sync/internal/monitoring/http"
 	"github.com/retail-ai-inc/sync/internal/replication"
 )
@@ -16,9 +16,9 @@ func NewRouter() http.Handler {
 	r := chi.NewRouter()
 
 	// 1) Auth related
-	r.Post("/login", identity.AuthLoginHandler)                 // POST /api/login
-	r.Get("/currentUser", identity.AuthCurrentUserHandler)      // GET /api/currentUser
-	r.Post("/logout", identity.AuthLogoutHandler)               // POST /api/logout
+	r.Post("/login", identityhttp.AuthLoginHandler)             // POST /api/login
+	r.Get("/currentUser", identityhttp.AuthCurrentUserHandler)  // GET /api/currentUser
+	r.Post("/logout", identityhttp.AuthLogoutHandler)           // POST /api/logout
 	r.Post("/test-connection", dbinspect.TestConnectionHandler) // GET /api/test-connection
 
 	// 2) Monitor
@@ -29,9 +29,9 @@ func NewRouter() http.Handler {
 	r.Get("/changestreams/status", monitoringhttp.ChangeStreamsStatusHandler) // GET /api/changestreams/status
 
 	// 3) api_oauth_test
-	r.Get("/oauth/{provider}/config", identity.GetOAuthConfigHandler)    // GET /api/oauth/{provider}/config
-	r.Put("/oauth/{provider}/config", identity.UpdateOAuthConfigHandler) // PUT /oauth/{provider}/config
-	r.Post("/login/google/callback", identity.AuthGoogleCallbackHandler)
+	r.Get("/oauth/{provider}/config", identityhttp.GetOAuthConfigHandler)    // GET /api/oauth/{provider}/config
+	r.Put("/oauth/{provider}/config", identityhttp.UpdateOAuthConfigHandler) // PUT /oauth/{provider}/config
+	r.Post("/login/google/callback", identityhttp.AuthGoogleCallbackHandler)
 
 	// 4) Sync related
 	r.Get("/sync", replication.SyncListHandler)             // GET /api/sync
@@ -42,12 +42,12 @@ func NewRouter() http.Handler {
 	r.Delete("/sync/{id}", replication.SyncDeleteHandler)   // DELETE /api/sync/{taskID}
 
 	// 5) User management
-	r.Get("/users", identity.GetUsersHandler)                          // GET /api/users
-	r.Put("/users/access", identity.UpdateUserAccessHandler)           // PUT /api/users/access
-	r.Delete("/users", identity.DeleteUserHandler)                     // DELETE /api/users
-	r.Put("/updatePassword", identity.UpdatePasswordHandler)           // PUT /api/updatePassword
-	r.Put("/updateAdminPassword", identity.UpdateAdminPasswordHandler) // PUT /api/updateAdminPassword
-	r.Get("/getAdminToken", identity.GetAdminTokenHandler)             // GET /api/getAdminToken
+	r.Get("/users", identityhttp.GetUsersHandler)                          // GET /api/users
+	r.Put("/users/access", identityhttp.UpdateUserAccessHandler)           // PUT /api/users/access
+	r.Delete("/users", identityhttp.DeleteUserHandler)                     // DELETE /api/users
+	r.Put("/updatePassword", identityhttp.UpdatePasswordHandler)           // PUT /api/updatePassword
+	r.Put("/updateAdminPassword", identityhttp.UpdateAdminPasswordHandler) // PUT /api/updateAdminPassword
+	r.Get("/getAdminToken", identityhttp.GetAdminTokenHandler)             // GET /api/getAdminToken
 
 	// 6) Schema related
 	r.Post("/tables/schema", dbinspect.GetTableSchemaHandler)

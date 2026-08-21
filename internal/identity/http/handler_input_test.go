@@ -1,4 +1,4 @@
-package identity
+package identityhttp
 
 import (
 	"encoding/json"
@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	_ "github.com/mattn/go-sqlite3"
+	"github.com/retail-ai-inc/sync/internal/identity/domain"
 )
 
 // postJSON runs a handler over a request body and returns the recorder.
@@ -22,16 +23,16 @@ func postJSON(h http.HandlerFunc, method, path, body string) *httptest.ResponseR
 	return rec
 }
 
-// resetSessionGlobals restores the package-level session variables, which
-// several handlers both read and write.
+// resetSessionGlobals restores the process-wide session, which several
+// handlers both read and write.
 func resetSessionGlobals(t *testing.T) {
 	t.Helper()
 
-	prevAccess, prevUser := access, currentUsername
+	prevAccess, prevUser := domain.Current().Access(), domain.Current().Username()
 	t.Cleanup(func() {
-		access, currentUsername = prevAccess, prevUser
+		domain.Current().Authenticate(prevUser, prevAccess)
 	})
-	access, currentUsername = "", ""
+	domain.Current().Clear()
 }
 
 func TestHandlersRejectMalformedJSON(t *testing.T) {
@@ -163,7 +164,7 @@ func TestUpdateAdminPasswordRejectsANonAdminToken(t *testing.T) {
 	resetSessionGlobals(t)
 
 	req := httptest.NewRequest(http.MethodPut, "/updateAdminPassword", strings.NewReader(`{"newPassword":"x"}`))
-	req.Header.Set("Authorization", "Bearer "+GenerateUserToken("bob", "guest"))
+	req.Header.Set("Authorization", "Bearer "+domain.GenerateUserToken("bob", "guest"))
 	rec := httptest.NewRecorder()
 
 	UpdateAdminPasswordHandler(rec, req)
@@ -206,7 +207,7 @@ func TestUpdateOAuthConfigRequiresAnAdminToken(t *testing.T) {
 
 	t.Run("guest token", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPut, "/oauth/google/config", strings.NewReader(`{}`))
-		req.Header.Set("Authorization", "Bearer "+GenerateUserToken("bob", "guest"))
+		req.Header.Set("Authorization", "Bearer "+domain.GenerateUserToken("bob", "guest"))
 		rec := httptest.NewRecorder()
 
 		UpdateOAuthConfigHandler(rec, req)
@@ -224,7 +225,7 @@ func TestUpdateOAuthConfigRequiresAnAdminToken(t *testing.T) {
 func TestTheSessionIsProcessGlobal(t *testing.T) {
 	resetSessionGlobals(t)
 
-	access, currentUsername = "admin", "admin"
+	domain.Current().Authenticate("admin", "admin")
 
 	// Nobody presents a credential, yet the admin-only handler answers.
 	rec := httptest.NewRecorder()
@@ -240,7 +241,7 @@ func TestTheSessionIsProcessGlobal(t *testing.T) {
 	}
 	data, _ := resp["data"].(map[string]interface{})
 	token, _ := data["accessToken"].(string)
-	if !ValidateAdminToken(token) {
+	if !domain.ValidateAdminToken(token) {
 		t.Fatalf("no admin token was issued to an unauthenticated caller (body: %s)", rec.Body.String())
 	}
 }
@@ -250,13 +251,14 @@ func TestTheSessionIsProcessGlobal(t *testing.T) {
 func TestLogoutClearsTheSessionForEveryone(t *testing.T) {
 	resetSessionGlobals(t)
 
-	access, currentUsername = "admin", "admin"
+	domain.Current().Authenticate("admin", "admin")
 
 	rec := httptest.NewRecorder()
 	AuthLogoutHandler(rec, httptest.NewRequest(http.MethodPost, "/logout", nil))
 
-	if access != "" || currentUsername != "" {
-		t.Fatalf("access = %q, currentUsername = %q — logout appears to be per-session now", access, currentUsername)
+	if domain.Current().Access() != "" || domain.Current().Username() != "" {
+		t.Fatalf("access = %q, username = %q — logout appears to be per-session now",
+			domain.Current().Access(), domain.Current().Username())
 	}
 
 	rec = httptest.NewRecorder()

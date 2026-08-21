@@ -1,4 +1,4 @@
-package identity
+package infra
 
 import (
 	"database/sql"
@@ -6,15 +6,10 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/retail-ai-inc/sync/internal/platform/sqlite"
-
 	_ "github.com/mattn/go-sqlite3" // SQLite driver
+	"github.com/retail-ai-inc/sync/internal/identity/domain"
+	"github.com/retail-ai-inc/sync/internal/platform/sqlite"
 )
-
-// openLocalDB already defined in sync_handler.go
-// No need to redefine here
-
-// Ensure user table exists and has initial admin account
 
 // GetUserByUsername gets user information by username
 func GetUserByUsername(username string) (map[string]interface{}, error) {
@@ -159,7 +154,7 @@ func SaveGoogleUser(email, name string) (string, string, error) {
 		}
 	} else {
 		// Create new user with a random password
-		randomPassword := generateRandomPassword()
+		randomPassword := domain.GenerateRandomPassword()
 
 		// Generate a default userId
 		defaultUserId := "g_" + fmt.Sprintf("%d", time.Now().Unix())
@@ -181,13 +176,6 @@ func SaveGoogleUser(email, name string) (string, string, error) {
 	}
 
 	return username, access, nil
-}
-
-// generateRandomPassword generates a random password for new Google users
-func generateRandomPassword() string {
-	// Simple implementation that generates a timestamp-based password
-	// In production, use a secure random generator
-	return "google_" + time.Now().Format("20060102150405")
 }
 
 // GetAllUsers gets all user information

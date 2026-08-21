@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/retail-ai-inc/sync/internal/identity"
+	identityhttp "github.com/retail-ai-inc/sync/internal/identity/http"
 )
 
 // Fixtures shared by this package's handler tests. They are duplicated per
@@ -147,7 +147,7 @@ func isolateCrontab(t *testing.T) {
 func resetSessionGlobals(t *testing.T) {
 	t.Helper()
 	rec := httptest.NewRecorder()
-	identity.AuthLogoutHandler(rec, httptest.NewRequest(http.MethodPost, "/logout", nil))
+	identityhttp.AuthLogoutHandler(rec, httptest.NewRequest(http.MethodPost, "/logout", nil))
 }
 
 // useTempDB points the package at a throwaway SQLite file carrying the same

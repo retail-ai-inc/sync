@@ -1,13 +1,14 @@
-package identity
+package domain
 
 import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
-	"fmt"
 	"os"
 	"strings"
 	"time"
+
+	_ "github.com/mattn/go-sqlite3" // SQLite driver
 )
 
 var (
@@ -64,31 +65,4 @@ func ExtractTokenFromHeader(authHeader string) string {
 	}
 	// If no Bearer prefix, return entire value
 	return authHeader
-}
-
-// ValidateUserToken validates if user token is valid and returns username and access level
-func ValidateUserToken(token string) (bool, string, string) {
-	// Get all users from database
-	users, err := GetAllUsers()
-	if err != nil {
-		fmt.Println("Error getting users:", err)
-		return false, "", ""
-	}
-
-	// Check if token matches any user's valid token for today
-	for _, user := range users {
-		username := user["username"].(string)
-		accessLevel := user["access"].(string)
-
-		// Generate today's token for this user
-		expectedToken := GenerateUserToken(username, accessLevel)
-
-		// Compare tokens
-		if hmac.Equal([]byte(token), []byte(expectedToken)) {
-			return true, username, accessLevel
-		}
-	}
-
-	fmt.Println("No matching token found for any user") // Debug
-	return false, "", ""
 }

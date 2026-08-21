@@ -8,7 +8,7 @@ import (
 
 	"github.com/retail-ai-inc/sync/internal/backup"
 	"github.com/retail-ai-inc/sync/internal/dbinspect"
-	"github.com/retail-ai-inc/sync/internal/identity"
+	identityhttp "github.com/retail-ai-inc/sync/internal/identity/http"
 	monitoringhttp "github.com/retail-ai-inc/sync/internal/monitoring/http"
 	"github.com/retail-ai-inc/sync/internal/replication"
 )
@@ -116,10 +116,10 @@ func TestUserManagementIsReachableWithoutCredentials(t *testing.T) {
 		handler http.HandlerFunc
 		req     *http.Request
 	}{
-		{"GET /api/users", identity.GetUsersHandler, jsonRequest(http.MethodGet, "/users", "")},
-		{"PUT /api/users/access", identity.UpdateUserAccessHandler, jsonRequest(http.MethodPut, "/users/access",
+		{"GET /api/users", identityhttp.GetUsersHandler, jsonRequest(http.MethodGet, "/users", "")},
+		{"PUT /api/users/access", identityhttp.UpdateUserAccessHandler, jsonRequest(http.MethodPut, "/users/access",
 			`{"userId":"u1","access":"admin"}`)},
-		{"DELETE /api/users", identity.DeleteUserHandler, jsonRequest(http.MethodDelete, "/users", `{"userId":"u1"}`)},
+		{"DELETE /api/users", identityhttp.DeleteUserHandler, jsonRequest(http.MethodDelete, "/users", `{"userId":"u1"}`)},
 	}
 
 	for _, tc := range cases {
@@ -140,7 +140,7 @@ func TestTheUserDirectoryIsPubliclyReadable(t *testing.T) {
 	resetSessionGlobals(t)
 
 	rec := httptest.NewRecorder()
-	identity.GetUsersHandler(rec, jsonRequest(http.MethodGet, "/users", ""))
+	identityhttp.GetUsersHandler(rec, jsonRequest(http.MethodGet, "/users", ""))
 
 	if rec.Code == http.StatusUnauthorized || rec.Code == http.StatusForbidden {
 		t.Fatalf("GET /api/users now returns %d — replace this with the intended authorization assertion", rec.Code)
@@ -162,7 +162,7 @@ func TestTheUserDirectoryIsPubliclyReadable(t *testing.T) {
 func TestAnUnauthenticatedCallerCanGrantAdmin(t *testing.T) {
 	conn := useTempDB(t)
 	insertUser(t, conn, "bob", "pw", "Bob", "guest")
-	// identity.UpdateUserAccessHandler looks users up by the userId column.
+	// identityhttp.UpdateUserAccessHandler looks users up by the userId column.
 	const userID = "google_20260821000000"
 	if _, err := conn.Exec("UPDATE users SET userId = ? WHERE username = 'bob'", userID); err != nil {
 		t.Fatalf("set userId: %v", err)
@@ -170,7 +170,7 @@ func TestAnUnauthenticatedCallerCanGrantAdmin(t *testing.T) {
 	resetSessionGlobals(t)
 
 	rec := httptest.NewRecorder()
-	identity.UpdateUserAccessHandler(rec, jsonRequest(http.MethodPut, "/users/access",
+	identityhttp.UpdateUserAccessHandler(rec, jsonRequest(http.MethodPut, "/users/access",
 		`{"userId":"`+userID+`","access":"admin"}`))
 
 	if rec.Code == http.StatusUnauthorized || rec.Code == http.StatusForbidden {
@@ -283,7 +283,7 @@ func TestOAuthConfigReadIsOpenWhileWriteIsGated(t *testing.T) {
 
 	// Read: no credentials needed. The provider must come from the query
 	// string, not the path — see TestTheOAuthPathParameterIsIgnored.
-	rec := unauthenticated(t, "GET /api/oauth/{provider}/config", identity.GetOAuthConfigHandler,
+	rec := unauthenticated(t, "GET /api/oauth/{provider}/config", identityhttp.GetOAuthConfigHandler,
 		jsonRequest(http.MethodGet, "/oauth/google/config?provider=google", ""), nil)
 	if !strings.Contains(rec.Body.String(), "cid") {
 		t.Errorf("the config was not returned: %s", rec.Body.String())
@@ -292,7 +292,7 @@ func TestOAuthConfigReadIsOpenWhileWriteIsGated(t *testing.T) {
 	// Write: admin token required, so the asymmetry is real.
 	resetSessionGlobals(t)
 	wrec := httptest.NewRecorder()
-	identity.UpdateOAuthConfigHandler(wrec, jsonRequest(http.MethodPut, "/oauth/google/config?provider=google", `{}`))
+	identityhttp.UpdateOAuthConfigHandler(wrec, jsonRequest(http.MethodPut, "/oauth/google/config?provider=google", `{}`))
 	if wrec.Code != http.StatusUnauthorized {
 		t.Fatalf("PUT returned %d, want 401 — the two halves appear to agree now; assert the shared policy instead", wrec.Code)
 	}
@@ -310,7 +310,7 @@ func TestTheOAuthClientSecretIsPubliclyReadable(t *testing.T) {
 	resetSessionGlobals(t)
 
 	rec := httptest.NewRecorder()
-	identity.GetOAuthConfigHandler(rec, jsonRequest(http.MethodGet, "/oauth/google/config?provider=google", ""))
+	identityhttp.GetOAuthConfigHandler(rec, jsonRequest(http.MethodGet, "/oauth/google/config?provider=google", ""))
 
 	if !strings.Contains(rec.Body.String(), "the-client-secret") {
 		t.Fatalf("the client secret is no longer served — it appears to be redacted; assert the redaction instead (body: %s)", rec.Body.String())
