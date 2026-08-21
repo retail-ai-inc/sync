@@ -2,10 +2,12 @@ package app
 
 import (
 	"database/sql"
+	"os"
 	"path/filepath"
 	"testing"
 
 	_ "github.com/mattn/go-sqlite3"
+	"github.com/retail-ai-inc/sync/internal/identity/infra"
 )
 
 // useTempDB points the package at a throwaway SQLite file carrying the same
@@ -68,4 +70,58 @@ func insertUser(t *testing.T, db *sql.DB, username, password, name, access strin
 func isolateCrontab(t *testing.T) {
 	t.Helper()
 	t.Setenv("PATH", t.TempDir())
+}
+
+// emptyIdentityDB points SYNC_DB_PATH at a file with no tables at all, so a
+// store call fails on the query rather than on the connection.
+func emptyIdentityDB(t *testing.T) {
+	t.Helper()
+	isolateCrontab(t)
+	t.Setenv("SYNC_DB_PATH", filepath.Join(t.TempDir(), "empty.db"))
+}
+
+// unopenableIdentityDB points SYNC_DB_PATH at a path whose parent is a regular
+// file, so opening the database fails outright.
+func unopenableIdentityDB(t *testing.T) {
+	t.Helper()
+	isolateCrontab(t)
+
+	blocker := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write blocker: %v", err)
+	}
+	t.Setenv("SYNC_DB_PATH", filepath.Join(blocker, "sub", "sync.db"))
+}
+
+// infraValidateUser and infraUpdateUserPassword reach the store directly, so a
+// test can check what a use case left behind without going through it again.
+func infraValidateUser(username, password string) (bool, string, error) {
+	return infra.ValidateUser(username, password)
+}
+
+func infraUpdateUserPassword(username, password string) error {
+	return infra.UpdateUserPassword(username, password)
+}
+
+// currentDB opens the database SYNC_DB_PATH currently names, so a helper can
+// seed a row into the file a fixture already created.
+func currentDB(t *testing.T) *sql.DB {
+	t.Helper()
+
+	db, err := sql.Open("sqlite3", os.Getenv("SYNC_DB_PATH"))
+	if err != nil {
+		t.Fatalf("open current sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return db
+}
+
+// infraSaveGoogleUser and infraGetUserByUsername reach the store directly, so a
+// test can exercise the half of the Google flow that does not leave the machine.
+func infraSaveGoogleUser(email, name string) (string, string, error) {
+	return infra.SaveGoogleUser(email, name)
+}
+
+func infraGetUserByUsername(username string) (map[string]interface{}, error) {
+	return infra.GetUserByUsername(username)
 }
