@@ -60,6 +60,12 @@ cloudbuild.yaml
 docker-compose-demo.yml
 sync.db-wal
 sync.db-shm
+# The SQLite file belongs at the repository root only; a copy anywhere else
+# means the SYNC_DB_PATH fallback in internal/platform/db/init.go resolved to
+# the wrong directory.
+*/sync.db
+*/*/sync.db
+*/*/*/sync.db
 CLAUDE.md
 .cursorrules
 .cursor
