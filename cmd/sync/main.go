@@ -15,10 +15,10 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/retail-ai-inc/sync/internal/monitoring"
 	"github.com/retail-ai-inc/sync/internal/platform/config"
+	"github.com/retail-ai-inc/sync/internal/platform/httpapi"
 	"github.com/retail-ai-inc/sync/internal/platform/logger"
 	"github.com/retail-ai-inc/sync/internal/platform/webui"
 	"github.com/retail-ai-inc/sync/internal/replication"
-	"github.com/retail-ai-inc/sync/pkg/api"
 	"github.com/sirupsen/logrus"
 )
 
@@ -45,7 +45,7 @@ func main() {
 	}()
 
 	router := chi.NewRouter()
-	router.Mount("/api", api.NewRouter())
+	router.Mount("/api", httpapi.NewRouter())
 
 	router.Get("/*", func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path

@@ -29,8 +29,10 @@ func initDBPath() {
 		return
 	}
 
-	// Build the path to the project root directory (two levels up from pkg/utils)
-	rootDir := filepath.Join(filepath.Dir(filename), "..", "..")
+	// Build the path to the project root directory (three levels up from
+	// internal/platform/db). Keep this in step with the file's location: the
+	// fallback is a build-time source path, so moving this file moves the path.
+	rootDir := filepath.Join(filepath.Dir(filename), "..", "..", "..")
 	absDBPath := filepath.Join(rootDir, "sync.db")
 
 	// Set the absolute path as an environment variable

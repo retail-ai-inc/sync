@@ -35,7 +35,21 @@ func TestTheDBPathFallbackIsABuildTimeSourcePath(t *testing.T) {
 	if !ok {
 		t.Skip("runtime.Caller is unavailable")
 	}
-	want := filepath.Join(filepath.Dir(thisFile), "..", "..", "sync.db")
+	// Resolve the repository root by walking up to the directory holding go.mod
+	// rather than by counting "..", so that moving this package is caught here
+	// instead of silently repointing the fallback at a subdirectory.
+	root := filepath.Dir(thisFile)
+	for {
+		if _, err := os.Stat(filepath.Join(root, "go.mod")); err == nil {
+			break
+		}
+		parent := filepath.Dir(root)
+		if parent == root {
+			t.Skip("no go.mod above the test file")
+		}
+		root = parent
+	}
+	want := filepath.Join(root, "sync.db")
 
 	if got != want {
 		t.Fatalf("SYNC_DB_PATH = %q, want the build-time source path %q — the fallback appears to have changed; assert the new one instead", got, want)
