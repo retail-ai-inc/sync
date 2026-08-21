@@ -6,6 +6,7 @@ services:
     restart: always
     environment:
       MYSQL_ROOT_PASSWORD: root
+      MYSQL_ROOT_HOST: '%'
       MYSQL_DATABASE: source_db
     volumes:
       - ./resources/mysql/init.sql:/docker-entrypoint-initdb.d/init.sql
@@ -18,6 +19,7 @@ services:
     restart: always
     environment:
       MYSQL_ROOT_PASSWORD: root
+      MYSQL_ROOT_HOST: '%'
       MYSQL_DATABASE: target_db
     ports:
       - "127.0.0.1:3308:3306"
@@ -27,6 +29,7 @@ services:
     restart: always
     environment:
       MARIADB_ROOT_PASSWORD: root
+      MARIADB_ROOT_HOST: '%'
       MARIADB_DATABASE: source_db
     volumes:
       - ./resources/mariadb/init.sql:/docker-entrypoint-initdb.d/init.sql
@@ -39,6 +42,7 @@ services:
     restart: always
     environment:
       MARIADB_ROOT_PASSWORD: root
+      MARIADB_ROOT_HOST: '%'
       MARIADB_DATABASE: target_db
     ports:
       - "127.0.0.1:3309:3306"
