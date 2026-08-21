@@ -1,0 +1,45 @@
+# Test-only stack. Ports are shifted so this can run alongside whatever already
+# occupies the defaults on the host (a native mongod holds 27017).
+#
+#   mongo  source 27117 (single-node replica set rs0)  target 27118 (standalone)
+#   redis  source 6479  (keyspace notifications on)    target 6480
+#
+# MySQL and MariaDB are not included: the containers from docker-compose.yml are
+# already running and now accept remote connections.
+services:
+  mongo_test_source:
+    image: mongo:6.0
+    container_name: mongo_test_source
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
+    ports:
+      - "127.0.0.1:27117:27017"
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  mongo_test_target:
+    image: mongo:6.0
+    container_name: mongo_test_target
+    ports:
+      - "127.0.0.1:27118:27017"
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  redis_test_source:
+    image: redis:7.0
+    container_name: redis_test_source
+    command: ["redis-server", "--appendonly", "yes", "--notify-keyspace-events", "KEA"]
+    ports:
+      - "127.0.0.1:6479:6379"
+
+  redis_test_target:
+    image: redis:7.0
+    container_name: redis_test_target
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "127.0.0.1:6480:6379"
