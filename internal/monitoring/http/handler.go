@@ -1,4 +1,4 @@
-package monitoring
+package monitoringhttp
 
 import (
 	"database/sql"
@@ -8,10 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/retail-ai-inc/sync/internal/platform/sqlite"
-
 	"github.com/go-chi/chi/v5"
 	"github.com/retail-ai-inc/sync/internal/platform/httpx"
+	"github.com/retail-ai-inc/sync/internal/platform/sqlite"
 	// "github.com/sirupsen/logrus"
 )
 

@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/retail-ai-inc/sync/internal/monitoring"
+	"github.com/retail-ai-inc/sync/internal/monitoring/app"
 	"github.com/retail-ai-inc/sync/internal/platform/config"
 	"github.com/retail-ai-inc/sync/internal/platform/httpapi"
 	"github.com/retail-ai-inc/sync/internal/platform/logging"
@@ -105,7 +105,7 @@ func runSyncTasks(parentCtx context.Context, log *logrus.Logger, cfg *config.Con
 	// Initialize row count monitoring (if enabled)
 	if currentConfig.EnableTableRowCountMonitoring {
 		rowCountMonitorCtx, rowCountMonitorCancel = context.WithCancel(parentCtx)
-		monitoring.StartRowCountMonitoring(rowCountMonitorCtx, currentConfig, log, currentConfig.MonitorInterval)
+		app.StartRowCountMonitoring(rowCountMonitorCtx, currentConfig, log, currentConfig.MonitorInterval)
 	}
 
 	for {
@@ -138,7 +138,7 @@ func runSyncTasks(parentCtx context.Context, log *logrus.Logger, cfg *config.Con
 				// Restart row count monitoring (if enabled)
 				if currentConfig.EnableTableRowCountMonitoring {
 					rowCountMonitorCtx, rowCountMonitorCancel = context.WithCancel(parentCtx)
-					monitoring.StartRowCountMonitoring(rowCountMonitorCtx, currentConfig, log, currentConfig.MonitorInterval)
+					app.StartRowCountMonitoring(rowCountMonitorCtx, currentConfig, log, currentConfig.MonitorInterval)
 				}
 			}
 		}

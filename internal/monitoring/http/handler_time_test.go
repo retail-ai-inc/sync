@@ -1,9 +1,11 @@
-package monitoring
+package monitoringhttp
 
 import (
 	"testing"
 	"time"
 
+	_ "github.com/go-sql-driver/mysql"
+	_ "github.com/mattn/go-sqlite3"
 	"github.com/retail-ai-inc/sync/internal/platform/httpx"
 )
 

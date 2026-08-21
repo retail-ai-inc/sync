@@ -1,4 +1,4 @@
-package monitoring
+package monitoringhttp
 
 import (
 	"context"
@@ -8,11 +8,9 @@ import (
 	"testing"
 
 	"github.com/go-chi/chi/v5"
+	_ "github.com/go-sql-driver/mysql"
+	_ "github.com/mattn/go-sqlite3"
 )
-
-// Fixtures shared by this package's handler tests. They are duplicated per
-// package rather than shared through an importable helper package, because a
-// non-test package holding test code compiles into every build.
 
 // isolateCrontab empties PATH so the `crontab` command cannot be found. The
 // backup handlers call CronManager.SyncCrontab unconditionally, which shells

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/retail-ai-inc/sync/internal/monitoring/notify"
+	"github.com/retail-ai-inc/sync/internal/platform/slack"
 	"go.mongodb.org/mongo-driver/mongo"
 )
 
@@ -116,7 +116,7 @@ func (s *MongoDBSyncer) storeToDeadLetterQueue(failedModels []mongo.WriteModel, 
 
 	// Send Slack notification for dead letter queue storage
 	if s.globalConfig != nil {
-		slackNotifier := notify.NewSlackNotifierFromConfigWithFieldLogger(s.globalConfig, s.logger)
+		slackNotifier := slack.NewSlackNotifierFromConfigWithFieldLogger(s.globalConfig, s.logger)
 		if slackNotifier.IsConfigured() {
 			message := fmt.Sprintf("🚨 MongoDB Operations Failed - Dead Letter Queue\n\nDatabase: %s.%s\nFailed Operations: %d\nTotal Operations: %d\nSuccess Rate: %.1f%%\n\nFile: %s",
 				sourceDB, collectionName, len(failedOps), totalOps,

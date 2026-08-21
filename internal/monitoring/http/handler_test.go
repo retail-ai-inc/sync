@@ -1,4 +1,4 @@
-package monitoring
+package monitoringhttp
 
 import (
 	"database/sql"
@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -94,6 +95,24 @@ func sqlNow(offset time.Duration) string {
 	return time.Now().UTC().Add(offset).Format("2006-01-02 15:04:05")
 }
 
+func metricsFor(t *testing.T, id, rangeStr string) map[string]interface{} {
+	t.Helper()
+
+	url := "/sync/{id}/metrics"
+	if rangeStr != "" {
+		url += "?range=" + rangeStr
+	}
+	rec := httptest.NewRecorder()
+	serveWithURLParams(rec, httptest.NewRequest(http.MethodGet, url, nil),
+		SyncMetricsHandler, map[string]string{"id": id})
+
+	resp := decodeEnvelope(t, rec)
+	if resp["success"] != true {
+		t.Fatalf("success = %v (body: %s)", resp["success"], rec.Body.String())
+	}
+	return resp["data"].(map[string]interface{})
+}
+
 func TestSyncMonitorHandlerReportsTaskStatus(t *testing.T) {
 	conn := useMonitorDB(t)
 	if _, err := conn.Exec(`INSERT INTO sync_tasks (id, enable, config_json) VALUES (1, 1, '{}'), (2, 0, '{}')`); err != nil {
@@ -150,24 +169,6 @@ func TestMonitorMetricsAreHardcoded(t *testing.T) {
 	if data["status"] != "Stopped" {
 		t.Errorf("status = %v, want Stopped", data["status"])
 	}
-}
-
-func metricsFor(t *testing.T, id, rangeStr string) map[string]interface{} {
-	t.Helper()
-
-	url := "/sync/{id}/metrics"
-	if rangeStr != "" {
-		url += "?range=" + rangeStr
-	}
-	rec := httptest.NewRecorder()
-	serveWithURLParams(rec, httptest.NewRequest(http.MethodGet, url, nil),
-		SyncMetricsHandler, map[string]string{"id": id})
-
-	resp := decodeEnvelope(t, rec)
-	if resp["success"] != true {
-		t.Fatalf("success = %v (body: %s)", resp["success"], rec.Body.String())
-	}
-	return resp["data"].(map[string]interface{})
 }
 
 func TestSyncMetricsBuildsThreeSeriesPerRow(t *testing.T) {

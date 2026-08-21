@@ -1,29 +1,20 @@
-package monitoring
+package infra
 
 import (
-	"context"
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
+
+	"github.com/retail-ai-inc/sync/internal/monitoring/domain"
+
+	// "github.com/sirupsen/logrus"
+	"context"
+	"strconv"
 
 	"github.com/sirupsen/logrus"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 )
-
-// CountQuery represents the query conditions to count documents
-type CountQuery struct {
-	Conditions []CountCondition `json:"conditions"`
-}
-
-// CountCondition represents a single condition for counting
-type CountCondition struct {
-	Field    string `json:"field"`
-	Operator string `json:"operator"`
-	Table    string `json:"table"`
-	Value    string `json:"value"`
-}
 
 // QueryCounter handles executing count queries with specific conditions
 type QueryCounter struct {
@@ -56,7 +47,7 @@ func NewQueryCounterWithYesterdaySupport(logger *logrus.Logger, yesterdayStart, 
 }
 
 // CountMongoDBDocuments counts documents in a MongoDB collection with specified conditions
-func (qc *QueryCounter) CountMongoDBDocuments(ctx context.Context, client *mongo.Client, database, collection string, query *CountQuery) (int64, error) {
+func (qc *QueryCounter) CountMongoDBDocuments(ctx context.Context, client *mongo.Client, database, collection string, query *domain.CountQuery) (int64, error) {
 	startTime := time.Now()
 
 	// If no query is provided, use EstimatedDocumentCount

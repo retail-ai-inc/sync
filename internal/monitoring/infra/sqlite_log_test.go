@@ -1,4 +1,4 @@
-package monitoring
+package infra
 
 import (
 	"context"
@@ -7,7 +7,9 @@ import (
 	"testing"
 	"time"
 
+	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/mattn/go-sqlite3"
+	"github.com/retail-ai-inc/sync/internal/monitoring/domain"
 )
 
 // useMonitoringDB points the package at a throwaway SQLite file carrying the
@@ -231,7 +233,7 @@ func TestStoreMonitoringLogSwallowsAMissingTable(t *testing.T) {
 func TestStoreChangeStreamStatisticsUpserts(t *testing.T) {
 	conn := useMonitoringDB(t)
 
-	streams := map[string]*ChangeStreamInfo{
+	streams := map[string]*domain.ChangeStreamInfo{
 		"source_db.orders": {
 			SyncTaskID: 1, Active: true,
 			ReceivedEvents: 100, ExecutedEvents: 90, ErrorCount: 2,
@@ -275,7 +277,7 @@ func TestStoreChangeStreamStatisticsClampsPendingAtZero(t *testing.T) {
 
 	// More executed than received: the syncer counts these independently, so
 	// the difference can go negative.
-	streams := map[string]*ChangeStreamInfo{
+	streams := map[string]*domain.ChangeStreamInfo{
 		"db.coll": {SyncTaskID: 1, Active: true, ReceivedEvents: 5, ExecutedEvents: 9},
 	}
 	if err := StoreChangeStreamStatistics(1, streams); err != nil {
@@ -294,8 +296,8 @@ func TestStoreChangeStreamStatisticsClampsPendingAtZero(t *testing.T) {
 func TestAnInactiveStreamKeepsItsLastRow(t *testing.T) {
 	conn := useMonitoringDB(t)
 
-	stream := &ChangeStreamInfo{SyncTaskID: 1, Active: true, ReceivedEvents: 100, ExecutedEvents: 100}
-	streams := map[string]*ChangeStreamInfo{"db.coll": stream}
+	stream := &domain.ChangeStreamInfo{SyncTaskID: 1, Active: true, ReceivedEvents: 100, ExecutedEvents: 100}
+	streams := map[string]*domain.ChangeStreamInfo{"db.coll": stream}
 
 	if err := StoreChangeStreamStatistics(1, streams); err != nil {
 		t.Fatalf("first store: %v", err)
@@ -316,12 +318,12 @@ func TestAnInactiveStreamKeepsItsLastRow(t *testing.T) {
 	}
 }
 
-// The whole registry that feeds this table is disconnected: RegisterChangeStream,
-// UpdateChangeStreamActivity, UpdateChangeStreamDetailedActivity,
-// AccumulateChangeStreamActivity, RecordChangeStreamError and
-// DeactivateChangeStream have no callers anywhere outside their own
+// The whole registry that feeds this table is disconnected: domain.RegisterChangeStream,
+// domain.UpdateChangeStreamActivity, UpdateChangeStreamDetailedActivity,
+// domain.AccumulateChangeStreamActivity, domain.RecordChangeStreamError and
+// domain.DeactivateChangeStream have no callers anywhere outside their own
 // definitions, so changeStreamTracker is permanently empty. The monitoring loop
-// calls GetActiveChangeStreamsByTaskID, gets an empty map, and hands it here —
+// calls domain.GetActiveChangeStreamsByTaskID, gets an empty map, and hands it here —
 // where the upsert loop has nothing to iterate. StoreChangeStreamStatistics
 // returns nil, the caller logs a success, and not one row is ever written or
 // updated. This is why the production table holds 33 rows created in 2025 whose
@@ -329,9 +331,11 @@ func TestAnInactiveStreamKeepsItsLastRow(t *testing.T) {
 func TestAnEmptyRegistryWritesNothingAndReportsSuccess(t *testing.T) {
 	conn := useMonitoringDB(t)
 
-	// What GetActiveChangeStreamsByTaskID returns in production.
-	resetTracker(t)
-	empty := GetActiveChangeStreamsByTaskID(1)
+	// What domain.GetActiveChangeStreamsByTaskID returns in production. Nothing
+	// in this package registers a stream, and the seven writers that could are
+	// themselves uncalled (T-052), so the registry is empty without a reset —
+	// which the assertion below states outright.
+	empty := domain.GetActiveChangeStreamsByTaskID(1)
 	if len(empty) != 0 {
 		t.Fatalf("the tracker is not empty: %d entries", len(empty))
 	}
@@ -347,7 +351,7 @@ func TestAnEmptyRegistryWritesNothingAndReportsSuccess(t *testing.T) {
 func TestStoreChangeStreamStatisticsReportsAMissingTable(t *testing.T) {
 	emptyDB(t)
 
-	streams := map[string]*ChangeStreamInfo{
+	streams := map[string]*domain.ChangeStreamInfo{
 		"db.coll": {SyncTaskID: 1, Active: true, ReceivedEvents: 1, ExecutedEvents: 1},
 	}
 	err := StoreChangeStreamStatistics(1, streams)
@@ -361,7 +365,7 @@ func TestStoreChangeStreamStatisticsSeparatesTasks(t *testing.T) {
 	conn := useMonitoringDB(t)
 
 	for _, taskID := range []int{1, 2} {
-		streams := map[string]*ChangeStreamInfo{
+		streams := map[string]*domain.ChangeStreamInfo{
 			"db.coll": {SyncTaskID: taskID, Active: true, ReceivedEvents: taskID * 10, ExecutedEvents: taskID * 10},
 		}
 		if err := StoreChangeStreamStatistics(taskID, streams); err != nil {
@@ -508,7 +512,7 @@ func TestAnUnparseableTimestampStopsStatisticsForTheTask(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	streams := map[string]*ChangeStreamInfo{
+	streams := map[string]*domain.ChangeStreamInfo{
 		"db.coll": {SyncTaskID: 1, Active: true, ReceivedEvents: 999, ExecutedEvents: 999},
 	}
 	err := StoreChangeStreamStatistics(1, streams)
@@ -524,64 +528,3 @@ func TestAnUnparseableTimestampStopsStatisticsForTheTask(t *testing.T) {
 }
 
 // ------------------------------------------------------ in-memory reset
-
-func TestResetInMemoryStatistics(t *testing.T) {
-	resetTracker(t)
-
-	RegisterChangeStream(1, "db", "a")
-	RegisterChangeStream(1, "db", "b")
-	RegisterChangeStream(2, "db", "c")
-	AccumulateChangeStreamActivity("db", "a", 10, 10, 8, 5, 3, 2)
-	AccumulateChangeStreamActivity("db", "c", 20, 20, 20, 10, 5, 5)
-	RecordChangeStreamError("db", "a", "boom")
-
-	before := GetActiveChangeStreamsByTaskID(1)["db.a"]
-	created, lastActivity, active := before.Created, before.LastActivity, before.Active
-
-	resetInMemoryStatistics(1)
-
-	a := GetActiveChangeStreamsByTaskID(1)["db.a"]
-	if a.ReceivedEvents != 0 || a.ExecutedEvents != 0 || a.EventCount != 0 ||
-		a.InsertedCount != 0 || a.UpdatedCount != 0 || a.DeletedCount != 0 || a.ErrorCount != 0 {
-		t.Errorf("task 1 counters were not cleared: %+v", a)
-	}
-	if !a.Created.Equal(created) || !a.LastActivity.Equal(lastActivity) || a.Active != active {
-		t.Error("resetInMemoryStatistics changed a field other than the counters")
-	}
-
-	c := GetActiveChangeStreamsByTaskID(2)["db.c"]
-	if c.ReceivedEvents != 20 {
-		t.Errorf("task 2 received = %d, want it left alone", c.ReceivedEvents)
-	}
-}
-
-// The error message is kept while the count that justified it is cleared, so
-// after a daily reset a stream reports zero errors alongside a stale
-// LastErrorMsg from a previous day.
-func TestResetInMemoryStatisticsKeepsTheStaleErrorMessage(t *testing.T) {
-	resetTracker(t)
-
-	RegisterChangeStream(1, "db", "a")
-	RecordChangeStreamError("db", "a", "yesterday's failure")
-
-	resetInMemoryStatistics(1)
-
-	a := GetActiveChangeStreamsByTaskID(1)["db.a"]
-	if a.ErrorCount != 0 {
-		t.Fatalf("ErrorCount = %d, want 0", a.ErrorCount)
-	}
-	if a.LastErrorMsg != "yesterday's failure" {
-		t.Fatalf("LastErrorMsg = %q — it appears to be cleared now; assert the empty value instead", a.LastErrorMsg)
-	}
-}
-
-func TestResetInMemoryStatisticsOnAnUnknownTask(t *testing.T) {
-	resetTracker(t)
-	RegisterChangeStream(1, "db", "a")
-
-	resetInMemoryStatistics(99) // must not panic or touch task 1
-
-	if n := len(GetActiveChangeStreamsByTaskID(1)); n != 1 {
-		t.Errorf("task 1 has %d streams, want 1", n)
-	}
-}

@@ -9,7 +9,7 @@ import (
 	"github.com/retail-ai-inc/sync/internal/backup"
 	"github.com/retail-ai-inc/sync/internal/dbinspect"
 	"github.com/retail-ai-inc/sync/internal/identity"
-	"github.com/retail-ai-inc/sync/internal/monitoring"
+	monitoringhttp "github.com/retail-ai-inc/sync/internal/monitoring/http"
 	"github.com/retail-ai-inc/sync/internal/replication"
 )
 
@@ -250,15 +250,15 @@ func TestMonitoringIsReachableWithoutCredentials(t *testing.T) {
 		req     *http.Request
 		params  map[string]string
 	}{
-		{"GET /api/sync/{id}/monitor", monitoring.SyncMonitorHandler,
+		{"GET /api/sync/{id}/monitor", monitoringhttp.SyncMonitorHandler,
 			jsonRequest(http.MethodGet, "/sync/{id}/monitor", ""), map[string]string{"id": "1"}},
-		{"GET /api/sync/{id}/metrics", monitoring.SyncMetricsHandler,
+		{"GET /api/sync/{id}/metrics", monitoringhttp.SyncMetricsHandler,
 			jsonRequest(http.MethodGet, "/sync/{id}/metrics", ""), map[string]string{"id": "1"}},
-		{"GET /api/sync/{id}/logs", monitoring.SyncLogsHandler,
+		{"GET /api/sync/{id}/logs", monitoringhttp.SyncLogsHandler,
 			jsonRequest(http.MethodGet, "/sync/{id}/logs", ""), map[string]string{"id": "1"}},
 		{"GET /api/sync/{id}/tables", replication.SyncTablesHandler,
 			jsonRequest(http.MethodGet, "/sync/{id}/tables", ""), map[string]string{"id": "1"}},
-		{"GET /api/changestreams/status", monitoring.ChangeStreamsStatusHandler,
+		{"GET /api/changestreams/status", monitoringhttp.ChangeStreamsStatusHandler,
 			jsonRequest(http.MethodGet, "/changestreams/status", ""), nil},
 	}
 

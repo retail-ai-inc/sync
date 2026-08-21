@@ -1,8 +1,11 @@
-package monitoring
+package domain
 
 import (
 	"testing"
 	"time"
+
+	_ "github.com/go-sql-driver/mysql"
+	_ "github.com/mattn/go-sqlite3"
 )
 
 // resetTracker clears the package-level registry so each test starts clean.

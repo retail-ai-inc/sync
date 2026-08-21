@@ -7,7 +7,7 @@ import (
 	"github.com/retail-ai-inc/sync/internal/backup"
 	"github.com/retail-ai-inc/sync/internal/dbinspect"
 	"github.com/retail-ai-inc/sync/internal/identity"
-	"github.com/retail-ai-inc/sync/internal/monitoring"
+	monitoringhttp "github.com/retail-ai-inc/sync/internal/monitoring/http"
 	"github.com/retail-ai-inc/sync/internal/replication"
 )
 
@@ -22,11 +22,11 @@ func NewRouter() http.Handler {
 	r.Post("/test-connection", dbinspect.TestConnectionHandler) // GET /api/test-connection
 
 	// 2) Monitor
-	r.Get("/sync/{id}/monitor", monitoring.SyncMonitorHandler)            // GET /api/sync/{taskID}/monitor
-	r.Get("/sync/{id}/metrics", monitoring.SyncMetricsHandler)            // GET /api/sync/{taskID}/metrics
-	r.Get("/sync/{id}/logs", monitoring.SyncLogsHandler)                  // GET /api/sync/{taskID}/logs
-	r.Get("/sync/{id}/tables", replication.SyncTablesHandler)             // GET /api/sync/{taskID}/tables
-	r.Get("/changestreams/status", monitoring.ChangeStreamsStatusHandler) // GET /api/changestreams/status
+	r.Get("/sync/{id}/monitor", monitoringhttp.SyncMonitorHandler)            // GET /api/sync/{taskID}/monitor
+	r.Get("/sync/{id}/metrics", monitoringhttp.SyncMetricsHandler)            // GET /api/sync/{taskID}/metrics
+	r.Get("/sync/{id}/logs", monitoringhttp.SyncLogsHandler)                  // GET /api/sync/{taskID}/logs
+	r.Get("/sync/{id}/tables", replication.SyncTablesHandler)                 // GET /api/sync/{taskID}/tables
+	r.Get("/changestreams/status", monitoringhttp.ChangeStreamsStatusHandler) // GET /api/changestreams/status
 
 	// 3) api_oauth_test
 	r.Get("/oauth/{provider}/config", identity.GetOAuthConfigHandler)    // GET /api/oauth/{provider}/config

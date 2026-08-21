@@ -1,6 +1,6 @@
 //go:build integration
 
-package monitoring
+package app
 
 import (
 	"context"
