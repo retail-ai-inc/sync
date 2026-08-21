@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/retail-ai-inc/sync/internal/platform/dsn"
+
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/sirupsen/logrus"
 
@@ -25,7 +27,7 @@ func open(t *testing.T, endpoint, database string) *sql.DB {
 	t.Helper()
 
 	host, port := harness.SplitHostPort(t, endpoint)
-	dsn := config.BuildDSNByType("mysql", map[string]string{
+	dsn := dsn.BuildDSNByType("mysql", map[string]string{
 		"user": "root", "password": "root", "host": host, "port": port, "database": database,
 	})
 
@@ -76,10 +78,10 @@ func syncTask(t *testing.T, table string, tables ...config.TableMapping) config.
 		ID:     1,
 		Enable: true,
 		Type:   "mysql",
-		SourceConnection: config.BuildDSNByType("mysql", map[string]string{
+		SourceConnection: dsn.BuildDSNByType("mysql", map[string]string{
 			"user": "root", "password": "root", "host": srcHost, "port": srcPort, "database": sourceDB,
 		}),
-		TargetConnection: config.BuildDSNByType("mysql", map[string]string{
+		TargetConnection: dsn.BuildDSNByType("mysql", map[string]string{
 			"user": "root", "password": "root", "host": tgtHost, "port": tgtPort, "database": targetDB,
 		}),
 		MySQLPositionPath: t.TempDir() + "/binlog.pos",

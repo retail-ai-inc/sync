@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	sqlitedb "github.com/retail-ai-inc/sync/internal/platform/db"
+	"github.com/retail-ai-inc/sync/internal/platform/sqlite"
 
 	_ "github.com/mattn/go-sqlite3" // SQLite driver
 )
@@ -18,7 +18,7 @@ import (
 
 // GetUserByUsername gets user information by username
 func GetUserByUsername(username string) (map[string]interface{}, error) {
-	db, err := sqlitedb.OpenSQLiteDB()
+	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
 		return nil, err
 	}
@@ -110,7 +110,7 @@ func GetUserData(username string) (map[string]interface{}, error) {
 
 // UpdateUserPassword updates user password
 func UpdateUserPassword(username, newPassword string) error {
-	db, err := sqlitedb.OpenSQLiteDB()
+	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
 		return err
 	}
@@ -122,7 +122,7 @@ func UpdateUserPassword(username, newPassword string) error {
 
 // SaveGoogleUser saves or updates Google user information
 func SaveGoogleUser(email, name string) (string, string, error) {
-	db, err := sqlitedb.OpenSQLiteDB()
+	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
 		return "", "", err
 	}
@@ -192,7 +192,7 @@ func generateRandomPassword() string {
 
 // GetAllUsers gets all user information
 func GetAllUsers() ([]map[string]interface{}, error) {
-	db, err := sqlitedb.OpenSQLiteDB()
+	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
 		return nil, err
 	}
@@ -262,7 +262,7 @@ FROM users`)
 // Initialize user table when starting service
 
 func GetAuthConfig(provider string) (map[string]interface{}, error) {
-	db, err := sqlitedb.OpenSQLiteDB()
+	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
 		return nil, err
 	}
@@ -299,7 +299,7 @@ func GetAuthConfig(provider string) (map[string]interface{}, error) {
 }
 
 func UpdateAuthConfig(provider string, config map[string]interface{}) error {
-	db, err := sqlitedb.OpenSQLiteDB()
+	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
 		return err
 	}

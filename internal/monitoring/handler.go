@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	sqlitedb "github.com/retail-ai-inc/sync/internal/platform/db"
+	"github.com/retail-ai-inc/sync/internal/platform/sqlite"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/retail-ai-inc/sync/internal/platform/httpx"
@@ -37,7 +37,7 @@ func convertToJST(timeStr string) string {
 func SyncMonitorHandler(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
-	db, err := sqlitedb.OpenSQLiteDB()
+	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
 		httpx.ErrorJSON(w, "db fail", err)
 		return
@@ -78,7 +78,7 @@ func SyncMetricsHandler(w http.ResponseWriter, r *http.Request) {
 
 	sinceTime := parseRangeToSince(rangeStr)
 
-	db, err := sqlitedb.OpenSQLiteDB()
+	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
 		httpx.ErrorJSON(w, "db fail", err)
 		return
@@ -250,7 +250,7 @@ func SyncLogsHandler(w http.ResponseWriter, r *http.Request) {
 
 	sinceTime := parseRangeToSince(rangeStr)
 
-	db, err := sqlitedb.OpenSQLiteDB()
+	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
 		httpx.ErrorJSON(w, "open db fail", err)
 		return
@@ -367,7 +367,7 @@ func parseRangeToSince(rangeStr string) (since time.Time) {
 
 // GET /api/changestreams/status
 func ChangeStreamsStatusHandler(w http.ResponseWriter, r *http.Request) {
-	db, err := sqlitedb.OpenSQLiteDB()
+	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
 		httpx.ErrorJSON(w, "open db fail", err)
 		return

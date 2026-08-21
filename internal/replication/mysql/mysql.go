@@ -15,8 +15,8 @@ import (
 	"github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/replication"
 	"github.com/go-mysql-org/go-mysql/schema"
-	"github.com/retail-ai-inc/sync/internal/platform/common"
 	"github.com/retail-ai-inc/sync/internal/platform/config"
+	"github.com/retail-ai-inc/sync/internal/platform/dsn"
 	"github.com/retail-ai-inc/sync/internal/platform/resilience"
 	"github.com/retail-ai-inc/sync/internal/replication/security"
 	"github.com/sirupsen/logrus"
@@ -52,7 +52,7 @@ func (s *MySQLSyncer) Start(ctx context.Context) {
 	var includeTables []string
 	for _, mapping := range s.cfg.Mappings {
 		for _, table := range mapping.Tables {
-			includeTables = append(includeTables, fmt.Sprintf("%s\\.%s", common.GetDatabaseName(s.cfg.Type, s.cfg.SourceConnection), table.SourceTable))
+			includeTables = append(includeTables, fmt.Sprintf("%s\\.%s", dsn.GetDatabaseName(s.cfg.Type, s.cfg.SourceConnection), table.SourceTable))
 		}
 	}
 	cfg.IncludeTableRegex = includeTables
@@ -162,8 +162,8 @@ func (s *MySQLSyncer) doInitialSync(ctx context.Context, targetDB *sql.DB) {
 	defer sourceDB.Close()
 
 	const batchSize = 100
-	sourceDBName := common.GetDatabaseName(s.cfg.Type, s.cfg.SourceConnection)
-	targetDBName := common.GetDatabaseName(s.cfg.Type, s.cfg.TargetConnection)
+	sourceDBName := dsn.GetDatabaseName(s.cfg.Type, s.cfg.SourceConnection)
+	targetDBName := dsn.GetDatabaseName(s.cfg.Type, s.cfg.TargetConnection)
 
 	for _, mapping := range s.cfg.Mappings {
 		for _, tableMap := range mapping.Tables {
@@ -478,7 +478,7 @@ func (h *MyEventHandler) OnRow(e *canal.RowsEvent) error {
 	tableName := table.Name
 
 	var targetTableName string
-	targetDBName := common.GetDatabaseName("mysql", h.TargetConnection)
+	targetDBName := dsn.GetDatabaseName("mysql", h.TargetConnection)
 	found := false
 	for _, mapping := range h.mappings {
 		for _, tableMap := range mapping.Tables {

@@ -1,4 +1,4 @@
-package logger
+package logging
 
 import (
 	"fmt"
@@ -9,7 +9,7 @@ import (
 	"sync"
 
 	_ "github.com/mattn/go-sqlite3" // for sqlite
-	"github.com/retail-ai-inc/sync/internal/platform/db"
+	"github.com/retail-ai-inc/sync/internal/platform/sqlite"
 	"github.com/sirupsen/logrus"
 )
 
@@ -100,7 +100,7 @@ func NewSQLiteHook() *SQLiteHook {
 }
 
 func (h *SQLiteHook) Fire(entry *logrus.Entry) error {
-	db, err := db.OpenSQLiteDB()
+	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
 		return nil
 	}

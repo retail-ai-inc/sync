@@ -16,7 +16,7 @@ import (
 	"github.com/retail-ai-inc/sync/internal/monitoring"
 	"github.com/retail-ai-inc/sync/internal/platform/config"
 	"github.com/retail-ai-inc/sync/internal/platform/httpapi"
-	"github.com/retail-ai-inc/sync/internal/platform/logger"
+	"github.com/retail-ai-inc/sync/internal/platform/logging"
 	"github.com/retail-ai-inc/sync/internal/platform/webui"
 	"github.com/retail-ai-inc/sync/internal/replication"
 	"github.com/sirupsen/logrus"
@@ -24,7 +24,7 @@ import (
 
 func main() {
 	cfg := config.NewConfig()
-	log := logger.InitLogger(cfg.LogLevel)
+	log := logging.InitLogger(cfg.LogLevel)
 
 	if _, err := os.Stat("ui/dist"); os.IsNotExist(err) {
 		log.Info("ui/dist directory does not exist, extracting ui/dist.zip...")

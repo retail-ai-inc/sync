@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/retail-ai-inc/sync/internal/platform/db"
+	"github.com/retail-ai-inc/sync/internal/platform/sqlite"
 )
 
 // GetUsersHandler GET /api/users
@@ -139,7 +139,7 @@ func UpdateUserAccessHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	db, err := db.OpenSQLiteDB()
+	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
 		errMsg := fmt.Sprintf("Failed to connect to database: %v", err)
 		http.Error(w, errMsg, http.StatusInternalServerError)
@@ -320,7 +320,7 @@ func DeleteUserHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	db, err := db.OpenSQLiteDB()
+	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
 		errMsg := fmt.Sprintf("Failed to connect to database: %v", err)
 		http.Error(w, errMsg, http.StatusInternalServerError)

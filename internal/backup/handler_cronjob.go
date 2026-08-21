@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	sqlitedb "github.com/retail-ai-inc/sync/internal/platform/db"
+	"github.com/retail-ai-inc/sync/internal/platform/sqlite"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/retail-ai-inc/sync/internal/platform/httpx"
@@ -96,7 +96,7 @@ func BackupExecuteHandler(w http.ResponseWriter, r *http.Request) {
 		updateBackupTaskStatus(taskID, "running", "Backup execution started", nil)
 
 		// Get database connection
-		db, err := sqlitedb.OpenSQLiteDB()
+		db, err := sqlite.OpenSQLiteDB()
 		if err != nil {
 			logrus.Errorf("[BackupExecutor] Failed to open database for task %s: %v", taskID, err)
 			updateBackupTaskStatus(taskID, "failed", "Failed to open database", err)

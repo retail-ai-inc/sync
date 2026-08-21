@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	sqlitedb "github.com/retail-ai-inc/sync/internal/platform/db"
+	"github.com/retail-ai-inc/sync/internal/platform/sqlite"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/retail-ai-inc/sync/internal/platform/dbconn/mongodb"
@@ -18,7 +18,7 @@ import (
 
 // GET /api/sync => query sync_tasks
 func SyncListHandler(w http.ResponseWriter, r *http.Request) {
-	db, err := sqlitedb.OpenSQLiteDB()
+	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
 		httpx.ErrorJSON(w, "open db fail", err)
 		return
@@ -137,7 +137,7 @@ ORDER BY id ASC
 func SyncCreateHandler(w http.ResponseWriter, r *http.Request) {
 	logrus.Infof("SyncCreateHandler => method=%s, URL=%s", r.Method, r.URL.String())
 
-	db, err := sqlitedb.OpenSQLiteDB()
+	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
 		httpx.ErrorJSON(w, "open db fail", err)
 		return
@@ -288,7 +288,7 @@ func SyncStopHandler(w http.ResponseWriter, r *http.Request) {
 func SyncUpdateHandler(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
-	db, err := sqlitedb.OpenSQLiteDB()
+	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
 		httpx.ErrorJSON(w, "db fail", err)
 		return
@@ -406,7 +406,7 @@ WHERE id=?
 func SyncDeleteHandler(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
-	db, err := sqlitedb.OpenSQLiteDB()
+	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
 		httpx.ErrorJSON(w, "open db fail", err)
 		return
@@ -437,7 +437,7 @@ func SyncTablesHandler(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	logrus.Infof("[SyncTables] Fetching tables data for task: %s", id)
 
-	db, err := sqlitedb.OpenSQLiteDB()
+	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
 		httpx.ErrorJSON(w, "open db fail", err)
 		return

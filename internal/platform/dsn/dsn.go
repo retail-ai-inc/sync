@@ -1,4 +1,4 @@
-package common
+package dsn
 
 import (
 	"net/url"

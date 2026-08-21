@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/retail-ai-inc/sync/internal/platform/common"
 	"github.com/retail-ai-inc/sync/internal/platform/config"
+	"github.com/retail-ai-inc/sync/internal/platform/dsn"
 	"github.com/retail-ai-inc/sync/internal/platform/resilience"
 	"github.com/sirupsen/logrus"
 	"go.mongodb.org/mongo-driver/bson"
@@ -155,8 +155,8 @@ func (s *MongoDBSyncer) Start(ctx context.Context) {
 	s.logger.Info("[MongoDB] Starting synchronization...")
 
 	var wg sync.WaitGroup
-	sourceDBName := common.GetDatabaseName(s.cfg.Type, s.cfg.SourceConnection)
-	targetDBName := common.GetDatabaseName(s.cfg.Type, s.cfg.TargetConnection)
+	sourceDBName := dsn.GetDatabaseName(s.cfg.Type, s.cfg.SourceConnection)
+	targetDBName := dsn.GetDatabaseName(s.cfg.Type, s.cfg.TargetConnection)
 
 	for _, mapping := range s.cfg.Mappings {
 		if len(mapping.Tables) > 0 {

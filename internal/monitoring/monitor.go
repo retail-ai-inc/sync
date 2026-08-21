@@ -11,9 +11,9 @@ import (
 
 	goredis "github.com/redis/go-redis/v9"
 	"github.com/retail-ai-inc/sync/internal/monitoring/notify"
-	"github.com/retail-ai-inc/sync/internal/platform/common"
 	"github.com/retail-ai-inc/sync/internal/platform/config"
-	"github.com/retail-ai-inc/sync/internal/platform/db"
+	"github.com/retail-ai-inc/sync/internal/platform/dsn"
+	"github.com/retail-ai-inc/sync/internal/platform/sqlite"
 	"github.com/sirupsen/logrus"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -276,8 +276,8 @@ func countAndLogMySQLOrMariaDB(ctx context.Context, sc config.SyncConfig, log *l
 	}
 
 	dbType := strings.ToUpper(sc.Type)
-	srcDBName := common.GetDatabaseName(sc.Type, sc.SourceConnection)
-	tgtDBName := common.GetDatabaseName(sc.Type, sc.TargetConnection)
+	srcDBName := dsn.GetDatabaseName(sc.Type, sc.SourceConnection)
+	tgtDBName := dsn.GetDatabaseName(sc.Type, sc.TargetConnection)
 
 	for _, mapping := range sc.Mappings {
 		for _, tblMap := range mapping.Tables {
@@ -344,8 +344,8 @@ func countAndLogPostgreSQL(ctx context.Context, sc config.SyncConfig, log *logru
 	}
 
 	dbType := strings.ToUpper(sc.Type)
-	srcDBName := common.GetDatabaseName(sc.Type, sc.SourceConnection)
-	tgtDBName := common.GetDatabaseName(sc.Type, sc.TargetConnection)
+	srcDBName := dsn.GetDatabaseName(sc.Type, sc.SourceConnection)
+	tgtDBName := dsn.GetDatabaseName(sc.Type, sc.TargetConnection)
 
 	for _, mapping := range sc.Mappings {
 		srcSchema := mapping.SourceSchema
@@ -409,8 +409,8 @@ func countAndLogMongoDB(ctx context.Context, sc config.SyncConfig, log *logrus.L
 	}()
 
 	dbType := strings.ToUpper(sc.Type)
-	srcDBName := common.GetDatabaseName(sc.Type, sc.SourceConnection)
-	tgtDBName := common.GetDatabaseName(sc.Type, sc.TargetConnection)
+	srcDBName := dsn.GetDatabaseName(sc.Type, sc.SourceConnection)
+	tgtDBName := dsn.GetDatabaseName(sc.Type, sc.TargetConnection)
 
 	for _, mapping := range sc.Mappings {
 		for _, tblMap := range mapping.Tables {
@@ -651,8 +651,8 @@ func countAndLogRedis(ctx context.Context, sc config.SyncConfig, log *logrus.Log
 		return
 	}
 
-	srcDBName := common.GetDatabaseName(sc.Type, sc.SourceConnection)
-	tgtDBName := common.GetDatabaseName(sc.Type, sc.TargetConnection)
+	srcDBName := dsn.GetDatabaseName(sc.Type, sc.SourceConnection)
+	tgtDBName := dsn.GetDatabaseName(sc.Type, sc.TargetConnection)
 
 	srcCount, err := srcClient.DBSize(ctx).Result()
 	if err != nil {
@@ -708,7 +708,7 @@ func getRowCountWithContext(ctx context.Context, db *sql.DB, table string) int64
 func storeMonitoringLog(syncTaskID int, dbType, srcDB, srcTable string, srcCount int64,
 	tgtDB, tgtTable string, tgtCount int64, action string) {
 
-	db, err := db.OpenSQLiteDB()
+	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
 		// If failed, just log the error
 		logrus.Errorf("Failed to open local DB for monitoring_log: %v", err)
@@ -747,7 +747,7 @@ INSERT INTO monitoring_log (
 
 // StoreChangeStreamStatistics stores ChangeStream statistics to changestream_statistics table
 func StoreChangeStreamStatistics(syncTaskID int, activeStreams map[string]*ChangeStreamInfo) error {
-	db, err := db.OpenSQLiteDB()
+	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
 		return fmt.Errorf("failed to open local DB for changestream_statistics: %w", err)
 	}
@@ -1018,8 +1018,8 @@ func logYesterdayMongoDBVolume(ctx context.Context, sc config.SyncConfig, log *l
 	}()
 
 	dbType := strings.ToUpper(sc.Type)
-	srcDBName := common.GetDatabaseName(sc.Type, sc.SourceConnection)
-	tgtDBName := common.GetDatabaseName(sc.Type, sc.TargetConnection)
+	srcDBName := dsn.GetDatabaseName(sc.Type, sc.SourceConnection)
+	tgtDBName := dsn.GetDatabaseName(sc.Type, sc.TargetConnection)
 
 	for _, mapping := range sc.Mappings {
 		for _, tblMap := range mapping.Tables {

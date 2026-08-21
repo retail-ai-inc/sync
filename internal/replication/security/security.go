@@ -10,7 +10,7 @@ import (
 	"strings"
 
 	"github.com/retail-ai-inc/sync/internal/platform/config"
-	"github.com/retail-ai-inc/sync/internal/platform/logger"
+	"github.com/retail-ai-inc/sync/internal/platform/logging"
 	"go.mongodb.org/mongo-driver/bson"
 )
 
@@ -58,34 +58,34 @@ func encryptAES(plaintext []byte) (string, error) {
 // Modify ProcessValue method to handle nested objects
 func ProcessValue(value interface{}, fieldName string, config TableSecurity) interface{} {
 	if !config.SecurityEnabled {
-		logger.Log.Debugf("[Security] Security processing not enabled: field=%s", fieldName)
+		logging.Log.Debugf("[Security] Security processing not enabled: field=%s", fieldName)
 		return value
 	}
 
-	logger.Log.Debugf("[Security] Security processing: field=%s", fieldName)
+	logging.Log.Debugf("[Security] Security processing: field=%s", fieldName)
 
 	// First check if it's a nested object
 	if nested, ok := value.(map[string]interface{}); ok {
-		logger.Log.Debugf("[Security] Found nested object: %s", fieldName)
+		logging.Log.Debugf("[Security] Found nested object: %s", fieldName)
 		return processNestedObject(nested, fieldName, config)
 	}
 	// Check bson.M type
 	if bsonM, ok := value.(bson.M); ok {
-		logger.Log.Debugf("[Security] Found bson.M object: %s", fieldName)
+		logging.Log.Debugf("[Security] Found bson.M object: %s", fieldName)
 		nested := map[string]interface{}(bsonM)
 		return processNestedObject(nested, fieldName, config)
 	}
 
 	// Check if it's a nested field path (contains dot)
 	if strings.Contains(fieldName, ".") {
-		logger.Log.Debugf("[Security] Nested path requires special handling: %s", fieldName)
+		logging.Log.Debugf("[Security] Nested path requires special handling: %s", fieldName)
 		return ProcessNestedFieldValue(value, fieldName, config)
 	}
 
 	// For regular fields, use original processing logic
 	for _, fc := range config.FieldSecurity {
 		if fc.Field == fieldName {
-			logger.Log.Debugf("[Security] Processing top level field: %s = %v, type=%s", fieldName, value, fc.SecurityType)
+			logging.Log.Debugf("[Security] Processing top level field: %s = %v, type=%s", fieldName, value, fc.SecurityType)
 			var processed interface{}
 
 			switch fc.SecurityType {
@@ -101,14 +101,14 @@ func ProcessValue(value interface{}, fieldName string, config TableSecurity) int
 				case string:
 					encrypted, err := encryptAES([]byte(v))
 					if err != nil {
-						logger.Log.Errorf("[Security] Encryption failed: %v", err)
+						logging.Log.Errorf("[Security] Encryption failed: %v", err)
 						return value
 					}
 					processed = encrypted
 				case []byte:
 					encrypted, err := encryptAES(v)
 					if err != nil {
-						logger.Log.Errorf("[Security] Encryption failed: %v", err)
+						logging.Log.Errorf("[Security] Encryption failed: %v", err)
 						return value
 					}
 					processed = encrypted
@@ -116,13 +116,13 @@ func ProcessValue(value interface{}, fieldName string, config TableSecurity) int
 					strVal := fmt.Sprintf("%v", v)
 					encrypted, err := encryptAES([]byte(strVal))
 					if err != nil {
-						logger.Log.Errorf("[Security] Encryption failed: %v", err)
+						logging.Log.Errorf("[Security] Encryption failed: %v", err)
 						return value
 					}
 					processed = encrypted
 				}
 			}
-			logger.Log.Debugf("[Security] After processing: %s = %v", fieldName, processed)
+			logging.Log.Debugf("[Security] After processing: %s = %v", fieldName, processed)
 			return processed
 		}
 	}
@@ -131,7 +131,7 @@ func ProcessValue(value interface{}, fieldName string, config TableSecurity) int
 
 // Add new function to process nested objects
 func processNestedObject(nested map[string]interface{}, parentField string, config TableSecurity) interface{} {
-	logger.Log.Debugf("[Security] Processing nested object fields: parent=%s", parentField)
+	logging.Log.Debugf("[Security] Processing nested object fields: parent=%s", parentField)
 	result := make(map[string]interface{})
 
 	// Copy all fields
@@ -149,7 +149,7 @@ func processNestedObject(nested map[string]interface{}, parentField string, conf
 				continue
 			}
 
-			logger.Log.Debugf("[Security] Found nested field to process: %s.%s, type=%s",
+			logging.Log.Debugf("[Security] Found nested field to process: %s.%s, type=%s",
 				parentField, subField, fc.SecurityType)
 
 			// If sub-field exists in nested object
@@ -166,10 +166,10 @@ func processNestedObject(nested map[string]interface{}, parentField string, conf
 				}
 
 				// Process sub-field value
-				logger.Log.Debugf("[Security] Processing sub-field: %s.%s = %v", parentField, subField, value)
+				logging.Log.Debugf("[Security] Processing sub-field: %s.%s = %v", parentField, subField, value)
 				processed := ProcessValue(value, subField, tempConfig)
 				result[subField] = processed
-				logger.Log.Debugf("[Security] Sub-field processing complete: %s.%s = %v", parentField, subField, processed)
+				logging.Log.Debugf("[Security] Sub-field processing complete: %s.%s = %v", parentField, subField, processed)
 			}
 		}
 	}
@@ -188,12 +188,12 @@ func ProcessNestedFieldValue(value interface{}, fieldPath string, config TableSe
 			// Convert bson.M to map[string]interface{}
 			nested = map[string]interface{}(bsonM)
 		} else {
-			logger.Log.Warnf("[Security] Nested processing failed: value is not object type field=%s type=%T", fieldPath, value)
+			logging.Log.Warnf("[Security] Nested processing failed: value is not object type field=%s type=%T", fieldPath, value)
 			return value
 		}
 	}
 
-	logger.Log.Debugf("[Security] Processing nested object field: %s", fieldPath)
+	logging.Log.Debugf("[Security] Processing nested object field: %s", fieldPath)
 
 	// Find matching nested field configuration
 	for _, fc := range config.FieldSecurity {
@@ -201,7 +201,7 @@ func ProcessNestedFieldValue(value interface{}, fieldPath string, config TableSe
 			// Find matching nested path configuration
 			paths := strings.Split(fieldPath, ".")
 			if len(paths) < 2 {
-				logger.Log.Warnf("[Security] Invalid nested path: %s", fieldPath)
+				logging.Log.Warnf("[Security] Invalid nested path: %s", fieldPath)
 				return value
 			}
 
@@ -238,7 +238,7 @@ func processNestedObjectValue(obj map[string]interface{}, paths []string, securi
 				next = map[string]interface{}(bsonM)
 				current[path] = next
 			} else {
-				logger.Log.Errorf("[Security] Failed to navigate nested path: %s is not an object", strings.Join(paths[:i+1], "."))
+				logging.Log.Errorf("[Security] Failed to navigate nested path: %s is not an object", strings.Join(paths[:i+1], "."))
 				return
 			}
 		}
@@ -258,7 +258,7 @@ func processNestedObjectValue(obj map[string]interface{}, paths []string, securi
 			parent = map[string]interface{}(bsonM)
 			current[parentField] = parent
 		} else {
-			logger.Log.Errorf("[Security] Failed to get parent object: %s is not an object", strings.Join(paths[:len(paths)-1], "."))
+			logging.Log.Errorf("[Security] Failed to get parent object: %s is not an object", strings.Join(paths[:len(paths)-1], "."))
 			return
 		}
 	}
@@ -277,40 +277,40 @@ func processNestedObjectValue(obj map[string]interface{}, paths []string, securi
 		}
 
 		// Process value and update
-		logger.Log.Debugf("[Security] Nested processing: path=%s, original value=%v", strings.Join(paths, "."), finalValue)
+		logging.Log.Debugf("[Security] Nested processing: path=%s, original value=%v", strings.Join(paths, "."), finalValue)
 		processed := ProcessValue(finalValue, lastField, tempConfig)
 		parent[lastField] = processed
-		logger.Log.Debugf("[Security] Nested processing complete: path=%s, processed=%v", strings.Join(paths, "."), processed)
+		logging.Log.Debugf("[Security] Nested processing complete: path=%s, processed=%v", strings.Join(paths, "."), processed)
 	} else {
-		logger.Log.Warnf("[Security] Final field in nested path does not exist: %s", strings.Join(paths, "."))
+		logging.Log.Warnf("[Security] Final field in nested path does not exist: %s", strings.Join(paths, "."))
 	}
 }
 
 func FindTableSecurityFromMappings(tableName string, mappings []config.DatabaseMapping) TableSecurity {
 	var result TableSecurity
 
-	logger.Log.Debugf("[Security] Searching table security configuration: tableName=%s, mappingsCount=%d", tableName, len(mappings))
+	logging.Log.Debugf("[Security] Searching table security configuration: tableName=%s, mappingsCount=%d", tableName, len(mappings))
 
 	for i, mapping := range mappings {
-		logger.Log.Debugf("[Security] Checking mapping[%d]: contains %d tables", i, len(mapping.Tables))
+		logging.Log.Debugf("[Security] Checking mapping[%d]: contains %d tables", i, len(mapping.Tables))
 
 		for j, table := range mapping.Tables {
-			logger.Log.Debugf("[Security] Checking table[%d-%d]: sourceTable=%s, targetTable=%s",
+			logging.Log.Debugf("[Security] Checking table[%d-%d]: sourceTable=%s, targetTable=%s",
 				i, j, table.SourceTable, table.TargetTable)
 
 			if table.SourceTable == tableName || table.TargetTable == tableName {
 				result.SecurityEnabled = table.SecurityEnabled
-				logger.Log.Debugf("[Security] Table found! SecurityEnabled=%v, FieldSecurityCount=%d",
+				logging.Log.Debugf("[Security] Table found! SecurityEnabled=%v, FieldSecurityCount=%d",
 					result.SecurityEnabled, len(table.FieldSecurity))
 
 				for k, field := range table.FieldSecurity {
-					logger.Log.Debugf("[Security] Field security config[%d]: %v", k, field)
+					logging.Log.Debugf("[Security] Field security config[%d]: %v", k, field)
 
 					if fieldMap, ok := field.(map[string]interface{}); ok {
 						fieldName, _ := fieldMap["field"].(string)
 						secType, _ := fieldMap["securityType"].(string)
 
-						logger.Log.Debugf("[Security] Parsing field: field=%s, securityType=%s", fieldName, secType)
+						logging.Log.Debugf("[Security] Parsing field: field=%s, securityType=%s", fieldName, secType)
 
 						if fieldName != "" && secType != "" {
 							result.FieldSecurity = append(result.FieldSecurity, FieldSecurityConfig{
@@ -326,6 +326,6 @@ func FindTableSecurityFromMappings(tableName string, mappings []config.DatabaseM
 		}
 	}
 
-	logger.Log.Debugf("[Security] Table security configuration not found")
+	logging.Log.Debugf("[Security] Table security configuration not found")
 	return result
 }

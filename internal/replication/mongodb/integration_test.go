@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/retail-ai-inc/sync/internal/platform/dsn"
+
 	"github.com/sirupsen/logrus"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -26,7 +28,7 @@ func connect(t *testing.T, endpoint string) *mongo.Client {
 	t.Helper()
 
 	host, port := harness.SplitHostPort(t, endpoint)
-	uri := config.BuildDSNByType("mongodb", map[string]string{
+	uri := dsn.BuildDSNByType("mongodb", map[string]string{
 		"host": host, "port": port, "database": sourceDB,
 	})
 
@@ -60,10 +62,10 @@ func syncTask(t *testing.T, collection string, tables ...config.TableMapping) co
 		ID:     1,
 		Enable: true,
 		Type:   "mongodb",
-		SourceConnection: config.BuildDSNByType("mongodb", map[string]string{
+		SourceConnection: dsn.BuildDSNByType("mongodb", map[string]string{
 			"host": srcHost, "port": srcPort, "database": sourceDB,
 		}),
-		TargetConnection: config.BuildDSNByType("mongodb", map[string]string{
+		TargetConnection: dsn.BuildDSNByType("mongodb", map[string]string{
 			"host": tgtHost, "port": tgtPort, "database": targetDB,
 		}),
 		MongoDBResumeTokenPath: t.TempDir(),

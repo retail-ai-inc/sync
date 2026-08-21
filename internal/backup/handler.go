@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"time"
 
-	sqlitedb "github.com/retail-ai-inc/sync/internal/platform/db"
+	"github.com/retail-ai-inc/sync/internal/platform/sqlite"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/retail-ai-inc/sync/internal/platform/httpx"
@@ -16,7 +16,7 @@ import (
 )
 
 func BackupListHandler(w http.ResponseWriter, r *http.Request) {
-	db, err := sqlitedb.OpenSQLiteDB()
+	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
 		httpx.ErrorJSON(w, "open db fail", err)
 		return
@@ -125,7 +125,7 @@ ORDER BY id ASC
 func BackupCreateHandler(w http.ResponseWriter, r *http.Request) {
 	logrus.Infof("[Backup] BackupCreateHandler => method=%s, URL=%s", r.Method, r.URL.String())
 
-	db, err := sqlitedb.OpenSQLiteDB()
+	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
 		httpx.ErrorJSON(w, "open db fail", err)
 		return
@@ -228,7 +228,7 @@ func BackupDeleteHandler(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	logrus.Infof("[Backup] BackupDeleteHandler => taskID=%s", id)
 
-	db, err := sqlitedb.OpenSQLiteDB()
+	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
 		httpx.ErrorJSON(w, "open db fail", err)
 		return
@@ -313,7 +313,7 @@ func BackupRunHandler(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	logrus.Infof("[Backup] BackupRunHandler => taskID=%s", id)
 
-	db, err := sqlitedb.OpenSQLiteDB()
+	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
 		httpx.ErrorJSON(w, "open db fail", err)
 		return
@@ -351,7 +351,7 @@ func BackupUpdateHandler(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	logrus.Infof("[Backup] BackupUpdateHandler => taskID=%s", id)
 
-	db, err := sqlitedb.OpenSQLiteDB()
+	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
 		httpx.ErrorJSON(w, "db fail", err)
 		return
@@ -474,7 +474,7 @@ WHERE id=?
 }
 
 func updateBackupStatus(id string, enable bool) error {
-	db, err := sqlitedb.OpenSQLiteDB()
+	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
 		return err
 	}
@@ -521,7 +521,7 @@ func calculateNextBackupTime(cronExpr string) string {
 
 // getDbAndCronManager Get database connection and crontab manager
 func getDbAndCronManager() (*sql.DB, *CronManager) {
-	db, err := sqlitedb.OpenSQLiteDB()
+	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
 		logrus.Errorf("[CronManager] Failed to open database: %v", err)
 		return nil, nil

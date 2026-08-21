@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/retail-ai-inc/sync/internal/platform/dsn"
+
 	goredis "github.com/redis/go-redis/v9"
 	"github.com/sirupsen/logrus"
 
@@ -36,10 +38,10 @@ func syncTask(t *testing.T, db string) config.SyncConfig {
 		ID:     1,
 		Enable: true,
 		Type:   "redis",
-		SourceConnection: config.BuildDSNByType("redis", map[string]string{
+		SourceConnection: dsn.BuildDSNByType("redis", map[string]string{
 			"host": srcHost, "port": srcPort, "database": db,
 		}),
-		TargetConnection: config.BuildDSNByType("redis", map[string]string{
+		TargetConnection: dsn.BuildDSNByType("redis", map[string]string{
 			"host": tgtHost, "port": tgtPort, "database": db,
 		}),
 		RedisPositionPath: t.TempDir() + "/redis.pos",

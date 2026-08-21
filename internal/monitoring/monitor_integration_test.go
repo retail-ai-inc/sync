@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/retail-ai-inc/sync/internal/platform/dsn"
+
 	_ "github.com/go-sql-driver/mysql"
 	goredis "github.com/redis/go-redis/v9"
 	"go.mongodb.org/mongo-driver/bson"
@@ -33,7 +35,7 @@ func mysqlDSN(t *testing.T, endpoint, database string) string {
 	t.Helper()
 
 	host, port := harness.SplitHostPort(t, endpoint)
-	return config.BuildDSNByType("mysql", map[string]string{
+	return dsn.BuildDSNByType("mysql", map[string]string{
 		"user": "root", "password": "root", "host": host, "port": port, "database": database,
 	})
 }

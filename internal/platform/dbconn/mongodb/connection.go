@@ -9,7 +9,7 @@ import (
 	"time"
 
 	_ "github.com/mattn/go-sqlite3" // SQLite driver
-	"github.com/retail-ai-inc/sync/internal/platform/db"
+	"github.com/retail-ai-inc/sync/internal/platform/sqlite"
 	"github.com/sirupsen/logrus"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -119,5 +119,5 @@ func ConnectMongoDBFromTaskID(ctx context.Context, taskID string, logger *logrus
 
 // Helper function to open the local SQLite database
 func openLocalDB() (*sql.DB, error) {
-	return db.OpenSQLiteDB()
+	return sqlite.OpenSQLiteDB()
 }

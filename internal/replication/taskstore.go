@@ -3,13 +3,13 @@ package replication
 import (
 	"encoding/json"
 
-	sqlitedb "github.com/retail-ai-inc/sync/internal/platform/db"
+	"github.com/retail-ai-inc/sync/internal/platform/sqlite"
 
 	"github.com/retail-ai-inc/sync/internal/platform/httpx"
 )
 
 func updateTaskStatus(id string, toStart bool) error {
-	db, err := sqlitedb.OpenSQLiteDB()
+	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
 		return err
 	}

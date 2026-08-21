@@ -12,12 +12,13 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/retail-ai-inc/sync/internal/platform/dsn"
+
 	_ "github.com/go-sql-driver/mysql"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 
-	"github.com/retail-ai-inc/sync/internal/platform/config"
 	"github.com/retail-ai-inc/sync/test/harness"
 )
 
@@ -30,7 +31,7 @@ func openSchemaMySQL(t *testing.T, endpoint, database string) *sql.DB {
 	t.Helper()
 
 	host, port := harness.SplitHostPort(t, endpoint)
-	dsn := config.BuildDSNByType("mysql", map[string]string{
+	dsn := dsn.BuildDSNByType("mysql", map[string]string{
 		"user": "root", "password": "root", "host": host, "port": port, "database": database,
 	})
 	db, err := sql.Open("mysql", dsn)
