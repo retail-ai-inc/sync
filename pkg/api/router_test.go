@@ -56,7 +56,6 @@ func TestRouterRegistersEveryEndpoint(t *testing.T) {
 		"POST /login",
 		"POST /login/google/callback",
 		"POST /logout",
-		"POST /sql/execute",
 		"POST /sync",
 		"POST /tables/schema",
 		"POST /test-connection",

@@ -44,7 +44,6 @@ func TestHandlersRejectMalformedJSON(t *testing.T) {
 		{"test connection", TestConnectionHandler, http.MethodPost, "/test-connection"},
 		{"user access", UpdateUserAccessHandler, http.MethodPut, "/users/access"},
 		{"delete user", DeleteUserHandler, http.MethodDelete, "/users"},
-		{"execute sql", ExecuteSQLHandler, http.MethodPost, "/sql/execute"},
 		{"table schema", GetTableSchemaHandler, http.MethodPost, "/tables/schema"},
 	}
 

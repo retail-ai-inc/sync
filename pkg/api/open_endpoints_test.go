@@ -213,22 +213,6 @@ func TestBackupControlIsReachableWithoutCredentials(t *testing.T) {
 
 // ------------------------------------------ database access endpoints
 
-// POST /api/sql/execute runs caller-supplied SQL against a task's source or
-// target database and requires no credentials. Whether this endpoint should
-// exist at all is one of the open permission-model questions.
-func TestExecuteSQLIsReachableWithoutCredentials(t *testing.T) {
-	useTempTaskDB(t)
-
-	rec := unauthenticated(t, "POST /api/sql/execute", ExecuteSQLHandler,
-		jsonRequest(http.MethodPost, "/sql/execute", `{"taskId":1,"sql":"SELECT 1","target":false}`), nil)
-
-	// With no such task the handler fails on the lookup rather than on
-	// authorization, which is the point being recorded.
-	if rec.Code == http.StatusOK {
-		t.Logf("the handler accepted the request outright: %s", rec.Body.String())
-	}
-}
-
 // POST /api/test-connection probes an arbitrary host and port supplied by the
 // caller and reports whether it answered, with no credentials required.
 func TestConnectionProbeIsReachableWithoutCredentials(t *testing.T) {
