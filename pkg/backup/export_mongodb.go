@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	_ "github.com/go-sql-driver/mysql"
 	"github.com/sirupsen/logrus"
 )
 
@@ -22,6 +23,38 @@ const JSONFilenameSeparator = "_"
 // ZIPFilenameSeparator defines the separator used between collection name and date in ZIP filenames
 // Change this to customize ZIP filename format (e.g., "-", "_", ".")
 const ZIPFilenameSeparator = "-"
+
+// UseExternalCommands checks whether to use external command mode
+func (e *BackupExecutor) UseExternalCommands() bool {
+	// Can be controlled through environment variables
+	if os.Getenv("USE_EXTERNAL_BACKUP") == "true" {
+		return true
+	}
+
+	// Can also check available memory, automatically switch to external command mode if memory is insufficient
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	currentMB := float64(m.Alloc) / 1024 / 1024
+
+	if currentMB > 2000 { // If Go process is already using more than 2GB, switch to external mode
+		logrus.Warnf("[BackupExecutor] High memory usage detected (%.2fMB), switching to external command mode", currentMB)
+		return true
+	}
+
+	return false
+}
+
+// logMemoryUsage logs memory usage information
+func (e *BackupExecutor) logMemoryUsage(phase string) {
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+
+	logrus.Infof("[BackupExecutor] 📊 Go Memory [%s]: Alloc=%.2fMB, Sys=%.2fMB, NumGoroutines=%d",
+		phase,
+		float64(m.Alloc)/1024/1024,
+		float64(m.Sys)/1024/1024,
+		runtime.NumGoroutine())
+}
 
 // ExecuteExternalMongoBackup executes MongoDB backup using external commands
 // Avoids Go memory management issues by directly calling system commands
@@ -115,59 +148,6 @@ func (e *BackupExecutor) executeExternalMongoExport(ctx context.Context, connStr
 	return nil
 }
 
-// executeExternalZip executes external zip command
-func (e *BackupExecutor) executeExternalZip(ctx context.Context, workDir, inputFile, outputFile string) error {
-	// Use system zip command
-	cmd := exec.CommandContext(ctx, "zip", "-j", outputFile, inputFile)
-	cmd.Dir = workDir
-
-	logrus.Infof("[BackupExecutor] Executing: zip -j %s %s", outputFile, inputFile)
-
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("zip failed: %w, output: %s", err, string(output))
-	}
-
-	// Check output file
-	if _, err := os.Stat(outputFile); err != nil {
-		return fmt.Errorf("zip output file not created: %w", err)
-	}
-
-	// Log compression results
-	if stat, err := os.Stat(outputFile); err == nil {
-		logrus.Infof("[BackupExecutor] ✅ Zip completed: %.2f MB", float64(stat.Size())/1024/1024)
-	}
-
-	return nil
-}
-
-// executeExternalGCSUpload executes external gsutil upload
-func (e *BackupExecutor) executeExternalGCSUpload(ctx context.Context, localFile, gcsPath string) error {
-	cmd := exec.CommandContext(ctx, "gsutil", "cp", localFile, gcsPath)
-
-	logrus.Infof("[BackupExecutor] Executing: gsutil cp %s %s", localFile, gcsPath)
-
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("gsutil upload failed: %w, output: %s", err, string(output))
-	}
-
-	logrus.Infof("[BackupExecutor] ✅ GCS upload completed: %s", gcsPath)
-	return nil
-}
-
-// logMemoryUsage logs memory usage information
-func (e *BackupExecutor) logMemoryUsage(phase string) {
-	var m runtime.MemStats
-	runtime.ReadMemStats(&m)
-
-	logrus.Infof("[BackupExecutor] 📊 Go Memory [%s]: Alloc=%.2fMB, Sys=%.2fMB, NumGoroutines=%d",
-		phase,
-		float64(m.Alloc)/1024/1024,
-		float64(m.Sys)/1024/1024,
-		runtime.NumGoroutine())
-}
-
 // executeExternalMongoExportSimple complete external command backup: mongoexport -> zip -> GCS upload
 func (e *BackupExecutor) executeExternalMongoExportSimple(ctx context.Context, connStr, database, collection, tempDir string, config ExecutorBackupConfig) error {
 	logrus.Infof("[BackupExecutor] 🚀 Starting COMPLETE external command backup for collection: %s", collection)
@@ -227,24 +207,71 @@ func (e *BackupExecutor) executeExternalMongoExportSimple(ctx context.Context, c
 	return nil
 }
 
-// UseExternalCommands checks whether to use external command mode
-func (e *BackupExecutor) UseExternalCommands() bool {
-	// Can be controlled through environment variables
-	if os.Getenv("USE_EXTERNAL_BACKUP") == "true" {
-		return true
+// executeExternalMongoExportWithOptions executes external mongoexport command with support for query conditions and field selection
+func (e *BackupExecutor) executeExternalMongoExportWithOptions(ctx context.Context, connStr, database, collection, outputPath string, config ExecutorBackupConfig) error {
+	args := []string{
+		"--uri", connStr,
+		"--db", database,
+		"--collection", collection,
+		"--out", outputPath,
+		"--quiet",
 	}
 
-	// Can also check available memory, automatically switch to external command mode if memory is insufficient
-	var m runtime.MemStats
-	runtime.ReadMemStats(&m)
-	currentMB := float64(m.Alloc) / 1024 / 1024
+	// Add query conditions
+	if queryConditions, exists := config.Query[collection]; exists && len(queryConditions) > 0 {
+		// Clean extra quotes in query conditions
+		cleanedQuery := cleanQueryStringValues(queryConditions)
 
-	if currentMB > 2000 { // If Go process is already using more than 2GB, switch to external mode
-		logrus.Warnf("[BackupExecutor] High memory usage detected (%.2fMB), switching to external command mode", currentMB)
-		return true
+		// Convert dynamic time queries to specific MongoDB queries
+		finalQuery := e.convertTimeRangeQuery(cleanedQuery)
+
+		queryJSON, err := json.Marshal(finalQuery)
+		if err != nil {
+			logrus.Warnf("[BackupExecutor] Failed to marshal query for collection %s: %v", collection, err)
+		} else {
+			args = append(args, "--query", string(queryJSON))
+			logrus.Infof("[BackupExecutor] Applied query for collection %s: %s", collection, string(queryJSON))
+		}
+	} else {
+		// If no query conditions, export all data
+		logrus.Infof("[BackupExecutor] No query conditions found for collection %s, exporting all data", collection)
 	}
 
-	return false
+	// Add field selection
+	if fields, exists := config.Database.Fields[collection]; exists && len(fields) > 0 && fields[0] != "all" {
+		fieldsStr := strings.Join(fields, ",")
+		args = append(args, "--fields", fieldsStr)
+		logrus.Infof("[BackupExecutor] Applied field selection for collection %s: %s", collection, fieldsStr)
+	}
+
+	cmd := exec.CommandContext(ctx, "mongoexport", args...)
+
+	// Display command line arguments with URI credentials masked
+	logrus.Infof("[BackupExecutor] Executing: %s", e.maskSensitiveArgs(append([]string{"mongoexport"}, args...)))
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("mongoexport failed: %w, output: %s", err, string(output))
+	}
+
+	// Check output file
+	if _, err := os.Stat(outputPath); err != nil {
+		return fmt.Errorf("mongoexport output file not created: %w", err)
+	}
+
+	// Count exported records and file size
+	recordCount, fileSize, err := e.countRecordsInFile(outputPath)
+	if err != nil {
+		logrus.Warnf("[BackupExecutor] Failed to count records in %s: %v", outputPath, err)
+		// Fall back to only showing file size
+		if stat, err := os.Stat(outputPath); err == nil {
+			logrus.Infof("[BackupExecutor] ✅ Mongoexport completed: %.2f MB", float64(stat.Size())/1024/1024)
+		}
+	} else {
+		logrus.Infof("[BackupExecutor] ✅ Mongoexport completed: %d records, %.2f MB", recordCount, fileSize)
+	}
+
+	return nil
 }
 
 // exportMongoDBMergedTables performs multi-table merged backup using external commands
@@ -387,73 +414,6 @@ func (e *BackupExecutor) exportMongoDBMergedTables(ctx context.Context, connStr,
 	return nil
 }
 
-// executeExternalMongoExportWithOptions executes external mongoexport command with support for query conditions and field selection
-func (e *BackupExecutor) executeExternalMongoExportWithOptions(ctx context.Context, connStr, database, collection, outputPath string, config ExecutorBackupConfig) error {
-	args := []string{
-		"--uri", connStr,
-		"--db", database,
-		"--collection", collection,
-		"--out", outputPath,
-		"--quiet",
-	}
-
-	// Add query conditions
-	if queryConditions, exists := config.Query[collection]; exists && len(queryConditions) > 0 {
-		// Clean extra quotes in query conditions
-		cleanedQuery := cleanQueryStringValues(queryConditions)
-
-		// Convert dynamic time queries to specific MongoDB queries
-		finalQuery := e.convertTimeRangeQuery(cleanedQuery)
-
-		queryJSON, err := json.Marshal(finalQuery)
-		if err != nil {
-			logrus.Warnf("[BackupExecutor] Failed to marshal query for collection %s: %v", collection, err)
-		} else {
-			args = append(args, "--query", string(queryJSON))
-			logrus.Infof("[BackupExecutor] Applied query for collection %s: %s", collection, string(queryJSON))
-		}
-	} else {
-		// If no query conditions, export all data
-		logrus.Infof("[BackupExecutor] No query conditions found for collection %s, exporting all data", collection)
-	}
-
-	// Add field selection
-	if fields, exists := config.Database.Fields[collection]; exists && len(fields) > 0 && fields[0] != "all" {
-		fieldsStr := strings.Join(fields, ",")
-		args = append(args, "--fields", fieldsStr)
-		logrus.Infof("[BackupExecutor] Applied field selection for collection %s: %s", collection, fieldsStr)
-	}
-
-	cmd := exec.CommandContext(ctx, "mongoexport", args...)
-
-	// Display command line arguments with URI credentials masked
-	logrus.Infof("[BackupExecutor] Executing: %s", e.maskSensitiveArgs(append([]string{"mongoexport"}, args...)))
-
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("mongoexport failed: %w, output: %s", err, string(output))
-	}
-
-	// Check output file
-	if _, err := os.Stat(outputPath); err != nil {
-		return fmt.Errorf("mongoexport output file not created: %w", err)
-	}
-
-	// Count exported records and file size
-	recordCount, fileSize, err := e.countRecordsInFile(outputPath)
-	if err != nil {
-		logrus.Warnf("[BackupExecutor] Failed to count records in %s: %v", outputPath, err)
-		// Fall back to only showing file size
-		if stat, err := os.Stat(outputPath); err == nil {
-			logrus.Infof("[BackupExecutor] ✅ Mongoexport completed: %.2f MB", float64(stat.Size())/1024/1024)
-		}
-	} else {
-		logrus.Infof("[BackupExecutor] ✅ Mongoexport completed: %d records, %.2f MB", recordCount, fileSize)
-	}
-
-	return nil
-}
-
 // countRecordsInFile counts the number of records in JSONL file
 func (e *BackupExecutor) countRecordsInFile(filePath string) (int, float64, error) {
 	stat, err := os.Stat(filePath)
@@ -490,139 +450,4 @@ func (e *BackupExecutor) countRecordsInFile(filePath string) (int, float64, erro
 	}
 
 	return count, fileSize, nil
-}
-
-// maskSensitiveArgs masks sensitive information like passwords in command arguments
-func (e *BackupExecutor) maskSensitiveArgs(args []string) string {
-	maskedArgs := make([]string, len(args))
-	copy(maskedArgs, args)
-
-	for i, arg := range maskedArgs {
-		if arg == "--uri" && i+1 < len(maskedArgs) {
-			// Mask credentials in URI
-			uri := maskedArgs[i+1]
-			if strings.Contains(uri, "://") && strings.Contains(uri, "@") {
-				// Format: mongodb://username:password@host:port/...
-				parts := strings.Split(uri, "://")
-				if len(parts) == 2 {
-					protocolPart := parts[0] + "://"
-					remaining := parts[1]
-
-					if atIndex := strings.Index(remaining, "@"); atIndex != -1 {
-						hostPart := remaining[atIndex:]
-						credPart := remaining[:atIndex]
-
-						// Check if there are credentials
-						if strings.Contains(credPart, ":") {
-							maskedArgs[i+1] = protocolPart + "***:***" + hostPart
-						}
-					}
-				}
-			}
-		}
-	}
-
-	return strings.Join(maskedArgs, " ")
-}
-
-// convertTimeRangeQuery Convert dynamic time range query to concrete MongoDB query
-func (e *BackupExecutor) convertTimeRangeQuery(query map[string]interface{}) map[string]interface{} {
-	result := make(map[string]interface{})
-
-	for key, value := range query {
-		if timeQuery, ok := value.(map[string]interface{}); ok {
-			if timeType, exists := timeQuery["type"]; exists && timeType == "daily" {
-				// Parse offset values
-				startOffset := -1
-				endOffset := 0
-
-				if so, ok := timeQuery["startOffset"]; ok {
-					if offset, ok := so.(float64); ok {
-						startOffset = int(offset)
-					}
-				}
-				if eo, ok := timeQuery["endOffset"]; ok {
-					if offset, ok := eo.(float64); ok {
-						endOffset = int(offset)
-					}
-				}
-
-				// Calculate JST time range and convert to UTC for database query
-				now := time.Now()
-				jst := time.FixedZone("JST", 9*3600)
-
-				// Get current JST time and truncate to start of day
-				nowJST := now.In(jst)
-
-				// Calculate start and end days in JST
-				startDayJST := time.Date(nowJST.Year(), nowJST.Month(), nowJST.Day()+startOffset, 0, 0, 0, 0, jst)
-				endDayJST := time.Date(nowJST.Year(), nowJST.Month(), nowJST.Day()+endOffset, 0, 0, 0, 0, jst)
-
-				// Convert JST times to UTC
-				startUTC := startDayJST.UTC()
-				endUTC := endDayJST.UTC()
-
-				logrus.Infof("[BackupExecutor] Time calculation: now=%s, startOffset=%d, endOffset=%d",
-					nowJST.Format("2006-01-02 15:04:05 JST"), startOffset, endOffset)
-				logrus.Infof("[BackupExecutor] JST range: %s to %s",
-					startDayJST.Format("2006-01-02 15:04:05 JST"), endDayJST.Format("2006-01-02 15:04:05 JST"))
-				logrus.Infof("[BackupExecutor] UTC range: %s to %s",
-					startUTC.Format("2006-01-02T15:04:05.000Z"), endUTC.Format("2006-01-02T15:04:05.000Z"))
-
-				// Create MongoDB date range query
-				mongoQuery := map[string]interface{}{
-					"$gte": map[string]interface{}{
-						"$date": startUTC.Format("2006-01-02T15:04:05.000Z"),
-					},
-					"$lt": map[string]interface{}{
-						"$date": endUTC.Format("2006-01-02T15:04:05.000Z"),
-					},
-				}
-
-				result[key] = mongoQuery
-				logrus.Infof("[BackupExecutor] Converted time range query for field %s: %s to %s",
-					key, startUTC.Format("2006-01-02T15:04:05.000Z"), endUTC.Format("2006-01-02T15:04:05.000Z"))
-			} else {
-				// Keep non-time queries as is
-				result[key] = value
-			}
-		} else {
-			// Keep non-object values as is
-			result[key] = value
-		}
-	}
-
-	return result
-}
-
-// cleanQueryStringValues Clean string values in query condition to remove extra escaping
-func cleanQueryStringValues(queryObj map[string]interface{}) map[string]interface{} {
-	cleaned := make(map[string]interface{})
-
-	for key, value := range queryObj {
-		switch v := value.(type) {
-		case string:
-			// Remove surrounding quotes if they exist (handle over-escaping)
-			cleanValue := v
-			// Remove extra double quotes from the beginning and end
-			if strings.HasPrefix(cleanValue, `"`) && strings.HasSuffix(cleanValue, `"`) {
-				cleanValue = strings.TrimPrefix(cleanValue, `"`)
-				cleanValue = strings.TrimSuffix(cleanValue, `"`)
-			}
-			// Remove extra single quotes from the beginning and end
-			if strings.HasPrefix(cleanValue, `'`) && strings.HasSuffix(cleanValue, `'`) {
-				cleanValue = strings.TrimPrefix(cleanValue, `'`)
-				cleanValue = strings.TrimSuffix(cleanValue, `'`)
-			}
-			cleaned[key] = cleanValue
-		case map[string]interface{}:
-			// Recursively clean nested objects
-			cleaned[key] = cleanQueryStringValues(v)
-		default:
-			// Keep other types as is
-			cleaned[key] = value
-		}
-	}
-
-	return cleaned
 }

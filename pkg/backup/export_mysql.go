@@ -297,103 +297,6 @@ except Exception as e:
 	return nil
 }
 
-// buildMySQLSelectQuery builds SELECT query with WHERE conditions and field selection
-func (e *BackupExecutor) buildMySQLSelectQuery(table string, config ExecutorBackupConfig) string {
-	// Build field list
-	fields := "*"
-	if fieldList, exists := config.Database.Fields[table]; exists && len(fieldList) > 0 && fieldList[0] != "all" {
-		fields = strings.Join(fieldList, ", ")
-	}
-
-	// Build WHERE clause
-	whereClause := ""
-	if queryConditions, exists := config.Query[table]; exists && len(queryConditions) > 0 {
-		whereClause = e.convertTimeRangeQueryForMySQL(queryConditions)
-	}
-
-	// Construct SELECT query
-	query := fmt.Sprintf("SELECT %s FROM %s", fields, table)
-	if whereClause != "" {
-		query += " WHERE " + whereClause
-	}
-
-	logrus.Infof("[BackupExecutor] Built SELECT query: %s", query)
-	return query
-}
-
-// convertTimeRangeQueryForMySQL converts dynamic time range query to MySQL WHERE clause
-func (e *BackupExecutor) convertTimeRangeQueryForMySQL(query map[string]interface{}) string {
-	var conditions []string
-
-	for key, value := range query {
-		if timeQuery, ok := value.(map[string]interface{}); ok {
-			if timeType, exists := timeQuery["type"]; exists && timeType == "daily" {
-				// Parse offset values
-				startOffset := -1
-				endOffset := 0
-
-				if so, ok := timeQuery["startOffset"]; ok {
-					if offset, ok := so.(float64); ok {
-						startOffset = int(offset)
-					}
-				}
-				if eo, ok := timeQuery["endOffset"]; ok {
-					if offset, ok := eo.(float64); ok {
-						endOffset = int(offset)
-					}
-				}
-
-				// Calculate JST time range and convert to UTC for database query
-				now := time.Now()
-				jst := time.FixedZone("JST", 9*3600)
-
-				// Get current JST time and truncate to start of day
-				nowJST := now.In(jst)
-
-				// Calculate start and end days in JST
-				startDayJST := time.Date(nowJST.Year(), nowJST.Month(), nowJST.Day()+startOffset, 0, 0, 0, 0, jst)
-				endDayJST := time.Date(nowJST.Year(), nowJST.Month(), nowJST.Day()+endOffset, 0, 0, 0, 0, jst)
-
-				// Convert JST times to UTC
-				startUTC := startDayJST.UTC()
-				endUTC := endDayJST.UTC()
-
-				logrus.Infof("[BackupExecutor] Time calculation: now=%s, startOffset=%d, endOffset=%d",
-					nowJST.Format("2006-01-02 15:04:05 JST"), startOffset, endOffset)
-				logrus.Infof("[BackupExecutor] JST range: %s to %s",
-					startDayJST.Format("2006-01-02 15:04:05 JST"), endDayJST.Format("2006-01-02 15:04:05 JST"))
-				logrus.Infof("[BackupExecutor] UTC range: %s to %s",
-					startUTC.Format("2006-01-02 15:04:05"), endUTC.Format("2006-01-02 15:04:05"))
-
-				// Create MySQL WHERE clause
-				condition := fmt.Sprintf("%s >= '%s' AND %s < '%s'",
-					key, startUTC.Format("2006-01-02 15:04:05"),
-					key, endUTC.Format("2006-01-02 15:04:05"))
-
-				conditions = append(conditions, condition)
-				logrus.Infof("[BackupExecutor] Converted time range query for field %s: %s", key, condition)
-			} else {
-				// Handle other query types if needed
-				logrus.Warnf("[BackupExecutor] Unsupported query type for field %s: %v", key, timeType)
-			}
-		} else {
-			// Simple equality condition
-			switch v := value.(type) {
-			case string:
-				conditions = append(conditions, fmt.Sprintf("%s = '%s'", key, strings.ReplaceAll(v, "'", "''")))
-			case float64:
-				conditions = append(conditions, fmt.Sprintf("%s = %v", key, v))
-			case int:
-				conditions = append(conditions, fmt.Sprintf("%s = %d", key, v))
-			default:
-				logrus.Warnf("[BackupExecutor] Unsupported value type for field %s: %T", key, value)
-			}
-		}
-	}
-
-	return strings.Join(conditions, " AND ")
-}
-
 // exportMySQLMergedTables performs multi-table merged backup for MySQL
 func (e *BackupExecutor) exportMySQLMergedTables(ctx context.Context, connectionURL, database string, tables []string, tempDir string, config ExecutorBackupConfig) error {
 	logrus.Infof("[BackupExecutor] 🚀 Starting MySQL multi-table merge backup for %d tables: %v", len(tables), tables)
@@ -606,49 +509,9 @@ func (e *BackupExecutor) getMySQLTables(ctx context.Context, config *ExecutorBac
 	return matchedTables, nil
 }
 
-// parseMySQLConnectionURL parses MySQL connection URL into components
-// Format: host:port or just host
-func parseMySQLConnectionURL(url string) (host, port, username, password string) {
-	parts := strings.Split(url, ":")
-	host = "localhost"
-	port = "3306"
-
-	if len(parts) >= 1 && parts[0] != "" {
-		host = parts[0]
-	}
-	if len(parts) >= 2 && parts[1] != "" {
-		port = parts[1]
-	}
-
-	return host, port, "", ""
-}
-
-// buildMySQLConnectionString builds MySQL connection parameters
-func buildMySQLConnectionString(url, username, password string) (host, port, user, pass string) {
-	host, port, _, _ = parseMySQLConnectionURL(url)
-	user = username
-	pass = password
-	return
-}
-
 // isCompressionDisabled reports whether the backup output should be uploaded
 // uncompressed. Anything other than an explicit "none" keeps the historical
 // behaviour of zipping, so existing tasks are unaffected.
 func isCompressionDisabled(compressionType string) bool {
 	return strings.EqualFold(strings.TrimSpace(compressionType), "none")
-}
-
-// maskMySQLPassword masks MySQL password in command arguments
-func (e *BackupExecutor) maskMySQLPassword(args []string) string {
-	maskedArgs := make([]string, len(args))
-	copy(maskedArgs, args)
-
-	for i, arg := range maskedArgs {
-		// Mask password argument (-pPASSWORD)
-		if strings.HasPrefix(arg, "-p") && len(arg) > 2 {
-			maskedArgs[i] = "-p***"
-		}
-	}
-
-	return strings.Join(maskedArgs, " ")
 }
