@@ -8,7 +8,7 @@ import (
 	"github.com/retail-ai-inc/sync/internal/dbinspect"
 	identityhttp "github.com/retail-ai-inc/sync/internal/identity/http"
 	monitoringhttp "github.com/retail-ai-inc/sync/internal/monitoring/http"
-	"github.com/retail-ai-inc/sync/internal/replication"
+	replicationhttp "github.com/retail-ai-inc/sync/internal/replication/http"
 )
 
 // NewRouter creates and returns the routing configuration for the entire /api
@@ -25,7 +25,7 @@ func NewRouter() http.Handler {
 	r.Get("/sync/{id}/monitor", monitoringhttp.SyncMonitorHandler)            // GET /api/sync/{taskID}/monitor
 	r.Get("/sync/{id}/metrics", monitoringhttp.SyncMetricsHandler)            // GET /api/sync/{taskID}/metrics
 	r.Get("/sync/{id}/logs", monitoringhttp.SyncLogsHandler)                  // GET /api/sync/{taskID}/logs
-	r.Get("/sync/{id}/tables", replication.SyncTablesHandler)                 // GET /api/sync/{taskID}/tables
+	r.Get("/sync/{id}/tables", replicationhttp.SyncTablesHandler)             // GET /api/sync/{taskID}/tables
 	r.Get("/changestreams/status", monitoringhttp.ChangeStreamsStatusHandler) // GET /api/changestreams/status
 
 	// 3) api_oauth_test
@@ -34,12 +34,12 @@ func NewRouter() http.Handler {
 	r.Post("/login/google/callback", identityhttp.AuthGoogleCallbackHandler)
 
 	// 4) Sync related
-	r.Get("/sync", replication.SyncListHandler)             // GET /api/sync
-	r.Put("/sync/{id}/stop", replication.SyncStopHandler)   // PUT /api/sync/{taskID}/stop
-	r.Put("/sync/{id}/start", replication.SyncStartHandler) // PUT /api/sync/{taskID}/start
-	r.Put("/sync/{id}", replication.SyncUpdateHandler)      // PUT /api/sync/{taskID}
-	r.Post("/sync", replication.SyncCreateHandler)          // POST /api/sync
-	r.Delete("/sync/{id}", replication.SyncDeleteHandler)   // DELETE /api/sync/{taskID}
+	r.Get("/sync", replicationhttp.SyncListHandler)             // GET /api/sync
+	r.Put("/sync/{id}/stop", replicationhttp.SyncStopHandler)   // PUT /api/sync/{taskID}/stop
+	r.Put("/sync/{id}/start", replicationhttp.SyncStartHandler) // PUT /api/sync/{taskID}/start
+	r.Put("/sync/{id}", replicationhttp.SyncUpdateHandler)      // PUT /api/sync/{taskID}
+	r.Post("/sync", replicationhttp.SyncCreateHandler)          // POST /api/sync
+	r.Delete("/sync/{id}", replicationhttp.SyncDeleteHandler)   // DELETE /api/sync/{taskID}
 
 	// 5) User management
 	r.Get("/users", identityhttp.GetUsersHandler)                          // GET /api/users

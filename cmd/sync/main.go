@@ -18,7 +18,7 @@ import (
 	"github.com/retail-ai-inc/sync/internal/platform/httpapi"
 	"github.com/retail-ai-inc/sync/internal/platform/logging"
 	"github.com/retail-ai-inc/sync/internal/platform/webui"
-	"github.com/retail-ai-inc/sync/internal/replication"
+	replicationapp "github.com/retail-ai-inc/sync/internal/replication/app"
 	"github.com/sirupsen/logrus"
 )
 
@@ -155,22 +155,22 @@ func startSyncTasks(ctx context.Context, cfg *config.Config, wg *sync.WaitGroup,
 		case "mongodb":
 			go func(sc config.SyncConfig) {
 				defer wg.Done()
-				replication.NewMongoDBSyncer(sc, cfg, log).Start(ctx)
+				replicationapp.NewMongoDBSyncer(sc, cfg, log).Start(ctx)
 			}(syncCfg)
 		case "mysql", "mariadb":
 			go func(sc config.SyncConfig) {
 				defer wg.Done()
-				replication.NewMySQLSyncer(sc, log).Start(ctx)
+				replicationapp.NewMySQLSyncer(sc, log).Start(ctx)
 			}(syncCfg)
 		case "postgresql":
 			go func(sc config.SyncConfig) {
 				defer wg.Done()
-				replication.NewPostgreSQLSyncer(sc, log).Start(ctx)
+				replicationapp.NewPostgreSQLSyncer(sc, log).Start(ctx)
 			}(syncCfg)
 		case "redis":
 			go func(sc config.SyncConfig) {
 				defer wg.Done()
-				replication.NewRedisSyncer(sc, log).Start(ctx)
+				replicationapp.NewRedisSyncer(sc, log).Start(ctx)
 			}(syncCfg)
 		default:
 			log.Errorf("Unknown sync type: %s", syncCfg.Type)

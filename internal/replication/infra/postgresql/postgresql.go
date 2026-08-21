@@ -20,7 +20,7 @@ import (
 	_ "github.com/lib/pq"
 	"github.com/retail-ai-inc/sync/internal/platform/config"
 	"github.com/retail-ai-inc/sync/internal/platform/resilience"
-	"github.com/retail-ai-inc/sync/internal/replication/security"
+	"github.com/retail-ai-inc/sync/internal/replication/infra/security"
 	"github.com/sirupsen/logrus"
 )
 

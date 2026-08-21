@@ -10,7 +10,7 @@ import (
 	"github.com/retail-ai-inc/sync/internal/dbinspect"
 	identityhttp "github.com/retail-ai-inc/sync/internal/identity/http"
 	monitoringhttp "github.com/retail-ai-inc/sync/internal/monitoring/http"
-	"github.com/retail-ai-inc/sync/internal/replication"
+	replicationhttp "github.com/retail-ai-inc/sync/internal/replication/http"
 )
 
 // The router installs no middleware (see TestTheRouterInstallsNoMiddleware)
@@ -60,16 +60,16 @@ func TestTaskManagementIsReachableWithoutCredentials(t *testing.T) {
 		req     *http.Request
 		params  map[string]string
 	}{
-		{"GET /api/sync", replication.SyncListHandler, jsonRequest(http.MethodGet, "/sync", ""), nil},
-		{"POST /api/sync", replication.SyncCreateHandler, jsonRequest(http.MethodPost, "/sync",
+		{"GET /api/sync", replicationhttp.SyncListHandler, jsonRequest(http.MethodGet, "/sync", ""), nil},
+		{"POST /api/sync", replicationhttp.SyncCreateHandler, jsonRequest(http.MethodPost, "/sync",
 			`{"taskName":"injected","type":"mysql","sourceConn":{"host":"h"},"targetConn":{"host":"h"}}`), nil},
-		{"PUT /api/sync/{id}", replication.SyncUpdateHandler, jsonRequest(http.MethodPut, "/sync/{id}",
+		{"PUT /api/sync/{id}", replicationhttp.SyncUpdateHandler, jsonRequest(http.MethodPut, "/sync/{id}",
 			`{"taskName":"renamed"}`), map[string]string{"id": "1"}},
-		{"DELETE /api/sync/{id}", replication.SyncDeleteHandler, jsonRequest(http.MethodDelete, "/sync/{id}", ""),
+		{"DELETE /api/sync/{id}", replicationhttp.SyncDeleteHandler, jsonRequest(http.MethodDelete, "/sync/{id}", ""),
 			map[string]string{"id": "1"}},
-		{"PUT /api/sync/{id}/start", replication.SyncStartHandler, jsonRequest(http.MethodPut, "/sync/{id}/start", ""),
+		{"PUT /api/sync/{id}/start", replicationhttp.SyncStartHandler, jsonRequest(http.MethodPut, "/sync/{id}/start", ""),
 			map[string]string{"id": "1"}},
-		{"PUT /api/sync/{id}/stop", replication.SyncStopHandler, jsonRequest(http.MethodPut, "/sync/{id}/stop", ""),
+		{"PUT /api/sync/{id}/stop", replicationhttp.SyncStopHandler, jsonRequest(http.MethodPut, "/sync/{id}/stop", ""),
 			map[string]string{"id": "1"}},
 	}
 
@@ -89,7 +89,7 @@ func TestAnUnauthenticatedCallerCanPersistASyncTask(t *testing.T) {
 	resetSessionGlobals(t)
 
 	rec := httptest.NewRecorder()
-	replication.SyncCreateHandler(rec, jsonRequest(http.MethodPost, "/sync",
+	replicationhttp.SyncCreateHandler(rec, jsonRequest(http.MethodPost, "/sync",
 		`{"taskName":"created without credentials","type":"mysql",
 		  "sourceConn":{"host":"h","port":"3306","user":"u","password":"p","database":"d"},
 		  "targetConn":{"host":"h","port":"3306","user":"u","password":"p","database":"d"},
@@ -256,7 +256,7 @@ func TestMonitoringIsReachableWithoutCredentials(t *testing.T) {
 			jsonRequest(http.MethodGet, "/sync/{id}/metrics", ""), map[string]string{"id": "1"}},
 		{"GET /api/sync/{id}/logs", monitoringhttp.SyncLogsHandler,
 			jsonRequest(http.MethodGet, "/sync/{id}/logs", ""), map[string]string{"id": "1"}},
-		{"GET /api/sync/{id}/tables", replication.SyncTablesHandler,
+		{"GET /api/sync/{id}/tables", replicationhttp.SyncTablesHandler,
 			jsonRequest(http.MethodGet, "/sync/{id}/tables", ""), map[string]string{"id": "1"}},
 		{"GET /api/changestreams/status", monitoringhttp.ChangeStreamsStatusHandler,
 			jsonRequest(http.MethodGet, "/changestreams/status", ""), nil},

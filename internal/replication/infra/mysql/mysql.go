@@ -18,7 +18,7 @@ import (
 	"github.com/retail-ai-inc/sync/internal/platform/config"
 	"github.com/retail-ai-inc/sync/internal/platform/dsn"
 	"github.com/retail-ai-inc/sync/internal/platform/resilience"
-	"github.com/retail-ai-inc/sync/internal/replication/security"
+	"github.com/retail-ai-inc/sync/internal/replication/infra/security"
 	"github.com/sirupsen/logrus"
 
 	_ "github.com/go-sql-driver/mysql"
