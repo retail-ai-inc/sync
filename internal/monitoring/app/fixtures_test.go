@@ -59,45 +59,8 @@ CREATE TABLE changestream_statistics (
 	return conn
 }
 
-// emptyDB points the package at a SQLite file with no tables, so the writers
-// hit a missing-table error.
-func emptyDB(t *testing.T) {
-	t.Helper()
-	t.Setenv("SYNC_DB_PATH", filepath.Join(t.TempDir(), "empty.db"))
-}
-
 type statsRow struct {
 	Received, Executed, Pending, Errors int
 	Inserted, Updated, Deleted          int
 	LastUpdated                         string
 }
-
-func readStats(t *testing.T, conn *sql.DB, taskID int, collection string) (statsRow, bool) {
-	t.Helper()
-
-	var r statsRow
-	err := conn.QueryRow(`
-		SELECT received, executed, pending, errors, inserted, updated, deleted, last_updated
-		FROM changestream_statistics WHERE task_id = ? AND collection_name = ?`,
-		taskID, collection).Scan(&r.Received, &r.Executed, &r.Pending, &r.Errors,
-		&r.Inserted, &r.Updated, &r.Deleted, &r.LastUpdated)
-	if err == sql.ErrNoRows {
-		return r, false
-	}
-	if err != nil {
-		t.Fatalf("read stats: %v", err)
-	}
-	return r, true
-}
-
-func countRows(t *testing.T, conn *sql.DB, table string) int {
-	t.Helper()
-
-	var n int
-	if err := conn.QueryRow("SELECT COUNT(*) FROM " + table).Scan(&n); err != nil {
-		t.Fatalf("count %s: %v", table, err)
-	}
-	return n
-}
-
-// ---------------------------------------------------------------- row counting

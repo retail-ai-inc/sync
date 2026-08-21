@@ -8,7 +8,6 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/go-chi/chi/v5"
 )
@@ -171,8 +170,4 @@ func insertMonitoringRow(t *testing.T, conn *sql.DB, taskID int, loggedAt, table
 		loggedAt, table, src, table, tgt, taskID); err != nil {
 		t.Fatalf("insert monitoring_log: %v", err)
 	}
-}
-
-func sqlNow(offset time.Duration) string {
-	return time.Now().UTC().Add(offset).Format("2006-01-02 15:04:05")
 }

@@ -62,17 +62,6 @@ func containsArg(args []string, want string) bool {
 	return false
 }
 
-func indexOfArg(args []string, want string) int {
-	for i, a := range args {
-		if a == want {
-			return i
-		}
-	}
-	return -1
-}
-
-// ------------------------------------------------ mongoexport workflow
-
 func TestExecuteExternalZipBuildsItsArguments(t *testing.T) {
 	binDir := stubPATH(t)
 	workDir := t.TempDir()

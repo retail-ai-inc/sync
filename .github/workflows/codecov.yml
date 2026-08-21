@@ -77,7 +77,20 @@ jobs:
           echo "All services are up!"
         
       - name: Run tests
-        run: go test -race -coverprofile=coverage.txt -covermode=atomic ./...
+        run: |
+          # -coverpkg=./... is required, not a nicety: the packages are split by
+          # bounded context and layer, so a test in one package exercises code in
+          # another. Without it every cross-package call counts as uncovered and
+          # the report understates coverage by roughly eight points.
+          go test -race -coverpkg=./... -coverprofile=coverage.raw -covermode=atomic ./...
+          # -coverpkg emits one entry per test binary for every block in the
+          # repository, which makes the profile 32x larger. Collapse it by keeping
+          # the highest count seen for each block; `go tool cover` reports the same
+          # total either way.
+          {
+            echo "mode: atomic"
+            grep -v '^mode:' coverage.raw | sort -t' ' -k1,1 -k3,3nr | sort -t' ' -u -k1,1
+          } > coverage.txt
 
       - name: Upload results to Codecov
         uses: codecov/codecov-action@v5
