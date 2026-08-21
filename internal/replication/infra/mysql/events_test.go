@@ -24,7 +24,7 @@ const ordersSchema = `CREATE TABLE orders (id TEXT, customer TEXT, email TEXT)`
 // SQL and hands it to a *sql.DB, so SQLite can execute it — the placeholder
 // syntax is the same and "main" is SQLite's own schema name, so the generated
 // "main.orders" resolves.
-func targetDB(t *testing.T, schemaSQL string) *sql.DB {
+func sqliteTarget(t *testing.T, schemaSQL string) *sql.DB {
 	t.Helper()
 
 	db, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "target.db"))
@@ -111,7 +111,7 @@ func rows(t *testing.T, db *sql.DB) []string {
 // -------------------------------------------------------------- dispatch
 
 func TestOnRowAppliesAnInsert(t *testing.T) {
-	db := targetDB(t, ordersSchema)
+	db := sqliteTarget(t, ordersSchema)
 	h := newHandler(t, db, mapTable("orders", "orders"))
 
 	err := h.OnRow(&canal.RowsEvent{
@@ -128,7 +128,7 @@ func TestOnRowAppliesAnInsert(t *testing.T) {
 }
 
 func TestOnRowAppliesEveryRowOfABatch(t *testing.T) {
-	db := targetDB(t, ordersSchema)
+	db := sqliteTarget(t, ordersSchema)
 	h := newHandler(t, db, mapTable("orders", "orders"))
 
 	if err := h.OnRow(&canal.RowsEvent{
@@ -144,7 +144,7 @@ func TestOnRowAppliesEveryRowOfABatch(t *testing.T) {
 }
 
 func TestOnRowRenamesTheTargetTable(t *testing.T) {
-	db := targetDB(t, `CREATE TABLE orders_archive (id TEXT, customer TEXT, email TEXT)`)
+	db := sqliteTarget(t, `CREATE TABLE orders_archive (id TEXT, customer TEXT, email TEXT)`)
 	h := newHandler(t, db, mapTable("orders", "orders_archive"))
 
 	if err := h.OnRow(&canal.RowsEvent{
@@ -165,7 +165,7 @@ func TestOnRowRenamesTheTargetTable(t *testing.T) {
 }
 
 func TestOnRowSkipsAnUnmappedTable(t *testing.T) {
-	db := targetDB(t, ordersSchema)
+	db := sqliteTarget(t, ordersSchema)
 	h := newHandler(t, db, mapTable("customers", "customers"))
 
 	if err := h.OnRow(&canal.RowsEvent{
@@ -185,7 +185,7 @@ func TestOnRowSkipsAnUnmappedTable(t *testing.T) {
 // task watching two source databases that both have an "orders" table
 // replicates both into the same target table.
 func TestTheMappingLookupIgnoresTheSourceDatabase(t *testing.T) {
-	db := targetDB(t, ordersSchema)
+	db := sqliteTarget(t, ordersSchema)
 	h := newHandler(t, db, mapTable("orders", "orders"))
 
 	other := sourceTable("orders", "id", "customer", "email")
@@ -207,7 +207,7 @@ func TestTheMappingLookupIgnoresTheSourceDatabase(t *testing.T) {
 // mapping naming the table, so a second mapping for the same source table is
 // silently unreachable — a table cannot be fanned out to two targets.
 func TestTheFirstMatchingMappingWins(t *testing.T) {
-	db := targetDB(t, ordersSchema)
+	db := sqliteTarget(t, ordersSchema)
 	h := newHandler(t, db, []config.DatabaseMapping{
 		{Tables: []config.TableMapping{{SourceTable: "orders", TargetTable: "orders"}}},
 		{Tables: []config.TableMapping{{SourceTable: "orders", TargetTable: "orders_copy"}}},
@@ -228,7 +228,7 @@ func TestTheFirstMatchingMappingWins(t *testing.T) {
 }
 
 func TestOnRowAppliesAnUpdate(t *testing.T) {
-	db := targetDB(t, ordersSchema)
+	db := sqliteTarget(t, ordersSchema)
 	if _, err := db.Exec(`INSERT INTO orders VALUES ('1','Ada','x')`); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -253,7 +253,7 @@ func TestOnRowAppliesAnUpdate(t *testing.T) {
 // itself is handled: the WHERE clause carries the old value, so the row is found
 // and its key rewritten.
 func TestAnUpdateMatchesOnTheOldPrimaryKey(t *testing.T) {
-	db := targetDB(t, ordersSchema)
+	db := sqliteTarget(t, ordersSchema)
 	if _, err := db.Exec(`INSERT INTO orders VALUES ('1','Ada','x')`); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -283,7 +283,7 @@ func TestAnOddUpdateBatchPanics(t *testing.T) {
 		}
 	}()
 
-	db := targetDB(t, ordersSchema)
+	db := sqliteTarget(t, ordersSchema)
 	h := newHandler(t, db, mapTable("orders", "orders"))
 	_ = h.OnRow(&canal.RowsEvent{
 		Table:  sourceTable("orders", "id", "customer", "email"),
@@ -293,7 +293,7 @@ func TestAnOddUpdateBatchPanics(t *testing.T) {
 }
 
 func TestOnRowAppliesADelete(t *testing.T) {
-	db := targetDB(t, ordersSchema)
+	db := sqliteTarget(t, ordersSchema)
 	if _, err := db.Exec(`INSERT INTO orders VALUES ('1','Ada','x'),('2','Grace','y')`); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -316,7 +316,7 @@ func TestOnRowAppliesADelete(t *testing.T) {
 // is still deleted. That is the opposite trade-off from the PostgreSQL syncer,
 // which matches on every column.
 func TestTheDeleteMatchesOnTheKeyAlone(t *testing.T) {
-	db := targetDB(t, ordersSchema)
+	db := sqliteTarget(t, ordersSchema)
 	if _, err := db.Exec(`INSERT INTO orders VALUES ('1','Drifted','z')`); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -337,7 +337,7 @@ func TestTheDeleteMatchesOnTheKeyAlone(t *testing.T) {
 // TestAnUnknownActionIsIgnored records that the switch has no default, so an
 // action the reader invents is dropped without a log line.
 func TestAnUnknownActionIsIgnored(t *testing.T) {
-	db := targetDB(t, ordersSchema)
+	db := sqliteTarget(t, ordersSchema)
 	h := newHandler(t, db, mapTable("orders", "orders"))
 
 	if err := h.OnRow(&canal.RowsEvent{
@@ -359,7 +359,7 @@ func TestAnUnknownActionIsIgnored(t *testing.T) {
 // so the change is dropped instead. A keyless source table therefore never
 // receives updates — silently, since the call reports nothing.
 func TestAnUpdateWithNoPrimaryKeyIsSkipped(t *testing.T) {
-	db := targetDB(t, ordersSchema)
+	db := sqliteTarget(t, ordersSchema)
 	if _, err := db.Exec(`INSERT INTO orders VALUES ('1','Ada','x')`); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -379,7 +379,7 @@ func TestAnUpdateWithNoPrimaryKeyIsSkipped(t *testing.T) {
 }
 
 func TestADeleteWithNoPrimaryKeyIsSkipped(t *testing.T) {
-	db := targetDB(t, ordersSchema)
+	db := sqliteTarget(t, ordersSchema)
 	if _, err := db.Exec(`INSERT INTO orders VALUES ('1','Ada','x')`); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -402,7 +402,7 @@ func TestADeleteWithNoPrimaryKeyIsSkipped(t *testing.T) {
 // key, so a keyless table accumulates rows in the target that no later update or
 // delete can ever reach.
 func TestAnInsertWithNoPrimaryKeyStillRuns(t *testing.T) {
-	db := targetDB(t, ordersSchema)
+	db := sqliteTarget(t, ordersSchema)
 	h := newHandler(t, db, mapTable("orders", "orders"))
 	table := sourceTable("orders", "id", "customer", "email")
 	table.PKColumns = nil
@@ -421,7 +421,7 @@ func TestAnInsertWithNoPrimaryKeyStillRuns(t *testing.T) {
 // ------------------------------------------------------------- masking
 
 func TestAnInsertMasksASecuredField(t *testing.T) {
-	db := targetDB(t, ordersSchema)
+	db := sqliteTarget(t, ordersSchema)
 	h := newHandler(t, db, securedTable("orders", "orders", "email"))
 
 	if err := h.OnRow(&canal.RowsEvent{
@@ -447,7 +447,7 @@ func TestAnInsertMasksASecuredField(t *testing.T) {
 // TestAnUpdateAlsoMasks records that the MySQL syncer applies masking on both
 // paths, unlike the PostgreSQL one where only inserts are masked.
 func TestAnUpdateAlsoMasks(t *testing.T) {
-	db := targetDB(t, ordersSchema)
+	db := sqliteTarget(t, ordersSchema)
 	if _, err := db.Exec(`INSERT INTO orders VALUES ('1','Ada','masked')`); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -473,7 +473,7 @@ func TestAnUpdateAlsoMasks(t *testing.T) {
 // a secured field — but it also means the raw value reaches the target's query
 // log.
 func TestTheDeleteKeyIsNotMasked(t *testing.T) {
-	db := targetDB(t, ordersSchema)
+	db := sqliteTarget(t, ordersSchema)
 	if _, err := db.Exec(`INSERT INTO orders VALUES ('1','Ada','x')`); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -497,7 +497,7 @@ func TestTheDeleteKeyIsNotMasked(t *testing.T) {
 // consults before it writes: a statement that cannot be applied sets it, and the
 // call itself reports nothing to the caller.
 func TestAFailedStatementRaisesTheErrorFlag(t *testing.T) {
-	db := targetDB(t, ordersSchema)
+	db := sqliteTarget(t, ordersSchema)
 	h := newHandler(t, db, mapTable("orders", "orders"))
 
 	// A column the target does not have, so the statement fails to prepare.
@@ -520,7 +520,7 @@ func TestAFailedStatementRaisesTheErrorFlag(t *testing.T) {
 // successful statement, so a failed row followed by a good one leaves the
 // position free to advance past the loss.
 func TestALaterSuccessClearsTheErrorFlag(t *testing.T) {
-	db := targetDB(t, ordersSchema)
+	db := sqliteTarget(t, ordersSchema)
 	h := newHandler(t, db, mapTable("orders", "orders"))
 
 	_ = h.OnRow(&canal.RowsEvent{
@@ -642,7 +642,7 @@ func TestTheHandlerNamesItself(t *testing.T) {
 // -------------------------------------------------------- batch insert
 
 func TestBatchInsertWritesEveryRow(t *testing.T) {
-	db := targetDB(t, ordersSchema)
+	db := sqliteTarget(t, ordersSchema)
 	s := newSyncer(t)
 
 	err := s.batchInsert(context.Background(), db, "main", "orders",
@@ -667,7 +667,7 @@ func TestBatchInsertOnAnEmptyBatchIsANoOp(t *testing.T) {
 }
 
 func TestBatchInsertReportsAFailingStatement(t *testing.T) {
-	db := targetDB(t, ordersSchema)
+	db := sqliteTarget(t, ordersSchema)
 	s := newSyncer(t)
 
 	err := s.batchInsert(context.Background(), db, "main", "orders",
@@ -683,7 +683,7 @@ func TestBatchInsertReportsAFailingStatement(t *testing.T) {
 // modified underneath it, so anything that inspects them afterwards — a retry,
 // a row count, a log line — sees the masked values, not what the source held.
 func TestBatchInsertMasksInPlace(t *testing.T) {
-	db := targetDB(t, ordersSchema)
+	db := sqliteTarget(t, ordersSchema)
 	s := newSyncer(t)
 	s.cfg = config.SyncConfig{Mappings: securedTable("orders", "orders", "email")}
 

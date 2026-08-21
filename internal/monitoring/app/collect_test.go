@@ -77,7 +77,7 @@ func TestStartRowCountMonitoringTakesNoMeasurementBeforeTheFirstTick(t *testing.
 	time.Sleep(50 * time.Millisecond)
 }
 
-func TestStartRowCountMonitoringStopsOnCancel(t *testing.T) {
+func TestTheMonitorLoopStopsOnCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	cfg := &config.Config{SyncConfigs: []config.SyncConfig{
