@@ -55,7 +55,7 @@ config.json
 .goreleaser.yaml
 dist/
 
-sync
+/sync
 cloudbuild.yaml
 docker-compose-demo.yml
 sync.db-wal
