@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/retail-ai-inc/sync/pkg/backup"
+	"github.com/retail-ai-inc/sync/internal/backup"
 	"github.com/sirupsen/logrus"
 )
 

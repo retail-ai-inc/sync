@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/retail-ai-inc/sync/pkg/config"
+	"github.com/retail-ai-inc/sync/internal/platform/config"
 )
 
 func cfgWith(tasks ...config.SyncConfig) *config.Config {

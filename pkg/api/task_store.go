@@ -4,7 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 
-	"github.com/retail-ai-inc/sync/pkg/db"
+	"github.com/retail-ai-inc/sync/internal/platform/db"
 )
 
 func openLocalDB() (*sql.DB, error) {

@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/retail-ai-inc/sync/pkg/db"
+	"github.com/retail-ai-inc/sync/internal/platform/db"
 )
 
 // GetUsersHandler GET /api/users

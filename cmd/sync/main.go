@@ -13,11 +13,12 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/retail-ai-inc/sync/internal/monitoring"
+	"github.com/retail-ai-inc/sync/internal/platform/config"
+	"github.com/retail-ai-inc/sync/internal/platform/logger"
+	"github.com/retail-ai-inc/sync/internal/platform/webui"
+	"github.com/retail-ai-inc/sync/internal/replication"
 	"github.com/retail-ai-inc/sync/pkg/api"
-	"github.com/retail-ai-inc/sync/pkg/config"
-	"github.com/retail-ai-inc/sync/pkg/logger"
-	"github.com/retail-ai-inc/sync/pkg/syncer"
-	"github.com/retail-ai-inc/sync/pkg/utils"
 	"github.com/sirupsen/logrus"
 )
 
@@ -27,7 +28,7 @@ func main() {
 
 	if _, err := os.Stat("ui/dist"); os.IsNotExist(err) {
 		log.Info("ui/dist directory does not exist, extracting ui/dist.zip...")
-		if err := utils.UnzipDistFile("ui/dist.zip", "ui/"); err != nil {
+		if err := webui.UnzipDistFile("ui/dist.zip", "ui/"); err != nil {
 			log.Errorf("Error unzipping dist.zip: %v", err)
 			return
 		}
@@ -104,7 +105,7 @@ func runSyncTasks(parentCtx context.Context, log *logrus.Logger, cfg *config.Con
 	// Initialize row count monitoring (if enabled)
 	if currentConfig.EnableTableRowCountMonitoring {
 		rowCountMonitorCtx, rowCountMonitorCancel = context.WithCancel(parentCtx)
-		utils.StartRowCountMonitoring(rowCountMonitorCtx, currentConfig, log, currentConfig.MonitorInterval)
+		monitoring.StartRowCountMonitoring(rowCountMonitorCtx, currentConfig, log, currentConfig.MonitorInterval)
 	}
 
 	for {
@@ -137,7 +138,7 @@ func runSyncTasks(parentCtx context.Context, log *logrus.Logger, cfg *config.Con
 				// Restart row count monitoring (if enabled)
 				if currentConfig.EnableTableRowCountMonitoring {
 					rowCountMonitorCtx, rowCountMonitorCancel = context.WithCancel(parentCtx)
-					utils.StartRowCountMonitoring(rowCountMonitorCtx, currentConfig, log, currentConfig.MonitorInterval)
+					monitoring.StartRowCountMonitoring(rowCountMonitorCtx, currentConfig, log, currentConfig.MonitorInterval)
 				}
 			}
 		}
@@ -154,22 +155,22 @@ func startSyncTasks(ctx context.Context, cfg *config.Config, wg *sync.WaitGroup,
 		case "mongodb":
 			go func(sc config.SyncConfig) {
 				defer wg.Done()
-				syncer.NewMongoDBSyncer(sc, cfg, log).Start(ctx)
+				replication.NewMongoDBSyncer(sc, cfg, log).Start(ctx)
 			}(syncCfg)
 		case "mysql", "mariadb":
 			go func(sc config.SyncConfig) {
 				defer wg.Done()
-				syncer.NewMySQLSyncer(sc, log).Start(ctx)
+				replication.NewMySQLSyncer(sc, log).Start(ctx)
 			}(syncCfg)
 		case "postgresql":
 			go func(sc config.SyncConfig) {
 				defer wg.Done()
-				syncer.NewPostgreSQLSyncer(sc, log).Start(ctx)
+				replication.NewPostgreSQLSyncer(sc, log).Start(ctx)
 			}(syncCfg)
 		case "redis":
 			go func(sc config.SyncConfig) {
 				defer wg.Done()
-				syncer.NewRedisSyncer(sc, log).Start(ctx)
+				replication.NewRedisSyncer(sc, log).Start(ctx)
 			}(syncCfg)
 		default:
 			log.Errorf("Unknown sync type: %s", syncCfg.Type)

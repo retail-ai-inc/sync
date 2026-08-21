@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/retail-ai-inc/sync/internal/db/mongodb"
+	"github.com/retail-ai-inc/sync/internal/platform/dbconn/mongodb"
 	"github.com/sirupsen/logrus"
 )
 
