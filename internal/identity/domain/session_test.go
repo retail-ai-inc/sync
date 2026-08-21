@@ -1,6 +1,8 @@
 package domain
 
 import (
+	"os"
+	"sync"
 	"testing"
 )
 
@@ -165,10 +167,29 @@ func TestCurrentIsProcessWide(t *testing.T) {
 	Current().Clear()
 }
 
-// The demonstration of the other half of T-070 — eight goroutines racing on the
-// Session's two unsynchronised fields — lives in racedemo_test.go behind the
-// "racedemo" build tag. It exists to be run under -race, where it reports the
-// race production has, so it cannot sit in a suite that CI runs with -race and
-// expects to pass. Run it with:
-//
-//	go test -race -tags racedemo ./internal/identity/domain/
+// TestTheSessionIsUnsynchronised records the other half of T-070. The Session
+// has no mutex, so concurrent handlers race on its two fields. This test is
+// gated because it exists to be run under -race, where it reports the race that
+// production has.
+func TestTheSessionIsUnsynchronised(t *testing.T) {
+	if os.Getenv("SYNC_RACE_PROOF") == "" {
+		t.Skip("set SYNC_RACE_PROOF=1 together with -race to demonstrate T-070")
+	}
+
+	s := freshSession()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s.Authenticate("alice", "admin")
+		}()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = s.IsAdmin()
+		}()
+	}
+	wg.Wait()
+}

@@ -273,7 +273,7 @@ func TestLogoutClearsTheSessionForEveryone(t *testing.T) {
 // costs the whole package: the race detector aborts it, and CI runs
 // `go test -race ./...`. The test is therefore skipped unless asked for.
 //
-//	SYNC_RACE_PROOF=1 go test -race -run TestConcurrentLoginsRace ./pkg/api/
+//	SYNC_RACE_PROOF=1 go test -race -run TestConcurrentLoginsRace ./internal/identity/http/
 //
 // See T-070 in docs/TEST_FINDINGS.md.
 func TestConcurrentLoginsRaceOnTheSessionGlobals(t *testing.T) {
