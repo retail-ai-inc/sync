@@ -1,4 +1,4 @@
-package backup
+package export
 
 import (
 	"context"
@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/retail-ai-inc/sync/internal/backup/infra/transfer"
 )
 
 // stubBin installs an executable stub on PATH under the given name. The stub
@@ -233,99 +235,6 @@ func TestExecuteExternalMySQLDumpReportsAnUncreatableOutput(t *testing.T) {
 
 // ------------------------------------------------------------- zip wiring
 
-func TestExecuteExternalZipBuildsItsArguments(t *testing.T) {
-	binDir := stubPATH(t)
-	workDir := t.TempDir()
-	input := filepath.Join(workDir, "orders.sql")
-	output := filepath.Join(workDir, "orders.zip")
-
-	if err := os.WriteFile(input, []byte("payload"), 0o600); err != nil {
-		t.Fatalf("write input: %v", err)
-	}
-	// The stub must produce the output file, which the caller then stats.
-	stubBin(t, binDir, "zip", "touch "+output, 0)
-
-	e := newExecutor()
-	if err := e.executeExternalZip(context.Background(), workDir, input, output); err != nil {
-		t.Fatalf("executeExternalZip: %v", err)
-	}
-
-	args := stubArgs(t, binDir, "zip")
-	if !containsArg(args, "-j") || !containsArg(args, output) || !containsArg(args, input) {
-		t.Errorf("args = %v, want -j plus both paths", args)
-	}
-}
-
-func TestExecuteExternalZipReportsAFailingCommand(t *testing.T) {
-	binDir := stubPATH(t)
-	stubBin(t, binDir, "zip", "echo 'disk full' >&2", 1)
-
-	e := newExecutor()
-	workDir := t.TempDir()
-	err := e.executeExternalZip(context.Background(), workDir,
-		filepath.Join(workDir, "in.sql"), filepath.Join(workDir, "out.zip"))
-
-	if err == nil {
-		t.Fatal("executeExternalZip() = nil, want the non-zero exit")
-	}
-	if !strings.Contains(err.Error(), "zip failed") || !strings.Contains(err.Error(), "disk full") {
-		t.Errorf("err = %v, want it to carry the command output", err)
-	}
-}
-
-// A zip command that exits 0 without producing the archive is caught by the
-// stat that follows, so a silently broken compression step does not pass as
-// success.
-func TestExecuteExternalZipRejectsAMissingArchive(t *testing.T) {
-	binDir := stubPATH(t)
-	stubBin(t, binDir, "zip", "", 0) // exits 0, writes nothing
-
-	e := newExecutor()
-	workDir := t.TempDir()
-	err := e.executeExternalZip(context.Background(), workDir,
-		filepath.Join(workDir, "in.sql"), filepath.Join(workDir, "out.zip"))
-
-	if err == nil {
-		t.Fatal("executeExternalZip() = nil despite no archive being produced")
-	}
-	if !strings.Contains(err.Error(), "zip output file not created") {
-		t.Errorf("err = %v", err)
-	}
-}
-
-// ------------------------------------------------------------ gsutil wiring
-
-func TestExecuteExternalGCSUploadBuildsItsArguments(t *testing.T) {
-	binDir := stubPATH(t)
-	stubBin(t, binDir, "gsutil", "", 0)
-
-	e := newExecutor()
-	if err := e.executeExternalGCSUpload(context.Background(),
-		"/tmp/orders.zip", "gs://bucket/path/orders.zip"); err != nil {
-		t.Fatalf("executeExternalGCSUpload: %v", err)
-	}
-
-	args := stubArgs(t, binDir, "gsutil")
-	if len(args) != 3 || args[0] != "cp" || args[1] != "/tmp/orders.zip" || args[2] != "gs://bucket/path/orders.zip" {
-		t.Errorf("args = %v, want [cp <local> <remote>]", args)
-	}
-}
-
-func TestExecuteExternalGCSUploadReportsAFailingCommand(t *testing.T) {
-	binDir := stubPATH(t)
-	stubBin(t, binDir, "gsutil", "echo 'AccessDeniedException: 403' >&2", 1)
-
-	e := newExecutor()
-	err := e.executeExternalGCSUpload(context.Background(), "/tmp/x.zip", "gs://b/x.zip")
-
-	if err == nil {
-		t.Fatal("executeExternalGCSUpload() = nil, want the non-zero exit")
-	}
-	if !strings.Contains(err.Error(), "gsutil upload failed") || !strings.Contains(err.Error(), "403") {
-		t.Errorf("err = %v, want it to carry the command output", err)
-	}
-}
-
 // The upload does not verify that the object landed: gsutil's exit status is
 // the only signal, and nothing reads back the object's size or checksum. A
 // truncated or empty archive uploads as a success.
@@ -334,8 +243,7 @@ func TestTheUploadIsNotVerified(t *testing.T) {
 	// Exits 0 without doing anything at all.
 	stubBin(t, binDir, "gsutil", "", 0)
 
-	e := newExecutor()
-	if err := e.executeExternalGCSUpload(context.Background(),
+	if err := transfer.UploadGCS(context.Background(),
 		"/nonexistent/path/orders.zip", "gs://bucket/orders.zip"); err != nil {
 		t.Fatalf("executeExternalGCSUpload() = %v — the upload appears to be verified now; assert the verification instead", err)
 	}

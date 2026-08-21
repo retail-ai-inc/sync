@@ -1,4 +1,4 @@
-package backup
+package export
 
 import (
 	"bufio"
@@ -13,6 +13,8 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/retail-ai-inc/sync/internal/backup/domain"
+	"github.com/retail-ai-inc/sync/internal/backup/infra/transfer"
 	"github.com/sirupsen/logrus"
 )
 
@@ -58,7 +60,7 @@ func (e *BackupExecutor) logMemoryUsage(phase string) {
 
 // ExecuteExternalMongoBackup executes MongoDB backup using external commands
 // Avoids Go memory management issues by directly calling system commands
-func (e *BackupExecutor) ExecuteExternalMongoBackup(ctx context.Context, config ExecutorBackupConfig, tempDir string, task BackupTask, collection string) error {
+func (e *BackupExecutor) ExecuteExternalMongoBackup(ctx context.Context, config ExecutorBackupConfig, tempDir string, task domain.BackupTask, collection string) error {
 	logrus.Infof("[BackupExecutor] 🚀 Using EXTERNAL COMMAND mode for collection: %s", collection)
 
 	// Log Go process memory (should remain stable)
@@ -85,7 +87,7 @@ func (e *BackupExecutor) ExecuteExternalMongoBackup(ctx context.Context, config 
 
 	// Step 2: External zip command
 	logrus.Infof("[BackupExecutor] 🗜️ Step 2: External zip compression")
-	if err := e.executeExternalZip(ctx, tempDir, outputPath, zipPath); err != nil {
+	if err := transfer.Zip(ctx, tempDir, outputPath, zipPath); err != nil {
 		return fmt.Errorf("external zip failed: %w", err)
 	}
 
@@ -95,7 +97,7 @@ func (e *BackupExecutor) ExecuteExternalMongoBackup(ctx context.Context, config 
 	if config.Destination.GCSPath != "" {
 		logrus.Infof("[BackupExecutor] ☁️ Step 3: External GCS upload")
 		gcsPath := fmt.Sprintf("%s/%s%s%s.zip", config.Destination.GCSPath, baseCollectionName, ZIPFilenameSeparator, dateStr)
-		if err := e.executeExternalGCSUpload(ctx, zipPath, gcsPath); err != nil {
+		if err := transfer.UploadGCS(ctx, zipPath, gcsPath); err != nil {
 			return fmt.Errorf("external GCS upload failed: %w", err)
 		}
 	}
@@ -173,7 +175,7 @@ func (e *BackupExecutor) executeExternalMongoExportSimple(ctx context.Context, c
 
 	// Step 2: External zip command
 	logrus.Infof("[BackupExecutor] 🗜️ Step 2: External zip compression")
-	if err := e.executeExternalZip(ctx, tempDir, outputPath, zipPath); err != nil {
+	if err := transfer.Zip(ctx, tempDir, outputPath, zipPath); err != nil {
 		return fmt.Errorf("external zip failed: %w", err)
 	}
 
@@ -183,7 +185,7 @@ func (e *BackupExecutor) executeExternalMongoExportSimple(ctx context.Context, c
 	zipFileName := fmt.Sprintf("%s%s%s.zip", baseCollectionName, ZIPFilenameSeparator, dateStr)
 	gcsPath := fmt.Sprintf("%s/%s", config.Destination.GCSPath, zipFileName)
 	logrus.Infof("[BackupExecutor] ☁️ Step 3: External GCS upload")
-	if err := e.executeExternalGCSUpload(ctx, zipPath, gcsPath); err != nil {
+	if err := transfer.UploadGCS(ctx, zipPath, gcsPath); err != nil {
 		return fmt.Errorf("external GCS upload failed: %w", err)
 	}
 
@@ -382,7 +384,7 @@ func (e *BackupExecutor) exportMongoDBMergedTables(ctx context.Context, connStr,
 
 	// Step 2: External zip command
 	logrus.Infof("[BackupExecutor] 🗜️ Step 2: External zip compression")
-	if err := e.executeExternalZip(ctx, tempDir, mergedJsonPath, zipPath); err != nil {
+	if err := transfer.Zip(ctx, tempDir, mergedJsonPath, zipPath); err != nil {
 		return fmt.Errorf("external zip failed: %w", err)
 	}
 
@@ -391,7 +393,7 @@ func (e *BackupExecutor) exportMongoDBMergedTables(ctx context.Context, connStr,
 	// Step 3: External GCS upload
 	gcsPath := fmt.Sprintf("%s/%s", config.Destination.GCSPath, zipFileName)
 	logrus.Infof("[BackupExecutor] ☁️ Step 3: External GCS upload")
-	if err := e.executeExternalGCSUpload(ctx, zipPath, gcsPath); err != nil {
+	if err := transfer.UploadGCS(ctx, zipPath, gcsPath); err != nil {
 		return fmt.Errorf("external GCS upload failed: %w", err)
 	}
 

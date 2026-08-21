@@ -1,4 +1,4 @@
-package backup
+package export
 
 import (
 	"context"
@@ -8,6 +8,7 @@ import (
 	"os"
 
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/retail-ai-inc/sync/internal/backup/domain"
 	"github.com/retail-ai-inc/sync/internal/platform/timex"
 	"github.com/sirupsen/logrus"
 )
@@ -134,8 +135,8 @@ func (e *BackupExecutor) Execute(ctx context.Context, taskID int) error {
 }
 
 // getBackupTask Get backup task information
-func (e *BackupExecutor) getBackupTask(ctx context.Context, taskID int) (BackupTask, error) {
-	var task BackupTask
+func (e *BackupExecutor) getBackupTask(ctx context.Context, taskID int) (domain.BackupTask, error) {
+	var task domain.BackupTask
 	var lastUpdateTime, lastBackupTime, nextBackupTime sql.NullString
 
 	query := `SELECT id, enable, last_update_time, last_backup_time, next_backup_time, config_json 

@@ -4,7 +4,7 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/retail-ai-inc/sync/internal/backup"
+	backuphttp "github.com/retail-ai-inc/sync/internal/backup/http"
 	"github.com/retail-ai-inc/sync/internal/dbinspect"
 	identityhttp "github.com/retail-ai-inc/sync/internal/identity/http"
 	monitoringhttp "github.com/retail-ai-inc/sync/internal/monitoring/http"
@@ -53,17 +53,17 @@ func NewRouter() http.Handler {
 	r.Post("/tables/schema", dbinspect.GetTableSchemaHandler)
 
 	// 7) Backup related
-	r.Get("/backup", backup.BackupListHandler)
-	r.Post("/backup", backup.BackupCreateHandler)
-	r.Delete("/backup/{id}", backup.BackupDeleteHandler)
-	r.Put("/backup/{id}/pause", backup.BackupPauseHandler)
-	r.Put("/backup/{id}/resume", backup.BackupResumeHandler)
-	r.Post("/backup/{id}/run", backup.BackupRunHandler)
-	r.Put("/backup/{id}", backup.BackupUpdateHandler)
+	r.Get("/backup", backuphttp.BackupListHandler)
+	r.Post("/backup", backuphttp.BackupCreateHandler)
+	r.Delete("/backup/{id}", backuphttp.BackupDeleteHandler)
+	r.Put("/backup/{id}/pause", backuphttp.BackupPauseHandler)
+	r.Put("/backup/{id}/resume", backuphttp.BackupResumeHandler)
+	r.Post("/backup/{id}/run", backuphttp.BackupRunHandler)
+	r.Put("/backup/{id}", backuphttp.BackupUpdateHandler)
 
 	// 8) Cronjob related
-	r.Post("/backup/execute/{id}", backup.BackupExecuteHandler)  // POST /api/backup/execute/{id}
-	r.Get("/backup/status/{taskId}", backup.BackupStatusHandler) // GET /api/backup/status/{taskId}
+	r.Post("/backup/execute/{id}", backuphttp.BackupExecuteHandler)  // POST /api/backup/execute/{id}
+	r.Get("/backup/status/{taskId}", backuphttp.BackupStatusHandler) // GET /api/backup/status/{taskId}
 
 	return r
 }

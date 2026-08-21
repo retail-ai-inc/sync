@@ -1,4 +1,4 @@
-package backup
+package backuphttp
 
 import (
 	"database/sql"
@@ -9,6 +9,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	_ "github.com/mattn/go-sqlite3"
+	"github.com/retail-ai-inc/sync/internal/backup/app"
 )
 
 func insertBackupTask(t *testing.T, conn *sql.DB, enable int, cfg string) {
@@ -37,6 +40,13 @@ func backupConfig(t *testing.T, conn *sql.DB, id int) map[string]interface{} {
 }
 
 // ------------------------------------------------------------- BackupRun
+
+// emptyTaskDB points the package at a SQLite file with no tables.
+func emptyTaskDB(t *testing.T) {
+	t.Helper()
+	isolateCrontab(t)
+	t.Setenv("SYNC_DB_PATH", filepath.Join(t.TempDir(), "empty.db"))
+}
 
 func TestBackupRunHandlerRejectsAnUnknownTask(t *testing.T) {
 	useTempTaskDB(t)
@@ -101,11 +111,7 @@ func TestBackupRunHandlerRecordsASuccessWithoutRunningAnything(t *testing.T) {
 
 	// Nothing else changed: no task status was registered, which is what a real
 	// asynchronous run does (see BackupExecuteHandler).
-	resetTaskStatus(t)
-	taskStatusMutex.RLock()
-	n := len(taskStatusMap)
-	taskStatusMutex.RUnlock()
-	if n != 0 {
+	if n := app.RunCount(); n != 0 {
 		t.Fatalf("%d background tasks were registered — the handler appears to execute now", n)
 	}
 }
@@ -335,11 +341,4 @@ func TestTheStoredNextBackupTimeIgnoresTheSchedule(t *testing.T) {
 	if d := time.Until(next); d < 23*time.Hour {
 		t.Fatalf("next_backup_time is %v away — the schedule appears to be parsed now; assert the real next run instead", d)
 	}
-}
-
-// emptyTaskDB points the package at a SQLite file with no tables.
-func emptyTaskDB(t *testing.T) {
-	t.Helper()
-	isolateCrontab(t)
-	t.Setenv("SYNC_DB_PATH", filepath.Join(t.TempDir(), "empty.db"))
 }

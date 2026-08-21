@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/retail-ai-inc/sync/internal/backup"
+	backuphttp "github.com/retail-ai-inc/sync/internal/backup/http"
 	"github.com/retail-ai-inc/sync/internal/dbinspect"
 	identityhttp "github.com/retail-ai-inc/sync/internal/identity/http"
 	monitoringhttp "github.com/retail-ai-inc/sync/internal/monitoring/http"
@@ -195,16 +195,16 @@ func TestBackupControlIsReachableWithoutCredentials(t *testing.T) {
 		req     *http.Request
 		params  map[string]string
 	}{
-		{"GET /api/backup", backup.BackupListHandler, jsonRequest(http.MethodGet, "/backup", ""), nil},
-		{"POST /api/backup", backup.BackupCreateHandler, jsonRequest(http.MethodPost, "/backup",
+		{"GET /api/backup", backuphttp.BackupListHandler, jsonRequest(http.MethodGet, "/backup", ""), nil},
+		{"POST /api/backup", backuphttp.BackupCreateHandler, jsonRequest(http.MethodPost, "/backup",
 			`{"name":"injected","sourceType":"mysql","schedule":"0 3 * * *"}`), nil},
-		{"DELETE /api/backup/{id}", backup.BackupDeleteHandler, jsonRequest(http.MethodDelete, "/backup/{id}", ""),
+		{"DELETE /api/backup/{id}", backuphttp.BackupDeleteHandler, jsonRequest(http.MethodDelete, "/backup/{id}", ""),
 			map[string]string{"id": "1"}},
-		{"PUT /api/backup/{id}/pause", backup.BackupPauseHandler, jsonRequest(http.MethodPut, "/backup/{id}/pause", ""),
+		{"PUT /api/backup/{id}/pause", backuphttp.BackupPauseHandler, jsonRequest(http.MethodPut, "/backup/{id}/pause", ""),
 			map[string]string{"id": "1"}},
-		{"PUT /api/backup/{id}/resume", backup.BackupResumeHandler, jsonRequest(http.MethodPut, "/backup/{id}/resume", ""),
+		{"PUT /api/backup/{id}/resume", backuphttp.BackupResumeHandler, jsonRequest(http.MethodPut, "/backup/{id}/resume", ""),
 			map[string]string{"id": "1"}},
-		{"GET /api/backup/status/{taskId}", backup.BackupStatusHandler,
+		{"GET /api/backup/status/{taskId}", backuphttp.BackupStatusHandler,
 			jsonRequest(http.MethodGet, "/backup/status/{taskId}", ""), map[string]string{"taskId": "unknown"}},
 	}
 

@@ -1,33 +1,17 @@
-package backup
+package crontab
 
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 	"time"
 
+	"github.com/retail-ai-inc/sync/internal/backup/domain"
 	"github.com/sirupsen/logrus"
 )
-
-// BackupTask Backup task structure
-type BackupTask struct {
-	ID             int
-	Enable         int
-	LastUpdateTime time.Time
-	LastBackupTime time.Time
-	NextBackupTime time.Time
-	ConfigJSON     string
-}
-
-type BackupConfig struct {
-	Schedule string `json:"schedule"`
-	Name     string `json:"name"`
-	// Other fields omitted...
-}
 
 // CronManager Manages crontab entries for backup tasks
 type CronManager struct {
@@ -55,9 +39,9 @@ func (cm *CronManager) SyncCrontab(ctx context.Context) error {
 	}
 	defer rows.Close()
 
-	var tasks []BackupTask
+	var tasks []domain.BackupTask
 	for rows.Next() {
-		var task BackupTask
+		var task domain.BackupTask
 		var lastUpdateTime, lastBackupTime, nextBackupTime sql.NullString
 
 		err := rows.Scan(&task.ID, &task.Enable, &lastUpdateTime, &lastBackupTime, &nextBackupTime, &task.ConfigJSON)
@@ -84,7 +68,7 @@ func (cm *CronManager) SyncCrontab(ctx context.Context) error {
 	}
 
 	// Generate crontab entries
-	crontabEntries := generateCrontabEntries(tasks, cm.apiServer)
+	crontabEntries := domain.GenerateCrontabEntries(tasks, cm.apiServer)
 
 	// Update system crontab
 	if err := updateSystemCrontab(crontabEntries); err != nil {
@@ -94,36 +78,6 @@ func (cm *CronManager) SyncCrontab(ctx context.Context) error {
 
 	logrus.Infof("[CronManager] Successfully synced %d backup tasks to crontab", len(tasks))
 	return nil
-}
-
-// generateCrontabEntries Generate crontab entries for tasks
-func generateCrontabEntries(tasks []BackupTask, apiServer string) []string {
-	var entries []string
-
-	// Add comment marking the beginning
-	entries = append(entries, "# BEGIN SYNC BACKUP TASKS - DO NOT EDIT THIS SECTION")
-
-	for _, task := range tasks {
-		var config BackupConfig
-		if err := json.Unmarshal([]byte(task.ConfigJSON), &config); err != nil {
-			logrus.Errorf("[CronManager] Failed to parse config_json for task %d: %v", task.ID, err)
-			continue
-		}
-
-		// Generate crontab entry
-		// Ensure the command format is correct, with complete path
-		entry := fmt.Sprintf("%s /usr/bin/curl -s -X POST %s/backup/execute/%d > /dev/null 2>&1",
-			config.Schedule, apiServer, task.ID)
-
-		// Add comment for identification
-		comment := fmt.Sprintf("# Backup task: %s (ID: %d)", config.Name, task.ID)
-		entries = append(entries, comment, entry, "")
-	}
-
-	// Add comment marking the end
-	entries = append(entries, "# END SYNC BACKUP TASKS")
-
-	return entries
 }
 
 // updateSystemCrontab Update system crontab

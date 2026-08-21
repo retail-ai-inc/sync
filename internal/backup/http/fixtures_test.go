@@ -1,4 +1,4 @@
-package backup
+package backuphttp
 
 import (
 	"database/sql"
@@ -6,11 +6,9 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
-)
 
-// Fixtures shared by this package's handler tests. They are duplicated per
-// package rather than shared through an importable helper package, because a
-// non-test package holding test code compiles into every build.
+	_ "github.com/mattn/go-sqlite3"
+)
 
 // isolateCrontab empties PATH so the `crontab` command cannot be found. The
 // backup handlers call CronManager.SyncCrontab unconditionally, which shells

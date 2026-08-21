@@ -1,4 +1,4 @@
-package backup
+package export
 
 import (
 	"context"
@@ -12,6 +12,7 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/retail-ai-inc/sync/internal/backup/infra/transfer"
 	"github.com/sirupsen/logrus"
 )
 
@@ -77,7 +78,7 @@ func (e *BackupExecutor) executeExternalMySQLBackupSimple(ctx context.Context, c
 		logrus.Infof("[BackupExecutor] ⏭️  Step 2: Compression disabled, uploading %s as-is", uploadName)
 	} else {
 		logrus.Infof("[BackupExecutor] 🗜️ Step 2: External zip compression")
-		if err := e.executeExternalZip(ctx, tempDir, outputPath, zipPath); err != nil {
+		if err := transfer.Zip(ctx, tempDir, outputPath, zipPath); err != nil {
 			return fmt.Errorf("external zip failed: %w", err)
 		}
 		e.logMemoryUsage("AFTER_ZIP")
@@ -86,7 +87,7 @@ func (e *BackupExecutor) executeExternalMySQLBackupSimple(ctx context.Context, c
 	// Step 3: External GCS upload
 	gcsPath := fmt.Sprintf("%s/%s", config.Destination.GCSPath, uploadName)
 	logrus.Infof("[BackupExecutor] ☁️ Step 3: External GCS upload")
-	if err := e.executeExternalGCSUpload(ctx, uploadPath, gcsPath); err != nil {
+	if err := transfer.UploadGCS(ctx, uploadPath, gcsPath); err != nil {
 		return fmt.Errorf("external GCS upload failed: %w", err)
 	}
 
@@ -413,7 +414,7 @@ func (e *BackupExecutor) exportMySQLMergedTables(ctx context.Context, connection
 		logrus.Infof("[BackupExecutor] ⏭️  Step 2: Compression disabled, uploading %s as-is", uploadName)
 	} else {
 		logrus.Infof("[BackupExecutor] 🗜️ Step 2: External zip compression")
-		if err := e.executeExternalZip(ctx, tempDir, mergedFilePath, zipPath); err != nil {
+		if err := transfer.Zip(ctx, tempDir, mergedFilePath, zipPath); err != nil {
 			return fmt.Errorf("external zip failed: %w", err)
 		}
 		e.logMemoryUsage("AFTER_ZIP")
@@ -422,7 +423,7 @@ func (e *BackupExecutor) exportMySQLMergedTables(ctx context.Context, connection
 	// Step 3: External GCS upload
 	gcsPath := fmt.Sprintf("%s/%s", config.Destination.GCSPath, uploadName)
 	logrus.Infof("[BackupExecutor] ☁️ Step 3: External GCS upload")
-	if err := e.executeExternalGCSUpload(ctx, uploadPath, gcsPath); err != nil {
+	if err := transfer.UploadGCS(ctx, uploadPath, gcsPath); err != nil {
 		return fmt.Errorf("external GCS upload failed: %w", err)
 	}
 
