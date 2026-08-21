@@ -189,7 +189,7 @@ func TestExecuteRejectsRegexModeForAnUnsupportedEngine(t *testing.T) {
 // and uploads, and the temporary directory is removed afterwards.
 func TestExecuteRunsTheMySQLWorkflowAndCleansUp(t *testing.T) {
 	dir := stubPATH(t)
-	stubBin(t, dir, "mysqldump", "touch \"$3\"", 0)
+	stubBin(t, dir, "mysqldump", "echo '-- dump'", 0)
 	linkRealBinary(t, dir, "zip")
 	stubBin(t, dir, "gsutil", "", 0)
 
