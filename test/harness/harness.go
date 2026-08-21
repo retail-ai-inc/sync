@@ -1,3 +1,5 @@
+//go:build integration
+
 // Package harness provides shared fixtures for the integration suite: endpoint
 // discovery, convergence polling, and sync task construction.
 //
