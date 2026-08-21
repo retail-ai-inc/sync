@@ -26,7 +26,7 @@ func useTempJobDB(t *testing.T) *sql.DB {
 
 	isolateCrontab(t)
 
-	path := filepath.Join(t.TempDir(), "sync.db")
+	path := filepath.Join(jobDBDir(t), "sync.db")
 	t.Setenv("SYNC_DB_PATH", path)
 
 	db, err := sql.Open("sqlite3", path)
@@ -48,6 +48,26 @@ CREATE TABLE backup_tasks (
 		t.Fatalf("create schema: %v", err)
 	}
 	return db
+}
+
+// jobDBDir returns a throwaway directory that is removed on a best-effort
+// basis rather than by t.TempDir.
+//
+// SubmitRun starts the executor in a goroutine that outlives the test, and that
+// goroutine opens the same SQLite file — creating -wal and -shm alongside it.
+// t.TempDir's cleanup fails the test when it finds those files after it has
+// begun deleting the directory, which made every submitting test flaky. Nothing
+// is asserted about the directory afterwards, so a best-effort removal is
+// enough.
+func jobDBDir(t *testing.T) string {
+	t.Helper()
+
+	dir, err := os.MkdirTemp("", "backup-app-")
+	if err != nil {
+		t.Fatalf("create temp dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
 }
 
 // emptyJobDB points SYNC_DB_PATH at a file with no tables at all.

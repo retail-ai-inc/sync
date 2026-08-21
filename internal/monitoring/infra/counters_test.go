@@ -179,25 +179,39 @@ func TestTheMongoDBCounterReportsAnInvalidURI(t *testing.T) {
 	}
 }
 
-// TestTheMongoDBCounterCountsPerCollection records that an unreachable MongoDB
-// is only discovered once the counting starts, so the failure is reported once
-// per mapped collection rather than once per task.
-func TestTheMongoDBCounterCountsPerCollection(t *testing.T) {
+// TestTheMongoDBCounterRecordsMinusOneForAFailedCount records what the MongoDB
+// counter does that the other three do not: it writes a monitoring_log row even
+// when the count failed, carrying -1 as the row count. So the dashboard shows
+// -1 documents rather than the last good figure — visible, unlike the silent
+// staleness of the SQL counters (T-194), but not labelled as a failure either.
+//
+// The temporary database matters here: without it the counter's writer opens the
+// sync.db tracked in this repository and inserts into it.
+func TestTheMongoDBCounterRecordsMinusOneForAFailedCount(t *testing.T) {
+	conn := useMonitoringDB(t)
 	logger, out := captureLog()
 
 	CountAndLogMongoDB(briefCtx(t), config.SyncConfig{
+		ID:               42,
 		Type:             "mongodb",
 		SourceConnection: "mongodb://127.0.0.1:1/shop",
 		TargetConnection: "mongodb://127.0.0.1:1/shop",
 		Mappings:         oneMapping(),
 	}, logger)
 
-	if out.Len() == 0 {
-		t.Fatal("an unreachable MongoDB produced no output at all")
-	}
 	if strings.Contains(out.String(), "Fail to connect to source") {
 		t.Errorf("output = %q; the connection appears to be checked upfront now, "+
 			"so assert that instead", out.String())
+	}
+
+	var src, tgt int64
+	err := conn.QueryRow(`SELECT src_row_count, tgt_row_count FROM monitoring_log
+		WHERE sync_task_id = 42`).Scan(&src, &tgt)
+	if err != nil {
+		t.Fatalf("no row was written for a failed count: %v", err)
+	}
+	if src != -1 || tgt != -1 {
+		t.Errorf("counts = %d/%d, want -1/-1", src, tgt)
 	}
 }
 
