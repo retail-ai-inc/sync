@@ -375,7 +375,7 @@ func TestParseFilesParallelCollectsEveryFile(t *testing.T) {
 			insertEvent(t, string(rune('a'+i))), insertEvent(t, string(rune('A'+i)))))
 	}
 
-	models, processed, ok, _ := s.parseFilesParallel(context.Background(), files, "shop", "orders", "b1")
+	models, processed, ok, _, _ := s.parseFilesParallel(context.Background(), files, "shop", "orders", "b1")
 	if !ok {
 		t.Error("parseFilesParallel reported a failure")
 	}
@@ -398,7 +398,7 @@ func TestOneUnreadableFileFailsTheWholeBatch(t *testing.T) {
 	good := writeStream(t, dir, "batch_1.bsonstream", insertEvent(t, "1"))
 	missing := filepath.Join(dir, "batch_2.bsonstream")
 
-	models, processed, ok, _ := s.parseFilesParallel(context.Background(),
+	models, processed, ok, _, _ := s.parseFilesParallel(context.Background(),
 		[]string{good, missing}, "shop", "orders", "b1")
 
 	if ok {
@@ -413,7 +413,7 @@ func TestOneUnreadableFileFailsTheWholeBatch(t *testing.T) {
 func TestParseFilesParallelOnAnEmptySelection(t *testing.T) {
 	s := newBufferSyncer(t)
 
-	models, processed, ok, _ := s.parseFilesParallel(context.Background(), nil, "shop", "orders", "b1")
+	models, processed, ok, _, _ := s.parseFilesParallel(context.Background(), nil, "shop", "orders", "b1")
 	if !ok || len(models) != 0 || len(processed) != 0 {
 		t.Errorf("= %d models, %d files, ok=%v", len(models), len(processed), ok)
 	}
@@ -548,9 +548,58 @@ func TestTheDiskWriterFlushesWhenTheChannelCloses(t *testing.T) {
 	if len(files) != 1 {
 		t.Fatalf("%d buffer files, want 1", len(files))
 	}
-	// The last event's token was persisted along with the file.
+
+	// The resume token must NOT have moved. It used to be saved here, which made
+	// it say "handled" for events that were only on this machine's disk — and the
+	// token is recorded on the target database, which survives the region, while
+	// the buffer directory does not. A rescheduled pod lost the events and the
+	// stream resumed after them.
+	if got := s.loadMongoDBResumeToken("shop", "orders"); len(got) != 0 {
+		t.Error("the resume token advanced when the events were only buffered locally")
+	}
+}
+
+// TestTheTokenAdvancesOnlyOnceTheEventsHaveLanded is the other half: the token
+// is recorded by the applier, from the event it last applied.
+func TestTheTokenAdvancesOnlyOnceTheEventsHaveLanded(t *testing.T) {
+	s := newBufferSyncer(t)
+	s.cfg = config.SyncConfig{MongoDBResumeTokenPath: t.TempDir()}
+
+	// A change stream document's _id is its resume token, so a buffered event
+	// already carries what the stream would continue from.
+	raw := event(t, bson.M{
+		"_id":           bson.M{"_data": "82ABCD"},
+		"operationType": "insert",
+		"documentKey":   bson.M{"_id": "1"},
+		"fullDocument":  bson.M{"_id": "1"},
+	})
+	token, ok := eventResumeToken(raw)
+	if !ok {
+		t.Fatal("the event carries no resume token")
+	}
+
+	if got := s.loadMongoDBResumeToken("shop", "orders"); len(got) != 0 {
+		t.Fatal("a token was already stored")
+	}
+	s.saveMongoDBResumeToken("shop", "orders", token)
+
 	if got := s.loadMongoDBResumeToken("shop", "orders"); len(got) == 0 {
-		t.Error("the resume token was not saved with the flush")
+		t.Error("the token was not stored once the events had landed")
+	}
+}
+
+// TestAnEventWithNoTokenIsRecognised covers a buffer file written by an older
+// build, or a truncated event: it must not be mistaken for a token.
+func TestAnEventWithNoTokenIsRecognised(t *testing.T) {
+	for name, raw := range map[string]bson.Raw{
+		"no _id":           event(t, bson.M{"operationType": "insert"}),
+		"_id is not a doc": event(t, bson.M{"_id": "not a token"}),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, ok := eventResumeToken(raw); ok {
+				t.Error("a resume token was found where there is none")
+			}
+		})
 	}
 }
 

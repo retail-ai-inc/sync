@@ -140,3 +140,20 @@ func (s *MongoDBSyncer) metricLabels(collection string) metrics.Labels {
 		"target":     dsn.Endpoint(s.cfg.Type, s.cfg.TargetConnection),
 	}
 }
+
+// eventResumeToken reports the resume token of a change stream event.
+//
+// A change stream document's _id *is* its resume token, so a buffered event
+// already carries the value the stream would continue from — no extra
+// bookkeeping in the buffer file is needed to record it.
+func eventResumeToken(raw bson.Raw) (bson.Raw, bool) {
+	value, err := raw.LookupErr("_id")
+	if err != nil {
+		return nil, false
+	}
+	doc, ok := value.DocumentOK()
+	if !ok {
+		return nil, false
+	}
+	return bson.Raw(doc), true
+}
