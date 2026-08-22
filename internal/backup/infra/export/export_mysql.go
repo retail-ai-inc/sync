@@ -34,6 +34,20 @@ func (e *BackupExecutor) executeExternalMySQLBackupSimple(ctx context.Context, c
 	var outputPath, zipPath string
 	var exportErr error
 
+	// The dump and the archive are removed however this returns. They used to be
+	// removed only on the way out of the success path, so a destination that was
+	// unreachable for a while filled the disk one dump at a time.
+	defer func() {
+		for _, path := range []string{outputPath, zipPath} {
+			if path == "" {
+				continue
+			}
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				logrus.Warnf("[BackupExecutor] Failed to remove %s: %v", path, err)
+			}
+		}
+	}()
+
 	// Determine format: SQL or CSV
 	format := config.Format
 	if format == "" {
@@ -93,28 +107,59 @@ func (e *BackupExecutor) executeExternalMySQLBackupSimple(ctx context.Context, c
 
 	e.logMemoryUsage("MYSQL_BACKUP_COMPLETE")
 
-	// Clean up temporary files
-	if err := os.Remove(outputPath); err != nil {
-		logrus.Warnf("[BackupExecutor] Failed to remove output file %s: %v", outputPath, err)
-	} else {
-		logrus.Debugf("[BackupExecutor] 🗑️  Cleaned up output file: %s", outputPath)
-	}
-
-	if !skipCompression {
-		if err := os.Remove(zipPath); err != nil {
-			logrus.Warnf("[BackupExecutor] Failed to remove ZIP file %s: %v", zipPath, err)
-		} else {
-			logrus.Debugf("[BackupExecutor] 🗑️  Cleaned up ZIP file: %s", zipPath)
-		}
-	}
-
 	logrus.Infof("[BackupExecutor] ✅ MySQL backup workflow completed for table: %s", table)
 	return nil
 }
 
+// mysqlCredentialsFile writes the password into a defaults file that only this
+// process can read, and returns its path along with the function that removes
+// it. An empty password produces no file.
+func mysqlCredentialsFile(password string) (string, func(), error) {
+	if password == "" {
+		return "", func() {}, nil
+	}
+
+	file, err := os.CreateTemp("", "mysql-credentials-*.cnf")
+	if err != nil {
+		return "", func() {}, fmt.Errorf("write the credentials file: %w", err)
+	}
+	remove := func() {
+		if err := os.Remove(file.Name()); err != nil && !os.IsNotExist(err) {
+			logrus.Warnf("[BackupExecutor] Failed to remove %s: %v", file.Name(), err)
+		}
+	}
+
+	// CreateTemp already makes it 0600, which is the point of the file.
+	quoted := strings.NewReplacer("\\", `\\`, `"`, `\"`).Replace(password)
+	if _, err := fmt.Fprintf(file, "[client]\npassword=\"%s\"\n", quoted); err != nil {
+		_ = file.Close()
+		remove()
+		return "", func() {}, fmt.Errorf("write the credentials file: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		remove()
+		return "", func() {}, fmt.Errorf("write the credentials file: %w", err)
+	}
+	return file.Name(), remove, nil
+}
+
 // executeExternalMySQLDump executes mysqldump command with options
 func (e *BackupExecutor) executeExternalMySQLDump(ctx context.Context, host, port, username, password, database, table, outputPath string, config ExecutorBackupConfig) error {
-	args := []string{
+	// The password used to be spelled "-p<password>" in the argument list, where
+	// every other user on the host could read it out of the process table for
+	// as long as the dump ran. It goes in a file only this process can read.
+	credentials, removeCredentials, err := mysqlCredentialsFile(password)
+	if err != nil {
+		return err
+	}
+	defer removeCredentials()
+
+	args := []string{}
+	if credentials != "" {
+		// mysqldump requires this before any other option.
+		args = append(args, "--defaults-extra-file="+credentials)
+	}
+	args = append(args,
 		// Pin the connection charset so 4-byte characters (emoji, rare CJK)
 		// survive the dump instead of being replaced with '?'. Relying on the
 		// client default is fragile: it varies by client build and utf8mb3 is
@@ -123,12 +168,7 @@ func (e *BackupExecutor) executeExternalMySQLDump(ctx context.Context, host, por
 		"-h", host,
 		"-P", port,
 		"-u", username,
-	}
-
-	// Add password if provided
-	if password != "" {
-		args = append(args, "-p"+password)
-	}
+	)
 
 	// Add mysqldump options
 	args = append(args,
@@ -141,7 +181,10 @@ func (e *BackupExecutor) executeExternalMySQLDump(ctx context.Context, host, por
 
 	// Add WHERE clause if query conditions exist
 	if queryConditions, exists := config.Query[table]; exists && len(queryConditions) > 0 {
-		whereClause := e.convertTimeRangeQueryForMySQL(queryConditions)
+		whereClause, err := e.convertTimeRangeQueryForMySQL(queryConditions)
+		if err != nil {
+			return fmt.Errorf("build the filter for %s: %w", table, err)
+		}
 		if whereClause != "" {
 			args = append(args, "--where", whereClause)
 			logrus.Infof("[BackupExecutor] Applied WHERE clause for table %s: %s", table, whereClause)
@@ -184,22 +227,31 @@ func (e *BackupExecutor) executeExternalMySQLDump(ctx context.Context, host, por
 // Works with remote MySQL servers without requiring FILE privilege or secure_file_priv configuration
 func (e *BackupExecutor) executeExternalMySQLCSV(ctx context.Context, host, port, username, password, database, table, outputPath string, config ExecutorBackupConfig) error {
 	// Build SELECT query
-	selectQuery := e.buildMySQLSelectQuery(table, config)
+	selectQuery, buildErr := e.buildMySQLSelectQuery(table, config)
+	if buildErr != nil {
+		return buildErr
+	}
 
-	// Build mysql command arguments
-	mysqlArgs := []string{
+	// As in executeExternalMySQLDump: the password goes in a file only this
+	// process can read, not into the argument list.
+	credentials, removeCredentials, err := mysqlCredentialsFile(password)
+	if err != nil {
+		return err
+	}
+	defer removeCredentials()
+
+	mysqlArgs := []string{}
+	if credentials != "" {
+		mysqlArgs = append(mysqlArgs, "--defaults-extra-file="+credentials)
+	}
+	mysqlArgs = append(mysqlArgs,
 		// See executeExternalMySQLDump: pin the charset rather than inheriting
 		// the client default, so 4-byte characters are not lost as '?'.
 		"--default-character-set=utf8mb4",
 		"-h", host,
 		"-P", port,
 		"-u", username,
-	}
-
-	// Add password if provided
-	if password != "" {
-		mysqlArgs = append(mysqlArgs, "-p"+password)
-	}
+	)
 
 	// Add database and query
 	// Note: Do NOT use --raw flag as it disables escaping which causes issues with special characters

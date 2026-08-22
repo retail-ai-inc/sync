@@ -224,16 +224,20 @@ func (e *BackupExecutor) executeExternalMongoExportWithOptions(ctx context.Conte
 		// Clean extra quotes in query conditions
 		cleanedQuery := cleanQueryStringValues(queryConditions)
 
-		// Convert dynamic time queries to specific MongoDB queries
-		finalQuery := e.convertTimeRangeQuery(cleanedQuery)
+		// Convert dynamic time queries to specific MongoDB queries. A condition
+		// that cannot be rendered is fatal: dropping it exports the whole
+		// collection, which looks like a successful backup of the wrong thing.
+		finalQuery, err := e.convertTimeRangeQuery(cleanedQuery)
+		if err != nil {
+			return fmt.Errorf("build the filter for %s: %w", collection, err)
+		}
 
 		queryJSON, err := json.Marshal(finalQuery)
 		if err != nil {
-			logrus.Warnf("[BackupExecutor] Failed to marshal query for collection %s: %v", collection, err)
-		} else {
-			args = append(args, "--query", string(queryJSON))
-			logrus.Infof("[BackupExecutor] Applied query for collection %s: %s", collection, string(queryJSON))
+			return fmt.Errorf("render the filter for %s: %w", collection, err)
 		}
+		args = append(args, "--query", string(queryJSON))
+		logrus.Infof("[BackupExecutor] Applied query for collection %s: %s", collection, string(queryJSON))
 	} else {
 		// If no query conditions, export all data
 		logrus.Infof("[BackupExecutor] No query conditions found for collection %s, exporting all data", collection)

@@ -121,26 +121,62 @@ func TestExecuteExternalZipRejectsAMissingArchive(t *testing.T) {
 
 // ------------------------------------------------------------ gsutil wiring
 
+// archive writes a local file for an upload to carry, and returns its path and
+// size.
+func archive(t *testing.T, name string) (string, int) {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), name)
+	body := []byte("archive contents")
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatalf("write %s: %v", name, err)
+	}
+	return path, len(body)
+}
+
 func TestExecuteExternalGCSUploadBuildsItsArguments(t *testing.T) {
 	binDir := stubPATH(t)
-	stubBin(t, binDir, "gsutil", "", 0)
+	local, size := archive(t, "orders.zip")
+	stubBin(t, binDir, "gsutil", fmt.Sprintf(
+		`case "$1" in stat) echo "    Content-Length:  %d";; esac`, size), 0)
 
-	if err := UploadGCS(context.Background(),
-		"/tmp/orders.zip", "gs://bucket/path/orders.zip"); err != nil {
+	if err := UploadGCS(context.Background(), local, "gs://bucket/path/orders.zip"); err != nil {
 		t.Fatalf("transfer.UploadGCS: %v", err)
 	}
 
 	args := stubArgs(t, binDir, "gsutil")
-	if len(args) != 3 || args[0] != "cp" || args[1] != "/tmp/orders.zip" || args[2] != "gs://bucket/path/orders.zip" {
-		t.Errorf("args = %v, want [cp <local> <remote>]", args)
+	// The copy, then the read-back that proves the object is there and whole.
+	want := []string{"cp", local, "gs://bucket/path/orders.zip", "stat", "gs://bucket/path/orders.zip"}
+	if strings.Join(args, " ") != strings.Join(want, " ") {
+		t.Errorf("args = %v, want %v", args, want)
+	}
+}
+
+// TestTheReadBackNamesTheObjectTheCopyWrote covers a destination that is a
+// prefix rather than an object: gsutil cp puts the file under it by its own
+// name, and that is the name the verification has to ask about.
+func TestTheReadBackNamesTheObjectTheCopyWrote(t *testing.T) {
+	binDir := stubPATH(t)
+	local, size := archive(t, "orders.zip")
+	stubBin(t, binDir, "gsutil", fmt.Sprintf(
+		`case "$1" in stat) echo "    Content-Length:  %d";; esac`, size), 0)
+
+	if err := UploadGCS(context.Background(), local, "gs://bucket/path/"); err != nil {
+		t.Fatalf("transfer.UploadGCS: %v", err)
+	}
+
+	args := stubArgs(t, binDir, "gsutil")
+	if got := args[len(args)-1]; got != "gs://bucket/path/orders.zip" {
+		t.Errorf("the read-back asked about %q, want the object cp wrote", got)
 	}
 }
 
 func TestExecuteExternalGCSUploadReportsAFailingCommand(t *testing.T) {
 	binDir := stubPATH(t)
+	local, _ := archive(t, "x.zip")
 	stubBin(t, binDir, "gsutil", "echo 'AccessDeniedException: 403' >&2", 1)
 
-	err := UploadGCS(context.Background(), "/tmp/x.zip", "gs://b/x.zip")
+	err := UploadGCS(context.Background(), local, "gs://b/x.zip")
 
 	if err == nil {
 		t.Fatal("executeExternalGCSUpload() = nil, want the non-zero exit")

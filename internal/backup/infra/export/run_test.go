@@ -142,31 +142,34 @@ func TestExecuteReportsAnUnparseableConfiguration(t *testing.T) {
 	}
 }
 
-// TestExecuteSucceedsWithNothingSelected records that a task naming no tables is
-// not an error: the group map comes back empty, the loop body never runs and the
-// call reports success. A misconfigured task therefore looks like a clean backup
-// to the scheduler, which goes on to stamp last_backup_time.
-func TestExecuteSucceedsWithNothingSelected(t *testing.T) {
+// TestSelectingNothingIsNotASuccessfulBackup covers a task naming no tables. The
+// group map came back empty, the loop body never ran and the call reported
+// success, so a misconfigured task looked like a clean backup to the scheduler —
+// which then stamped last_backup_time on a backup that does not exist.
+func TestSelectingNothingIsNotASuccessfulBackup(t *testing.T) {
 	db := taskDB(t)
 	id := insertBackupTask(t, db, 1, `{"name":"empty","sourceType":"mysql"}`)
 
-	if err := NewBackupExecutor(db).Execute(context.Background(), id); err != nil {
-		t.Fatalf("Execute with no tables: %v — an empty selection appears to be "+
-			"rejected now, so assert that instead", err)
+	if err := NewBackupExecutor(db).Execute(context.Background(), id); err == nil {
+		t.Error("Execute = nil for a task that selected no tables")
 	}
 }
 
-// TestExecuteSwallowsAnUnsupportedEngine records that an unknown sourceType does
-// not fail the call. The per-group error is logged and the loop continues, so
-// Execute returns nil and the task is recorded as backed up.
-func TestExecuteSwallowsAnUnsupportedEngine(t *testing.T) {
+// TestAnUnsupportedEngineFailsTheBackup covers a per-group failure reaching the
+// caller. An unknown sourceType — like every other failure inside the group loop
+// — used to be logged and stepped over, so Execute returned nil and the task was
+// recorded as backed up.
+func TestAnUnsupportedEngineFailsTheBackup(t *testing.T) {
 	db := taskDB(t)
 	id := insertBackupTask(t, db, 1,
 		`{"name":"x","sourceType":"cassandra","database":{"tables":["orders"]}}`)
 
-	if err := NewBackupExecutor(db).Execute(context.Background(), id); err != nil {
-		t.Fatalf("Execute with an unsupported engine returned %v; the per-group "+
-			"failure appears to be propagated now, so assert that instead", err)
+	err := NewBackupExecutor(db).Execute(context.Background(), id)
+	if err == nil {
+		t.Fatal("Execute = nil for an engine it cannot export")
+	}
+	if !strings.Contains(err.Error(), "cassandra") {
+		t.Errorf("err = %v, want it to name the engine", err)
 	}
 }
 
@@ -216,10 +219,10 @@ func TestExecuteRunsTheMySQLWorkflowAndCleansUp(t *testing.T) {
 	}
 }
 
-// TestAFailedExportStillLeavesNoTempDirectory records that the failure branch
-// removes its working directory too, so a repeatedly failing task does not fill
-// the disk.
-func TestAFailedExportStillLeavesNoTempDirectory(t *testing.T) {
+// TestAFailedExportIsReportedAndLeavesNoTempDirectory covers both halves of a
+// failing dump: the caller is told, and the working directory is removed so a
+// task that keeps failing does not fill the disk.
+func TestAFailedExportIsReportedAndLeavesNoTempDirectory(t *testing.T) {
 	dir := stubPATH(t)
 	stubBin(t, dir, "mysqldump", "", 1)
 
@@ -232,9 +235,8 @@ func TestAFailedExportStillLeavesNoTempDirectory(t *testing.T) {
 		"destination":{"gcsPath":"gs://bucket/x"}
 	}`)
 
-	if err := NewBackupExecutor(db).Execute(context.Background(), id); err != nil {
-		t.Fatalf("Execute returned %v for a failing dump; the failure appears to be "+
-			"propagated now, so assert that instead", err)
+	if err := NewBackupExecutor(db).Execute(context.Background(), id); err == nil {
+		t.Error("Execute = nil for a dump that failed")
 	}
 	if after := tempDirCount(t); after != before {
 		t.Errorf("temp directory count %d -> %d after a failure", before, after)
@@ -342,10 +344,11 @@ func TestATimeRangeDropsIrrelevantShards(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ExpandAndGroupTables: %v", err)
 	}
-	// Both shards are from 2020 and the range covers the last forty days, so the
-	// filter keeps only its fallback: the first table.
-	if tables := groups["orders"]; len(tables) != 1 || tables[0] != "orders_202001" {
-		t.Errorf("orders group = %v, want just the fallback shard", tables)
+	// Both shards are from 2020 and the range covers the last forty days, so
+	// neither is selected. It used to fall back to the first table, archiving a
+	// shard from outside the window and calling that a successful backup.
+	if tables := groups["orders"]; len(tables) != 0 {
+		t.Errorf("orders group = %v, want nothing", tables)
 	}
 }
 
@@ -367,18 +370,15 @@ func TestExpandAndGroupTablesReportsAnUnreachableMySQL(t *testing.T) {
 	}
 }
 
-// TestRegexModeNeedsAPattern records that the mode flag alone does nothing: with
-// an empty pattern the manual branch runs instead, quietly backing up whatever
-// the table list happens to hold.
+// TestRegexModeNeedsAPattern covers a job set to select its tables by pattern
+// that has lost its pattern. The mode flag alone used to fall through to the
+// manual branch, quietly backing up whatever tables happened to be left in the
+// list — which is not what the job says it does.
 func TestRegexModeNeedsAPattern(t *testing.T) {
 	cfg := ExecutorBackupConfig{SourceType: "mysql", TableSelectionMode: "regex"}
 	cfg.Database.Tables = []string{"orders"}
 
-	groups, err := newExecutor().ExpandAndGroupTables(context.Background(), &cfg)
-	if err != nil {
-		t.Fatalf("ExpandAndGroupTables: %v", err)
-	}
-	if got := groupKeys(groups); !reflect.DeepEqual(got, []string{"orders"}) {
-		t.Errorf("groups = %v, want the manual selection", got)
+	if _, err := newExecutor().ExpandAndGroupTables(context.Background(), &cfg); err == nil {
+		t.Error("ExpandAndGroupTables = nil for a pattern-mode job with no pattern")
 	}
 }

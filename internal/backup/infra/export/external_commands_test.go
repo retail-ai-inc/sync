@@ -98,7 +98,6 @@ func TestExecuteExternalMySQLDumpBuildsItsArguments(t *testing.T) {
 		"-h", "tokyo",
 		"-P", "3306",
 		"-u", "svc",
-		"-phunter2",
 		"--single-transaction",
 		"--skip-lock-tables",
 		"--no-tablespaces",
@@ -119,10 +118,12 @@ func TestExecuteExternalMySQLDumpBuildsItsArguments(t *testing.T) {
 	}
 }
 
-// The password is passed as -p<value> on the command line, so it is visible in
-// the process list to every user on the host for the duration of the dump.
-// maskMySQLPassword only masks the log line, not the argv.
-func TestTheMySQLPasswordIsPassedOnTheCommandLine(t *testing.T) {
+// TestTheMySQLPasswordStaysOutOfTheProcessList covers what every other user on
+// the host could read. The password used to be spelled "-p<value>" in the
+// argument list, so it sat in the process table for as long as the dump ran, and
+// maskMySQLPassword masked only the log line. It now goes into a defaults file
+// that only this process can read, and the file is removed afterwards.
+func TestTheMySQLPasswordStaysOutOfTheProcessList(t *testing.T) {
 	binDir := stubPATH(t)
 	stubBin(t, binDir, "mysqldump", "", 0)
 
@@ -135,8 +136,59 @@ func TestTheMySQLPasswordIsPassedOnTheCommandLine(t *testing.T) {
 		t.Fatalf("executeExternalMySQLDump: %v", err)
 	}
 
-	if !containsArg(stubArgs(t, binDir, "mysqldump"), "-phunter2") {
-		t.Fatalf("the password is no longer passed in argv — it appears to have moved to a file or the environment; assert the new mechanism instead")
+	args := stubArgs(t, binDir, "mysqldump")
+	for _, arg := range args {
+		if strings.Contains(arg, "hunter2") {
+			t.Fatalf("the password is in the argument list: %q", arg)
+		}
+	}
+
+	var defaults string
+	for _, arg := range args {
+		if after, found := strings.CutPrefix(arg, "--defaults-extra-file="); found {
+			defaults = after
+		}
+	}
+	if defaults == "" {
+		t.Fatal("no defaults file was passed, so the password reached mysqldump some other way")
+	}
+	// mysqldump requires it before every other option.
+	if args[0] != "--defaults-extra-file="+defaults {
+		t.Errorf("the defaults file is argument %v, want the first", args[0])
+	}
+	if _, err := os.Stat(defaults); !os.IsNotExist(err) {
+		t.Errorf("%s still exists after the dump (%v)", defaults, err)
+	}
+}
+
+// TestTheCredentialsFileIsReadableOnlyByThisProcess covers the file the password
+// moved into: putting it on disk instead of in argv only helps if the mode is
+// right.
+func TestTheCredentialsFileIsReadableOnlyByThisProcess(t *testing.T) {
+	path, remove, err := mysqlCredentialsFile("hun\"ter2\\")
+	if err != nil {
+		t.Fatalf("mysqlCredentialsFile: %v", err)
+	}
+	defer remove()
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if mode := info.Mode().Perm(); mode&0o077 != 0 {
+		t.Errorf("mode = %v, want nothing for group or other", mode)
+	}
+
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !strings.Contains(string(body), "[client]") {
+		t.Errorf("file = %q, want a [client] section", body)
+	}
+	// A quote or a backslash in the password must not end the value early.
+	if !strings.Contains(string(body), `password="hun\"ter2\\"`) {
+		t.Errorf("file = %q, want the quote and backslash escaped", body)
 	}
 }
 
@@ -235,18 +287,68 @@ func TestExecuteExternalMySQLDumpReportsAnUncreatableOutput(t *testing.T) {
 
 // ------------------------------------------------------------- zip wiring
 
-// The upload does not verify that the object landed: gsutil's exit status is
-// the only signal, and nothing reads back the object's size or checksum. A
-// truncated or empty archive uploads as a success.
-func TestTheUploadIsNotVerified(t *testing.T) {
-	binDir := stubPATH(t)
-	// Exits 0 without doing anything at all.
-	stubBin(t, binDir, "gsutil", "", 0)
+// TestAnUploadThatDidNotLandIsNotASuccess covers the entry a backup list holds.
+// gsutil's exit status used to be the only signal, so a gsutil that exits 0
+// without doing anything — or a local file that was never written — was recorded
+// as a successful upload, and the list of backups stopped being a list of things
+// that can be restored.
+func TestAnUploadThatDidNotLandIsNotASuccess(t *testing.T) {
+	t.Run("the local file is missing", func(t *testing.T) {
+		binDir := stubPATH(t)
+		stubBin(t, binDir, "gsutil", "", 0)
 
-	if err := transfer.UploadGCS(context.Background(),
-		"/nonexistent/path/orders.zip", "gs://bucket/orders.zip"); err != nil {
-		t.Fatalf("executeExternalGCSUpload() = %v — the upload appears to be verified now; assert the verification instead", err)
-	}
+		if err := transfer.UploadGCS(context.Background(),
+			filepath.Join(t.TempDir(), "orders.zip"), "gs://bucket/orders.zip"); err == nil {
+			t.Error("UploadGCS = nil for a file that does not exist")
+		}
+	})
+
+	t.Run("the object cannot be read back", func(t *testing.T) {
+		binDir := stubPATH(t)
+		// cp succeeds, stat does not: the object is not there.
+		stubBin(t, binDir, "gsutil", `case "$1" in stat) exit 1;; esac`, 0)
+
+		local := filepath.Join(t.TempDir(), "orders.zip")
+		if err := os.WriteFile(local, []byte("archive"), 0o600); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+
+		if err := transfer.UploadGCS(context.Background(), local, "gs://bucket/orders.zip"); err == nil {
+			t.Error("UploadGCS = nil for an object that cannot be read back")
+		}
+	})
+
+	t.Run("the object is truncated", func(t *testing.T) {
+		binDir := stubPATH(t)
+		stubBin(t, binDir, "gsutil", `case "$1" in stat) echo "    Content-Length:  3";; esac`, 0)
+
+		local := filepath.Join(t.TempDir(), "orders.zip")
+		if err := os.WriteFile(local, []byte("archive"), 0o600); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+
+		err := transfer.UploadGCS(context.Background(), local, "gs://bucket/orders.zip")
+		if err == nil {
+			t.Fatal("UploadGCS = nil for an object three bytes long")
+		}
+		if !strings.Contains(err.Error(), "3 bytes") {
+			t.Errorf("err = %v, want it to name the size it found", err)
+		}
+	})
+
+	t.Run("a whole object is accepted", func(t *testing.T) {
+		binDir := stubPATH(t)
+		stubBin(t, binDir, "gsutil", `case "$1" in stat) echo "    Content-Length:  7";; esac`, 0)
+
+		local := filepath.Join(t.TempDir(), "orders.zip")
+		if err := os.WriteFile(local, []byte("archive"), 0o600); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+
+		if err := transfer.UploadGCS(context.Background(), local, "gs://bucket/orders.zip"); err != nil {
+			t.Errorf("UploadGCS = %v for an object that arrived whole", err)
+		}
+	})
 }
 
 // ------------------------------------------------- the full MySQL workflow
@@ -372,11 +474,11 @@ func TestTheMySQLBackupWorkflowStopsWhenTheUploadFails(t *testing.T) {
 	}
 }
 
-// When the upload fails the intermediate .sql and .zip are left in the
-// temporary directory: the cleanup only runs on the success path. A backup
-// target that is unreachable for a while therefore fills the disk one dump at
-// a time.
-func TestAFailedUploadLeavesTheIntermediateFilesBehind(t *testing.T) {
+// TestAFailedUploadLeavesNothingBehind covers disk use during an outage. The
+// intermediate .sql and .zip used to be removed only on the way out of the
+// success path, so a backup destination that was unreachable for a while filled
+// the disk one dump at a time.
+func TestAFailedUploadLeavesNothingBehind(t *testing.T) {
 	binDir := stubPATH(t)
 	tempDir := t.TempDir()
 
@@ -399,10 +501,9 @@ func TestAFailedUploadLeavesTheIntermediateFilesBehind(t *testing.T) {
 			left = append(left, entry.Name())
 		}
 	}
-	if len(left) == 0 {
-		t.Fatalf("nothing was left behind — the cleanup appears to run on the failure path now; assert the cleanup instead")
+	if len(left) != 0 {
+		t.Errorf("%v was left behind after a failed upload", left)
 	}
-	t.Logf("left behind after a failed upload: %v", left)
 }
 
 func containsArg(args []string, want string) bool {
@@ -581,7 +682,7 @@ func TestExecuteExternalMySQLCSVPipesThroughPython(t *testing.T) {
 	}
 
 	args := stubArgs(t, binDir, "mysql")
-	for _, want := range []string{"--default-character-set=utf8mb4", "-h", "h", "-P", "3306", "-u", "svc", "-phunter2", "app", "-e", "--batch"} {
+	for _, want := range []string{"--default-character-set=utf8mb4", "-h", "h", "-P", "3306", "-u", "svc", "app", "-e", "--batch"} {
 		if !containsArg(args, want) {
 			t.Errorf("argument %q was not passed (got: %v)", want, args)
 		}

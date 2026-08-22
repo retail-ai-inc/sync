@@ -8,12 +8,17 @@ import (
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
+	"github.com/sirupsen/logrus"
 )
+
+// DefaultPath is where the control database lives when SYNC_DB_PATH says
+// nothing: alongside the working directory, not a path baked in at build time.
+const DefaultPath = "sync.db"
 
 func OpenSQLiteDB() (*sql.DB, error) {
 	dbPath := os.Getenv("SYNC_DB_PATH")
 	if dbPath == "" {
-		dbPath = "sync.db"
+		dbPath = DefaultPath
 	}
 
 	if !filepath.IsAbs(dbPath) {
@@ -22,6 +27,12 @@ func OpenSQLiteDB() (*sql.DB, error) {
 			dbPath = absPath
 		}
 	}
+
+	// Whether the file was already there decides whether this is a first run or
+	// a misconfiguration, and the two are otherwise indistinguishable: both
+	// start the process with an empty task list.
+	_, statErr := os.Stat(dbPath)
+	fresh := os.IsNotExist(statErr)
 
 	// Ensure parent directory exists
 	dir := filepath.Dir(dbPath)
@@ -65,6 +76,13 @@ func OpenSQLiteDB() (*sql.DB, error) {
 
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to database (tried %d times): %v", maxRetries, err)
+	}
+
+	if fresh {
+		logrus.Warnf("[SQLite] Created a new, empty control database at %s. "+
+			"If this is not a first run, SYNC_DB_PATH is pointing somewhere "+
+			"unintended and this process has started with no sync tasks and no "+
+			"users.", dbPath)
 	}
 
 	return db, nil

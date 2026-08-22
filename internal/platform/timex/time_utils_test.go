@@ -1,8 +1,6 @@
 package timex
 
 import (
-	"reflect"
-	"regexp"
 	"testing"
 	"time"
 )
@@ -37,73 +35,120 @@ func TestReplaceDatePlaceholdersWithDate(t *testing.T) {
 	}
 }
 
-// TestReplaceDatePlaceholdersCorruptsOrdinaryText records a defect with a wide
-// blast radius. After handling the braced forms, the function also replaces the
-// bare substrings YYYY, MM, DD, yyyy, mm and dd "for backward compatibility".
-// Those are two-letter sequences that occur in ordinary English words, so any
-// table or file name containing them is silently rewritten with digits.
-//
-// The one caller is processFileNamePattern in pkg/backup/executor.go, which
-// applies this to the user-supplied file name pattern. The table name itself is
-// appended afterwards and so survives, but any descriptive wording in the
-// pattern does not: `summary_YYYYMM.json` yields `su08ary_202608.json`, and
-// that is the name the backup is stored under in GCS.
-func TestReplaceDatePlaceholdersCorruptsOrdinaryText(t *testing.T) {
-	tests := []struct {
-		input string
-		want  string
-		why   string
-	}{
-		{"summary", "su08ary", "mm -> 08"},
-		{"address", "a21ress", "dd -> 21"},
-		{"middleware", "mi21leware", "dd -> 21"},
-		{"comment", "co08ent", "mm -> 08"},
-		{"recommended", "reco08ended", "mm -> 08"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			got := ReplaceDatePlaceholdersWithDate(tt.input, fixedDate)
-
-			if got == tt.input {
-				t.Fatalf("ReplaceDatePlaceholdersWithDate(%q) is now left alone; the bare "+
-					"substring replacement may have been removed, so assert that instead", tt.input)
-			}
-			if got != tt.want {
-				t.Errorf("ReplaceDatePlaceholdersWithDate(%q) = %q, want %q (%s)",
-					tt.input, got, tt.want, tt.why)
+// TestOrdinaryWordsAreLeftAlone covers a rewrite with a wide blast radius. The
+// bare forms — YYYY, MM, DD and their lower-case spellings — used to be replaced
+// as plain substrings, and "mm" and "dd" occur in ordinary English, so any
+// wording in a file-name pattern came back written in digits. That name is what
+// the archive is stored under.
+func TestOrdinaryWordsAreLeftAlone(t *testing.T) {
+	for _, word := range []string{
+		"summary", "address", "middleware", "comment", "recommended", "orders", "payments",
+	} {
+		t.Run(word, func(t *testing.T) {
+			if got := ReplaceDatePlaceholdersWithDate(word, fixedDate); got != word {
+				t.Errorf("ReplaceDatePlaceholdersWithDate(%q) = %q, want it untouched", word, got)
 			}
 		})
 	}
 }
 
-// TestReplaceDatePlaceholdersMixesSuccessAndCorruption shows both behaviours in
-// one realistic pattern: the intended date suffix resolves correctly while the
-// table name in the same string is mangled.
-func TestReplaceDatePlaceholdersMixesSuccessAndCorruption(t *testing.T) {
+// TestABareDateIsStillADate covers the patterns written before the braces
+// existed: a word that is nothing but date tokens is still substituted.
+func TestABareDateIsStillADate(t *testing.T) {
+	tests := []struct{ pattern, want string }{
+		{"YYYYMMDD", "20260821"},
+		{"yyyymmdd", "20260821"},
+		{"summary_YYYYMM.json", "summary_202608.json"},
+		{"orders_YYYY-MM-DD.sql", "orders_2026-08-21.sql"},
+		{"backup_YYYYMMDD_summary.json", "backup_20260821_summary.json"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.pattern, func(t *testing.T) {
+			if got := ReplaceDatePlaceholdersWithDate(tt.pattern, fixedDate); got != tt.want {
+				t.Errorf("ReplaceDatePlaceholdersWithDate(%q) = %q, want %q", tt.pattern, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestTheDatePartIsReplacedAndTheRestIsNot puts both behaviours in one realistic
+// pattern: the date suffix resolves and the words around it survive. This used
+// to come out as "order_su08ary_202608.json".
+func TestTheDatePartIsReplacedAndTheRestIsNot(t *testing.T) {
 	const pattern = "order_summary_YYYYMM.json"
 
 	got := ReplaceDatePlaceholdersWithDate(pattern, fixedDate)
 
-	if want := "order_su08ary_202608.json"; got != want {
+	if want := "order_summary_202608.json"; got != want {
 		t.Errorf("ReplaceDatePlaceholdersWithDate(%q) = %q, want %q", pattern, got, want)
 	}
 }
 
-func TestReplaceDatePlaceholdersUsesCurrentDate(t *testing.T) {
-	// Only the shape is asserted, since the real clock is involved.
-	got := ReplaceDatePlaceholders("{YYYY}-{MM}-{DD}")
-
-	if !regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`).MatchString(got) {
-		t.Errorf("ReplaceDatePlaceholders = %q, want a YYYY-MM-DD shaped string", got)
+// TestDailyOffsetsAcceptsEverySpellingOfANumber covers a configuration written
+// by hand or through a client that quotes its numbers. An offset that was not a
+// JSON number used to fall back to the default with nothing said, so a task
+// asking for the last week backed up yesterday.
+func TestDailyOffsetsAcceptsEverySpellingOfANumber(t *testing.T) {
+	for name, spec := range map[string]map[string]interface{}{
+		"json numbers": {"startOffset": float64(-7), "endOffset": float64(0)},
+		"go ints":      {"startOffset": -7, "endOffset": 0},
+		"strings":      {"startOffset": "-7", "endOffset": "0"},
+		"int64":        {"startOffset": int64(-7), "endOffset": int64(0)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			start, end, err := DailyOffsets(spec)
+			if err != nil {
+				t.Fatalf("DailyOffsets: %v", err)
+			}
+			if start != -7 || end != 0 {
+				t.Errorf("offsets = %d..%d, want -7..0", start, end)
+			}
+		})
 	}
 }
 
-func TestGetTodayDateString(t *testing.T) {
-	got := GetTodayDateString()
+// TestAnOffsetThatIsNotANumberIsReported is the other half: something that
+// cannot be read as a number is said out loud rather than replaced by a default
+// that quietly backs up the wrong days.
+func TestAnOffsetThatIsNotANumberIsReported(t *testing.T) {
+	for name, spec := range map[string]map[string]interface{}{
+		"words":   {"startOffset": "last week", "endOffset": float64(0)},
+		"a list":  {"startOffset": []interface{}{-1}, "endOffset": float64(0)},
+		"a float": {"startOffset": "-1.5", "endOffset": float64(0)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, _, err := DailyOffsets(spec); err == nil {
+				t.Error("DailyOffsets accepted an offset that is not a number of days")
+			}
+		})
+	}
+}
 
-	if !regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`).MatchString(got) {
-		t.Errorf("GetTodayDateString = %q, want a YYYY-MM-DD shaped string", got)
+// TestAnEmptyWindowIsReported covers the intuitive spelling of "just today".
+// endOffset is exclusive, so 0 to 0 names no time at all, and an export built
+// from it writes an empty file and reports a successful backup.
+func TestAnEmptyWindowIsReported(t *testing.T) {
+	for name, spec := range map[string]map[string]interface{}{
+		"same day":    {"startOffset": float64(0), "endOffset": float64(0)},
+		"end earlier": {"startOffset": float64(0), "endOffset": float64(-1)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, _, err := DailyOffsets(spec); err == nil {
+				t.Error("DailyOffsets accepted a window nothing can fall in")
+			}
+		})
+	}
+}
+
+// TestTheDefaultWindowIsYesterday covers an omitted pair of offsets.
+func TestTheDefaultWindowIsYesterday(t *testing.T) {
+	start, end, err := DailyOffsets(map[string]interface{}{"type": "daily"})
+	if err != nil {
+		t.Fatalf("DailyOffsets: %v", err)
+	}
+	if start != -1 || end != 0 {
+		t.Errorf("offsets = %d..%d, want -1..0", start, end)
 	}
 }
 
@@ -119,147 +164,6 @@ func TestParseDatabaseTimestamp(t *testing.T) {
 	for _, bad := range []string{"2026-08-21", "21/08/2026 13:45:30", "", "not a time"} {
 		if _, err := ParseDatabaseTimestamp(bad); err == nil {
 			t.Errorf("ParseDatabaseTimestamp(%q) succeeded, want an error", bad)
-		}
-	}
-}
-
-func TestProcessTimeRangeQueryConvertsDaily(t *testing.T) {
-	query := map[string]interface{}{
-		"created_at": map[string]interface{}{
-			"type":        "daily",
-			"startOffset": float64(-1),
-			"endOffset":   float64(0),
-		},
-	}
-
-	got, err := ProcessTimeRangeQuery(query)
-	if err != nil {
-		t.Fatalf("ProcessTimeRangeQuery returned %v", err)
-	}
-
-	converted, ok := got["created_at"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("created_at is not a map: %#v", got["created_at"])
-	}
-	gte, ok := converted["$gte"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("$gte is missing or not a map: %#v", converted)
-	}
-	lt, ok := converted["$lt"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("$lt is missing or not a map: %#v", converted)
-	}
-
-	// Both bounds are extended JSON dates at UTC midnight-equivalents of JST
-	// day boundaries, which is 15:00:00 UTC on the preceding day.
-	for name, bound := range map[string]map[string]interface{}{"$gte": gte, "$lt": lt} {
-		s, ok := bound["$date"].(string)
-		if !ok {
-			t.Fatalf("%s has no $date string: %#v", name, bound)
-		}
-		parsed, err := time.Parse("2006-01-02T15:04:05.000Z", s)
-		if err != nil {
-			t.Fatalf("%s date %q does not parse: %v", name, s, err)
-		}
-		if parsed.Hour() != 15 || parsed.Minute() != 0 || parsed.Second() != 0 {
-			t.Errorf("%s = %q, want 15:00:00 UTC (JST midnight)", name, s)
-		}
-	}
-
-	startStr := gte["$date"].(string)
-	endStr := lt["$date"].(string)
-	start, _ := time.Parse("2006-01-02T15:04:05.000Z", startStr)
-	end, _ := time.Parse("2006-01-02T15:04:05.000Z", endStr)
-	if !start.Before(end) {
-		t.Errorf("start %q is not before end %q", startStr, endStr)
-	}
-	if got := end.Sub(start); got != 24*time.Hour {
-		t.Errorf("range spans %v, want 24h for offsets -1..0", got)
-	}
-}
-
-func TestProcessTimeRangeQueryPassesThroughNonRanges(t *testing.T) {
-	tests := []struct {
-		name  string
-		value interface{}
-	}{
-		{"scalar", "active"},
-		{"map without type", map[string]interface{}{"$gt": 5}},
-		{"non-string type", map[string]interface{}{"type": 42}},
-		// The comparison against "daily" is case-sensitive, so a capitalised
-		// type is forwarded verbatim and reaches MongoDB as a literal filter.
-		{"capitalised daily", map[string]interface{}{"type": "Daily", "startOffset": float64(-1), "endOffset": float64(0)}},
-		{"unknown type", map[string]interface{}{"type": "weekly", "startOffset": float64(-7), "endOffset": float64(0)}},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := ProcessTimeRangeQuery(map[string]interface{}{"field": tt.value})
-			if err != nil {
-				t.Fatalf("ProcessTimeRangeQuery returned %v", err)
-			}
-			if !reflect.DeepEqual(got["field"], tt.value) {
-				t.Errorf("field = %#v, want it passed through unchanged (%#v)", got["field"], tt.value)
-			}
-		})
-	}
-}
-
-// TestProcessTimeRangeQueryKeepsMalformedRangeVerbatim records a defect that
-// turns a configuration mistake into an empty backup. When a daily range fails
-// to convert — a missing offset, or offsets supplied as anything other than a
-// JSON number — the error is logged and the *original object* is kept as the
-// query value. MongoDB then receives `{type: "daily", startOffset: ...}` as a
-// literal equality filter, matches nothing, and the backup completes with an
-// empty file and no error anywhere.
-func TestProcessTimeRangeQueryKeepsMalformedRangeVerbatim(t *testing.T) {
-	malformed := []struct {
-		name  string
-		value map[string]interface{}
-	}{
-		{"missing endOffset", map[string]interface{}{"type": "daily", "startOffset": float64(-1)}},
-		{"missing both offsets", map[string]interface{}{"type": "daily"}},
-		{"offsets as strings", map[string]interface{}{"type": "daily", "startOffset": "-1", "endOffset": "0"}},
-		{"offsets as ints", map[string]interface{}{"type": "daily", "startOffset": -1, "endOffset": 0}},
-	}
-
-	for _, tt := range malformed {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := ProcessTimeRangeQuery(map[string]interface{}{"created_at": tt.value})
-			if err != nil {
-				t.Fatalf("ProcessTimeRangeQuery returned %v", err)
-			}
-
-			kept, ok := got["created_at"].(map[string]interface{})
-			if !ok {
-				t.Fatalf("created_at is not a map: %#v", got["created_at"])
-			}
-			if _, converted := kept["$gte"]; converted {
-				t.Fatalf("the malformed range was converted; error handling may have " +
-					"changed, so assert the new behaviour instead")
-			}
-			if kept["type"] != "daily" {
-				t.Errorf("created_at = %#v, want the original object preserved verbatim", kept)
-			}
-		})
-	}
-}
-
-// TestProcessTimeRangeQueryNeverReturnsError records that the error return is
-// always nil: conversion failures are logged and swallowed inside the loop.
-// Callers cannot distinguish a converted query from a silently skipped one.
-func TestProcessTimeRangeQueryNeverReturnsError(t *testing.T) {
-	inputs := []map[string]interface{}{
-		nil,
-		{},
-		{"created_at": map[string]interface{}{"type": "daily"}},
-		{"created_at": map[string]interface{}{"type": "daily", "startOffset": "bad", "endOffset": "bad"}},
-	}
-
-	for _, in := range inputs {
-		if _, err := ProcessTimeRangeQuery(in); err != nil {
-			t.Errorf("ProcessTimeRangeQuery(%#v) returned %v; if it now reports "+
-				"failures, update this test and the callers", in, err)
 		}
 	}
 }

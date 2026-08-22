@@ -124,6 +124,10 @@ func (e *BackupExecutor) readJSONFile(tempDir, tableName, dateStr string) ([]int
 	var documents []interface{}
 	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
 
+	// A line that will not parse is a truncated or damaged export, and skipping
+	// it used to return the rest with a nil error — so the archive was silently
+	// short by however many documents were unreadable, and nothing downstream
+	// could tell.
 	for i, line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -132,8 +136,7 @@ func (e *BackupExecutor) readJSONFile(tempDir, tableName, dateStr string) ([]int
 
 		var doc interface{}
 		if err := json.Unmarshal([]byte(line), &doc); err != nil {
-			logrus.Warnf("[BackupExecutor] Failed to parse JSON line %d in %s: %v", i+1, filePath, err)
-			continue
+			return nil, fmt.Errorf("%s is damaged at line %d: %w", filePath, i+1, err)
 		}
 		documents = append(documents, doc)
 	}

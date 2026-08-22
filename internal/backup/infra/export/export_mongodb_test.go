@@ -85,9 +85,19 @@ func mongoBounds(t *testing.T, converted map[string]interface{}, field string) (
 	return read("$gte"), read("$lt")
 }
 
+// mustConvert converts a query and fails the test if it cannot.
+func mustConvert(t *testing.T, query map[string]interface{}) map[string]interface{} {
+	t.Helper()
+
+	got, err := newExecutor().convertTimeRangeQuery(query)
+	if err != nil {
+		t.Fatalf("convertTimeRangeQuery(%v): %v", query, err)
+	}
+	return got
+}
+
 func TestConvertTimeRangeQuery(t *testing.T) {
-	got := newExecutor().convertTimeRangeQuery(
-		map[string]interface{}{"created_at": dailyQuery(float64(-1), float64(0))})
+	got := mustConvert(t, map[string]interface{}{"created_at": dailyQuery(float64(-1), float64(0))})
 
 	start, end := mongoBounds(t, got, "created_at")
 
@@ -102,16 +112,15 @@ func TestConvertTimeRangeQuery(t *testing.T) {
 	}
 }
 
-// TestMongoAndMySQLTimeRangesAgree pins the other half of T-022. The MongoDB
-// and MySQL query builders are separate copies of the same logic, and they do
-// agree with each other — both use time.Date in JST and treat endOffset as
-// exclusive. Only the table-selection window in extractTimeRange is the
-// outlier, which is what makes it worth reconciling rather than the other two.
+// TestMongoAndMySQLTimeRangesAgree covers the two engines resolving the same
+// configuration. They were separate copies of the same arithmetic and did agree;
+// they now share one implementation, and this is what would catch them drifting
+// apart again.
 func TestMongoAndMySQLTimeRangesAgree(t *testing.T) {
 	query := map[string]interface{}{"created_at": dailyQuery(float64(-3), float64(-1))}
 
-	mongoStart, mongoEnd := mongoBounds(t, newExecutor().convertTimeRangeQuery(query), "created_at")
-	mysqlStart, mysqlEnd := parseWhereBounds(t, newExecutor().convertTimeRangeQueryForMySQL(query))
+	mongoStart, mongoEnd := mongoBounds(t, mustConvert(t, query), "created_at")
+	mysqlStart, mysqlEnd := parseWhereBounds(t, mustClause(t, query))
 
 	if !mongoStart.Equal(mysqlStart) || !mongoEnd.Equal(mysqlEnd) {
 		t.Errorf("mongo window %v..%v differs from mysql window %v..%v",
@@ -131,7 +140,7 @@ func TestConvertTimeRangeQueryPassesThroughOtherEntries(t *testing.T) {
 		"created_at": dailyQuery(float64(-1), float64(0)),
 	}
 
-	got := newExecutor().convertTimeRangeQuery(input)
+	got := mustConvert(t, input)
 
 	for _, key := range []string{"status", "score", "weekly", "plain"} {
 		if !reflect.DeepEqual(got[key], input[key]) {
@@ -143,18 +152,15 @@ func TestConvertTimeRangeQueryPassesThroughOtherEntries(t *testing.T) {
 	}
 }
 
-// TestConvertTimeRangeQueryEqualOffsetsMatchNothing mirrors the MySQL variant:
-// endOffset is exclusive, so 0..0 yields $gte and $lt at the same instant and
-// the export writes an empty file without reporting anything.
-func TestConvertTimeRangeQueryEqualOffsetsMatchNothing(t *testing.T) {
-	got := newExecutor().convertTimeRangeQuery(
+// TestAnEmptyMongoWindowIsRefused mirrors the MySQL side: endOffset is
+// exclusive, so 0..0 put $gte and $lt at the same instant, and the export wrote
+// an empty file and reported a successful backup.
+func TestAnEmptyMongoWindowIsRefused(t *testing.T) {
+	_, err := newExecutor().convertTimeRangeQuery(
 		map[string]interface{}{"created_at": dailyQuery(float64(0), float64(0))})
 
-	start, end := mongoBounds(t, got, "created_at")
-
-	if !start.Equal(end) {
-		t.Errorf("bounds are %v..%v; equal offsets no longer collapse the range, "+
-			"so assert the new behaviour instead", start, end)
+	if err == nil {
+		t.Error("convertTimeRangeQuery accepted a window no document can fall in")
 	}
 }
 

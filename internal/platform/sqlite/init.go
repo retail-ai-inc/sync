@@ -1,40 +1,12 @@
 package sqlite
 
-import (
-	"os"
-	"path/filepath"
-	"runtime"
-	"sync"
-)
-
-var (
-	// Ensure initialization only happens once
-	dbPathOnce sync.Once
-)
-
-func init() {
-	dbPathOnce.Do(initDBPath)
-}
-
-// initDBPath initializes the database path environment variable
-func initDBPath() {
-	// Check if environment variable is already set
-	if os.Getenv("SYNC_DB_PATH") != "" {
-		return
-	}
-
-	// Get the directory of the current execution file
-	_, filename, _, ok := runtime.Caller(0)
-	if !ok {
-		return
-	}
-
-	// Build the path to the project root directory (three levels up from
-	// internal/platform/db). Keep this in step with the file's location: the
-	// fallback is a build-time source path, so moving this file moves the path.
-	rootDir := filepath.Join(filepath.Dir(filename), "..", "..", "..")
-	absDBPath := filepath.Join(rootDir, "sync.db")
-
-	// Set the absolute path as an environment variable
-	os.Setenv("SYNC_DB_PATH", absDBPath)
-}
+// The fallback for SYNC_DB_PATH used to be derived from runtime.Caller, which
+// is the path of this source file on the machine that compiled the binary. In a
+// container built anywhere else that directory does not exist; OpenSQLiteDB
+// created it, created an empty database inside it, and the process started with
+// no sync tasks and nothing to say so. A deployment that forgot to set
+// SYNC_DB_PATH looked exactly like a deployment with nothing configured.
+//
+// There is no build-time path any more. Unset means ./sync.db relative to the
+// working directory, and OpenSQLiteDB says out loud when it has had to create a
+// control database that was not already there.

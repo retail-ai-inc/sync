@@ -1,6 +1,7 @@
 package logging
 
 import (
+	"database/sql"
 	"fmt"
 	"os"
 	"sort"
@@ -38,7 +39,10 @@ func (f *CustomTextFormatter) Format(entry *logrus.Entry) ([]byte, error) {
 			v := entry.Data[k]
 			parts = append(parts, fmt.Sprintf("%s=%v", k, v))
 		}
-		dataStr = " " + strings.Join(parts, "")
+		// Joined with a space: the separator used to be the empty string, so two
+		// fields came out as "sync_task_id=7table=users", which neither reads
+		// nor parses.
+		dataStr = " " + strings.Join(parts, " ")
 	}
 
 	logLine := fmt.Sprintf("[%s] [%s] %s%s\n", timestamp, level, entry.Message, dataStr)
@@ -89,8 +93,21 @@ func getLogLevel(level string) logrus.Level {
 	}
 }
 
+// SQLiteHook writes log lines into the control database.
+//
+// It used to open and close a database connection for every line, which at the
+// info level is one SQLite open per log entry, and it answered every failure
+// with nil — so the rows could stop being written for good with nothing to show
+// it. The connection is now opened once and kept, and a failure is reported to
+// logrus once per outage rather than never or once per line.
 type SQLiteHook struct {
 	formatter *CustomTextFormatter
+
+	mu sync.Mutex
+	db *sql.DB
+	// reported says the current failure has already been passed to logrus, so a
+	// database that stays unreachable does not produce one complaint per line.
+	reported bool
 }
 
 func NewSQLiteHook() *SQLiteHook {
@@ -99,12 +116,44 @@ func NewSQLiteHook() *SQLiteHook {
 	}
 }
 
-func (h *SQLiteHook) Fire(entry *logrus.Entry) error {
-	db, err := sqlite.OpenSQLiteDB()
-	if err != nil {
+// Close releases the connection the hook holds.
+func (h *SQLiteHook) Close() error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.closeLocked()
+}
+
+func (h *SQLiteHook) closeLocked() error {
+	if h.db == nil {
 		return nil
 	}
-	defer db.Close()
+	db := h.db
+	h.db = nil
+	return db.Close()
+}
+
+// fail drops the connection so the next line reconnects, and reports the
+// failure the first time it happens.
+func (h *SQLiteHook) fail(err error) error {
+	_ = h.closeLocked()
+	if h.reported {
+		return nil
+	}
+	h.reported = true
+	return err
+}
+
+func (h *SQLiteHook) Fire(entry *logrus.Entry) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.db == nil {
+		db, err := sqlite.OpenSQLiteDB()
+		if err != nil {
+			return h.fail(fmt.Errorf("open the log database: %w", err))
+		}
+		h.db = db
+	}
 
 	// Use the hook's own formatter instead of accessing global Log.Formatter
 	formatted, _ := h.formatter.Format(entry)
@@ -130,7 +179,10 @@ func (h *SQLiteHook) Fire(entry *logrus.Entry) error {
 INSERT INTO sync_log(level, message, sync_task_id)
 VALUES(?, ?, ?);
 `
-	_, _ = db.Exec(insSQL, level, message, syncTaskID)
+	if _, err := h.db.Exec(insSQL, level, message, syncTaskID); err != nil {
+		return h.fail(fmt.Errorf("write a log row: %w", err))
+	}
+	h.reported = false
 	return nil
 }
 

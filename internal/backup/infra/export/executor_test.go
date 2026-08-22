@@ -35,25 +35,21 @@ func TestExtractTablePrefix(t *testing.T) {
 	}
 }
 
-// TestExtractTablePrefixPatternOrderLeavesStrayDigits records a defect in the
-// pattern list: `\d{6}$` is tried before `\d{8}$`, so an eight-digit date with
-// no underscore separator has only its last six digits stripped, leaving two
-// stray digits on the prefix.
-func TestExtractTablePrefixPatternOrderLeavesStrayDigits(t *testing.T) {
+// TestAnEightDigitDateIsStrippedWhole covers the pattern list's order. The
+// six-digit form used to be tried first, so an eight-digit date with no
+// underscore had only its last six digits removed and two stray digits stayed on
+// the prefix: orders20260821 grouped as "orders20", which is a different group
+// from every other day of that month.
+func TestAnEightDigitDateIsStrippedWhole(t *testing.T) {
 	tests := []struct{ table, want string }{
-		{"orders20260821", "orders20"}, // want "orders"
-		{"20260821", "20"},             // an all-numeric name loses all but two digits
+		{"orders20260821", "orders"},
+		{"orders20260822", "orders"},
+		{"20260821", ""},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.table, func(t *testing.T) {
-			got := newExecutor().extractTablePrefix(tt.table)
-
-			if got == "orders" || got == "" {
-				t.Fatalf("extractTablePrefix(%q) = %q; the pattern order may have been "+
-					"fixed, so assert the correct prefix instead", tt.table, got)
-			}
-			if got != tt.want {
+			if got := newExecutor().extractTablePrefix(tt.table); got != tt.want {
 				t.Errorf("extractTablePrefix(%q) = %q, want %q", tt.table, got, tt.want)
 			}
 		})
@@ -189,14 +185,12 @@ func TestIsTableRelevantForTimeRange(t *testing.T) {
 	}
 }
 
-// TestIsTableRelevantForTimeRangeIncludesTouchingIntervals records an
-// off-by-one. Both TimeRange values are half-open — extractTableTimePattern
-// builds End with AddDate, so a monthly table ends on the first of the next
-// month — but the overlap test uses Before and After rather than their strict
-// complements. An interval whose End equals the range Start therefore counts as
-// overlapping, so the months either side of the window are always pulled in: a
-// one-month backup exports three months of tables.
-func TestIsTableRelevantForTimeRangeIncludesTouchingIntervals(t *testing.T) {
+// TestATouchingIntervalDoesNotOverlap covers an off-by-one at the boundary. Both
+// intervals are half-open — a monthly table ends on the first of the next month
+// — but the overlap test used Before and After rather than their strict
+// complements, so an interval ending exactly where the window starts counted as
+// overlapping and a one-month backup exported three months of tables.
+func TestATouchingIntervalDoesNotOverlap(t *testing.T) {
 	august := &TimeRange{
 		Start: time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC),
 		End:   time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC),
@@ -208,9 +202,9 @@ func TestIsTableRelevantForTimeRangeIncludesTouchingIntervals(t *testing.T) {
 		"orders_202609",   // starts exactly at the range end
 	} {
 		t.Run(table, func(t *testing.T) {
-			if !newExecutor().isTableRelevantForTimeRange(table, august) {
-				t.Errorf("isTableRelevantForTimeRange(%q) = false; the boundary "+
-					"comparison may have been tightened, so assert that instead", table)
+			if newExecutor().isTableRelevantForTimeRange(table, august) {
+				t.Errorf("isTableRelevantForTimeRange(%q) = true for an interval that "+
+					"only touches the window", table)
 			}
 		})
 	}
@@ -237,12 +231,12 @@ func TestFilterRelevantTables(t *testing.T) {
 	})
 }
 
-// TestFilterRelevantTablesFallsBackToFirstTable records a defect: when a time
-// range excludes every table, the function backs up `tables[0]` instead of
-// reporting that nothing matched. The job then succeeds while archiving a table
-// outside the requested window, which looks like a successful backup of the
-// wrong data.
-func TestFilterRelevantTablesFallsBackToFirstTable(t *testing.T) {
+// TestNoMatchingTableSelectsNothing covers what a job did when its window
+// excluded every table: it backed up tables[0] and reported success, so the
+// archive held a table from outside the requested window and looked like a fresh
+// backup of the right thing. Selecting nothing is now what happens, and Execute
+// reports it.
+func TestNoMatchingTableSelectsNothing(t *testing.T) {
 	// A daily range around today cannot overlap tables from 2020.
 	tables := []string{"orders_202001", "orders_202002"}
 	conditions := map[string]map[string]interface{}{
@@ -253,18 +247,14 @@ func TestFilterRelevantTablesFallsBackToFirstTable(t *testing.T) {
 		}},
 	}
 
-	got := newExecutor().filterRelevantTables(tables, conditions, "orders")
-
-	if len(got) != 1 || got[0] != "orders_202001" {
-		t.Errorf("filterRelevantTables = %v; the fallback may have been replaced "+
-			"with an error or an empty result, so assert that instead", got)
+	if got := newExecutor().filterRelevantTables(tables, conditions, "orders"); len(got) != 0 {
+		t.Errorf("filterRelevantTables = %v, want nothing", got)
 	}
 }
 
-// TestFilterRelevantTablesPanicsOnEmptyInput records that the same fallback
-// indexes tables[0] without checking the slice, so an empty table list with a
-// time-range condition panics instead of returning nothing.
-func TestFilterRelevantTablesPanicsOnEmptyInput(t *testing.T) {
+// TestAnEmptyTableListIsNotAPanic covers the same path with nothing to choose
+// from: the fallback indexed tables[0] without checking the slice.
+func TestAnEmptyTableListIsNotAPanic(t *testing.T) {
 	conditions := map[string]map[string]interface{}{
 		"orders": {"created_at": map[string]interface{}{
 			"type":        "daily",
@@ -273,14 +263,9 @@ func TestFilterRelevantTablesPanicsOnEmptyInput(t *testing.T) {
 		}},
 	}
 
-	defer func() {
-		if recover() == nil {
-			t.Error("filterRelevantTables with no tables no longer panics; a guard " +
-				"may have been added, so assert the returned value instead")
-		}
-	}()
-
-	newExecutor().filterRelevantTables(nil, conditions, "orders")
+	if got := newExecutor().filterRelevantTables(nil, conditions, "orders"); len(got) != 0 {
+		t.Errorf("filterRelevantTables = %v, want nothing", got)
+	}
 }
 
 func TestExtractTimeRange(t *testing.T) {
@@ -308,33 +293,31 @@ func TestExtractTimeRange(t *testing.T) {
 		if got == nil {
 			t.Fatal("extractTimeRange returned nil")
 		}
-		// The end bound is endOffset+1, so -3..0 covers four days.
-		if want := 4 * 24 * time.Hour; got.End.Sub(got.Start) != want {
+		// endOffset is exclusive, the same as it is for the row filters, so
+		// -3..0 covers three days.
+		if want := 3 * 24 * time.Hour; got.End.Sub(got.Start) != want {
 			t.Errorf("range spans %v, want %v", got.End.Sub(got.Start), want)
 		}
 	})
 
-	// The -1..0 default spans two days, not one: the end bound is computed as
-	// endOffset+1, so "yesterday" also takes in today, whose data is still
-	// being written. utils.convertToMongoDBTimeRange, the other implementation
-	// of the same configuration, omits the +1 and spans a single day — the same
-	// task description therefore means different windows depending on which
-	// code path handles it.
-	t.Run("default offsets span two days", func(t *testing.T) {
+	// The -1..0 default is yesterday and only yesterday. It used to add a day to
+	// the end bound, so it also took in today — whose rows are still being
+	// written — while the row filters resolved the same offsets to one day.
+	t.Run("the default is yesterday alone", func(t *testing.T) {
 		query := map[string]interface{}{"created_at": map[string]interface{}{"type": "daily"}}
 
 		got := newExecutor().extractTimeRange(query)
 		if got == nil {
 			t.Fatal("extractTimeRange returned nil")
 		}
-		if want := 48 * time.Hour; got.End.Sub(got.Start) != want {
+		if want := 24 * time.Hour; got.End.Sub(got.Start) != want {
 			t.Errorf("range spans %v, want %v for the -1..0 default", got.End.Sub(got.Start), want)
 		}
 	})
 
-	t.Run("offsets must be JSON numbers", func(t *testing.T) {
-		// Strings and Go ints fail the float64 assertion and are silently
-		// replaced by the -1..0 default rather than reported.
+	t.Run("offsets need not be JSON numbers", func(t *testing.T) {
+		// A string or a Go int used to fail the float64 assertion and be
+		// replaced by the -1..0 default with nothing said.
 		query := map[string]interface{}{"created_at": map[string]interface{}{
 			"type":        "daily",
 			"startOffset": "-3",
@@ -345,10 +328,23 @@ func TestExtractTimeRange(t *testing.T) {
 		if got == nil {
 			t.Fatal("extractTimeRange returned nil")
 		}
-		if want := 48 * time.Hour; got.End.Sub(got.Start) != want {
-			t.Errorf("range spans %v; non-float offsets are no longer silently "+
-				"replaced by the default, so assert the new behaviour instead",
-				got.End.Sub(got.Start))
+		if want := 3 * 24 * time.Hour; got.End.Sub(got.Start) != want {
+			t.Errorf("range spans %v, want %v", got.End.Sub(got.Start), want)
+		}
+	})
+
+	// A window nothing can fall in is not a window. extractTimeRange cannot
+	// report it, so it declines to filter and every table is considered; the
+	// export itself refuses the same configuration outright.
+	t.Run("an empty window filters nothing", func(t *testing.T) {
+		query := map[string]interface{}{"created_at": map[string]interface{}{
+			"type":        "daily",
+			"startOffset": float64(0),
+			"endOffset":   float64(0),
+		}}
+
+		if got := newExecutor().extractTimeRange(query); got != nil {
+			t.Errorf("extractTimeRange = %v, want nil", got)
 		}
 	})
 }
@@ -392,15 +388,16 @@ func TestProcessFileNamePattern(t *testing.T) {
 	})
 }
 
-// TestProcessFileNamePatternInheritsPlaceholderCorruption shows T-017 reaching
-// the backup file name: descriptive wording in the pattern is rewritten with
-// digits before the table name is attached.
-func TestProcessFileNamePatternInheritsPlaceholderCorruption(t *testing.T) {
+// TestTheWordingInAPatternSurvives covers the name an archive is stored under in
+// GCS. The bare date placeholders used to be replaced as plain substrings, and
+// "mm" and "dd" occur in ordinary English, so summary_YYYYMM.json was stored as
+// su08ary_202608.json.
+func TestTheWordingInAPatternSurvives(t *testing.T) {
 	yesterday := time.Now().AddDate(0, 0, -1)
 
 	got := processFileNamePattern("summary_YYYYMM.json", "orders")
 
-	want := "orders_su" + yesterday.Format("01") + "ary_" + yesterday.Format("200601") + ".json"
+	want := "orders_summary_" + yesterday.Format("200601") + ".json"
 	if got != want {
 		t.Errorf("processFileNamePattern = %q, want %q", got, want)
 	}

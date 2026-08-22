@@ -19,8 +19,15 @@ func (e *BackupExecutor) ExpandAndGroupTables(ctx context.Context, config *Execu
 
 	tableGroups := make(map[string][]string)
 
+	// A job set to select its tables by pattern but carrying no pattern used to
+	// fall through to the manual list quietly, backing up whichever tables
+	// happened to be left in it.
+	if config.TableSelectionMode == "regex" && config.RegexPattern == "" {
+		return nil, fmt.Errorf("the job selects tables by pattern but has no pattern")
+	}
+
 	// Check if regex mode is enabled
-	if config.TableSelectionMode == "regex" && config.RegexPattern != "" {
+	if config.TableSelectionMode == "regex" {
 		var actualTables []string
 		var err error
 
@@ -145,13 +152,16 @@ func (e *BackupExecutor) groupTablesByPrefix(tables []string) map[string][]strin
 
 // extractTablePrefix Extract common prefix from table name
 func (e *BackupExecutor) extractTablePrefix(tableName string) string {
-	// Common patterns for date-based table names
+	// Common patterns for date-based table names, longest first. They used to be
+	// listed with the six-digit form ahead of the eight-digit one, so a table
+	// named orders20260821 had only its last six digits removed and the prefix
+	// came out as "orders20".
 	patterns := []string{
-		`_\d{6}$`, // _YYYYMM (monthly)
 		`_\d{8}$`, // _YYYYMMDD (daily)
+		`_\d{6}$`, // _YYYYMM (monthly)
 		`_\d{4}$`, // _YYYY (yearly)
-		`\d{6}$`,  // YYYYMM (monthly without underscore)
 		`\d{8}$`,  // YYYYMMDD (daily without underscore)
+		`\d{6}$`,  // YYYYMM (monthly without underscore)
 		`\d+$`,    // Simple number suffix (e.g., users1, users2)
 	}
 
@@ -203,10 +213,15 @@ func (e *BackupExecutor) filterRelevantTables(tables []string, queryConditions m
 		}
 	}
 
-	// If no relevant tables found, return the first table as fallback
+	// No table covers the window. This used to fall back to tables[0], which
+	// archives a table from outside the window and reports success — a job that
+	// looks like a fresh backup and holds the wrong data, which is worse than
+	// one that plainly backed nothing up. (It also indexed tables[0] without
+	// checking the length, so an empty list panicked.)
 	if len(relevantTables) == 0 {
-		logrus.Warnf("[BackupExecutor] No tables match time range, using first table as fallback: %s", tables[0])
-		return []string{tables[0]}
+		logrus.Warnf("[BackupExecutor] No table in group %q covers %s to %s, so none "+
+			"will be exported for it", groupName,
+			timeRange.Start.Format(time.RFC3339), timeRange.End.Format(time.RFC3339))
 	}
 
 	return relevantTables
@@ -218,43 +233,33 @@ type TimeRange struct {
 	End   time.Time
 }
 
-// extractTimeRange Extract time range from query conditions
+// extractTimeRange resolves the window a task's query conditions name.
+//
+// It used to do its own arithmetic — AddDate followed by Truncate(24h), which
+// rounds to a multiple of the zero instant and so lands on UTC midnight, then
+// shifted by nine hours as though that had been JST midnight — and it added a
+// day to the end offset. The result was a forty-eight hour window, aligned to
+// the wrong day for the nine hours of each day when the UTC and JST dates
+// differ, which is when the backup cron usually runs. Meanwhile the row filters
+// resolved the same configuration to twenty-four JST hours, so one job selected
+// its tables by one window and its rows by another. Both now come from timex.
 func (e *BackupExecutor) extractTimeRange(query map[string]interface{}) *TimeRange {
 	for _, value := range query {
-		if timeQuery, ok := value.(map[string]interface{}); ok {
-			if timeType, exists := timeQuery["type"]; exists && timeType == "daily" {
-				// Parse offset values
-				startOffset := -1
-				endOffset := 0
-
-				if so, ok := timeQuery["startOffset"]; ok {
-					if offset, ok := so.(float64); ok {
-						startOffset = int(offset)
-					}
-				}
-				if eo, ok := timeQuery["endOffset"]; ok {
-					if offset, ok := eo.(float64); ok {
-						endOffset = int(offset)
-					}
-				}
-
-				// Calculate JST time range
-				now := time.Now()
-				jst := time.FixedZone("JST", 9*3600)
-
-				startJST := now.In(jst).AddDate(0, 0, startOffset).Truncate(24 * time.Hour)
-				endJST := now.In(jst).AddDate(0, 0, endOffset+1).Truncate(24 * time.Hour)
-
-				// Convert to UTC
-				startUTC := startJST.Add(-9 * time.Hour)
-				endUTC := endJST.Add(-9 * time.Hour)
-
-				return &TimeRange{
-					Start: startUTC,
-					End:   endUTC,
-				}
-			}
+		timeQuery, ok := value.(map[string]interface{})
+		if !ok {
+			continue
 		}
+		if timeType, exists := timeQuery["type"]; !exists || timeType != "daily" {
+			continue
+		}
+
+		startUTC, endUTC, err := dailyWindow(timeQuery)
+		if err != nil {
+			logrus.Warnf("[BackupExecutor] Could not read the time range, so every "+
+				"table will be considered: %v", err)
+			return nil
+		}
+		return &TimeRange{Start: startUTC, End: endUTC}
 	}
 	return nil
 }
@@ -268,8 +273,12 @@ func (e *BackupExecutor) isTableRelevantForTimeRange(tableName string, timeRange
 		return true
 	}
 
-	// Check if table time range overlaps with query time range
-	return !(tableTime.End.Before(timeRange.Start) || tableTime.Start.After(timeRange.End))
+	// Both intervals are half-open, so they overlap only when each starts
+	// strictly before the other ends. The comparison used to be Before/After,
+	// which counts a table whose interval ends exactly where the window starts
+	// as overlapping — so a query for one month pulled in the month either side
+	// of it and a monthly backup exported three months of data.
+	return tableTime.End.After(timeRange.Start) && tableTime.Start.Before(timeRange.End)
 }
 
 // extractTableTimePattern Extract time pattern from table name and return its time range

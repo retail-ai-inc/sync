@@ -194,11 +194,11 @@ func TestReadJSONFileSkipsBlankLines(t *testing.T) {
 	}
 }
 
-// A line that does not parse is logged at warn level and dropped, and the read
-// still returns success. A truncated or partially corrupt mongoexport is
-// therefore restored with documents silently missing — the caller has no way
-// to tell how many were lost.
-func TestReadJSONFileSilentlyDropsCorruptLines(t *testing.T) {
+// TestADamagedExportIsReportedNotTrimmed covers a truncated or partly corrupt
+// mongoexport. A line that would not parse used to be logged at warn level and
+// dropped while the read still returned success, so the archive was restored
+// with documents silently missing and nothing downstream could tell how many.
+func TestADamagedExportIsReportedNotTrimmed(t *testing.T) {
 	e := newExecutor()
 	dir := t.TempDir()
 
@@ -208,11 +208,11 @@ func TestReadJSONFileSilentlyDropsCorruptLines(t *testing.T) {
 	}
 
 	got, err := e.readJSONFile(dir, "t", "2026-08-20")
-	if err != nil {
-		t.Fatalf("readJSONFile() = %v — corrupt lines appear to be reported now; assert the error instead", err)
+	if err == nil {
+		t.Fatalf("readJSONFile returned %d documents and no error for a damaged file", len(got))
 	}
-	if len(got) != 3 {
-		t.Fatalf("read %d documents from 5 lines, want 3 — the drop behaviour appears to have changed", len(got))
+	if !strings.Contains(err.Error(), "line 2") {
+		t.Errorf("err = %v, want it to name the line", err)
 	}
 }
 

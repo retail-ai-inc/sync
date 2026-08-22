@@ -50,50 +50,64 @@ func TestFileStateStoreLoadMissingKey(t *testing.T) {
 	}
 }
 
-// TestFileStateStoreSaveRequiresExistingDirectory records that Save does not
-// create its directory. A checkpoint store pointed at a path that does not yet
-// exist fails every write, and since the syncers log and continue, the failure
-// shows up later as a checkpoint that never advances.
-func TestFileStateStoreSaveRequiresExistingDirectory(t *testing.T) {
-	store := NewFileStateStore(filepath.Join(t.TempDir(), "not-created-yet"))
-
-	if err := store.Save("k", []byte("v")); err == nil {
-		t.Error("Save into a missing directory succeeded; it may now create the " +
-			"directory, so assert that instead")
-	}
-}
-
-// TestFileStateStoreKeysAreNotSanitised records that the key is joined onto the
-// directory without validation, so a key containing path separators escapes the
-// store. Keys are derived from database and collection names, which an operator
-// controls through the task configuration.
-func TestFileStateStoreKeysAreNotSanitised(t *testing.T) {
-	root := t.TempDir()
-	inner := filepath.Join(root, "state")
-	if err := os.MkdirAll(inner, 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	store := NewFileStateStore(inner)
-
-	if err := store.Save(filepath.Join("..", "escaped"), []byte("v")); err != nil {
-		t.Fatalf("Save with a traversing key: %v", err)
-	}
-
-	if _, err := os.Stat(filepath.Join(root, "escaped")); err != nil {
-		t.Errorf("the file did not land outside the store (%v); keys may now be "+
-			"sanitised, which would be an improvement", err)
-	}
-}
-
-// TestFileStateStoreSaveIsNotAtomic records that Save writes in place with
-// os.WriteFile rather than writing a temporary file and renaming it. A crash
-// during the write leaves a truncated checkpoint, which on restart is either
-// unparseable or, worse, parses as an earlier position.
-func TestFileStateStoreSaveIsNotAtomic(t *testing.T) {
-	dir := t.TempDir()
+// TestSaveCreatesItsDirectory covers a store pointed at a path that does not
+// exist yet. Save used to fail every write, and because the syncers log and
+// carry on the symptom appeared much later, as a checkpoint that never advanced.
+func TestSaveCreatesItsDirectory(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "not-created-yet")
 	store := NewFileStateStore(dir)
 
 	if err := store.Save("k", []byte("v")); err != nil {
+		t.Fatalf("Save into a missing directory: %v", err)
+	}
+
+	got, err := store.Load("k")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if string(got) != "v" {
+		t.Errorf("Load returned %q, want %q", got, "v")
+	}
+}
+
+// TestAKeyCannotNameAFileOutsideTheStore covers keys derived from database and
+// collection names, which an operator sets through the task configuration. The
+// key used to be joined onto the directory unchecked, so one containing a path
+// separator wrote wherever it liked.
+func TestAKeyCannotNameAFileOutsideTheStore(t *testing.T) {
+	root := t.TempDir()
+	inner := filepath.Join(root, "state")
+	store := NewFileStateStore(inner)
+
+	for _, key := range []string{
+		filepath.Join("..", "escaped"),
+		"sub/dir",
+		"..",
+		"",
+	} {
+		if err := store.Save(key, []byte("v")); err == nil {
+			t.Errorf("Save(%q) succeeded, want a refusal", key)
+		}
+	}
+
+	if _, err := os.Stat(filepath.Join(root, "escaped")); err == nil {
+		t.Error("a file landed outside the store")
+	}
+}
+
+// TestSaveIsAtomic covers a crash during the write. Save used to write the
+// destination in place, so an interrupted write left a truncated checkpoint that
+// on restart either would not parse or parsed as an earlier position — which
+// replays events already applied. The write now lands on a temporary file and is
+// renamed over the destination.
+func TestSaveIsAtomic(t *testing.T) {
+	dir := t.TempDir()
+	store := NewFileStateStore(dir)
+
+	if err := store.Save("k", []byte("first")); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if err := store.Save("k", []byte("second")); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 
@@ -101,11 +115,20 @@ func TestFileStateStoreSaveIsNotAtomic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read dir: %v", err)
 	}
-	// An atomic implementation would leave no temporary file behind, but it
-	// would also not write the destination directly; the marker here is that
-	// exactly one file exists and it is the destination itself.
+	// The temporary file is renamed, not left behind.
 	if len(entries) != 1 || entries[0].Name() != "k" {
-		t.Errorf("directory holds %d entries (%v); the write path may have changed",
-			len(entries), entries)
+		names := make([]string, len(entries))
+		for i, e := range entries {
+			names[i] = e.Name()
+		}
+		t.Errorf("directory holds %v, want just the destination", names)
+	}
+
+	got, err := store.Load("k")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if string(got) != "second" {
+		t.Errorf("Load returned %q, want %q", got, "second")
 	}
 }

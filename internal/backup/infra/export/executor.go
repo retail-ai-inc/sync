@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/retail-ai-inc/sync/internal/backup/domain"
@@ -73,6 +75,19 @@ func (e *BackupExecutor) Execute(ctx context.Context, taskID int) error {
 		return fmt.Errorf("failed to expand table patterns: %w", err)
 	}
 
+	// A job that selected nothing used to return nil, so an empty table list and
+	// a completed backup were indistinguishable to the scheduler, which then
+	// stamped last_backup_time and moved on.
+	if len(tableGroups) == 0 {
+		return fmt.Errorf("no table was selected for backup")
+	}
+
+	// Every group's failure is collected rather than logged and stepped over:
+	// the caller used to be told the backup succeeded when mysqldump had died,
+	// when the engine was one this does not support, and when the temporary
+	// directory could not be created.
+	var failures []error
+
 	// Process each table group separately
 	for groupName, tables := range tableGroups {
 		logrus.Debugf("[BackupExecutor] Processing table group: %s (%d tables)", groupName, len(tables))
@@ -80,7 +95,7 @@ func (e *BackupExecutor) Execute(ctx context.Context, taskID int) error {
 		// Create temporary directory for this table group
 		tempDir, err := os.MkdirTemp("", fmt.Sprintf("backup_%d_%s_", taskID, groupName))
 		if err != nil {
-			logrus.Errorf("[BackupExecutor] Failed to create temp directory for table group %s: %v", groupName, err)
+			failures = append(failures, fmt.Errorf("%s: create a temporary directory: %w", groupName, err))
 			continue
 		}
 
@@ -114,8 +129,10 @@ func (e *BackupExecutor) Execute(ctx context.Context, taskID int) error {
 		}
 
 		if exportErr != nil {
-			logrus.Errorf("[BackupExecutor] External command backup failed for table group %s: %v", groupName, exportErr)
-			os.RemoveAll(tempDir) // Clean up failed export
+			failures = append(failures, fmt.Errorf("%s: %w", groupName, exportErr))
+			if err := os.RemoveAll(tempDir); err != nil { // Clean up failed export
+				logrus.Warnf("[BackupExecutor] Failed to remove temp directory %s: %v", tempDir, err)
+			}
 			continue
 		}
 
@@ -130,8 +147,26 @@ func (e *BackupExecutor) Execute(ctx context.Context, taskID int) error {
 		}
 	}
 
+	if len(failures) > 0 {
+		return fmt.Errorf("back up task %d: %w", taskID, errors.Join(failures...))
+	}
+
 	logrus.Debugf("[BackupExecutor] All table backups completed for task %d", taskID)
 	return nil
+}
+
+// parseStamp reads one stored timestamp, saying so when it cannot.
+func parseStamp(taskID int, column string, stored sql.NullString) time.Time {
+	if !stored.Valid || stored.String == "" {
+		return time.Time{}
+	}
+	t, err := timex.ParseDatabaseTimestamp(stored.String)
+	if err != nil {
+		logrus.Warnf("[BackupExecutor] Task %d has %s = %q, which is not a timestamp; "+
+			"it will read as never having happened: %v", taskID, column, stored.String, err)
+		return time.Time{}
+	}
+	return t
 }
 
 // getBackupTask Get backup task information
@@ -149,19 +184,12 @@ func (e *BackupExecutor) getBackupTask(ctx context.Context, taskID int) (domain.
 		return task, fmt.Errorf("failed to query backup task: %w", err)
 	}
 
-	// Parse timestamps
-	if lastUpdateTime.Valid {
-		t, _ := timex.ParseDatabaseTimestamp(lastUpdateTime.String)
-		task.LastUpdateTime = t
-	}
-	if lastBackupTime.Valid {
-		t, _ := timex.ParseDatabaseTimestamp(lastBackupTime.String)
-		task.LastBackupTime = t
-	}
-	if nextBackupTime.Valid {
-		t, _ := timex.ParseDatabaseTimestamp(nextBackupTime.String)
-		task.NextBackupTime = t
-	}
+	// Parse timestamps. A stored value that will not parse used to become the
+	// zero time silently, which reads as "never backed up" — the one thing an
+	// operator checks before a switchover.
+	task.LastUpdateTime = parseStamp(taskID, "last_update_time", lastUpdateTime)
+	task.LastBackupTime = parseStamp(taskID, "last_backup_time", lastBackupTime)
+	task.NextBackupTime = parseStamp(taskID, "next_backup_time", nextBackupTime)
 
 	return task, nil
 }

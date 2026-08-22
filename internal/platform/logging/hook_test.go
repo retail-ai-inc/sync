@@ -101,41 +101,52 @@ func TestAnEntryWithoutATaskIDIsStillWritten(t *testing.T) {
 	}
 }
 
-// TestTheHookSwallowsEveryFailure records that a log hook must never break the
-// program that logs: a missing database, a missing table and an unopenable path
-// are all answered with nil. The consequence is that log rows can stop being
-// written with nothing to show it.
-func TestTheHookSwallowsEveryFailure(t *testing.T) {
-	hook := NewSQLiteHook()
+// TestAFailureIsReportedOnceAndNotOncePerLine covers log rows quietly stopping.
+// Every failure used to be answered with nil — a missing table, an unopenable
+// path — so the hook could stop writing for good with nothing to show it. It now
+// reports the first failure of an outage and stays quiet until it recovers,
+// which is the difference between one visible complaint and either none or one
+// per log line.
+func TestAFailureIsReportedOnceAndNotOncePerLine(t *testing.T) {
 	entry := &logrus.Entry{Logger: logrus.New(), Level: logrus.ErrorLevel, Message: "m"}
 
 	t.Run("no tables", func(t *testing.T) {
+		hook := NewSQLiteHook()
+		t.Cleanup(func() { _ = hook.Close() })
 		t.Setenv("SYNC_DB_PATH", filepath.Join(t.TempDir(), "empty.db"))
+
+		if err := hook.Fire(entry); err == nil {
+			t.Error("Fire = nil for a database with no sync_log table")
+		}
 		if err := hook.Fire(entry); err != nil {
-			t.Errorf("Fire = %v, want nil", err)
+			t.Errorf("the second line reported %v; the same outage should be quiet", err)
 		}
 	})
 
 	t.Run("unopenable database", func(t *testing.T) {
+		hook := NewSQLiteHook()
+		t.Cleanup(func() { _ = hook.Close() })
 		blocker := filepath.Join(t.TempDir(), "not-a-directory")
 		if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
 			t.Fatalf("write blocker: %v", err)
 		}
 		t.Setenv("SYNC_DB_PATH", filepath.Join(blocker, "sub", "sync.db"))
 
-		if err := hook.Fire(entry); err != nil {
-			t.Errorf("Fire = %v, want nil", err)
+		if err := hook.Fire(entry); err == nil {
+			t.Error("Fire = nil for an unopenable database")
 		}
 	})
 }
 
-// TestTheHookOpensADatabasePerEntry records that every log line opens and closes
-// its own connection. At the info level that is one SQLite open per line, which
-// is why the hook is only attached at higher levels.
-func TestTheHookOpensADatabasePerEntry(t *testing.T) {
+// TestTheConnectionIsReusedAcrossLines covers the cost of logging. Every line
+// used to open and close its own SQLite connection — at the info level that is
+// one open per log entry, against a database whose pool holds a single
+// connection and which replication also writes its checkpoints to.
+func TestTheConnectionIsReusedAcrossLines(t *testing.T) {
 	db := useTempLogDB(t)
 
 	hook := NewSQLiteHook()
+	t.Cleanup(func() { _ = hook.Close() })
 	for i := 0; i < 5; i++ {
 		if err := hook.Fire(&logrus.Entry{
 			Logger:  logrus.New(),

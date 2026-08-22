@@ -8,7 +8,7 @@ import (
 )
 
 // whereRE extracts the two timestamps from a generated time-range condition.
-var whereRE = regexp.MustCompile(`>= '([^']+)' AND \w+ < '([^']+)'`)
+var whereRE = regexp.MustCompile(`>= '([^']+)' AND ` + "`?" + `\w+` + "`?" + ` < '([^']+)'`)
 
 func parseWhereBounds(t *testing.T, where string) (time.Time, time.Time) {
 	t.Helper()
@@ -39,9 +39,19 @@ func dailyQuery(start, end interface{}) map[string]interface{} {
 	return q
 }
 
+// mustClause builds a WHERE clause and fails the test if it cannot.
+func mustClause(t *testing.T, query map[string]interface{}) string {
+	t.Helper()
+
+	where, err := newExecutor().convertTimeRangeQueryForMySQL(query)
+	if err != nil {
+		t.Fatalf("convertTimeRangeQueryForMySQL(%v): %v", query, err)
+	}
+	return where
+}
+
 func TestConvertTimeRangeQueryForMySQLDailyRange(t *testing.T) {
-	where := newExecutor().convertTimeRangeQueryForMySQL(
-		map[string]interface{}{"created_at": dailyQuery(float64(-1), float64(0))})
+	where := mustClause(t, map[string]interface{}{"created_at": dailyQuery(float64(-1), float64(0))})
 
 	start, end := parseWhereBounds(t, where)
 
@@ -57,55 +67,60 @@ func TestConvertTimeRangeQueryForMySQLDailyRange(t *testing.T) {
 	}
 }
 
-// TestConvertTimeRangeQueryForMySQLDisagreesWithTableSelection pins the
-// divergence recorded as T-022. Two implementations run inside a single backup
-// job and compute different windows from the same offsets:
-//
-//   - extractTimeRange, which decides *which tables* to export, adds one to
-//     endOffset and truncates against UTC rather than JST
-//   - convertTimeRangeQueryForMySQL, which builds the WHERE clause deciding
-//     *which rows* to export, uses time.Date in JST and treats endOffset as
-//     exclusive
-//
-// The selection window is the wider of the two, so it is over-inclusive rather
-// than lossy, but the two can never be reasoned about together.
-func TestConvertTimeRangeQueryForMySQLDisagreesWithTableSelection(t *testing.T) {
+// TestTheRowWindowAndTheTableWindowAgree covers what used to be two
+// implementations of the same window inside one backup job. Table selection
+// added one to endOffset and truncated against UTC rather than JST — forty-eight
+// hours, aligned to the wrong day for the nine hours each day when the UTC and
+// JST dates differ, which is when the backup cron usually runs. The WHERE clause
+// resolved the same offsets to twenty-four JST hours. Both now come from timex.
+func TestTheRowWindowAndTheTableWindowAgree(t *testing.T) {
 	query := map[string]interface{}{"created_at": dailyQuery(float64(-1), float64(0))}
 
-	rowWindow := newExecutor().convertTimeRangeQueryForMySQL(query)
-	rowStart, rowEnd := parseWhereBounds(t, rowWindow)
+	rowStart, rowEnd := parseWhereBounds(t, mustClause(t, query))
 
 	tableWindow := newExecutor().extractTimeRange(query)
 	if tableWindow == nil {
 		t.Fatal("extractTimeRange returned nil")
 	}
 
-	rowSpan := rowEnd.Sub(rowStart)
-	tableSpan := tableWindow.End.Sub(tableWindow.Start)
-
-	if rowSpan == tableSpan {
-		t.Fatalf("both implementations now span %v; if they were reconciled, "+
-			"replace this test with one asserting the agreed window", rowSpan)
+	if !rowStart.Equal(tableWindow.Start.UTC()) || !rowEnd.Equal(tableWindow.End.UTC()) {
+		t.Errorf("rows are filtered on %v..%v but tables are selected on %v..%v",
+			rowStart, rowEnd, tableWindow.Start.UTC(), tableWindow.End.UTC())
 	}
-	if rowSpan != 24*time.Hour || tableSpan != 48*time.Hour {
-		t.Errorf("row window spans %v and table window spans %v, want 24h and 48h",
-			rowSpan, tableSpan)
+	if got := rowEnd.Sub(rowStart); got != 24*time.Hour {
+		t.Errorf("the window spans %v, want 24h", got)
 	}
 }
 
-// TestConvertTimeRangeQueryForMySQLEqualOffsetsMatchNothing records a defect:
-// endOffset is exclusive, so the intuitive "just today" spelling of 0..0
-// produces `col >= X AND col < X`, which no row can satisfy. The export
-// succeeds and writes an empty file.
-func TestConvertTimeRangeQueryForMySQLEqualOffsetsMatchNothing(t *testing.T) {
-	where := newExecutor().convertTimeRangeQueryForMySQL(
+// TestAnEmptyWindowIsRefused covers the intuitive spelling of "just today".
+// endOffset is exclusive, so 0..0 produced `col >= X AND col < X`, which no row
+// can satisfy: the export succeeded, wrote an empty file, and reported a
+// successful backup.
+func TestAnEmptyWindowIsRefused(t *testing.T) {
+	_, err := newExecutor().convertTimeRangeQueryForMySQL(
 		map[string]interface{}{"created_at": dailyQuery(float64(0), float64(0))})
 
-	start, end := parseWhereBounds(t, where)
+	if err == nil {
+		t.Error("convertTimeRangeQueryForMySQL accepted a window no row can fall in")
+	}
+}
 
-	if !start.Equal(end) {
-		t.Errorf("bounds are %v..%v; equal offsets no longer collapse the range, "+
-			"so assert the new behaviour instead", start, end)
+// TestOffsetsNeedNotBeJSONNumbers covers a configuration written by hand or
+// through a client that quotes its numbers. Anything other than a JSON number
+// used to fall back to the default -1..0 with no error and no log line, so a
+// task asking for the last week quietly backed up yesterday.
+func TestOffsetsNeedNotBeJSONNumbers(t *testing.T) {
+	fromNumbers := mustClause(t, map[string]interface{}{
+		"created_at": dailyQuery(float64(-7), float64(0))})
+	fromStrings := mustClause(t, map[string]interface{}{
+		"created_at": dailyQuery("-7", "0")})
+
+	if fromNumbers != fromStrings {
+		t.Errorf("quoted offsets produced %q, want the same as %q", fromStrings, fromNumbers)
+	}
+	start, end := parseWhereBounds(t, fromStrings)
+	if got := end.Sub(start); got != 7*24*time.Hour {
+		t.Errorf("the window spans %v, want 168h", got)
 	}
 }
 
@@ -115,69 +130,80 @@ func TestConvertTimeRangeQueryForMySQLEqualityConditions(t *testing.T) {
 		query map[string]interface{}
 		want  string
 	}{
-		{"string", map[string]interface{}{"status": "active"}, "status = 'active'"},
-		{"float", map[string]interface{}{"score": float64(1.5)}, "score = 1.5"},
-		{"int", map[string]interface{}{"count": 3}, "count = 3"},
-		{"quote is doubled", map[string]interface{}{"name": "O'Brien"}, "name = 'O''Brien'"},
+		{"string", map[string]interface{}{"status": "active"}, "`status` = 'active'"},
+		{"float", map[string]interface{}{"score": float64(1.5)}, "`score` = 1.5"},
+		{"int", map[string]interface{}{"count": 3}, "`count` = 3"},
+		{"bool", map[string]interface{}{"active": true}, "`active` = true"},
+		{"quote is doubled", map[string]interface{}{"name": "O'Brien"}, "`name` = 'O''Brien'"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := newExecutor().convertTimeRangeQueryForMySQL(tt.query); got != tt.want {
+			if got := mustClause(t, tt.query); got != tt.want {
 				t.Errorf("convertTimeRangeQueryForMySQL = %q, want %q", got, tt.want)
 			}
 		})
 	}
 }
 
-func TestConvertTimeRangeQueryForMySQLDropsUnsupportedInput(t *testing.T) {
+// TestAConditionThatCannotBeRenderedIsAnError covers the difference between a
+// filtered export and a full-table one. An unrecognised condition used to be
+// logged and dropped, which leaves the WHERE clause empty — so the archive was
+// far larger than intended, held rows it was not meant to, and the job still
+// reported success.
+func TestAConditionThatCannotBeRenderedIsAnError(t *testing.T) {
 	tests := []struct {
 		name  string
 		query map[string]interface{}
 	}{
-		// A non-daily range object is logged and dropped, so the condition
-		// silently disappears and the export covers the whole table.
 		{"non-daily range", map[string]interface{}{"created_at": map[string]interface{}{"type": "weekly"}}},
 		{"capitalised daily", map[string]interface{}{"created_at": map[string]interface{}{"type": "Daily"}}},
-		// Value types outside string/float64/int are dropped the same way.
-		{"bool value", map[string]interface{}{"active": true}},
 		{"nil value", map[string]interface{}{"deleted_at": nil}},
+		{"nested object", map[string]interface{}{"meta": map[string]interface{}{"a": 1}}},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := newExecutor().convertTimeRangeQueryForMySQL(tt.query); got != "" {
-				t.Errorf("convertTimeRangeQueryForMySQL = %q, want an empty clause; "+
-					"unsupported input is no longer dropped, so assert that instead", got)
+			if got, err := newExecutor().convertTimeRangeQueryForMySQL(tt.query); err == nil {
+				t.Errorf("convertTimeRangeQueryForMySQL = %q, want a refusal", got)
 			}
 		})
 	}
 }
 
-// TestConvertTimeRangeQueryForMySQLInterpolatesKeysVerbatim records an
-// injection path. Column names are pasted into the SQL with no escaping or
-// validation, and values are escaped only by doubling single quotes — which
-// MySQL's default backslash handling defeats. The query map comes from a backup
-// task's config_json, and POST /api/backup requires no authentication, so
-// anyone who can reach the API can place arbitrary SQL into a WHERE clause that
-// the mysql CLI then executes.
-func TestConvertTimeRangeQueryForMySQLInterpolatesKeysVerbatim(t *testing.T) {
-	t.Run("column name is not escaped", func(t *testing.T) {
-		got := newExecutor().convertTimeRangeQueryForMySQL(
-			map[string]interface{}{"1=1 OR id": "x"})
-
-		if !strings.Contains(got, "1=1 OR id = 'x'") {
-			t.Errorf("clause = %q; column names may now be validated or quoted, "+
-				"so assert that instead", got)
+// TestTheClauseCannotBeUsedToInjectSQL covers the WHERE clause an operator's
+// backup configuration ends up controlling. Column names were pasted into the
+// SQL with no escaping and no validation, and values were escaped only by
+// doubling the single quote — which MySQL's default backslash handling defeats.
+// The clause is then handed to the mysql client to execute.
+func TestTheClauseCannotBeUsedToInjectSQL(t *testing.T) {
+	t.Run("a column name that is not one is refused", func(t *testing.T) {
+		for _, name := range []string{"1=1 OR id", "id`", "id; DROP TABLE orders", "", "id name"} {
+			if got, err := newExecutor().convertTimeRangeQueryForMySQL(
+				map[string]interface{}{name: "x"}); err == nil {
+				t.Errorf("the column name %q was accepted: %q", name, got)
+			}
 		}
 	})
 
-	t.Run("backslash is left intact", func(t *testing.T) {
-		got := newExecutor().convertTimeRangeQueryForMySQL(
-			map[string]interface{}{"name": `back\slash`})
+	t.Run("a backslash cannot escape the closing quote", func(t *testing.T) {
+		got := mustClause(t, map[string]interface{}{"name": `back\slash`})
 
-		if !strings.Contains(got, `back\slash`) {
-			t.Errorf("clause = %q; backslashes may now be escaped, so assert that instead", got)
+		if strings.Contains(got, `back\slash'`) {
+			t.Errorf("clause = %q; the backslash still reaches the statement intact", got)
+		}
+		if !strings.Contains(got, `back\\slash`) {
+			t.Errorf("clause = %q, want the backslash doubled", got)
+		}
+	})
+
+	t.Run("a value ending in a backslash cannot open the statement", func(t *testing.T) {
+		got := mustClause(t, map[string]interface{}{"name": `x\`})
+
+		// Unescaped this would read as ... = 'x\' AND ..., with the closing
+		// quote consumed and the rest of the clause inside the literal.
+		if !strings.HasSuffix(got, `= 'x\\'`) {
+			t.Errorf("clause = %q, want the trailing backslash doubled", got)
 		}
 	})
 }
@@ -190,8 +216,17 @@ func TestBuildMySQLSelectQuery(t *testing.T) {
 		return c
 	}
 
+	mustQuery := func(t *testing.T, table string, c ExecutorBackupConfig) string {
+		t.Helper()
+		q, err := newExecutor().buildMySQLSelectQuery(table, c)
+		if err != nil {
+			t.Fatalf("buildMySQLSelectQuery: %v", err)
+		}
+		return q
+	}
+
 	t.Run("all columns by default", func(t *testing.T) {
-		got := newExecutor().buildMySQLSelectQuery("orders", base())
+		got := mustQuery(t, "orders", base())
 		if want := "SELECT * FROM orders"; got != want {
 			t.Errorf("query = %q, want %q", got, want)
 		}
@@ -200,7 +235,7 @@ func TestBuildMySQLSelectQuery(t *testing.T) {
 	t.Run("explicit field list", func(t *testing.T) {
 		c := base()
 		c.Database.Fields["orders"] = []string{"id", "created_at"}
-		got := newExecutor().buildMySQLSelectQuery("orders", c)
+		got := mustQuery(t, "orders", c)
 		if want := "SELECT id, created_at FROM orders"; got != want {
 			t.Errorf("query = %q, want %q", got, want)
 		}
@@ -209,7 +244,7 @@ func TestBuildMySQLSelectQuery(t *testing.T) {
 	t.Run("the all sentinel means every column", func(t *testing.T) {
 		c := base()
 		c.Database.Fields["orders"] = []string{"all"}
-		got := newExecutor().buildMySQLSelectQuery("orders", c)
+		got := mustQuery(t, "orders", c)
 		if want := "SELECT * FROM orders"; got != want {
 			t.Errorf("query = %q, want %q", got, want)
 		}
@@ -218,20 +253,19 @@ func TestBuildMySQLSelectQuery(t *testing.T) {
 	t.Run("query conditions become a WHERE clause", func(t *testing.T) {
 		c := base()
 		c.Query["orders"] = map[string]interface{}{"status": "active"}
-		got := newExecutor().buildMySQLSelectQuery("orders", c)
-		if want := "SELECT * FROM orders WHERE status = 'active'"; got != want {
+		got := mustQuery(t, "orders", c)
+		if want := "SELECT * FROM orders WHERE `status` = 'active'"; got != want {
 			t.Errorf("query = %q, want %q", got, want)
 		}
 	})
 
-	t.Run("a dropped condition leaves no WHERE clause", func(t *testing.T) {
-		// Combined with the dropping behaviour above, an unsupported condition
-		// turns a filtered export into a full-table export.
+	t.Run("a condition that cannot be rendered stops the export", func(t *testing.T) {
+		// Dropping it would turn a filtered export into a full-table one, which
+		// is a much larger archive holding rows the job was not asked for.
 		c := base()
-		c.Query["orders"] = map[string]interface{}{"active": true}
-		got := newExecutor().buildMySQLSelectQuery("orders", c)
-		if want := "SELECT * FROM orders"; got != want {
-			t.Errorf("query = %q, want %q", got, want)
+		c.Query["orders"] = map[string]interface{}{"created_at": map[string]interface{}{"type": "weekly"}}
+		if got, err := newExecutor().buildMySQLSelectQuery("orders", c); err == nil {
+			t.Errorf("query = %q, want a refusal", got)
 		}
 	})
 }

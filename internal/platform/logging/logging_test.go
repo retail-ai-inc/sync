@@ -77,11 +77,11 @@ func TestCustomTextFormatterIncludesFields(t *testing.T) {
 	}
 }
 
-// TestCustomTextFormatterRunsFieldsTogether records a formatting defect: the
-// field parts are joined with an empty separator, so two or more fields are
-// concatenated with nothing between them. `sync_task_id=7` and `table=users`
-// come out as `sync_task_id=7table=users`, which neither reads nor parses.
-func TestCustomTextFormatterRunsFieldsTogether(t *testing.T) {
+// TestTheFieldsAreSeparated covers a line an operator has to read. The parts
+// used to be joined with an empty separator, so two fields came out as
+// "sync_task_id=7table=users" — neither readable nor parseable, and this is the
+// default format for every line the process writes.
+func TestTheFieldsAreSeparated(t *testing.T) {
 	line := formatEntry(t, &logrus.Entry{
 		Time:    time.Date(2026, 8, 21, 0, 0, 0, 0, time.UTC),
 		Level:   logrus.InfoLevel,
@@ -89,12 +89,8 @@ func TestCustomTextFormatterRunsFieldsTogether(t *testing.T) {
 		Data:    logrus.Fields{"sync_task_id": 7, "table": "users"},
 	})
 
-	if strings.Contains(line, "7 table=users") {
-		t.Fatalf("fields are now separated (%q); the join may have been fixed, "+
-			"so assert the readable form instead", line)
-	}
-	if !strings.Contains(line, "sync_task_id=7table=users") {
-		t.Errorf("Format produced %q, want the fields run together", line)
+	if !strings.Contains(line, "sync_task_id=7 table=users") {
+		t.Errorf("Format produced %q, want the fields separated", line)
 	}
 }
 
