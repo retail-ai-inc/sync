@@ -36,7 +36,7 @@ func syncTask(t *testing.T, db string) config.SyncConfig {
 	tgtHost, tgtPort := harness.SplitHostPort(t, harness.RedisTarget)
 
 	return config.SyncConfig{
-		ID:     1,
+		ID:     harness.UniqueTaskID(),
 		Enable: true,
 		Type:   "redis",
 		SourceConnection: dsn.BuildDSNByType("redis", map[string]string{
@@ -291,7 +291,11 @@ func TestChangesWhileStoppedAreReplayed(t *testing.T) {
 		t.Fatalf("seed removed: %v", err)
 	}
 
-	stop := startSyncer(t, syncTask(t, "0"))
+	// One configuration, reused: the two runs have to be the same task, because
+	// the stream offset is keyed by task id.
+	task := syncTask(t, "0")
+
+	stop := startSyncer(t, task)
 	harness.Eventually(t, 30*time.Second, func() error {
 		if tgt.Exists(ctx, "kept", "removed-while-down").Val() != 2 {
 			return fmt.Errorf("initial sync has not landed")
@@ -310,7 +314,7 @@ func TestChangesWhileStoppedAreReplayed(t *testing.T) {
 		t.Fatalf("delete while down: %v", err)
 	}
 
-	startSyncer(t, syncTask(t, "0"))
+	startSyncer(t, task)
 
 	// The re-run of the initial copy picks up the new key.
 	harness.Eventually(t, 30*time.Second, func() error {

@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -142,4 +143,25 @@ func RunSyncer(t *testing.T, start func(context.Context)) (stop func()) {
 // having to run before the next one starts.
 func UniqueName(prefix string) string {
 	return fmt.Sprintf("%s_%d", prefix, time.Now().UnixNano())
+}
+
+// taskIDs hands out a distinct id per task built in one run. It starts from the
+// clock so two runs against the same databases do not reuse each other's ids:
+// the checkpoints and the direction claims outlive the process that wrote them.
+var taskIDs = func() *atomic.Int64 {
+	var n atomic.Int64
+	n.Store(time.Now().UnixMilli() % 1_000_000_000)
+	return &n
+}()
+
+// UniqueTaskID returns an id no other task in this run uses.
+//
+// It matters because a task's checkpoint and its replication-direction claim are
+// now recorded on the target database, keyed by task id — which is what lets a
+// syncer replaced in the other region find out where to resume from. Two tasks
+// sharing an id therefore share a checkpoint, and the second one starts by
+// replaying from wherever the first one stopped. In production the id comes from
+// the sync_tasks table and is unique; in a test suite it has to be asked for.
+func UniqueTaskID() int {
+	return int(taskIDs.Add(1))
 }

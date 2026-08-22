@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/go-mysql-org/go-mysql/mysql"
+	"github.com/retail-ai-inc/sync/internal/platform/config"
 	"github.com/sirupsen/logrus"
 )
 
@@ -19,7 +20,13 @@ func newSyncer(t *testing.T) *MySQLSyncer {
 
 	logger := logrus.New()
 	logger.SetLevel(logrus.PanicLevel)
-	return &MySQLSyncer{logger: logger, dialect: dialectSQLite}
+	// Type is set because the endpoint and database-name helpers dispatch on
+	// it; a syncer in this package is always a MySQL one.
+	return &MySQLSyncer{
+		cfg:     config.SyncConfig{Type: "mysql"},
+		logger:  logger,
+		dialect: dialectSQLite,
+	}
 }
 
 func TestParseAddr(t *testing.T) {

@@ -30,6 +30,13 @@ func connect(t *testing.T, endpoint string) *mongo.Client {
 	host, port := harness.SplitHostPort(t, endpoint)
 	uri := dsn.BuildDSNByType("mongodb", map[string]string{
 		"host": host, "port": port, "database": sourceDB,
+		// The fixture's replica sets advertise 127.0.0.1:27017, which is
+		// reachable inside the container and nowhere else, so topology
+		// discovery cannot be used here. A production cluster advertises
+		// addresses its clients can resolve and must not set this: pinned to
+		// one node the driver neither finds the rest of the set nor follows an
+		// election. That path needs a real replica set to exercise.
+		dsn.KeyDirect: "true",
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -59,14 +66,17 @@ func syncTask(t *testing.T, collection string, tables ...config.TableMapping) co
 	}
 
 	return config.SyncConfig{
-		ID:     1,
+		ID:     harness.UniqueTaskID(),
 		Enable: true,
 		Type:   "mongodb",
+		// See connect() for why the fixture has to pin one node.
 		SourceConnection: dsn.BuildDSNByType("mongodb", map[string]string{
 			"host": srcHost, "port": srcPort, "database": sourceDB,
+			dsn.KeyDirect: "true",
 		}),
 		TargetConnection: dsn.BuildDSNByType("mongodb", map[string]string{
 			"host": tgtHost, "port": tgtPort, "database": targetDB,
+			dsn.KeyDirect: "true",
 		}),
 		MongoDBResumeTokenPath: t.TempDir(),
 		Mappings:               []config.DatabaseMapping{{Tables: tables}},

@@ -205,3 +205,86 @@ func TestTheBinlogConnectionFollowsTheDSN(t *testing.T) {
 		})
 	}
 }
+
+// ------------------------------------------------- checkpoints and sources
+
+// TestACheckpointFromAnotherSourceIsIgnored covers the one way a binlog offset
+// can be actively harmful. A file and offset mean nothing on another server:
+// read against a different one they address unrelated bytes, and the read
+// succeeds, so the task resumes from somewhere arbitrary with nothing to show
+// that it happened. That is reachable by repointing a task at another source,
+// and by a task id being reused after the configuration database is restored.
+func TestACheckpointFromAnotherSourceIsIgnored(t *testing.T) {
+	s := newSyncer(t)
+	s.cfg.SourceConnection = "u:p@tcp(osaka:3306)/shop"
+	path := filepath.Join(t.TempDir(), "pos.json")
+
+	payload, err := checkpoint.Encode(binlogCheckpoint{
+		Name: "binlog.000004", Pos: 154, Source: "tokyo:3306/shop",
+	})
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	store := &checkpoint.FileStore{Path: path}
+	if err := store.Save(context.Background(), "", payload); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	got, err := s.loadCheckpoint(context.Background(), store)
+	if err != nil {
+		t.Fatalf("loadCheckpoint: %v", err)
+	}
+	if got != nil {
+		t.Errorf("checkpoint = %+v; an offset from another server was accepted", *got)
+	}
+}
+
+func TestACheckpointFromTheSameSourceIsUsed(t *testing.T) {
+	s := newSyncer(t)
+	s.cfg.SourceConnection = "u:p@tcp(tokyo:3306)/shop"
+	path := filepath.Join(t.TempDir(), "pos.json")
+
+	payload, err := checkpoint.Encode(binlogCheckpoint{
+		Name: "binlog.000004", Pos: 154, Source: "tokyo:3306/shop",
+	})
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	store := &checkpoint.FileStore{Path: path}
+	if err := store.Save(context.Background(), "", payload); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	got, err := s.loadCheckpoint(context.Background(), store)
+	if err != nil {
+		t.Fatalf("loadCheckpoint: %v", err)
+	}
+	if got == nil {
+		t.Fatal("a checkpoint from this task's own source was ignored")
+	}
+	if got.Pos != 154 {
+		t.Errorf("offset = %d", got.Pos)
+	}
+}
+
+// TestACheckpointWithNoSourceIsStillUsed keeps an existing deployment resuming:
+// a checkpoint written before the source was recorded has no way to prove which
+// server it came from, and refusing it would re-copy every table on upgrade.
+func TestACheckpointWithNoSourceIsStillUsed(t *testing.T) {
+	s := newSyncer(t)
+	s.cfg.SourceConnection = "u:p@tcp(tokyo:3306)/shop"
+	path := filepath.Join(t.TempDir(), "pos.json")
+
+	if err := (&checkpoint.FileStore{Path: path}).Save(context.Background(), "",
+		`{"Name":"binlog.000003","Pos":154}`); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	got, err := s.loadCheckpoint(context.Background(), &checkpoint.FileStore{Path: path})
+	if err != nil {
+		t.Fatalf("loadCheckpoint: %v", err)
+	}
+	if got == nil {
+		t.Fatal("a checkpoint from an older build was ignored, which would re-copy every table")
+	}
+}

@@ -127,12 +127,19 @@ func TestWritesDuringInitialSyncAreNotLost(t *testing.T) {
 		return nil
 	})
 
-	arrived := countIn(t, tgt, targetDB, collection, bson.M{"marker": bson.M{"$exists": true}})
-	if arrived != int64(markers) {
-		t.Errorf("%d of %d documents written during the snapshot reached the target; "+
-			"writes in the window between the snapshot read and the change stream "+
-			"opening are lost (F-020)", arrived, markers)
-	}
+	// The seeded documents arrive through the copy; the markers arrive
+	// afterwards, through the stream replaying from the cluster time the copy
+	// pinned. So this has to be polled rather than read once: the copy
+	// converging says nothing about the replay having caught up.
+	harness.Eventually(t, 60*time.Second, func() error {
+		arrived := countIn(t, tgt, targetDB, collection, bson.M{"marker": bson.M{"$exists": true}})
+		if arrived != int64(markers) {
+			return fmt.Errorf("%d of %d documents written during the snapshot have "+
+				"reached the target; writes in the window between the snapshot read "+
+				"and the change stream opening are lost (F-020)", arrived, markers)
+		}
+		return nil
+	})
 }
 
 // TestResumeAfterRestart checks that a stopped syncer picks up where it left
@@ -148,12 +155,11 @@ func TestResumeAfterRestart(t *testing.T) {
 		t.Fatalf("seed source: %v", err)
 	}
 
-	statePath := t.TempDir()
-	newCfg := func() config.SyncConfig {
-		cfg := syncTask(t, collection)
-		cfg.MongoDBResumeTokenPath = statePath
-		return cfg
-	}
+	// One configuration, reused: the two runs have to be the same task, because
+	// the resume token is keyed by task id.
+	base := syncTask(t, collection)
+	base.MongoDBResumeTokenPath = t.TempDir()
+	newCfg := func() config.SyncConfig { return base }
 
 	stop := startSyncer(t, newCfg())
 	harness.Eventually(t, 30*time.Second, func() error {

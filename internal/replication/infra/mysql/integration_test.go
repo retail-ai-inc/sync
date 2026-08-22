@@ -75,7 +75,7 @@ func syncTask(t *testing.T, table string, tables ...config.TableMapping) config.
 	}
 
 	return config.SyncConfig{
-		ID:     1,
+		ID:     harness.UniqueTaskID(),
 		Enable: true,
 		Type:   "mysql",
 		SourceConnection: dsn.BuildDSNByType("mysql", map[string]string{
@@ -365,12 +365,18 @@ func TestWritesDuringInitialSyncAreNotLost(t *testing.T) {
 		return nil
 	})
 
-	arrived := countRows(t, tgt, table, "name = 'marker'")
-	if arrived != markers {
-		t.Errorf("%d of %d rows written during the initial copy reached the target; "+
-			"writes in the window between the copy and canal starting are lost (F-040)",
-			arrived, markers)
-	}
+	// The seeded rows arrive through the copy; the markers arrive afterwards,
+	// through the stream replaying from the coordinates the copy pinned. So this
+	// has to be polled rather than read once: the copy converging says nothing
+	// about the replay having caught up.
+	harness.Eventually(t, 60*time.Second, func() error {
+		if arrived := countRows(t, tgt, table, "name = 'marker'"); arrived != markers {
+			return fmt.Errorf("%d of %d rows written during the initial copy have "+
+				"reached the target; writes in the window between the copy and the "+
+				"stream starting are lost (F-040)", arrived, markers)
+		}
+		return nil
+	})
 }
 
 // TestResumeFromStoredBinlogPosition checks that a restarted syncer replays what
@@ -384,11 +390,11 @@ func TestResumeFromStoredBinlogPosition(t *testing.T) {
 	mustExec(t, src, fmt.Sprintf("INSERT INTO %s (id, name) VALUES (1, 'seed')", table))
 
 	positionPath := t.TempDir() + "/binlog.pos"
-	newCfg := func() config.SyncConfig {
-		cfg := syncTask(t, table)
-		cfg.MySQLPositionPath = positionPath
-		return cfg
-	}
+	// One configuration, reused: the two runs have to be the same task, because
+	// the checkpoint is keyed by task id.
+	base := syncTask(t, table)
+	base.MySQLPositionPath = positionPath
+	newCfg := func() config.SyncConfig { return base }
 
 	stop := startSyncer(t, newCfg())
 	harness.Eventually(t, 45*time.Second, func() error {
@@ -424,11 +430,10 @@ func TestResumeFromStoredBinlogPosition(t *testing.T) {
 	})
 }
 
-// TestTransactionBoundariesAreObserved exercises F-045. MyEventHandler.OnRow
-// applies each row event on its own as it arrives; there is no XID grouping and
-// no transaction on the target, so a multi-row transaction at the source is
-// replayed as a sequence of independent statements. A reader on the target can
-// therefore observe a state that never existed at the source.
+// TestTransactionBoundariesAreObserved exercises F-045. Row events are buffered
+// and applied inside one target transaction at the XID that closes the source
+// transaction, so a reader on the target cannot observe a state that never
+// existed at the source.
 //
 // The scenario keeps a two-row invariant — the balances must always sum to the
 // same constant — and transfers between the rows inside explicit transactions
@@ -533,13 +538,15 @@ func TestTransactionBoundariesAreObserved(t *testing.T) {
 		t.Errorf("the target settled on a sum of %d, want %d", finalSum, total)
 	}
 
-	if len(observed) == 0 {
-		t.Skip("no intermediate state was caught; the window is narrow and the " +
-			"poller may simply have missed it")
+	// Zero observations is the pass. The poller can only miss a violation, never
+	// invent one, so this is a best-effort check in the direction that matters:
+	// anything it does catch is a state the source never held.
+	if len(observed) > 0 {
+		t.Errorf("the target exposed %d intermediate sums such as %v, none of which "+
+			"ever existed at the source: the row events of one transaction are not "+
+			"being applied together (F-045)",
+			len(observed), observed[:min(len(observed), 3)])
 	}
-	t.Errorf("the target exposed %d intermediate sums such as %v, none of which "+
-		"ever existed at the source: row events are applied individually with no "+
-		"transaction around them (F-045)", len(observed), observed[:min(len(observed), 3)])
 }
 
 func min(a, b int) int {

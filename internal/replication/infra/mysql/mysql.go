@@ -158,6 +158,7 @@ func (s *MySQLSyncer) Start(ctx context.Context) {
 		lastExecError:     0,
 		TargetConnection:  s.cfg.TargetConnection,
 		flavor:            cfg.Flavor,
+		source:            dsn.Endpoint(s.cfg.Type, s.cfg.SourceConnection),
 		labels:            s.metricLabels(),
 		discovering:       discovering,
 		checkpoints:       checkpoints,
@@ -252,17 +253,18 @@ func (s *MySQLSyncer) snapshot(ctx context.Context, targetDB *sql.DB) *binlogChe
 	}
 	defer func() { _, _ = conn.ExecContext(ctx, "COMMIT") }()
 
-	checkpoint, err := s.sourceCheckpoint(ctx, conn)
+	pinned, err := s.sourceCheckpoint(ctx, conn)
 	if err != nil {
 		s.logger.Errorf("[MySQL] Failed to read the source binlog coordinates: %v. "+
 			"The copy cannot start without them, because every write made while "+
 			"it ran would then belong to neither the copy nor the stream", err)
 		return nil
 	}
-	s.logger.Infof("[MySQL] Snapshot pinned at %+v", *checkpoint)
+	pinned.Source = dsn.Endpoint(s.cfg.Type, s.cfg.SourceConnection)
+	s.logger.Infof("[MySQL] Snapshot pinned at %+v", *pinned)
 
 	s.doInitialSync(ctx, conn, targetDB)
-	return checkpoint
+	return pinned
 }
 
 // sourceCheckpoint reads the source's current binlog coordinates.
@@ -635,6 +637,13 @@ type binlogCheckpoint struct {
 	Pos    uint32 `json:"Pos"`
 	GTID   string `json:"gtid,omitempty"`
 	Flavor string `json:"flavor,omitempty"`
+	// Source names the server the offset belongs to, without credentials. A
+	// file and offset mean nothing anywhere else: read against a different
+	// server they address unrelated bytes, and the read succeeds, so the task
+	// resumes from somewhere arbitrary with no error to show for it. That is
+	// reachable by repointing a task at another source, and by a task id being
+	// reused after the configuration database is restored from a backup.
+	Source string `json:"source,omitempty"`
 }
 
 // position reports the file-and-offset half of the checkpoint.
@@ -697,6 +706,16 @@ func (s *MySQLSyncer) loadCheckpoint(ctx context.Context, store checkpoint.Store
 		return nil, fmt.Errorf("read the stored checkpoint: %w", err)
 	}
 	if !found || cp.Name == "" {
+		return nil, nil
+	}
+
+	// A checkpoint written against another server is worse than none: the offset
+	// would be read against data it does not describe, successfully, and the
+	// task would resume from somewhere arbitrary.
+	if want := dsn.Endpoint(s.cfg.Type, s.cfg.SourceConnection); cp.Source != "" && cp.Source != want {
+		s.logger.Warnf("[MySQL] Ignoring a checkpoint recorded against %s: this task "+
+			"reads %s, and a binlog offset means nothing on another server. The copy "+
+			"will be made again.", cp.Source, want)
 		return nil, nil
 	}
 	return &cp, nil
@@ -819,6 +838,8 @@ type MyEventHandler struct {
 	// flavor names the server dialect the recorded GTID set belongs to, so a
 	// MariaDB set is not read back as a MySQL one.
 	flavor string
+	// source names the server the offsets belong to, without credentials.
+	source string
 	// labels identify this task in the metrics.
 	labels metrics.Labels
 	// discovering means the task listed no tables, so every table it sees is
@@ -1124,7 +1145,7 @@ func (h *MyEventHandler) OnPosSynced(header *replication.EventHeader, pos mysql.
 
 	h.logger.Debugf("[MySQL] Syncing position: %v, force: %v", pos, force)
 
-	cp := binlogCheckpoint{Name: pos.Name, Pos: pos.Pos}
+	cp := binlogCheckpoint{Name: pos.Name, Pos: pos.Pos, Source: h.source}
 	if set != nil {
 		cp.GTID = set.String()
 		cp.Flavor = h.flavor
