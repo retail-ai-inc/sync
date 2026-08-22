@@ -40,7 +40,10 @@ CREATE TABLE IF NOT EXISTS backup_tasks (
     last_update_time DATETIME,
     last_backup_time DATETIME,
     next_backup_time DATETIME,
-    config_json      TEXT NOT NULL
+    config_json      TEXT NOT NULL,
+    last_run_time    DATETIME,
+    last_run_status  TEXT,
+    last_run_message TEXT
 );
 
 CREATE TABLE IF NOT EXISTS users (
@@ -148,5 +151,64 @@ SELECT 1, 0, 'info', 60
 WHERE NOT EXISTS (SELECT 1 FROM config_global WHERE id = 1)`); err != nil {
 		return fmt.Errorf("seed the global configuration: %w", err)
 	}
+
+	return addColumns(db)
+}
+
+// addedColumns are columns added to a table that already existed in databases
+// created by an earlier version. CREATE TABLE IF NOT EXISTS does nothing to a
+// table that is there, so a database from before these columns were introduced
+// would otherwise never gain them.
+var addedColumns = []struct{ table, column, definition string }{
+	{"backup_tasks", "last_run_time", "DATETIME"},
+	{"backup_tasks", "last_run_status", "TEXT"},
+	{"backup_tasks", "last_run_message", "TEXT"},
+}
+
+// addColumns adds each of those columns if it is missing.
+//
+// SQLite has no ADD COLUMN IF NOT EXISTS, and the error for one that is already
+// there is not distinguishable by a code — so the columns are read first. Adding
+// a column is the only schema change made to an existing table: nothing here
+// drops, renames, or retypes anything, so a database opened by an older binary
+// afterwards still works.
+func addColumns(db *sql.DB) error {
+	for _, add := range addedColumns {
+		present, err := hasColumn(db, add.table, add.column)
+		if err != nil {
+			return err
+		}
+		if present {
+			continue
+		}
+		if _, err := db.Exec(fmt.Sprintf(
+			`ALTER TABLE %s ADD COLUMN %s %s`, add.table, add.column, add.definition)); err != nil {
+			return fmt.Errorf("add %s.%s: %w", add.table, add.column, err)
+		}
+	}
 	return nil
+}
+
+func hasColumn(db *sql.DB, table, column string) (bool, error) {
+	rows, err := db.Query(fmt.Sprintf(`PRAGMA table_info(%s)`, table))
+	if err != nil {
+		return false, fmt.Errorf("read the columns of %s: %w", table, err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			cid                 int
+			name, declType      string
+			notNull, primaryKey int
+			defaultValue        sql.NullString
+		)
+		if err := rows.Scan(&cid, &name, &declType, &notNull, &defaultValue, &primaryKey); err != nil {
+			return false, fmt.Errorf("read the columns of %s: %w", table, err)
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }

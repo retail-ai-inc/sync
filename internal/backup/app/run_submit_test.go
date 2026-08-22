@@ -214,3 +214,52 @@ func snapshotRun(t *testing.T, taskID string) (domain.Run, bool) {
 	}
 	return domain.Run{}, false
 }
+
+// TestAFailedRunIsRecordedInTheDatabase records that the outcome outlives the
+// process. It used to live only in the in-memory register, so a job that failed
+// overnight and a restart in the morning left nothing anywhere saying so — the
+// dashboard showed the timestamp of the last run that had worked, and "the
+// backup is a few days old" and "the backup has been failing since Tuesday"
+// looked the same.
+func TestAFailedRunIsRecordedInTheDatabase(t *testing.T) {
+	db := useTempJobDB(t)
+	id := insertJob(t, db, 1, `{"name":"nightly","sourceType":"mongodb"}`)
+	ForgetRuns()
+	t.Cleanup(ForgetRuns)
+
+	taskID, err := StartRun(itoa(id))
+	if err != nil {
+		t.Fatalf("StartRun: %v", err)
+	}
+	if final := settled(t, taskID); final.Status != domain.RunFailed {
+		t.Fatalf("Status = %q, want a failure to record", final.Status)
+	}
+
+	var status, message, at string
+	if err := db.QueryRow(
+		`SELECT COALESCE(last_run_status,''), COALESCE(last_run_message,''), COALESCE(last_run_time,'')
+		 FROM backup_tasks WHERE id = ?`, id).Scan(&status, &message, &at); err != nil {
+		t.Fatalf("read the recorded outcome: %v", err)
+	}
+	if status != domain.RunFailed {
+		t.Errorf("last_run_status = %q, want %q", status, domain.RunFailed)
+	}
+	if message == "" {
+		t.Error("last_run_message is empty, so the failure says nothing about itself")
+	}
+	if at == "" {
+		t.Error("last_run_time is empty, so there is no telling when it failed")
+	}
+
+	// The successful-backup timestamp answers a different question and must not
+	// have moved.
+	var lastBackup string
+	if err := db.QueryRow(
+		`SELECT COALESCE(last_backup_time,'') FROM backup_tasks WHERE id = ?`, id).
+		Scan(&lastBackup); err != nil {
+		t.Fatalf("read last_backup_time: %v", err)
+	}
+	if lastBackup != "2026-08-20 18:00:00" {
+		t.Errorf("last_backup_time = %q, want it untouched by a failed run", lastBackup)
+	}
+}

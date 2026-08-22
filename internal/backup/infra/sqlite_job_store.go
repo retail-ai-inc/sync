@@ -58,7 +58,10 @@ SELECT
   COALESCE(last_update_time,''),
   COALESCE(last_backup_time,''),
   COALESCE(next_backup_time,''),
-  config_json
+  config_json,
+  COALESCE(last_run_time,''),
+  COALESCE(last_run_status,''),
+  COALESCE(last_run_message,'')
 FROM backup_tasks
 ORDER BY id ASC
 `)
@@ -76,11 +79,15 @@ ORDER BY id ASC
 			lastBackup string
 			nextBackup string
 			cfgJSON    string
+			outcome    domain.RunOutcome
 		)
-		if err := rows.Scan(&id, &enableInt, &lastUpdate, &lastBackup, &nextBackup, &cfgJSON); err != nil {
+		if err := rows.Scan(&id, &enableInt, &lastUpdate, &lastBackup, &nextBackup, &cfgJSON,
+			&outcome.At, &outcome.Status, &outcome.Message); err != nil {
 			return nil, faultAt(StageScan, err)
 		}
-		jobs = append(jobs, domain.NewBackupJob(id, enableInt, lastUpdate, lastBackup, nextBackup, cfgJSON))
+		job := domain.NewBackupJob(id, enableInt, lastUpdate, lastBackup, nextBackup, cfgJSON)
+		job.SetLastRun(outcome)
+		jobs = append(jobs, job)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, faultAt(StageIterate, err)
@@ -243,6 +250,37 @@ func StampLastBackup(id, now string) error {
 	}
 	// An id that matches no row used to be a success, so "run this backup now"
 	// answered "started successfully" for a job that does not exist.
+	if ra, _ := res.RowsAffected(); ra == 0 {
+		return ErrNoSuchJob
+	}
+	return nil
+}
+
+// RecordRunOutcome stores how a job's last run went, so the answer survives a
+// restart.
+//
+// Whether a backup worked was held only in an in-process map. A job that failed
+// at three in the morning left the dashboard showing the timestamp of the last
+// run that succeeded — days earlier — with nothing anywhere saying the newer one
+// had failed, because the process that knew had been restarted since. Before a
+// regional switchover that reads as "the backup is a few days old", not as "the
+// backup has been failing since Tuesday".
+//
+// last_backup_time keeps its meaning of "when a backup last succeeded"; these
+// columns say what happened the last time one was attempted, whatever that was.
+func RecordRunOutcome(id int, at, status, message string) error {
+	db, err := sqlite.OpenSQLiteDB()
+	if err != nil {
+		return faultAt(StageOpen, err)
+	}
+	defer db.Close()
+
+	res, err := db.Exec(
+		`UPDATE backup_tasks SET last_run_time=?, last_run_status=?, last_run_message=? WHERE id=?`,
+		at, status, message, id)
+	if err != nil {
+		return faultAt(StageUpdate, err)
+	}
 	if ra, _ := res.RowsAffected(); ra == 0 {
 		return ErrNoSuchJob
 	}

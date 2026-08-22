@@ -131,6 +131,8 @@ func execute(taskID string, id int) {
 	if err != nil {
 		logrus.Errorf("[BackupExecutor] Failed to open database for task %s: %v", taskID, err)
 		AdvanceRun(taskID, domain.RunFailed, "Failed to open database", err)
+		// Nowhere to record the outcome: the place it would be recorded is the
+		// database that could not be opened.
 		return
 	}
 	defer db.Close()
@@ -144,6 +146,7 @@ func execute(taskID string, id int) {
 	if err := executor.Execute(ctx, id); err != nil {
 		logrus.Errorf("[BackupExecutor] Failed to execute backup task %d: %v", id, err)
 		AdvanceRun(taskID, domain.RunFailed, "Backup execution failed", err)
+		recordOutcome(id, domain.RunFailed, err.Error())
 		return
 	}
 
@@ -154,7 +157,21 @@ func execute(taskID string, id int) {
 	}
 
 	AdvanceRun(taskID, domain.RunCompleted, "Backup executed successfully", nil)
+	recordOutcome(id, domain.RunCompleted, "")
 	logrus.Debugf("[BackupExecutor] Background backup task %s completed successfully", taskID)
+}
+
+// recordOutcome writes how a run went to the control database.
+//
+// The in-memory register is the only other record, and it goes with the
+// process. A backup that failed overnight and a restart in the morning left the
+// dashboard showing nothing but the timestamp of the last run that worked, so
+// "the backup is a few days old" and "the backup has been failing since
+// Tuesday" looked identical — the second is the one worth waking up for.
+func recordOutcome(id int, status, message string) {
+	if err := infra.RecordRunOutcome(id, httpx.TimeNowStr(), status, message); err != nil {
+		logrus.Warnf("[BackupExecutor] Failed to record the outcome of task %d: %v", id, err)
+	}
 }
 
 // ErrJobNotFound means the id names no job.

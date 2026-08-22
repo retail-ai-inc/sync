@@ -130,6 +130,7 @@ type BackupJob struct {
 	lastBackupTime string
 	nextBackupTime string
 	configJSON     string
+	lastRun        RunOutcome
 }
 
 // NewBackupJob builds a job from a stored row.
@@ -143,6 +144,23 @@ func NewBackupJob(id, enable int, lastUpdate, lastBackup, nextBackup, configJSON
 		configJSON:     configJSON,
 	}
 }
+
+// RunOutcome is how a job's last run went, as it was last written to the
+// control database. An unrun job has all three empty.
+type RunOutcome struct {
+	At      string
+	Status  string
+	Message string
+}
+
+// SetLastRun attaches the stored outcome of the last run. The store fills it in
+// after building the job; nothing else writes it.
+func (j *BackupJob) SetLastRun(outcome RunOutcome) { j.lastRun = outcome }
+
+// LastRun reports how the last attempted run went. That is not the same as
+// LastBackupTime, which moves only when a run succeeds: a job whose last run
+// failed keeps the older successful timestamp and reports the failure here.
+func (j BackupJob) LastRun() RunOutcome { return j.lastRun }
 
 func (j BackupJob) ID() int                   { return j.id }
 func (j BackupJob) Enable() int               { return j.enable }

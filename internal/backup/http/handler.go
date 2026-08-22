@@ -56,7 +56,14 @@ func BackupListHandler(w http.ResponseWriter, r *http.Request) {
 			"regexPattern":       v.Config.RegexPattern,
 			"lastUpdateTime":     httpx.ConvertTimeToJST(v.Job.LastUpdateTime()),
 			"lastBackupTime":     httpx.ConvertTimeToJST(v.Job.LastBackupTime()),
-			"nextBackupTime":     httpx.ConvertTimeToJST(v.Job.NextBackupTimeRaw()),
+			// The last run, which is not the last success: a job whose overnight
+			// run failed keeps the older lastBackupTime and reports the failure
+			// here, so the two together say how old the newest usable copy is
+			// and whether anything has gone wrong since.
+			"lastRunTime":    httpx.ConvertTimeToJST(v.Job.LastRun().At),
+			"lastRunStatus":  v.Job.LastRun().Status,
+			"lastRunMessage": v.Job.LastRun().Message,
+			"nextBackupTime": httpx.ConvertTimeToJST(v.Job.NextBackupTimeRaw()),
 		})
 	}
 

@@ -30,24 +30,13 @@ func useTempJobDB(t *testing.T) *sql.DB {
 	path := filepath.Join(jobDBDir(t), "sync.db")
 	t.Setenv("SYNC_DB_PATH", path)
 
-	db, err := sql.Open("sqlite3", path)
+	// Through the real opener, so the fixture carries the schema the program
+	// creates rather than a copy of it that can drift.
+	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
 		t.Fatalf("open temp sqlite: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-
-	const schema = `
-CREATE TABLE backup_tasks (
-    id               INTEGER PRIMARY KEY AUTOINCREMENT,
-    enable           INTEGER NOT NULL DEFAULT 1,
-    last_update_time DATETIME,
-    last_backup_time DATETIME,
-    next_backup_time DATETIME,
-    config_json      TEXT NOT NULL
-);`
-	if _, err := db.Exec(schema); err != nil {
-		t.Fatalf("create schema: %v", err)
-	}
 	return db
 }
 
