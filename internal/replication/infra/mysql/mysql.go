@@ -104,14 +104,15 @@ func (s *MySQLSyncer) Start(ctx context.Context) {
 		canal:             c,
 		lastExecError:     0,
 		TargetConnection:  s.cfg.TargetConnection,
+		flavor:            cfg.Flavor,
 	}
 	c.SetEventHandler(h)
 
-	var startPos *mysql.Position
+	var checkpoint *binlogCheckpoint
 	if s.cfg.MySQLPositionPath != "" {
-		startPos = s.loadBinlogPosition(s.cfg.MySQLPositionPath)
-		if startPos != nil {
-			s.logger.Infof("[MySQL] Starting canal from saved position: %v", *startPos)
+		checkpoint = s.loadCheckpoint(s.cfg.MySQLPositionPath)
+		if checkpoint != nil {
+			s.logger.Infof("[MySQL] Starting canal from saved checkpoint: %+v", *checkpoint)
 		}
 	}
 
@@ -144,10 +145,15 @@ func (s *MySQLSyncer) Start(ctx context.Context) {
 
 	go func() {
 		var runErr error
-		if startPos != nil {
-			runErr = c.RunFrom(*startPos)
-		} else {
+		switch {
+		case checkpoint == nil:
 			runErr = c.Run()
+		case checkpoint.gtidSet() != nil:
+			// Preferred: the transactions themselves, which stay meaningful
+			// across a failover to a different server.
+			runErr = c.StartFromGTID(checkpoint.gtidSet())
+		default:
+			runErr = c.RunFrom(checkpoint.position())
 		}
 		if runErr != nil {
 			if strings.Contains(runErr.Error(), "context canceled") {
@@ -445,7 +451,49 @@ func makeQuestionMarks(n int) []string {
 	return res
 }
 
-func (s *MySQLSyncer) loadBinlogPosition(path string) *mysql.Position {
+// binlogCheckpoint is what the position file holds.
+//
+// The file-and-offset pair only means something on the server that produced it.
+// After a Cloud SQL failover the new primary has its own binlog files, and an
+// offset taken from the old one points at unrelated bytes — the syncer either
+// fails to start or, worse, resumes from the wrong place. A GTID set names the
+// transactions themselves and survives the failover, so it is what a resumed
+// task prefers.
+//
+// Name and Pos keep the capitalised spelling mysql.Position marshals to, so a
+// file written before GTIDs were recorded still loads.
+type binlogCheckpoint struct {
+	Name   string `json:"Name"`
+	Pos    uint32 `json:"Pos"`
+	GTID   string `json:"gtid,omitempty"`
+	Flavor string `json:"flavor,omitempty"`
+}
+
+// position reports the file-and-offset half of the checkpoint.
+func (c *binlogCheckpoint) position() mysql.Position {
+	return mysql.Position{Name: c.Name, Pos: c.Pos}
+}
+
+// gtidSet parses the recorded GTID set, reporting nil when there is none or it
+// cannot be read. A checkpoint written by an older build has no GTID set and
+// falls back to the offset.
+func (c *binlogCheckpoint) gtidSet() mysql.GTIDSet {
+	if c.GTID == "" {
+		return nil
+	}
+	flavor := c.Flavor
+	if flavor == "" {
+		flavor = mysql.MySQLFlavor
+	}
+	set, err := mysql.ParseGTIDSet(flavor, c.GTID)
+	if err != nil {
+		return nil
+	}
+	return set
+}
+
+// loadCheckpoint reads the stored position, reporting nil when there is none.
+func (s *MySQLSyncer) loadCheckpoint(path string) *binlogCheckpoint {
 	positionDir := filepath.Dir(path)
 	if err := os.MkdirAll(positionDir, os.ModePerm); err != nil {
 		s.logger.Warnf("[MySQL] create dir for position file => %s => %v", path, err)
@@ -460,11 +508,22 @@ func (s *MySQLSyncer) loadBinlogPosition(path string) *mysql.Position {
 		s.logger.Infof("[MySQL] binlog position file => %s => empty", path)
 		return nil
 	}
-	var pos mysql.Position
-	if errU := json.Unmarshal(data, &pos); errU != nil {
+	var cp binlogCheckpoint
+	if errU := json.Unmarshal(data, &cp); errU != nil {
 		s.logger.Errorf("[MySQL] unmarshal binlog position => %s => %v", path, errU)
 		return nil
 	}
+	return &cp
+}
+
+// loadBinlogPosition reports the stored file-and-offset pair, for callers that
+// only need that half.
+func (s *MySQLSyncer) loadBinlogPosition(path string) *mysql.Position {
+	cp := s.loadCheckpoint(path)
+	if cp == nil {
+		return nil
+	}
+	pos := cp.position()
 	return &pos
 }
 
@@ -541,6 +600,9 @@ type MyEventHandler struct {
 	canal             *canal.Canal
 	lastExecError     int32
 	TargetConnection  string
+	// flavor names the server dialect the recorded GTID set belongs to, so a
+	// MariaDB set is not read back as a MySQL one.
+	flavor string
 	// dialect is the flavour the target speaks. The zero value is MySQL, so a
 	// handler built without naming one behaves as production does.
 	dialect dialect
@@ -793,7 +855,7 @@ func (h *MyEventHandler) setTargetDB(db *sql.DB) {
 	h.mu.Unlock()
 }
 
-func (h *MyEventHandler) OnPosSynced(header *replication.EventHeader, pos mysql.Position, gs mysql.GTIDSet, force bool) error {
+func (h *MyEventHandler) OnPosSynced(header *replication.EventHeader, pos mysql.Position, set mysql.GTIDSet, force bool) error {
 	// A source that never sends XID events — a non-transactional engine, or a
 	// stream that stops mid-transaction — would otherwise leave rows buffered
 	// indefinitely. This is the periodic checkpoint, so drain here too. The
@@ -824,8 +886,13 @@ func (h *MyEventHandler) OnPosSynced(header *replication.EventHeader, pos mysql.
 		return err
 	}
 
-	// Marshal position to JSON
-	data, err := json.Marshal(pos)
+	cp := binlogCheckpoint{Name: pos.Name, Pos: pos.Pos}
+	if set != nil {
+		cp.GTID = set.String()
+		cp.Flavor = h.flavor
+	}
+
+	data, err := json.Marshal(cp)
 	if err != nil {
 		h.logger.Errorf("[MySQL] Failed to marshal position: %v", err)
 		return err

@@ -652,15 +652,19 @@ func TestOnPosSyncedReportsAnUnwritablePath(t *testing.T) {
 	}
 }
 
-// TestTheSavedPositionIgnoresTheGTIDSet records that only the file-and-offset
-// pair is stored. A source that has been failed over to a replica cannot be
-// resumed from this file, because the offset means nothing on the new server.
-func TestTheSavedPositionIgnoresTheGTIDSet(t *testing.T) {
+const sampleGTID = "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-5"
+
+// TestTheSavedPositionCarriesTheGTIDSet pins what makes a checkpoint survive a
+// failover. The file-and-offset pair only means something on the server that
+// produced it; the GTID set names the transactions and stays meaningful when
+// the source is failed over to a replica with its own binlog files.
+func TestTheSavedPositionCarriesTheGTIDSet(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "pos.json")
 	h := newHandler(t, nil, nil)
 	h.positionSaverPath = path
+	h.flavor = mysql.MySQLFlavor
 
-	gtid, err := mysql.ParseMysqlGTIDSet("3E11FA47-71CA-11E1-9E33-C80AA9429562:1-5")
+	gtid, err := mysql.ParseMysqlGTIDSet(sampleGTID)
 	if err != nil {
 		t.Fatalf("ParseMysqlGTIDSet: %v", err)
 	}
@@ -668,9 +672,89 @@ func TestTheSavedPositionIgnoresTheGTIDSet(t *testing.T) {
 		t.Fatalf("OnPosSynced: %v", err)
 	}
 
-	data, _ := os.ReadFile(path)
-	if strings.Contains(string(data), "3E11FA47") {
-		t.Fatalf("the GTID set appears to be stored now: %s", data)
+	cp := newSyncer(t).loadCheckpoint(path)
+	if cp == nil {
+		t.Fatal("loadCheckpoint returned nil for a file the saver wrote")
+	}
+	if cp.GTID != sampleGTID {
+		t.Errorf("stored GTID %q, want %q", cp.GTID, sampleGTID)
+	}
+	if cp.Flavor != mysql.MySQLFlavor {
+		t.Errorf("stored flavor %q, want %q", cp.Flavor, mysql.MySQLFlavor)
+	}
+	if got := cp.gtidSet(); got == nil || got.String() != sampleGTID {
+		t.Errorf("the stored set did not parse back: %v", got)
+	}
+}
+
+// TestACheckpointWithNoGTIDSetFallsBackToTheOffset covers the source that has
+// GTIDs turned off, and files written before they were recorded.
+func TestACheckpointWithNoGTIDSetFallsBackToTheOffset(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pos.json")
+	h := newHandler(t, nil, nil)
+	h.positionSaverPath = path
+
+	want := mysql.Position{Name: "binlog.000007", Pos: 990}
+	if err := h.OnPosSynced(nil, want, nil, false); err != nil {
+		t.Fatalf("OnPosSynced: %v", err)
+	}
+
+	cp := newSyncer(t).loadCheckpoint(path)
+	if cp == nil {
+		t.Fatal("loadCheckpoint returned nil")
+	}
+	if cp.gtidSet() != nil {
+		t.Errorf("a set was recorded for a source that sent none: %q", cp.GTID)
+	}
+	if cp.position() != want {
+		t.Errorf("position %+v, want %+v", cp.position(), want)
+	}
+}
+
+// TestAPositionFileFromAnOlderBuildStillLoads pins the file format's
+// compatibility: the two fields keep the capitalised names mysql.Position
+// marshals to, so an existing deployment resumes rather than restarting from
+// the current end of the binlog.
+func TestAPositionFileFromAnOlderBuildStillLoads(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pos.json")
+	if err := os.WriteFile(path, []byte(`{"Name":"binlog.000003","Pos":154}`), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	cp := newSyncer(t).loadCheckpoint(path)
+	if cp == nil {
+		t.Fatal("loadCheckpoint returned nil for a file in the old format")
+	}
+	if want := (mysql.Position{Name: "binlog.000003", Pos: 154}); cp.position() != want {
+		t.Errorf("position %+v, want %+v", cp.position(), want)
+	}
+	if cp.gtidSet() != nil {
+		t.Error("a GTID set was invented for a file that has none")
+	}
+}
+
+// TestAnUnreadableGTIDSetFallsBackToTheOffset records that a corrupt set does
+// not stop the task: the offset is still there, and resuming from it is better
+// than not resuming at all.
+func TestAnUnreadableGTIDSetFallsBackToTheOffset(t *testing.T) {
+	cp := &binlogCheckpoint{Name: "binlog.1", Pos: 4, GTID: "not-a-gtid-set"}
+
+	if got := cp.gtidSet(); got != nil {
+		t.Errorf("gtidSet() = %v for an unparseable set", got)
+	}
+}
+
+// TestAMissingFlavourReadsAsMySQL covers a checkpoint whose flavour was not
+// recorded, which is the shape an older build wrote.
+func TestAMissingFlavourReadsAsMySQL(t *testing.T) {
+	cp := &binlogCheckpoint{Name: "binlog.1", Pos: 4, GTID: sampleGTID}
+
+	got := cp.gtidSet()
+	if got == nil {
+		t.Fatal("gtidSet() = nil for a set with no flavour recorded")
+	}
+	if got.String() != sampleGTID {
+		t.Errorf("gtidSet() = %q, want %q", got, sampleGTID)
 	}
 }
 
