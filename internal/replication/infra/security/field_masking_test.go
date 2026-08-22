@@ -1,6 +1,7 @@
 package security
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"encoding/base64"
@@ -72,10 +73,16 @@ func TestProcessValueMasked(t *testing.T) {
 		// Strings are replaced with one asterisk per byte, so the length leaks.
 		{"string", "john@example.com", strings.Repeat("*", len("john@example.com"))},
 		{"empty string", "", ""},
-		// Everything else collapses to a fixed literal, changing the value's type.
-		{"int", 12345, "****"},
-		{"bool", true, "****"},
-		{"nil", nil, "****"},
+		// A value that is not text keeps its type. It used to become the literal
+		// string "****" whatever it was, which for a numeric or boolean column on
+		// the target is either an error or a truncation.
+		{"int", 12345, 0},
+		{"int64", int64(12345), int64(0)},
+		{"float", 1.5, float64(0)},
+		{"bool", true, false},
+		// A null field has nothing to hide, and masking it would make an absent
+		// value look like a present one.
+		{"nil", nil, nil},
 	}
 
 	for _, tt := range tests {
@@ -162,25 +169,41 @@ func TestProcessValueEncryptedIsNonDeterministic(t *testing.T) {
 	}
 }
 
-// TestProcessValueUnknownSecurityTypeReturnsNil records a defect that destroys
-// data. ProcessValue declares `var processed interface{}`, switches on the
-// security type, and returns `processed` unconditionally — so any type outside
-// {masked, encrypted} returns nil and the field is written to the target as
-// NULL. The comparison is case-sensitive, so "Masked" is enough to trigger it,
-// and FindTableSecurityFromMappings accepts whatever string the UI stored as
-// long as it is non-empty.
-func TestProcessValueUnknownSecurityTypeReturnsNil(t *testing.T) {
-	for _, secType := range []string{"Masked", "MASKED", "hashed", "redacted", "unknown"} {
-		t.Run(secType, func(t *testing.T) {
+// TestAnUnknownSecurityTypeDoesNotDestroyTheValue covers a defect that wrote
+// NULL over real data. The switch left `processed` at its zero value for
+// anything outside {masked, encrypted} and returned it unconditionally, so a
+// securityType of "Masked" — the comparison was case-sensitive — or anything a
+// client had made up replicated the field as NULL. The mapping store accepts
+// whatever string it is given as long as it is non-empty.
+func TestAnUnknownSecurityTypeDoesNotDestroyTheValue(t *testing.T) {
+	const value = "john@example.com"
+
+	t.Run("a known kind spelled differently still works", func(t *testing.T) {
+		for _, secType := range []string{"Masked", "MASKED", " masked "} {
 			cfg := enabled(FieldSecurityConfig{Field: "email", SecurityType: secType})
-
-			got := ProcessValue("john@example.com", "email", cfg)
-
-			if got != nil {
-				t.Errorf("ProcessValue with securityType %q = %#v; unknown types no "+
-					"longer null the value, so assert the new behaviour instead", secType, got)
+			if got := ProcessValue(value, "email", cfg); got != strings.Repeat("*", len(value)) {
+				t.Errorf("ProcessValue with securityType %q = %#v, want it masked", secType, got)
 			}
-		})
+		}
+	})
+
+	t.Run("an unknown kind leaves the value alone", func(t *testing.T) {
+		for _, secType := range []string{"hashed", "redacted", "unknown"} {
+			cfg := enabled(FieldSecurityConfig{Field: "email", SecurityType: secType})
+			if got := ProcessValue(value, "email", cfg); got != value {
+				t.Errorf("ProcessValue with securityType %q = %#v, want the value unchanged", secType, got)
+			}
+		}
+	})
+}
+
+// TestAFieldNameIsMatchedWithoutRegardToCase covers the same case-sensitivity on
+// the other half of the rule.
+func TestAFieldNameIsMatchedWithoutRegardToCase(t *testing.T) {
+	cfg := enabled(FieldSecurityConfig{Field: "Email", SecurityType: "masked"})
+
+	if got := ProcessValue("john@example.com", "email", cfg); got == "john@example.com" {
+		t.Error("the field was not matched, so it was replicated in the clear")
 	}
 }
 
@@ -340,15 +363,57 @@ func TestFindTableSecurityFromMappingsSkipsIncompleteEntries(t *testing.T) {
 	}
 }
 
-// TestEncryptionKeyIsHardcoded records F-101: the AES-256 key is a literal in
-// the source, identical in every deployment, and committed to a public
-// repository. Any encrypted target data is readable by anyone with the source.
-func TestEncryptionKeyIsHardcoded(t *testing.T) {
-	if string(encryptionKey) != "0123456789abcdef0123456789abcdef" {
-		t.Errorf("the hardcoded key changed to %q; if key management landed, "+
-			"replace this test with one covering the new source", encryptionKey)
-	}
+// TestTheKeyComesFromTheEnvironment covers where the AES-256 key is read from.
+// It was a literal in the source — identical in every deployment and committed
+// to a public repository — so anything encrypted with it could be read by anyone
+// who had the source. A deployment can now supply its own.
+//
+// The literal is still the fallback, and deliberately so: changing the key would
+// make values already written to a target undecryptable, mixed in with the ones
+// written after. Using it is reported as an error every time a field is
+// encrypted, and which key an existing target should be re-encrypted under is
+// not this program's decision.
+func TestTheKeyComesFromTheEnvironment(t *testing.T) {
 	if len(encryptionKey) != 32 {
 		t.Errorf("key length = %d, want 32 for AES-256", len(encryptionKey))
 	}
+
+	for name, given := range map[string]string{
+		"hex":    "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+		"base64": base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32)),
+		"raw":    "abcdefghijklmnopqrstuvwxyz012345",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("SYNC_FIELD_KEY", given)
+
+			key := fieldKey()
+			if len(key) != 32 {
+				t.Fatalf("key length = %d, want 32", len(key))
+			}
+			if string(key) == string(legacyKey) {
+				t.Error("the configured key was ignored")
+			}
+		})
+	}
+
+	t.Run("the credential key is accepted too", func(t *testing.T) {
+		t.Setenv("SYNC_FIELD_KEY", "")
+		t.Setenv("SYNC_CONFIG_KEY", "abcdefghijklmnopqrstuvwxyz012345")
+
+		if string(fieldKey()) == string(legacyKey) {
+			t.Error("SYNC_CONFIG_KEY was ignored")
+		}
+	})
+
+	t.Run("a key that cannot be used stops the process", func(t *testing.T) {
+		t.Setenv("SYNC_FIELD_KEY", "too short")
+
+		defer func() {
+			if recover() == nil {
+				t.Error("an unusable key was accepted; the fields would be sealed " +
+					"with the published key while the operator believed otherwise")
+			}
+		}()
+		fieldKey()
+	})
 }

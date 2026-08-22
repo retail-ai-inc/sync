@@ -5,17 +5,92 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"io"
+	"os"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/retail-ai-inc/sync/internal/platform/config"
 	"github.com/retail-ai-inc/sync/internal/platform/logging"
 	"go.mongodb.org/mongo-driver/bson"
 )
 
-// Encryption key - should be managed securely in production environment
-var encryptionKey = []byte("0123456789abcdef0123456789abcdef") // 32 AES-256
+// legacyKey is the AES-256 key this has always used when none is configured.
+// It is a literal in a public repository, so anything encrypted under it can be
+// read by anyone who has the source — which is everyone. It is kept only so that
+// values already written to a target under it stay readable; a deployment that
+// means it sets SYNC_FIELD_KEY.
+var legacyKey = []byte("0123456789abcdef0123456789abcdef") // 32 AES-256
+
+// encryptionKey is what fields are actually sealed with.
+var encryptionKey = fieldKey()
+
+// usingLegacyKey says no key was configured, which is worth saying out loud the
+// first time a field is encrypted rather than only in a document somewhere.
+var usingLegacyKey bool
+
+// legacyWarned keeps that warning to one line per process.
+var legacyWarned sync.Once
+
+// fieldKey reads the field encryption key from the environment.
+//
+// SYNC_FIELD_KEY names it; SYNC_CONFIG_KEY — which seals the stored credentials
+// — is accepted as well so that a deployment that has set one key does not have
+// to invent a second. Either may be given as 64 hex characters, as base64, or as
+// 32 raw bytes.
+func fieldKey() []byte {
+	for _, name := range []string{"SYNC_FIELD_KEY", "SYNC_CONFIG_KEY"} {
+		raw := strings.TrimSpace(os.Getenv(name))
+		if raw == "" {
+			continue
+		}
+		key, err := decodeFieldKey(raw)
+		if err != nil {
+			// Carrying on under the published key while the operator believes
+			// their own key is in use is the worst of the three outcomes.
+			panic("security: " + name + " is set but cannot be used: " + err.Error())
+		}
+		return key
+	}
+	usingLegacyKey = true
+	return legacyKey
+}
+
+// decodeFieldKey reads a key in either of the forms an operator is likely to
+// have it in.
+func decodeFieldKey(raw string) ([]byte, error) {
+	for _, decode := range []func(string) ([]byte, error){
+		hex.DecodeString,
+		base64.StdEncoding.DecodeString,
+		base64.RawStdEncoding.DecodeString,
+	} {
+		if key, err := decode(raw); err == nil && len(key) == 32 {
+			return key, nil
+		}
+	}
+	if len(raw) == 32 {
+		return []byte(raw), nil
+	}
+	return nil, fmt.Errorf("a key must be 32 bytes, given as 64 hex characters, "+
+		"as base64, or raw; got %d characters", len(raw))
+}
+
+// warnAboutTheLegacyKey says once that the encryption is not protecting anything.
+func warnAboutTheLegacyKey(fieldName string) {
+	if !usingLegacyKey {
+		return
+	}
+	legacyWarned.Do(func() {
+		logging.Log.Errorf("[Security] Field %q is configured as encrypted, but "+
+			"neither SYNC_FIELD_KEY nor SYNC_CONFIG_KEY is set, so it is being "+
+			"sealed with the key built into this program — which is published in "+
+			"its source. Anyone with the source can read those fields on the "+
+			"target. Set SYNC_FIELD_KEY to a key of your own.", fieldName)
+	})
+}
 
 // Define field security configuration
 type FieldSecurityConfig struct {
@@ -84,19 +159,24 @@ func ProcessValue(value interface{}, fieldName string, config TableSecurity) int
 
 	// For regular fields, use original processing logic
 	for _, fc := range config.FieldSecurity {
-		if fc.Field == fieldName {
+		if !strings.EqualFold(fc.Field, fieldName) {
+			continue
+		}
+		{
 			logging.Log.Debugf("[Security] Processing top level field: %s = %v, type=%s", fieldName, value, fc.SecurityType)
-			var processed interface{}
+			// Anything other than the two known kinds used to fall out of the
+			// switch with processed still nil, and nil was returned — so a
+			// securityType of "Masked", or anything a client had made up, wrote
+			// the field to the target as NULL. The comparison is case-insensitive
+			// now, and an unrecognised kind leaves the value alone rather than
+			// destroying it.
+			processed := value
 
-			switch fc.SecurityType {
+			switch strings.ToLower(strings.TrimSpace(fc.SecurityType)) {
 			case "masked":
-				switch v := value.(type) {
-				case string:
-					processed = strings.Repeat("*", len(v))
-				default:
-					processed = "****"
-				}
+				processed = maskValue(value)
 			case "encrypted":
+				warnAboutTheLegacyKey(fieldName)
 				switch v := value.(type) {
 				case string:
 					encrypted, err := encryptAES([]byte(v))
@@ -121,12 +201,68 @@ func ProcessValue(value interface{}, fieldName string, config TableSecurity) int
 					}
 					processed = encrypted
 				}
+			default:
+				logging.Log.Errorf("[Security] Field %q is configured with an "+
+					"unknown security type %q, so it is being replicated unchanged. "+
+					"The kinds this understands are \"masked\" and \"encrypted\".",
+					fieldName, fc.SecurityType)
 			}
 			logging.Log.Debugf("[Security] After processing: %s = %v", fieldName, processed)
 			return processed
 		}
 	}
 	return value
+}
+
+// maskValue hides a value while keeping something the target column can hold.
+//
+// A text value becomes asterisks of the same length. Everything else used to
+// become the literal string "****" whatever its type, which for a numeric or
+// boolean column on the target is either an error or a truncation — and which
+// applied to every VARCHAR read through go-sql-driver too, because that returns
+// []byte and []byte was not the string case. Non-text values are replaced with
+// the zero of their own type, which hides them and still fits the column.
+func maskValue(value interface{}) interface{} {
+	switch v := value.(type) {
+	case nil:
+		// A null field has nothing to hide, and writing "****" over it would
+		// make an absent value look like a present one.
+		return nil
+	case string:
+		return strings.Repeat("*", len(v))
+	case []byte:
+		return []byte(strings.Repeat("*", len(v)))
+	case int:
+		return int(0)
+	case int8:
+		return int8(0)
+	case int16:
+		return int16(0)
+	case int32:
+		return int32(0)
+	case int64:
+		return int64(0)
+	case uint:
+		return uint(0)
+	case uint8:
+		return uint8(0)
+	case uint16:
+		return uint16(0)
+	case uint32:
+		return uint32(0)
+	case uint64:
+		return uint64(0)
+	case float32:
+		return float32(0)
+	case float64:
+		return float64(0)
+	case bool:
+		return false
+	case time.Time:
+		return time.Time{}
+	default:
+		return "****"
+	}
 }
 
 // Add new function to process nested objects

@@ -217,13 +217,17 @@ func TestOnRowSkipsAnUnmappedTable(t *testing.T) {
 	}
 }
 
-// TestTheMappingLookupIgnoresTheSourceDatabase records that the table is matched
-// by name alone: the event's schema is read for logging and never compared. So a
-// task watching two source databases that both have an "orders" table
-// replicates both into the same target table.
-func TestTheMappingLookupIgnoresTheSourceDatabase(t *testing.T) {
+// TestAMappingThatNamesItsDatabaseIsHeldToIt covers a task watching more than
+// one source database. The table used to be matched by name alone — the event's
+// schema was read and then only used for logging — so two databases that both
+// have an "orders" table were replicated into the same target table, one over
+// the other.
+func TestAMappingThatNamesItsDatabaseIsHeldToIt(t *testing.T) {
 	db := sqliteTarget(t, ordersSchema)
-	h := newHandler(t, db, mapTable("orders", "orders"))
+	h := newHandler(t, db, []config.DatabaseMapping{{
+		SourceDatabase: "shop",
+		Tables:         []config.TableMapping{{SourceTable: "orders", TargetTable: "orders"}},
+	}})
 
 	other := sourceTable("orders", "id", "customer", "email")
 	other.Schema = "a_completely_different_database"
@@ -234,17 +238,39 @@ func TestTheMappingLookupIgnoresTheSourceDatabase(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("OnRow: %v", err)
 	}
-	if got := rows(t, db); len(got) != 1 {
-		t.Fatalf("rows = %v; the source database appears to be compared now, so "+
-			"assert that instead", got)
+	if got := rows(t, db); len(got) != 0 {
+		t.Errorf("rows = %v, want the other database's table left alone", got)
 	}
 }
 
-// TestTheFirstMatchingMappingWins records that the lookup stops at the first
-// mapping naming the table, so a second mapping for the same source table is
-// silently unreachable — a table cannot be fanned out to two targets.
-func TestTheFirstMatchingMappingWins(t *testing.T) {
+// TestAMappingWithNoDatabaseMatchesAnyOfThem is the other half: a task with one
+// source database does not name it in its mappings, and those must go on
+// matching.
+func TestAMappingWithNoDatabaseMatchesAnyOfThem(t *testing.T) {
 	db := sqliteTarget(t, ordersSchema)
+	h := newHandler(t, db, mapTable("orders", "orders"))
+
+	if err := apply(h, &canal.RowsEvent{
+		Table:  sourceTable("orders", "id", "customer", "email"),
+		Action: canal.InsertAction,
+		Rows:   [][]interface{}{{"1", "Ada", "x"}},
+	}); err != nil {
+		t.Fatalf("OnRow: %v", err)
+	}
+	if got := rows(t, db); len(got) != 1 {
+		t.Errorf("rows = %v, want the row replicated", got)
+	}
+}
+
+// TestATableCanBeFannedOutToTwoTargets covers a source table listed twice, which
+// is how a fan-out is spelled. The lookup used to stop at the first mapping
+// naming the table, so the second target silently received nothing and the
+// configuration that asked for it looked like it had been accepted.
+func TestATableCanBeFannedOutToTwoTargets(t *testing.T) {
+	db := sqliteTarget(t, ordersSchema)
+	if _, err := db.Exec(`CREATE TABLE orders_copy (id TEXT PRIMARY KEY, customer TEXT, email TEXT)`); err != nil {
+		t.Fatalf("create second target: %v", err)
+	}
 	h := newHandler(t, db, []config.DatabaseMapping{
 		{Tables: []config.TableMapping{{SourceTable: "orders", TargetTable: "orders"}}},
 		{Tables: []config.TableMapping{{SourceTable: "orders", TargetTable: "orders_copy"}}},
@@ -257,10 +283,16 @@ func TestTheFirstMatchingMappingWins(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("OnRow: %v", err)
 	}
-	// The second mapping's table does not exist, so had it been used the insert
-	// would have failed; one row in "orders" proves only the first was applied.
+
 	if got := rows(t, db); len(got) != 1 {
-		t.Errorf("rows = %v", got)
+		t.Errorf("orders = %v, want the row", got)
+	}
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM orders_copy`).Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("orders_copy holds %d rows, want 1", n)
 	}
 }
 
@@ -308,25 +340,25 @@ func TestAnUpdateMatchesOnTheOldPrimaryKey(t *testing.T) {
 	}
 }
 
-// TestAnOddUpdateBatchPanics records that the update loop trusts the binlog to
-// deliver before/after rows in pairs and indexes Rows[i+1] without checking. A
-// malformed or truncated event therefore takes the process down rather than
-// being rejected.
-func TestAnOddUpdateBatchPanics(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Error("an odd update batch did not panic; the length appears to be " +
-				"checked now, so assert that instead")
-		}
-	}()
-
+// TestAnOddUpdateBatchIsRejected covers a malformed or truncated update event.
+// The loop trusted the binlog to deliver before/after rows in pairs and indexed
+// Rows[i+1] without checking, so an odd count panicked — inside the canal
+// callback, where nothing recovers it, taking the whole process down.
+func TestAnOddUpdateBatchIsRejected(t *testing.T) {
 	db := sqliteTarget(t, ordersSchema)
 	h := newHandler(t, db, mapTable("orders", "orders"))
-	_ = apply(h, &canal.RowsEvent{
+
+	err := apply(h, &canal.RowsEvent{
 		Table:  sourceTable("orders", "id", "customer", "email"),
 		Action: canal.UpdateAction,
 		Rows:   [][]interface{}{{"1", "Ada", "x"}},
 	})
+	if err == nil {
+		t.Fatal("an odd update batch was accepted")
+	}
+	if !strings.Contains(err.Error(), "before/after pairs") {
+		t.Errorf("err = %v, want it to say what was wrong", err)
+	}
 }
 
 func TestOnRowAppliesADelete(t *testing.T) {
@@ -842,12 +874,11 @@ func TestBatchInsertReportsAFailingStatement(t *testing.T) {
 	}
 }
 
-// TestBatchInsertMasksInPlace records that the initial-sync path rewrites the
-// caller's own slice when masking is enabled, rather than building a copy the
-// way the binlog path does. The rows the caller read from the source are
-// modified underneath it, so anything that inspects them afterwards — a retry,
-// a row count, a log line — sees the masked values, not what the source held.
-func TestBatchInsertMasksInPlace(t *testing.T) {
+// TestBatchInsertLeavesTheCallersRowsAlone covers a shared slice being written
+// to. The initial-sync path used to mask the caller's own rows in place while
+// the binlog path built a copy — so whatever looked at those rows afterwards, a
+// retry or a count or a log line, saw asterisks instead of what the source held.
+func TestBatchInsertLeavesTheCallersRowsAlone(t *testing.T) {
 	db := sqliteTarget(t, ordersSchema)
 	s := newSyncer(t)
 	s.cfg = config.SyncConfig{Mappings: securedTable("orders", "orders", "email")}
@@ -858,11 +889,10 @@ func TestBatchInsertMasksInPlace(t *testing.T) {
 		t.Fatalf("batchInsert: %v", err)
 	}
 
-	if batch[0][2] == "ada@example.com" {
-		t.Fatal("the caller's slice was left alone; the copy appears to be made " +
-			"now, so assert that instead")
+	if batch[0][2] != "ada@example.com" {
+		t.Errorf("the caller's row now reads %v, want what it read from the source", batch[0][2])
 	}
 	if got := rows(t, db); strings.Contains(got[0], "ada@example.com") {
-		t.Errorf("row = %q, want the address masked", got[0])
+		t.Errorf("row = %q, want the address masked on the target", got[0])
 	}
 }

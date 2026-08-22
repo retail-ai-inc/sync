@@ -620,15 +620,24 @@ func (s *MySQLSyncer) batchInsert(
 		tableName, tableSecurity.SecurityEnabled, len(tableSecurity.FieldSecurity))
 
 	if tableSecurity.SecurityEnabled && len(tableSecurity.FieldSecurity) > 0 {
-		s.logger.Debugf("[MySQL] Row data before processing: %v", rows)
+		// A copy, not the caller's rows. The masking used to be applied in place,
+		// so the snapshot reader's own buffer came back holding asterisks — the
+		// binlog path builds a new slice for exactly this reason, and the two
+		// halves of one syncer disagreeing about whether a shared slice may be
+		// written to is the kind of thing that holds for years and then does not.
+		masked := make([][]interface{}, len(rows))
 		for i, row := range rows {
+			out := make([]interface{}, len(row))
 			for j, val := range row {
 				if j < len(cols) {
-					rows[i][j] = security.ProcessValue(val, cols[j], tableSecurity)
+					out[j] = security.ProcessValue(val, cols[j], tableSecurity)
+					continue
 				}
+				out[j] = val
 			}
+			masked[i] = out
 		}
-		s.logger.Debugf("[MySQL] Row data after processing: %v", rows)
+		rows = masked
 	}
 
 	// The snapshot is idempotent for the same reason the change stream is: a
@@ -928,8 +937,11 @@ type MyEventHandler struct {
 	// stop can record it and start from where it actually got to.
 	pendingCheckpoint string
 
-	canal            *canal.Canal
-	lastExecError    int32
+	canal         *canal.Canal
+	lastExecError int32
+	// keylessTables names the tables already reported as having no primary key,
+	// so the warning appears once rather than once per row.
+	keylessTables    map[string]bool
 	TargetConnection string
 	// flavor names the server dialect the recorded GTID set belongs to, so a
 	// MariaDB set is not read back as a MySQL one.
@@ -963,29 +975,16 @@ func (h *MyEventHandler) OnRow(e *canal.RowsEvent) error {
 	sourceDB := table.Schema
 	tableName := table.Name
 
-	var targetTableName string
 	targetDBName := dsn.GetDatabaseName("mysql", h.TargetConnection)
-	found := false
-	for _, mapping := range h.mappings {
-		for _, tableMap := range mapping.Tables {
-			if tableMap.SourceTable == tableName {
-				targetTableName = tableMap.TargetTable
-				found = true
-				break
-			}
-		}
-		if found {
-			break
-		}
-	}
-	if !found {
+	targets := h.targetsFor(sourceDB, tableName)
+	if len(targets) == 0 {
 		if !h.discovering || discovery.IsInternal(tableName) {
 			h.logger.Debugf("[MySQL] No mapping found for source table %s.%s => skip event", sourceDB, tableName)
 			return nil
 		}
 		// The task lists no tables, so everything is replicated under its own
 		// name — including tables created after the task started.
-		targetTableName = tableName
+		targets = []string{tableName}
 	}
 
 	columnNames := make([]string, len(table.Columns))
@@ -1008,23 +1007,68 @@ func (h *MyEventHandler) OnRow(e *canal.RowsEvent) error {
 		}
 	}
 
-	switch e.Action {
-	case canal.InsertAction:
-		for _, row := range e.Rows {
-			fail(h.enqueue(h.buildStatement("INSERT", targetDBName, targetTableName, columnNames, table, row, nil)))
-		}
-	case canal.UpdateAction:
-		for i := 0; i < len(e.Rows); i += 2 {
-			oldRow := e.Rows[i]
-			newRow := e.Rows[i+1]
-			fail(h.enqueue(h.buildStatement("UPDATE", targetDBName, targetTableName, columnNames, table, newRow, oldRow)))
-		}
-	case canal.DeleteAction:
-		for _, row := range e.Rows {
-			fail(h.enqueue(h.buildStatement("DELETE", targetDBName, targetTableName, columnNames, table, row, nil)))
+	// Every mapping that names this table, not just the first. A table listed
+	// twice — the way a fan-out to two targets is spelled — used to stop at the
+	// first match, so the second target silently received nothing.
+	for _, targetTableName := range targets {
+		switch e.Action {
+		case canal.InsertAction:
+			for _, row := range e.Rows {
+				fail(h.enqueue(h.buildStatement("INSERT", targetDBName, targetTableName, columnNames, table, row, nil)))
+			}
+		case canal.UpdateAction:
+			// An update event carries the rows in before/after pairs. Reading
+			// e.Rows[i+1] on trust panicked on an odd count, and a panic in the
+			// canal callback takes the process with it.
+			if len(e.Rows)%2 != 0 {
+				return fmt.Errorf("an update event for %s.%s carries %d rows, which "+
+					"is not a whole number of before/after pairs", sourceDB, tableName, len(e.Rows))
+			}
+			for i := 0; i+1 < len(e.Rows); i += 2 {
+				oldRow := e.Rows[i]
+				newRow := e.Rows[i+1]
+				fail(h.enqueue(h.buildStatement("UPDATE", targetDBName, targetTableName, columnNames, table, newRow, oldRow)))
+			}
+		case canal.DeleteAction:
+			for _, row := range e.Rows {
+				fail(h.enqueue(h.buildStatement("DELETE", targetDBName, targetTableName, columnNames, table, row, nil)))
+			}
+		default:
+			// Nothing used to be said here at all, so an action the library grew
+			// later would be dropped in silence.
+			h.logger.Warnf("[MySQL] Ignoring a %q event on %s.%s: this only knows "+
+				"inserts, updates and deletes", e.Action, sourceDB, tableName)
 		}
 	}
 	return firstErr
+}
+
+// targetsFor reports the target tables one source table is replicated to.
+//
+// The lookup used to compare the table name alone and to stop at the first
+// match. A task reading from more than one source database therefore sent both
+// databases' "orders" to whichever target was listed first — the schema was read
+// off the event and then only used for logging.
+func (h *MyEventHandler) targetsFor(sourceDB, sourceTable string) []string {
+	var targets []string
+
+	for _, mapping := range h.mappings {
+		// A mapping that does not name a source database matches any of them,
+		// which is what a single-database task looks like.
+		if mapping.SourceDatabase != "" && !strings.EqualFold(mapping.SourceDatabase, sourceDB) {
+			continue
+		}
+		for _, tableMap := range mapping.Tables {
+			if strings.EqualFold(tableMap.SourceTable, sourceTable) {
+				target := tableMap.TargetTable
+				if target == "" {
+					target = tableMap.SourceTable
+				}
+				targets = append(targets, target)
+			}
+		}
+	}
+	return targets
 }
 
 // statement is one DML the target has to run, already rendered with its
@@ -1079,7 +1123,7 @@ func (h *MyEventHandler) buildStatement(
 
 	case "UPDATE":
 		if len(table.PKColumns) == 0 {
-			h.logger.Warnf("[MySQL][UPDATE] table=%s.%s no PK => skip", tgtDB, tgtTable)
+			h.warnAboutMissingKey(tgtDB, tgtTable)
 			return nil
 		}
 		setClauses := make([]string, len(cols))
@@ -1102,7 +1146,7 @@ func (h *MyEventHandler) buildStatement(
 
 	case "DELETE":
 		if len(table.PKColumns) == 0 {
-			h.logger.Warnf("[MySQL][DELETE] table=%s.%s no PK => skip", tgtDB, tgtTable)
+			h.warnAboutMissingKey(tgtDB, tgtTable)
 			return nil
 		}
 		var whereClauses []string
@@ -1118,6 +1162,33 @@ func (h *MyEventHandler) buildStatement(
 		}
 	}
 	return nil
+}
+
+// warnAboutMissingKey reports a table whose rows cannot be addressed on the
+// target, once rather than once per event.
+//
+// Skipping the update or the delete is right — the alternative is matching on
+// every column and rewriting whatever happens to look the same — but it means
+// the table is only half replicated: inserts arrive and nothing else does, so
+// the target accumulates rows the source has changed or removed. That is worth
+// one clear line, not a debug entry per row.
+func (h *MyEventHandler) warnAboutMissingKey(db, table string) {
+	name := db + "." + table
+
+	h.mu.Lock()
+	if h.keylessTables == nil {
+		h.keylessTables = map[string]bool{}
+	}
+	warned := h.keylessTables[name]
+	h.keylessTables[name] = true
+	h.mu.Unlock()
+
+	if warned {
+		return
+	}
+	h.logger.Warnf("[MySQL] %s has no primary key, so its updates and deletes "+
+		"cannot be addressed on the target. Only inserts are being replicated, and "+
+		"the two sides will drift apart until it has one.", name)
 }
 
 // enqueue adds a statement to the open transaction, flushing early when the
