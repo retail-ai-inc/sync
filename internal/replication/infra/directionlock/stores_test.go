@@ -160,3 +160,49 @@ func TestAClosedDatabaseIsReported(t *testing.T) {
 		t.Error("Put on a closed database returned no error")
 	}
 }
+
+// TestTheSQLStoreRemovesOneTasksClaim covers the release path against a real
+// table.
+func TestTheSQLStoreRemovesOneTasksClaim(t *testing.T) {
+	s := sqlStore(t)
+	ctx := context.Background()
+
+	for _, id := range []int{1, 2} {
+		if err := s.Put(ctx, Claim{TaskID: id, Role: RoleTarget, UpdatedAt: fixedNow}); err != nil {
+			t.Fatalf("Put %d: %v", id, err)
+		}
+	}
+
+	if err := s.Remove(ctx, 1); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+
+	claims, err := s.Claims(ctx)
+	if err != nil {
+		t.Fatalf("Claims: %v", err)
+	}
+	if len(claims) != 1 || claims[0].TaskID != 2 {
+		t.Errorf("claims = %v, want only task 2", claims)
+	}
+}
+
+// TestRemovingAClaimThatIsNotThereIsFine covers a release after a crash left
+// nothing behind, and a second release.
+func TestRemovingAClaimThatIsNotThereIsFine(t *testing.T) {
+	s := sqlStore(t)
+
+	if err := s.Remove(context.Background(), 99); err != nil {
+		t.Errorf("Remove of an absent claim = %v", err)
+	}
+}
+
+// TestTheSQLStoreSpellsPlaceholdersBothWays pins the one difference between the
+// flavours this store runs against.
+func TestTheSQLStoreSpellsPlaceholdersBothWays(t *testing.T) {
+	if got := (&SQLStore{}).arg(2); got != "?" {
+		t.Errorf("arg(2) = %q, want a question mark", got)
+	}
+	if got := (&SQLStore{NumberedPlaceholders: true}).arg(2); got != "$2" {
+		t.Errorf("arg(2) = %q, want $2", got)
+	}
+}

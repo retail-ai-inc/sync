@@ -128,6 +128,18 @@ func (s *SQLStore) Put(ctx context.Context, c Claim) error {
 	return tx.Commit()
 }
 
+func (s *SQLStore) Remove(ctx context.Context, taskID int) error {
+	if err := s.ensure(ctx); err != nil {
+		return err
+	}
+	_, err := s.DB.ExecContext(ctx,
+		fmt.Sprintf("DELETE FROM %s WHERE task_id = %s", s.qualified(), s.arg(1)), taskID)
+	if err != nil {
+		return fmt.Errorf("write %s: %w", s.qualified(), err)
+	}
+	return nil
+}
+
 // --------------------------------------------------------------- MongoDB
 
 // MongoStore keeps the claims in a collection on the database itself.
@@ -183,6 +195,14 @@ func (s *MongoStore) Put(ctx context.Context, c Claim) error {
 	return nil
 }
 
+func (s *MongoStore) Remove(ctx context.Context, taskID int) error {
+	_, err := s.Database.Collection(tableName).DeleteOne(ctx, bson.M{"_id": taskID})
+	if err != nil {
+		return fmt.Errorf("write %s: %w", tableName, err)
+	}
+	return nil
+}
+
 // ----------------------------------------------------------------- Redis
 
 // RedisStore keeps the claims in one hash, keyed by task.
@@ -223,6 +243,13 @@ func (s *RedisStore) Put(ctx context.Context, c Claim) error {
 		return err
 	}
 	if err := s.Client.HSet(ctx, redisKey, strconv.Itoa(c.TaskID), string(encoded)).Err(); err != nil {
+		return fmt.Errorf("write %s: %w", redisKey, err)
+	}
+	return nil
+}
+
+func (s *RedisStore) Remove(ctx context.Context, taskID int) error {
+	if err := s.Client.HDel(ctx, redisKey, strconv.Itoa(taskID)).Err(); err != nil {
 		return fmt.Errorf("write %s: %w", redisKey, err)
 	}
 	return nil

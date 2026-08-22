@@ -1257,6 +1257,13 @@ func (s *MySQLSyncer) claimDirection(ctx context.Context, targetDB *sql.DB) (fun
 
 	return func() {
 		stop()
+		// Give the release its own deadline: the task's context is already
+		// cancelled by the time this runs.
+		releaseCtx, cancelRelease := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancelRelease()
+		if err := guard.Release(releaseCtx); err != nil {
+			s.logger.Warnf("[MySQL] Could not release the replication direction claim: %v", err)
+		}
 		_ = sourceDB.Close()
 	}, nil
 }

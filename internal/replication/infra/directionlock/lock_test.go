@@ -44,6 +44,14 @@ func (s *memoryStore) Put(_ context.Context, c Claim) error {
 	return nil
 }
 
+func (s *memoryStore) Remove(_ context.Context, taskID int) error {
+	if s.putErr != nil {
+		return s.putErr
+	}
+	delete(s.claims, taskID)
+	return nil
+}
+
 func (s *memoryStore) Endpoint() string { return s.address }
 
 var fixedNow = time.Date(2026, 8, 22, 10, 0, 0, 0, time.UTC)
@@ -307,5 +315,91 @@ func TestTheStalenessWindowCanBeOverridden(t *testing.T) {
 	g.StaleAfter = time.Minute
 	if got := g.staleAfter(); got != time.Minute {
 		t.Errorf("staleAfter() = %v", got)
+	}
+}
+
+// ---------------------------------------------------------------- release
+
+// TestReleasingLetsTheOppositeDirectionStartAtOnce is what makes a planned
+// failover quick. Without it the claims sit there until they go stale, so an
+// operator who has stopped Tokyo → Osaka and wants to start Osaka → Tokyo is
+// refused for the length of the staleness window — a quarter of an hour of a
+// runbook spent waiting for a timeout.
+func TestReleasingLetsTheOppositeDirectionStartAtOnce(t *testing.T) {
+	tokyo, osaka := newStore("tokyo:3306/shop"), newStore("osaka:3306/shop")
+
+	forward := guardFor(tokyo, osaka)
+	if err := forward.Acquire(context.Background()); err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+
+	// The reverse task cannot start while the forward one holds the pair.
+	reverse := &Guard{
+		TaskID: 2, Source: osaka, Target: tokyo,
+		Now: func() time.Time { return fixedNow }, Owner: "syncer-tokyo-0",
+	}
+	if err := reverse.Acquire(context.Background()); err == nil {
+		t.Fatal("the reverse direction was allowed while the forward one held the pair")
+	}
+
+	if err := forward.Release(context.Background()); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+	if err := reverse.Acquire(context.Background()); err != nil {
+		t.Errorf("the reverse direction is still refused after the release: %v", err)
+	}
+}
+
+func TestReleasingRemovesBothClaims(t *testing.T) {
+	source, target := newStore("tokyo:3306/shop"), newStore("osaka:3306/shop")
+	g := guardFor(source, target)
+	if err := g.Acquire(context.Background()); err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+
+	if err := g.Release(context.Background()); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+
+	if len(source.claims) != 0 || len(target.claims) != 0 {
+		t.Errorf("claims left: source %v, target %v", source.claims, target.claims)
+	}
+}
+
+// TestReleasingLeavesOtherTasksAlone covers a source split across several tasks,
+// which is how a large database is usually replicated.
+func TestReleasingLeavesOtherTasksAlone(t *testing.T) {
+	source := newStore("tokyo:3306/shop")
+	target := newStore("osaka:3306/shop", claim(2, RoleTarget, "tokyo:3306/shop", time.Minute))
+	g := guardFor(source, target)
+	if err := g.Acquire(context.Background()); err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+
+	if err := g.Release(context.Background()); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+
+	if _, ok := target.claims[2]; !ok {
+		t.Error("another task's claim was released too")
+	}
+}
+
+// TestAFailedReleaseIsReportedButStillTriesBothEnds keeps one unreachable
+// endpoint from leaving a claim behind on the other.
+func TestAFailedReleaseIsReportedButStillTriesBothEnds(t *testing.T) {
+	source, target := newStore("tokyo:3306/shop"), newStore("osaka:3306/shop")
+	g := guardFor(source, target)
+	if err := g.Acquire(context.Background()); err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	source.putErr = errors.New("connection refused")
+
+	err := g.Release(context.Background())
+	if err == nil {
+		t.Error("a failed release reported success")
+	}
+	if len(target.claims) != 0 {
+		t.Error("the reachable endpoint's claim was left behind")
 	}
 }

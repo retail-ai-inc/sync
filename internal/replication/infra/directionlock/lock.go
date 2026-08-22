@@ -64,6 +64,8 @@ type Store interface {
 	Claims(ctx context.Context) ([]Claim, error)
 	// Put records one claim, replacing that task's previous one.
 	Put(ctx context.Context, c Claim) error
+	// Remove discards one task's claim.
+	Remove(ctx context.Context, taskID int) error
 	// Endpoint describes the database, for error messages. It must not carry
 	// credentials.
 	Endpoint() string
@@ -231,4 +233,24 @@ func (g *Guard) KeepAlive(ctx context.Context, onError func(error)) {
 			}
 		}
 	}
+}
+
+// Release discards this task's claims.
+//
+// It is called when a task stops on purpose, and it is what makes a planned
+// failover quick. Without it the claims sit there until they go stale, so an
+// operator who has stopped Tokyo → Osaka and wants to start Osaka → Tokyo is
+// refused for the length of the staleness window — a quarter of an hour of a
+// runbook spent waiting for a timeout rather than doing anything.
+//
+// A crash deliberately does not release them: a claim outliving a process that
+// died is the whole reason the heartbeat exists.
+func (g *Guard) Release(ctx context.Context) error {
+	var firstErr error
+	for _, store := range []Store{g.Source, g.Target} {
+		if err := store.Remove(ctx, g.TaskID); err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("release the direction claim on %s: %w", store.Endpoint(), err)
+		}
+	}
+	return firstErr
 }

@@ -492,7 +492,16 @@ func (s *MongoDBSyncer) claimDirection(ctx context.Context, sourceDBName, target
 	go guard.KeepAlive(heartbeatCtx, func(err error) {
 		s.logger.Warnf("[MongoDB] Could not refresh the replication direction claim: %v", err)
 	})
-	return stop, nil
+	return func() {
+		stop()
+		// Give the release its own deadline: the task's context is already
+		// cancelled by the time this runs.
+		releaseCtx, cancelRelease := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancelRelease()
+		if err := guard.Release(releaseCtx); err != nil {
+			s.logger.Warnf("[MongoDB] Could not release the replication direction claim: %v", err)
+		}
+	}, nil
 }
 
 // discoveryInterval is how often a task with no configured collections looks

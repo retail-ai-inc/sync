@@ -727,7 +727,16 @@ func (r *RedisSyncer) claimDirection(ctx context.Context) (func(), error) {
 	go guard.KeepAlive(heartbeatCtx, func(err error) {
 		r.logger.Warnf("[Redis] Could not refresh the replication direction claim: %v", err)
 	})
-	return stop, nil
+	return func() {
+		stop()
+		// Give the release its own deadline: the task's context is already
+		// cancelled by the time this runs.
+		releaseCtx, cancelRelease := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancelRelease()
+		if err := guard.Release(releaseCtx); err != nil {
+			r.logger.Warnf("[Redis] Could not release the replication direction claim: %v", err)
+		}
+	}, nil
 }
 
 // metricLabels identify this task in the metrics. The endpoints are named
