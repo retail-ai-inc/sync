@@ -26,6 +26,32 @@ func fail(w http.ResponseWriter, fallback string, err error) {
 	httpx.ErrorJSON(w, fallback, err)
 }
 
+// redactedPassword is what a stored password is replaced with on its way out.
+// It is a fixed string rather than the real length, so it says nothing about
+// the value it hides.
+const redactedPassword = "********"
+
+// withoutCredentials copies a connection map with its password masked.
+//
+// The list endpoint answers with the connection settings of every task, and
+// those carry the passwords the syncer authenticates with — in the clear, to
+// anybody who could reach the port. Masking them here means the UI can still
+// show which host a task points at without the response being a credential
+// dump.
+func withoutCredentials(conn map[string]string) map[string]string {
+	if conn == nil {
+		return nil
+	}
+	safe := make(map[string]string, len(conn))
+	for k, v := range conn {
+		safe[k] = v
+	}
+	if safe["password"] != "" {
+		safe["password"] = redactedPassword
+	}
+	return safe
+}
+
 // taskPayload is the shape both the list and the create endpoints answer with
 // for one task.
 func taskPayload(id interface{}, enable bool, status, lastUpdate, lastRun, name string, c domain.Config) map[string]interface{} {
@@ -37,8 +63,8 @@ func taskPayload(id interface{}, enable bool, status, lastUpdate, lastRun, name 
 		"lastRunTime":    lastRun,
 		"taskName":       name,
 		"sourceType":     c.Type,
-		"sourceConn":     c.SourceConn,
-		"targetConn":     c.TargetConn,
+		"sourceConn":     withoutCredentials(c.SourceConn),
+		"targetConn":     withoutCredentials(c.TargetConn),
 		"mappings":       c.Mappings,
 
 		"pg_replication_slot":       c.PgReplicationSlot,

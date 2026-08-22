@@ -23,7 +23,36 @@ func ReadOAuthConfig(provider string) (map[string]interface{}, error) {
 	if err == sql.ErrNoRows {
 		return nil, ErrNoOAuthConfig
 	}
-	return config, err
+	if err != nil {
+		return nil, err
+	}
+	return withoutClientSecret(config), nil
+}
+
+// maskedSecret stands in for a stored client secret on the way out. It is a
+// fixed string, so it says nothing about the value it hides, and the write path
+// recognises it as "leave the stored one alone".
+const maskedSecret = "********"
+
+// withoutClientSecret copies a provider configuration with its client secret
+// removed.
+//
+// The read endpoint has to stay reachable without a token, because the sign-in
+// page needs the client id before anybody has one. Answering with the secret
+// as well handed the whole OAuth credential to any unauthenticated caller. The
+// write path takes the secret and stores it; nothing needs it back.
+func withoutClientSecret(config map[string]interface{}) map[string]interface{} {
+	if config == nil {
+		return nil
+	}
+	safe := make(map[string]interface{}, len(config))
+	for k, v := range config {
+		safe[k] = v
+	}
+	if secret, ok := safe[domain.FieldClientSecret].(string); ok && secret != "" {
+		safe[domain.FieldClientSecret] = maskedSecret
+	}
+	return safe
 }
 
 // MissingOAuthFieldError names a required field an enabled provider is missing.
@@ -38,6 +67,17 @@ func (e *MissingOAuthFieldError) Error() string {
 // URLs and the default scopes filled in.
 func WriteOAuthConfig(provider string, config map[string]interface{}) error {
 	enabled, _ := config[domain.FieldEnabled].(bool)
+
+	// The read endpoint masks the client secret, so a UI that reads the
+	// configuration and writes it back sends the mask. Keeping the stored value
+	// in that case is what stops the round trip from destroying the credential.
+	if secret, _ := config[domain.FieldClientSecret].(string); secret == maskedSecret {
+		stored, err := infra.GetAuthConfig(provider)
+		if err != nil {
+			return err
+		}
+		config[domain.FieldClientSecret], _ = stored[domain.FieldClientSecret].(string)
+	}
 
 	if provider == domain.ProviderGoogle && enabled {
 		for _, field := range []string{domain.FieldClientID, domain.FieldClientSecret, domain.FieldRedirectURI} {

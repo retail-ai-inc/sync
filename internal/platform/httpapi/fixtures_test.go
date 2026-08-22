@@ -5,12 +5,29 @@ import (
 	"database/sql"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
-	identityhttp "github.com/retail-ai-inc/sync/internal/identity/http"
 )
+
+// scratchDir is a temporary directory removed on a best-effort basis.
+//
+// t.TempDir fails the test when the directory is not empty at cleanup, and the
+// backup run handler starts a job that outlives the request: it writes into the
+// database directory after the test has returned, which turned an unrelated
+// assertion into a flake.
+func scratchDir(t *testing.T) string {
+	t.Helper()
+
+	dir, err := os.MkdirTemp("", "httpapi-")
+	if err != nil {
+		t.Fatalf("create temp dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
 
 // Fixtures shared by this package's handler tests. They are duplicated per
 // package rather than shared through an importable helper package, because a
@@ -24,7 +41,7 @@ func useTempTaskDB(t *testing.T) *sql.DB {
 
 	isolateCrontab(t)
 
-	path := filepath.Join(t.TempDir(), "sync.db")
+	path := filepath.Join(scratchDir(t), "sync.db")
 	t.Setenv("SYNC_DB_PATH", path)
 
 	db, err := sql.Open("sqlite3", path)
@@ -72,7 +89,7 @@ func useMonitorDB(t *testing.T) *sql.DB {
 
 	isolateCrontab(t)
 
-	path := filepath.Join(t.TempDir(), "sync.db")
+	path := filepath.Join(scratchDir(t), "sync.db")
 	t.Setenv("SYNC_DB_PATH", path)
 
 	conn, err := sql.Open("sqlite3", path)
@@ -140,16 +157,6 @@ func isolateCrontab(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 }
 
-// resetSessionGlobals clears the process-global session that identity's handlers
-// read and write. Those variables are unexported, so from this package the only
-// way to clear them is the logout handler, which is what it does. Unlike the
-// in-package version this cannot restore the previous values on cleanup.
-func resetSessionGlobals(t *testing.T) {
-	t.Helper()
-	rec := httptest.NewRecorder()
-	identityhttp.AuthLogoutHandler(rec, httptest.NewRequest(http.MethodPost, "/logout", nil))
-}
-
 // useTempDB points the package at a throwaway SQLite file carrying the same
 // schema as sync.db, so the user and auth-config helpers can be exercised
 // without touching the database tracked in this repository.
@@ -158,7 +165,7 @@ func useTempDB(t *testing.T) *sql.DB {
 
 	isolateCrontab(t)
 
-	path := filepath.Join(t.TempDir(), "sync.db")
+	path := filepath.Join(scratchDir(t), "sync.db")
 	t.Setenv("SYNC_DB_PATH", path)
 
 	db, err := sql.Open("sqlite3", path)

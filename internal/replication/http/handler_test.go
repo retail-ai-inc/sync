@@ -91,11 +91,10 @@ func TestAnUnparseableTaskConfigIsReturnedAsBlank(t *testing.T) {
 	}
 }
 
-// The stored connection blocks are echoed verbatim, so the source and target
-// passwords are served to any caller that can reach GET /api/sync. The handler
-// performs no authentication of its own and the router installs none, so that
-// is any caller who can reach the port.
-func TestSyncListHandlerServesConnectionPasswords(t *testing.T) {
+// TestSyncListHandlerMasksConnectionPasswords is the fix for a response that
+// used to be a credential dump: the stored connection blocks were echoed
+// verbatim, passwords included, to any caller that reached the endpoint.
+func TestSyncListHandlerMasksConnectionPasswords(t *testing.T) {
 	db := useTempTaskDB(t)
 	insertSyncTask(t, db, 1, `{
 		"type":"mysql",
@@ -107,11 +106,41 @@ func TestSyncListHandlerServesConnectionPasswords(t *testing.T) {
 	SyncListHandler(rec, httptest.NewRequest(http.MethodGet, "/sync", nil))
 
 	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d — the handler appears to require credentials now", rec.Code)
+		t.Fatalf("status = %d", rec.Code)
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, "tokyo-secret") || !strings.Contains(body, "osaka-secret") {
-		t.Fatalf("the connection passwords are no longer served — they appear to be redacted; assert the redaction instead (body: %s)", body)
+	for _, secret := range []string{"tokyo-secret", "osaka-secret"} {
+		if strings.Contains(body, secret) {
+			t.Errorf("the response still carries %q: %s", secret, body)
+		}
+	}
+	// The rest of the connection stays, because the UI shows where a task
+	// points.
+	for _, kept := range []string{"tokyo", "osaka", "repl", "3306"} {
+		if !strings.Contains(body, kept) {
+			t.Errorf("the response no longer names %q: %s", kept, body)
+		}
+	}
+}
+
+// TestMaskingDoesNotChangeTheStoredTask pins that the redaction happens on the
+// way out: the copy the syncer authenticates with must keep its password.
+func TestMaskingDoesNotChangeTheStoredTask(t *testing.T) {
+	conn := map[string]string{"host": "tokyo", "password": "tokyo-secret"}
+
+	masked := withoutCredentials(conn)
+
+	if masked["password"] != redactedPassword {
+		t.Errorf("masked password = %q", masked["password"])
+	}
+	if conn["password"] != "tokyo-secret" {
+		t.Errorf("the source map was modified: %q", conn["password"])
+	}
+	if withoutCredentials(nil) != nil {
+		t.Error("a nil connection produced a map")
+	}
+	if got := withoutCredentials(map[string]string{"host": "h"}); got["password"] != "" {
+		t.Errorf("a connection with no password gained one: %q", got["password"])
 	}
 }
 

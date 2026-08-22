@@ -137,31 +137,42 @@ func TestRouterReturns405ForTheWrongMethod(t *testing.T) {
 // NewRouter registers no middleware at all: there is no authentication,
 // authorisation, rate limiting, request logging, panic recovery or body-size
 // limit in front of any handler. Every check is left to each handler to
-// perform for itself, so a handler that forgets one is reachable
-// unauthenticated, and a panic in any handler kills the connection rather than
-// returning a 500.
-func TestTheRouterInstallsNoMiddleware(t *testing.T) {
+// / TestEveryRouteIsCoveredByTheAccessRules pins the shape of the permission
+// model: exactly four routes are reachable without a credential, and every
+// other route carries the authentication middleware. A route added without a
+// group is caught here rather than in production.
+func TestEveryRouteIsCoveredByTheAccessRules(t *testing.T) {
 	r, ok := NewRouter().(chi.Routes)
 	if !ok {
 		t.Fatal("NewRouter did not return a chi.Routes")
 	}
 
-	if n := len(r.Middlewares()); n != 0 {
-		t.Fatalf("the router now installs %d middleware(s) — assert what they enforce instead", n)
+	public := map[string]bool{
+		"POST /login":                  true,
+		"POST /logout":                 true,
+		"POST /login/google/callback":  true,
+		"GET /oauth/{provider}/config": true,
 	}
 
-	var withMiddleware []string
+	var uncovered []string
 	err := chi.Walk(r, func(method, route string, _ http.Handler, mw ...func(http.Handler) http.Handler) error {
-		if len(mw) > 0 {
-			withMiddleware = append(withMiddleware, fmt.Sprintf("%s %s (%d)", method, route, len(mw)))
+		name := method + " " + route
+		if public[name] {
+			if len(mw) > 0 {
+				uncovered = append(uncovered, fmt.Sprintf("%s is public but carries %d middleware", name, len(mw)))
+			}
+			return nil
+		}
+		if len(mw) == 0 {
+			uncovered = append(uncovered, fmt.Sprintf("%s carries no middleware", name))
 		}
 		return nil
 	})
 	if err != nil {
 		t.Fatalf("walk routes: %v", err)
 	}
-	if len(withMiddleware) > 0 {
-		t.Fatalf("routes now carry middleware: %s — assert what it enforces instead", strings.Join(withMiddleware, ", "))
+	if len(uncovered) > 0 {
+		t.Errorf("routes outside the access rules: %s", strings.Join(uncovered, ", "))
 	}
 }
 

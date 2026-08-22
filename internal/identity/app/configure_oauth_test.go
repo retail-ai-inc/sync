@@ -2,6 +2,7 @@ package app
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/retail-ai-inc/sync/internal/identity/domain"
@@ -27,10 +28,12 @@ func TestReadOAuthConfig(t *testing.T) {
 	}
 }
 
-// TestTheClientSecretIsReturnedInFull records that the read path hands back the
-// stored document as it is, secret included. Combined with the endpoint needing
-// no credentials, that publishes the OAuth client secret.
-func TestTheClientSecretIsReturnedInFull(t *testing.T) {
+// TestTheClientSecretIsMaskedOnTheWayOut is the fix for a credential the read
+// path used to publish. The endpoint has to stay reachable without a token,
+// because the sign-in page needs the client id before anybody has one, so
+// answering with the secret as well handed the whole OAuth credential to any
+// caller that could reach the port.
+func TestTheClientSecretIsMaskedOnTheWayOut(t *testing.T) {
 	db := useTempDB(t)
 	if _, err := db.Exec(
 		`INSERT INTO auth_configs (provider, config_json, enabled)
@@ -42,9 +45,47 @@ func TestTheClientSecretIsReturnedInFull(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadOAuthConfig: %v", err)
 	}
-	if got[domain.FieldClientSecret] != "top-secret" {
-		t.Fatalf("clientSecret = %v; the secret appears to be redacted now, so assert "+
-			"that instead", got[domain.FieldClientSecret])
+	if got[domain.FieldClientSecret] == "top-secret" {
+		t.Fatal("the client secret is still served in full")
+	}
+	if got[domain.FieldClientID] != "id" {
+		t.Errorf("clientId = %v, want it kept: the sign-in page needs it",
+			got[domain.FieldClientID])
+	}
+}
+
+// TestAMaskedSecretDoesNotOverwriteTheStoredOne covers the round trip a UI
+// makes: it reads the configuration, changes something else, and writes it
+// back. Storing the mask would destroy the credential.
+func TestAMaskedSecretDoesNotOverwriteTheStoredOne(t *testing.T) {
+	db := useTempDB(t)
+	if _, err := db.Exec(
+		`INSERT INTO auth_configs (provider, config_json, enabled)
+		 VALUES ('google', '{"clientId":"id","clientSecret":"top-secret","redirectUri":"uri"}', 1)`); err != nil {
+		t.Fatalf("insert config: %v", err)
+	}
+
+	roundTripped, err := ReadOAuthConfig(domain.ProviderGoogle)
+	if err != nil {
+		t.Fatalf("ReadOAuthConfig: %v", err)
+	}
+	roundTripped[domain.FieldEnabled] = true
+	roundTripped[domain.FieldRedirectURI] = "https://new.example.com/callback"
+
+	if err := WriteOAuthConfig(domain.ProviderGoogle, roundTripped); err != nil {
+		t.Fatalf("WriteOAuthConfig: %v", err)
+	}
+
+	var stored string
+	if err := db.QueryRow(
+		`SELECT config_json FROM auth_configs WHERE provider='google'`).Scan(&stored); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if !strings.Contains(stored, "top-secret") {
+		t.Errorf("the stored secret was replaced by the mask: %s", stored)
+	}
+	if !strings.Contains(stored, "https://new.example.com/callback") {
+		t.Errorf("the change that was actually made did not land: %s", stored)
 	}
 }
 

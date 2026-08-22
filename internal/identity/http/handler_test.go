@@ -506,10 +506,11 @@ func TestGetOAuthConfigHandlerReturnsTheConfiguration(t *testing.T) {
 	}
 }
 
-// TestTheOAuthConfigIsReadableWithoutCredentials records that the read endpoint
-// asks for nothing and returns the client secret, while the write endpoint next
-// to it demands an admin token.
-func TestTheOAuthConfigIsReadableWithoutCredentials(t *testing.T) {
+// TestTheOAuthConfigIsReadableWithoutTheSecret pins the shape of the one
+// endpoint that has to stay reachable without a token: the sign-in page needs
+// the client id before anybody has one. It used to answer with the client
+// secret too, which published the whole OAuth credential.
+func TestTheOAuthConfigIsReadableWithoutTheSecret(t *testing.T) {
 	db := useTempDB(t)
 	storeOAuthConfig(t, db, "google",
 		`{"clientId":"id","clientSecret":"top-secret","redirectUri":"uri"}`, true)
@@ -518,9 +519,13 @@ func TestTheOAuthConfigIsReadableWithoutCredentials(t *testing.T) {
 	rec := httptest.NewRecorder()
 	GetOAuthConfigHandler(rec, req)
 
-	if !strings.Contains(rec.Body.String(), "top-secret") {
-		t.Fatalf("the secret is no longer returned; assert the redaction instead "+
-			"(body: %q)", rec.Body.String())
+	body := rec.Body.String()
+	if strings.Contains(body, "top-secret") {
+		t.Errorf("the client secret is still served: %q", body)
+	}
+	if !strings.Contains(body, `"clientId":"id"`) {
+		t.Errorf("the client id is no longer served, so the sign-in page cannot "+
+			"start the flow: %q", body)
 	}
 }
 

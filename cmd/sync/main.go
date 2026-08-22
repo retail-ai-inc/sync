@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	identity "github.com/retail-ai-inc/sync/internal/identity/domain"
 	"github.com/retail-ai-inc/sync/internal/monitoring/app"
 	"github.com/retail-ai-inc/sync/internal/platform/config"
 	"github.com/retail-ai-inc/sync/internal/platform/httpapi"
@@ -44,8 +45,19 @@ func main() {
 		cancel()
 	}()
 
+	if identity.SecretIsEphemeral() {
+		log.Error("SYNC_TOKEN_SECRET is not set, so a random signing secret was " +
+			"generated for this process: tokens will not survive a restart and will " +
+			"not be accepted by another replica. Set it before running more than one.")
+	}
+
 	router := chi.NewRouter()
 	router.Mount("/api", httpapi.NewRouter())
+
+	// Probes, outside /api because they must answer before anything is
+	// configured and must never require a credential.
+	router.Get("/healthz", httpapi.Health)
+	router.Get("/readyz", httpapi.Ready)
 
 	router.Get("/*", func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
@@ -62,9 +74,16 @@ func main() {
 		http.ServeFile(w, r, "ui/dist/index.html")
 	})
 
+	// Every timeout is set. Without them a connection that opens and then sends
+	// nothing holds a goroutine and a file descriptor for as long as it likes,
+	// which is all it takes to exhaust the control plane from one host.
 	server := &http.Server{
-		Addr:    ":8080",
-		Handler: router,
+		Addr:              ":8080",
+		Handler:           router,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 	go func() {
 		log.Info("UI is running at http://localhost:8080")
