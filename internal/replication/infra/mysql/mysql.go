@@ -22,6 +22,7 @@ import (
 	"github.com/retail-ai-inc/sync/internal/platform/config"
 	"github.com/retail-ai-inc/sync/internal/platform/dsn"
 	"github.com/retail-ai-inc/sync/internal/platform/resilience"
+	"github.com/retail-ai-inc/sync/internal/replication/infra/directionlock"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/security"
 	"github.com/sirupsen/logrus"
 
@@ -96,6 +97,17 @@ func (s *MySQLSyncer) Start(ctx context.Context) {
 		s.logger.Errorf("[MySQL] Failed to connect to target DB after retries: %v", err)
 		return
 	}
+
+	// Nothing is read or written until the direction is agreed. A target that
+	// has been promoted, or a source that is itself somebody's target, means
+	// the pair has been reversed under us and carrying on would overwrite the
+	// newer side with the older one.
+	releaseGuard, guardErr := s.claimDirection(ctx, targetDB)
+	if guardErr != nil {
+		s.logger.Errorf("[MySQL] %v", guardErr)
+		return
+	}
+	defer releaseGuard()
 
 	// The stored checkpoint is the authority on whether the copy has been made:
 	// a previous run that reached the stream wrote one. Without it the copy runs
@@ -1070,4 +1082,46 @@ func (h *MyEventHandler) OnPosSynced(header *replication.EventHeader, pos mysql.
 
 func (h *MyEventHandler) String() string {
 	return "MyEventHandler"
+}
+
+// claimDirection records which way this task replicates, on both databases, and
+// keeps the claims refreshed for as long as it runs.
+//
+// The returned function stops the refresh. A failure here stops the task: the
+// direction not being agreed is exactly the situation where carrying on
+// destroys data.
+func (s *MySQLSyncer) claimDirection(ctx context.Context, targetDB *sql.DB) (func(), error) {
+	sourceDB, err := sql.Open("mysql", s.cfg.SourceConnection)
+	if err != nil {
+		return nil, fmt.Errorf("open the source to claim the replication direction: %w", err)
+	}
+
+	guard := &directionlock.Guard{
+		TaskID: s.cfg.ID,
+		Source: &directionlock.SQLStore{
+			DB:      sourceDB,
+			Schema:  dsn.GetDatabaseName(s.cfg.Type, s.cfg.SourceConnection),
+			Address: dsn.Endpoint(s.cfg.Type, s.cfg.SourceConnection),
+		},
+		Target: &directionlock.SQLStore{
+			DB:      targetDB,
+			Schema:  dsn.GetDatabaseName(s.cfg.Type, s.cfg.TargetConnection),
+			Address: dsn.Endpoint(s.cfg.Type, s.cfg.TargetConnection),
+		},
+	}
+
+	if err := guard.Acquire(ctx); err != nil {
+		_ = sourceDB.Close()
+		return nil, err
+	}
+
+	heartbeatCtx, stop := context.WithCancel(ctx)
+	go guard.KeepAlive(heartbeatCtx, func(err error) {
+		s.logger.Warnf("[MySQL] Could not refresh the replication direction claim: %v", err)
+	})
+
+	return func() {
+		stop()
+		_ = sourceDB.Close()
+	}, nil
 }

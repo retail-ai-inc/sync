@@ -90,3 +90,51 @@ func extractRedisDatabase(dsn string) string {
 	}
 	return ""
 }
+
+// Endpoint describes a connection without its credentials, as host:port/database.
+//
+// It is what the direction lock records on each database to name the other
+// side, and what error messages name, so neither can leak a password into a
+// table an operator will read or a log line that will be shipped somewhere.
+func Endpoint(dbType, connection string) string {
+	host := extractHost(dbType, connection)
+	database := GetDatabaseName(dbType, connection)
+	if database == "" {
+		return host
+	}
+	return host + "/" + database
+}
+
+// extractHost reports the host and port a DSN addresses.
+func extractHost(dbType, connection string) string {
+	switch strings.ToLower(dbType) {
+	case "mysql", "mariadb":
+		cfg, err := mysqldriver.ParseDSN(connection)
+		if err != nil {
+			return ""
+		}
+		return cfg.Addr
+	case "mongodb":
+		lower := strings.ToLower(connection)
+		for _, prefix := range []string{"mongodb+srv://", "mongodb://"} {
+			if !strings.HasPrefix(lower, prefix) {
+				continue
+			}
+			rest := connection[len(prefix):]
+			if at := strings.LastIndex(rest, "@"); at != -1 {
+				rest = rest[at+1:]
+			}
+			if slash := strings.Index(rest, "/"); slash != -1 {
+				rest = rest[:slash]
+			}
+			return rest
+		}
+		return ""
+	default:
+		u, err := url.Parse(connection)
+		if err != nil {
+			return ""
+		}
+		return u.Host
+	}
+}

@@ -900,8 +900,12 @@ func TestStartRunsTheWholeSequence(t *testing.T) {
 		on("TTL", ":-1\r\n").
 		on("DUMP", bulk("payload")).
 		on("XGROUP", "+OK\r\n").
-		on("XREADGROUP", "*0\r\n")
-	target := newFakeRedis(t).on("RESTORE", "+OK\r\n")
+		on("XREADGROUP", "*0\r\n").
+		on("HGETALL", "*0\r\n").
+		on("HSET", ":1\r\n")
+	target := newFakeRedis(t).on("RESTORE", "+OK\r\n").
+		on("HGETALL", "*0\r\n").
+		on("HSET", ":1\r\n")
 
 	logger := logrus.New()
 	logger.SetLevel(logrus.PanicLevel)
@@ -940,8 +944,9 @@ func TestStartRunsTheWholeSequence(t *testing.T) {
 // TestStartWithNoMappingsReplicatesTheKeyspace is the same task that used to
 // panic on startup. It now runs the keyspace path and says so.
 func TestStartWithNoMappingsReplicatesTheKeyspace(t *testing.T) {
-	source := newFakeRedis(t).on("SCAN", "*2\r\n$1\r\n0\r\n*0\r\n")
-	target := newFakeRedis(t)
+	source := newFakeRedis(t).on("SCAN", "*2\r\n$1\r\n0\r\n*0\r\n").
+		on("HGETALL", "*0\r\n").on("HSET", ":1\r\n")
+	target := newFakeRedis(t).on("HGETALL", "*0\r\n").on("HSET", ":1\r\n")
 
 	logger := logrus.New()
 	logger.SetLevel(logrus.PanicLevel)
@@ -967,5 +972,43 @@ func TestStartWithNoMappingsReplicatesTheKeyspace(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("Start did not return after the context was cancelled")
+	}
+}
+
+// TestStartRefusesAPromotedTarget is the direction lock seen from the entry
+// point. A target that is being replicated out of is what a promoted replica
+// looks like: writing to it would overwrite everything written since the
+// promotion, so the task refuses to start rather than catching up.
+func TestStartRefusesAPromotedTarget(t *testing.T) {
+	claim := `{"task_id":9,"role":"source","peer":"elsewhere","owner":"syncer-tokyo-0",` +
+		`"updated_at":"` + time.Now().UTC().Format(time.RFC3339) + `"}`
+
+	source := newFakeRedis(t).on("HGETALL", "*0\r\n").on("HSET", ":1\r\n").
+		on("SCAN", "*2\r\n$1\r\n0\r\n*0\r\n")
+	target := newFakeRedis(t).
+		on("HGETALL", "*2\r\n$1\r\n9\r\n"+bulk(claim)).
+		on("HSET", ":1\r\n")
+
+	logger := logrus.New()
+	logger.SetLevel(logrus.PanicLevel)
+	cfg := sampleConfig()
+	cfg.SourceConnection = "redis://" + source.listener.Addr().String() + "/0"
+	cfg.TargetConnection = "redis://" + target.listener.Addr().String() + "/0"
+	s := NewRedisSyncer(cfg, logger)
+
+	done := make(chan struct{})
+	go func() {
+		s.Start(context.Background())
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Start did not refuse a target that is being replicated out of")
+	}
+
+	if source.sawCommand("SCAN") {
+		t.Error("the initial copy ran despite the refusal")
 	}
 }

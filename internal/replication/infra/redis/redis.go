@@ -15,6 +15,7 @@ import (
 	intRedis "github.com/retail-ai-inc/sync/internal/platform/dbconn/redis"
 	"github.com/retail-ai-inc/sync/internal/platform/dsn"
 	"github.com/retail-ai-inc/sync/internal/platform/resilience"
+	"github.com/retail-ai-inc/sync/internal/replication/infra/directionlock"
 	"github.com/sirupsen/logrus"
 )
 
@@ -114,6 +115,17 @@ func (r *RedisSyncer) Start(ctx context.Context) {
 	}
 	defer r.source.Close()
 	defer r.target.Close()
+
+	// Nothing is read or written until the direction is agreed. A target that
+	// has been promoted, or a source that is itself somebody's target, means the
+	// pair has been reversed under us and carrying on would overwrite the newer
+	// side with the older one.
+	stopGuard, guardErr := r.claimDirection(ctx)
+	if guardErr != nil {
+		r.logger.Errorf("[Redis] %v", guardErr)
+		return
+	}
+	defer stopGuard()
 
 	r.checkKeyspaceNotifications(ctx)
 
@@ -580,4 +592,30 @@ func (r *RedisSyncer) saveStreamPosition(stream, id string) {
 	if err := os.WriteFile(path, []byte(id), 0644); err != nil {
 		r.logger.Errorf("[Redis] write position fail: %v", err)
 	}
+}
+
+// claimDirection records which way this task replicates, on both endpoints, and
+// keeps the claims refreshed for as long as it runs.
+func (r *RedisSyncer) claimDirection(ctx context.Context) (func(), error) {
+	guard := &directionlock.Guard{
+		TaskID: r.cfg.ID,
+		Source: &directionlock.RedisStore{
+			Client:  r.source,
+			Address: dsn.Endpoint("redis", r.cfg.SourceConnection),
+		},
+		Target: &directionlock.RedisStore{
+			Client:  r.target,
+			Address: dsn.Endpoint("redis", r.cfg.TargetConnection),
+		},
+	}
+
+	if err := guard.Acquire(ctx); err != nil {
+		return nil, err
+	}
+
+	heartbeatCtx, stop := context.WithCancel(ctx)
+	go guard.KeepAlive(heartbeatCtx, func(err error) {
+		r.logger.Warnf("[Redis] Could not refresh the replication direction claim: %v", err)
+	})
+	return stop, nil
 }

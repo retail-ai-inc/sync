@@ -1,6 +1,9 @@
 package dsn
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestGetDatabaseName(t *testing.T) {
 	tests := []struct {
@@ -85,5 +88,48 @@ func TestTheSRVSchemeIsUnderstood(t *testing.T) {
 
 	if got := extractMongoDatabase(dsn); got != "source_db" {
 		t.Errorf("extractMongoDatabase(%q) = %q, want source_db", dsn, got)
+	}
+}
+
+// TestTheEndpointCarriesNoCredentials pins what the direction lock writes onto
+// the replicated databases and what error messages name. Either could be read
+// by somebody who should not learn the password.
+func TestTheEndpointCarriesNoCredentials(t *testing.T) {
+	tests := []struct {
+		dbType string
+		dsn    string
+		want   string
+	}{
+		{"mysql", "root:hunter2@tcp(db.internal:3306)/shop?tls=preferred", "db.internal:3306/shop"},
+		{"mariadb", "root:hunter2@tcp(db:3307)/shop", "db:3307/shop"},
+		{"postgresql", "postgres://root:hunter2@pg:5432/shop?sslmode=prefer", "pg:5432/shop"},
+		{"mongodb", "mongodb://root:hunter2@a:27017,b:27017/shop?w=majority", "a:27017,b:27017/shop"},
+		{"mongodb", "mongodb+srv://root:hunter2@cluster.example.net/shop", "cluster.example.net/shop"},
+		{"mongodb", "mongodb://mongo:27017/shop", "mongo:27017/shop"},
+		{"redis", "rediss://:hunter2@cache:6379/2", "cache:6379/2"},
+		{"redis", "redis://cache:6379", "cache:6379"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.dsn, func(t *testing.T) {
+			got := Endpoint(tt.dbType, tt.dsn)
+			if got != tt.want {
+				t.Errorf("Endpoint(%q) = %q, want %q", tt.dsn, got, tt.want)
+			}
+			if strings.Contains(got, "hunter2") {
+				t.Errorf("Endpoint(%q) leaked the password", tt.dsn)
+			}
+		})
+	}
+}
+
+func TestAnUnreadableDSNHasNoEndpoint(t *testing.T) {
+	for _, tt := range []struct{ dbType, dsn string }{
+		{"mysql", "not a dsn"},
+		{"mongodb", "http://elsewhere"},
+	} {
+		if got := Endpoint(tt.dbType, tt.dsn); got != "" {
+			t.Errorf("Endpoint(%q, %q) = %q, want empty", tt.dbType, tt.dsn, got)
+		}
 	}
 }

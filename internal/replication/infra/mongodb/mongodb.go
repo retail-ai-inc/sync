@@ -12,6 +12,7 @@ import (
 	"github.com/retail-ai-inc/sync/internal/platform/config"
 	"github.com/retail-ai-inc/sync/internal/platform/dsn"
 	"github.com/retail-ai-inc/sync/internal/platform/resilience"
+	"github.com/retail-ai-inc/sync/internal/replication/infra/directionlock"
 	"github.com/sirupsen/logrus"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -157,6 +158,17 @@ func (s *MongoDBSyncer) Start(ctx context.Context) {
 	var wg sync.WaitGroup
 	sourceDBName := dsn.GetDatabaseName(s.cfg.Type, s.cfg.SourceConnection)
 	targetDBName := dsn.GetDatabaseName(s.cfg.Type, s.cfg.TargetConnection)
+
+	// Nothing is read or written until the direction is agreed. A target that
+	// has been promoted, or a source that is itself somebody's target, means the
+	// pair has been reversed under us and carrying on would overwrite the newer
+	// side with the older one.
+	stopGuard, guardErr := s.claimDirection(ctx, sourceDBName, targetDBName)
+	if guardErr != nil {
+		s.logger.Errorf("[MongoDB] %v", guardErr)
+		return
+	}
+	defer stopGuard()
 
 	for _, mapping := range s.cfg.Mappings {
 		if len(mapping.Tables) > 0 {
@@ -364,4 +376,30 @@ func (s *MongoDBSyncer) findTableAdvancedSettings(collName string) config.Advanc
 		}
 	}
 	return config.AdvancedSettings{}
+}
+
+// claimDirection records which way this task replicates, on both databases, and
+// keeps the claims refreshed for as long as it runs.
+func (s *MongoDBSyncer) claimDirection(ctx context.Context, sourceDBName, targetDBName string) (func(), error) {
+	guard := &directionlock.Guard{
+		TaskID: s.cfg.ID,
+		Source: &directionlock.MongoStore{
+			Database: s.sourceClient.Database(sourceDBName),
+			Address:  dsn.Endpoint(s.cfg.Type, s.cfg.SourceConnection),
+		},
+		Target: &directionlock.MongoStore{
+			Database: s.targetClient.Database(targetDBName),
+			Address:  dsn.Endpoint(s.cfg.Type, s.cfg.TargetConnection),
+		},
+	}
+
+	if err := guard.Acquire(ctx); err != nil {
+		return nil, err
+	}
+
+	heartbeatCtx, stop := context.WithCancel(ctx)
+	go guard.KeepAlive(heartbeatCtx, func(err error) {
+		s.logger.Warnf("[MongoDB] Could not refresh the replication direction claim: %v", err)
+	})
+	return stop, nil
 }
