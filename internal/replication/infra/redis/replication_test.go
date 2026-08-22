@@ -144,16 +144,18 @@ func TestAnEmptyDumpIsSkipped(t *testing.T) {
 	}
 }
 
-// TestASyntaxErrorFallsBackToDeleteAndRestore records the compatibility path:
-// older Redis rejects RESTORE REPLACE, so the key is deleted and restored
-// plainly. The two-step form is not atomic — a reader between them sees no key.
-func TestASyntaxErrorFallsBackToDeleteAndRestore(t *testing.T) {
+// TestASyntaxErrorFallsBackToAnAtomicReplace covers the compatibility path: a
+// Redis too old to know RESTORE REPLACE. The fallback used to be DEL followed by
+// RESTORE — two round trips with a window in between where the target does not
+// hold the key at all, on every full copy of every key. It is one script now,
+// and Redis runs a script to completion before anything else.
+func TestASyntaxErrorFallsBackToAnAtomicReplace(t *testing.T) {
 	source := newFakeRedis(t).on("TTL", ":-1\r\n").on("DUMP", bulk("payload"))
 	target := newFakeRedis(t)
 
-	// The first RESTORE (with REPLACE) is refused; the retry succeeds. The stub
-	// answers per verb, so both attempts get the same reply and the fallback
-	// error is what the caller sees — which is enough to pin the DEL.
+	// The first RESTORE (with REPLACE) is refused; the stub answers per verb, so
+	// the retry gets the same reply and the fallback error is what the caller
+	// sees — which is enough to pin what the fallback issued.
 	target.on("RESTORE", "-ERR syntax error\r\n").on("DEL", ":1\r\n")
 	s := newRedisSyncerWithFakes(t, source, target)
 
@@ -161,8 +163,12 @@ func TestASyntaxErrorFallsBackToDeleteAndRestore(t *testing.T) {
 	if err == nil {
 		t.Fatal("copyFullKey reported success for a rejected RESTORE")
 	}
-	if !target.sawCommand("DEL") {
-		t.Errorf("target commands = %v, want the DEL fallback", target.seen())
+	if target.sawCommand("DEL") {
+		t.Errorf("target commands = %v; the key is still deleted in its own round "+
+			"trip, which leaves it missing until the restore lands", target.seen())
+	}
+	if !target.sawCommand("EVALSHA") && !target.sawCommand("EVAL") {
+		t.Errorf("target commands = %v, want the replace to have been scripted", target.seen())
 	}
 }
 

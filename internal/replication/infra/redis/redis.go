@@ -155,6 +155,14 @@ func (r *RedisSyncer) Start(ctx context.Context) error {
 	pairs := r.streamMappings()
 	if len(pairs) == 0 {
 		r.logger.Info("[Redis] No stream mappings configured; replicating the keyspace only.")
+	} else {
+		// A mapping names a stream to consume with a consumer group. It does not
+		// narrow what the keyspace copy covers, which is every key the source
+		// holds — worth saying, because a task that lists three keys reads as
+		// though it replicates three keys.
+		r.logger.Infof("[Redis] %d stream mapping(s) configured. They name streams to "+
+			"replicate by consumer group; the rest of the keyspace is replicated "+
+			"whole either way, so the mappings do not narrow what is copied.", len(pairs))
 	}
 	for _, pair := range pairs {
 		go r.replicateStream(ctx, pair)
@@ -307,8 +315,11 @@ func (r *RedisSyncer) copyFullKey(ctx context.Context, key string) error {
 	restoreErr := r.target.RestoreReplace(ctx, key, time.Duration(expireMs)*time.Millisecond, dumpedVal).Err()
 	if restoreErr != nil {
 		if strings.Contains(restoreErr.Error(), "ERR syntax error") {
-			_ = r.target.Del(ctx, key)
-			restoreErr = r.target.Restore(ctx, key, time.Duration(expireMs)*time.Millisecond, dumpedVal).Err()
+			// A server too old to know RESTORE REPLACE. The fallback used to be
+			// DEL followed by RESTORE, two round trips with a window in between
+			// where the target does not have the key at all — on every full copy
+			// of every key. The script does both in one step.
+			restoreErr = replaceKey.Run(ctx, r.target, []string{key}, expireMs, dumpedVal).Err()
 		}
 		if restoreErr != nil {
 			return fmt.Errorf("RESTORE fail key=%s: %v", key, restoreErr)
@@ -316,6 +327,13 @@ func (r *RedisSyncer) copyFullKey(ctx context.Context, key string) error {
 	}
 	return nil
 }
+
+// replaceKey overwrites one key with a dump, atomically. Redis runs a script to
+// completion before anything else, so the key is never missing partway through.
+var replaceKey = goredis.NewScript(`
+redis.call('DEL', KEYS[1])
+return redis.call('RESTORE', KEYS[1], ARGV[1], ARGV[2])
+`)
 
 // ------------------------------------------------------ keyspace watching
 
@@ -330,6 +348,10 @@ func (r *RedisSyncer) copyFullKey(ctx context.Context, key string) error {
 // comparison eventually corrects the data, which is why this is a recovery-point
 // problem rather than a data-loss one: seconds become an hour.
 const masterRediscoveryInterval = 30 * time.Second
+
+// subscriptionHealthInterval is how often a subscription is asked whether it is
+// still there.
+const subscriptionHealthInterval = 30 * time.Second
 
 func (r *RedisSyncer) watchKeyspaceChanges(ctx context.Context) {
 	pattern := fmt.Sprintf("__keyspace@%s__:*", r.sourceDatabase())
@@ -440,11 +462,34 @@ func (r *RedisSyncer) subscribeKeyspace(ctx context.Context, client goredis.Univ
 	defer pubsub.Close()
 	r.logger.Infof("[Redis] Keyspace subscription started on %s.", pattern)
 
+	// go-redis reconnects a dropped subscription by itself, so the channel does
+	// not close and nothing here notices — the events simply stop arriving and
+	// the task goes on reporting no error. The ping is what turns that into a
+	// line somebody can see; the periodic comparison is what makes the data
+	// right again either way.
+	health := time.NewTicker(subscriptionHealthInterval)
+	defer health.Stop()
+	healthy := true
+
 	for {
 		select {
 		case <-ctx.Done():
 			r.logger.Info("[Redis] Keyspace subscription shutting down.")
 			return
+		case <-health.C:
+			if err := pubsub.Ping(ctx); err != nil {
+				if healthy {
+					r.logger.Errorf("[Redis] The keyspace subscription on %s is not "+
+						"answering (%v). Changes are not arriving; the target will only "+
+						"catch up at the next full comparison.", pattern, err)
+				}
+				healthy = false
+				continue
+			}
+			if !healthy {
+				r.logger.Infof("[Redis] The keyspace subscription on %s is answering again.", pattern)
+				healthy = true
+			}
 		case msg, ok := <-pubsub.Channel():
 			if !ok {
 				r.logger.Warn("[Redis] Keyspace subscription channel closed unexpectedly.")
@@ -735,6 +780,13 @@ func (r *RedisSyncer) removeKeysMissingFromSource(ctx context.Context, keys []st
 // -------------------------------------------------------- stream watching
 
 // replicateStream mirrors one source stream onto the target.
+// streamRetryDelay and maxStreamRetryDelay bound how fast a failing stream read
+// is tried again.
+const (
+	streamRetryDelay    = 500 * time.Millisecond
+	maxStreamRetryDelay = 30 * time.Second
+)
+
 func (r *RedisSyncer) replicateStream(ctx context.Context, pair streamPair) {
 	lastID := r.loadStreamPosition(pair.source)
 	if lastID == "" {
@@ -753,6 +805,11 @@ func (r *RedisSyncer) replicateStream(ctx context.Context, pair streamPair) {
 }
 
 func (r *RedisSyncer) watchStreamChanges(ctx context.Context, pair streamPair, groupName, lastID string) {
+	// A failing read used to loop straight back round, so a source that was down
+	// was dialled as fast as the failures came back — a tight loop against a
+	// server that is already in trouble, and a log line per attempt.
+	backoff := streamRetryDelay
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -770,9 +827,18 @@ func (r *RedisSyncer) watchStreamChanges(ctx context.Context, pair streamPair, g
 					r.logger.Warnf("[Redis] XReadGroup context canceled => %v", xerr)
 					return
 				}
-				r.logger.Errorf("[Redis] XReadGroup error => %v", xerr)
+				r.logger.Errorf("[Redis] XReadGroup error, retrying in %s => %v", backoff, xerr)
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(backoff):
+				}
+				if backoff *= 2; backoff > maxStreamRetryDelay {
+					backoff = maxStreamRetryDelay
+				}
 				continue
 			}
+			backoff = streamRetryDelay
 			if len(streams) == 0 {
 				continue
 			}
