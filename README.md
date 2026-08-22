@@ -149,6 +149,23 @@ holds values written that way:
 3. anything not re-copied stays readable with the old published key, which is
    still in this repository's history.
 
+### The first sign-in
+
+The control database is created by the program, on first start, at
+`SYNC_DB_PATH`. It comes up with no accounts in it, so set
+`SYNC_ADMIN_PASSWORD` before the first start: an empty user table plus that
+variable creates one administrator called `admin`, and the log says so.
+
+The variable is read **only when there is no account at all**. Leaving it set in
+a manifest afterwards does nothing — it cannot reset a password that has been
+changed since, and it cannot put back an administrator that was removed on
+purpose. Change the password after signing in, and the variable stops mattering.
+
+Earlier versions shipped `sync.db` inside the repository with an administrator
+row already in it, which meant one published password worked on every
+deployment. That file is no longer tracked; a clone no longer carries anybody's
+credentials, and neither does it carry their task configuration.
+
 ### Where the state lives
 
 Two different kinds of state, with different durability requirements:
@@ -189,7 +206,8 @@ loudly instead of filling the disk.
 
 | Variable | Effect |
 | --- | --- |
-| `SYNC_DB_PATH` | Path to the control-plane SQLite file. Defaults to `sync.db` beside the binary. |
+| `SYNC_DB_PATH` | Path to the control-plane SQLite file. Defaults to `sync.db` beside the binary. The file and its schema are created on first start. |
+| `SYNC_ADMIN_PASSWORD` | Password for the first administrator, created only when the user table is empty. Ignored once an account exists. |
 | `SYNC_CONFIG_KEY` | 32-byte key, base64 or hex, that encrypts the database passwords stored in the task configuration. Without it they are stored in clear text and startup says so. |
 | `SYNC_TOKEN_SECRET` | Signing secret for API tokens. Without it a generated one is used, so tokens do not survive a restart. |
 | `SYNC_FIELD_KEY` | 32-byte key, base64 or hex, that encrypts the fields a task marks `encrypted`. `SYNC_CONFIG_KEY` is used when this is unset. A task that marks a field `encrypted` and has neither will not start. |

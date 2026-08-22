@@ -2,6 +2,7 @@ package config
 
 import (
 	"database/sql"
+	"github.com/retail-ai-inc/sync/internal/platform/sqlite"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,30 +20,19 @@ func useTempConfigDB(t *testing.T) *sql.DB {
 	path := filepath.Join(t.TempDir(), "sync.db")
 	t.Setenv("SYNC_DB_PATH", path)
 
-	db, err := sql.Open("sqlite3", path)
+	// Through the real opener, so the fixture carries the schema the program
+	// creates rather than a copy of it that can drift. That also settles the
+	// schema for this file, so a table a test drops afterwards stays dropped.
+	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
 		t.Fatalf("open temp sqlite: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
 
-	const schema = `
-CREATE TABLE config_global (
-    id                                INTEGER PRIMARY KEY,
-    enable_table_row_count_monitoring INTEGER NOT NULL DEFAULT 0,
-    log_level                         TEXT    NOT NULL DEFAULT 'info',
-    monitor_interval                  INTEGER DEFAULT 60,
-    slackWebhookURL                   TEXT,
-    slackChannel                      TEXT
-);
-CREATE TABLE sync_tasks (
-    id               INTEGER PRIMARY KEY AUTOINCREMENT,
-    enable           INTEGER NOT NULL DEFAULT 1,
-    last_update_time DATETIME,
-    last_run_time    DATETIME,
-    config_json      TEXT NOT NULL
-);`
-	if _, err := db.Exec(schema); err != nil {
-		t.Fatalf("create schema: %v", err)
+	// The opener seeds a settings row. The tests here supply their own, or
+	// depend on there being none, so start from an empty table.
+	if _, err := db.Exec(`DELETE FROM config_global`); err != nil {
+		t.Fatalf("clear config_global: %v", err)
 	}
 	return db
 }
@@ -132,25 +122,14 @@ func TestAnUnopenableDatabaseIsReported(t *testing.T) {
 }
 
 func TestAMissingSyncTasksTableIsReported(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "sync.db")
-	t.Setenv("SYNC_DB_PATH", path)
-
-	db, err := sql.Open("sqlite3", path)
-	if err != nil {
-		t.Fatalf("open: %v", err)
+	db := useTempConfigDB(t)
+	if _, err := db.Exec(
+		`INSERT INTO config_global (id, enable_table_row_count_monitoring, log_level, monitor_interval)
+		 VALUES (1, 0, 'info', 60)`); err != nil {
+		t.Fatalf("insert settings: %v", err)
 	}
-	defer db.Close()
-	if _, err := db.Exec(`
-CREATE TABLE config_global (
-    id                                INTEGER PRIMARY KEY,
-    enable_table_row_count_monitoring INTEGER NOT NULL DEFAULT 0,
-    log_level                         TEXT    NOT NULL DEFAULT 'info',
-    monitor_interval                  INTEGER DEFAULT 60,
-    slackWebhookURL                   TEXT,
-    slackChannel                      TEXT
-);
-INSERT INTO config_global (id) VALUES (1);`); err != nil {
-		t.Fatalf("create schema: %v", err)
+	if _, err := db.Exec(`DROP TABLE sync_tasks`); err != nil {
+		t.Fatalf("drop sync_tasks: %v", err)
 	}
 
 	if _, err := NewConfig(); err == nil {

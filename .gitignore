@@ -58,6 +58,10 @@ dist/
 /sync
 cloudbuild.yaml
 docker-compose-demo.yml
+# The control database. It used to be committed, which shipped one admin
+# password — and the connection strings of whoever committed it last — to
+# every clone. The program creates the file and its schema on first run.
+sync.db
 sync.db-wal
 sync.db-shm
 # The SQLite file belongs at the repository root only; a copy anywhere else

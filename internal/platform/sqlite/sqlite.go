@@ -78,11 +78,15 @@ func OpenSQLiteDB() (*sql.DB, error) {
 		return nil, fmt.Errorf("failed to connect to database (tried %d times): %v", maxRetries, err)
 	}
 
+	if err := applySchema(db, dbPath); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+
 	if fresh {
-		logrus.Warnf("[SQLite] Created a new, empty control database at %s. "+
-			"If this is not a first run, SYNC_DB_PATH is pointing somewhere "+
-			"unintended and this process has started with no sync tasks and no "+
-			"users.", dbPath)
+		logrus.Warnf("[SQLite] Created a new control database at %s. If this is not "+
+			"a first run, SYNC_DB_PATH is pointing somewhere unintended and this "+
+			"process has started with no sync tasks and no users.", dbPath)
 	}
 
 	return db, nil

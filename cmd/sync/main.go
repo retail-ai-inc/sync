@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"os"
 	"os/signal"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	identity "github.com/retail-ai-inc/sync/internal/identity/domain"
+	identityStore "github.com/retail-ai-inc/sync/internal/identity/infra"
 	"github.com/retail-ai-inc/sync/internal/platform/config"
 	"github.com/retail-ai-inc/sync/internal/platform/httpapi"
 	"github.com/retail-ai-inc/sync/internal/platform/logging"
@@ -50,6 +52,20 @@ func main() {
 			"configuration store are held in the clear. Anybody who can read the " +
 			"file — a backup, a volume snapshot — has the credentials for both " +
 			"regions.")
+	}
+
+	// A fresh control database has no accounts at all, because the file is no
+	// longer shipped with one in it. Without this the UI would be reachable and
+	// unusable.
+	switch created, err := identityStore.EnsureAdmin(); {
+	case errors.Is(err, identityStore.ErrNoBootstrapPassword):
+		log.Error(err)
+	case err != nil:
+		log.Errorf("Failed to check for an administrator account: %v", err)
+	case created:
+		log.Infof("Created the first administrator %q from SYNC_ADMIN_PASSWORD. "+
+			"Change the password after signing in; the variable is ignored from now on.",
+			identityStore.BootstrapUsername)
 	}
 
 	if identity.SecretIsEphemeral() {

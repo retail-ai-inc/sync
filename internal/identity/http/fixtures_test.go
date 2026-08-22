@@ -3,6 +3,7 @@ package identityhttp
 import (
 	"database/sql"
 	"encoding/json"
+	"github.com/retail-ai-inc/sync/internal/platform/sqlite"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -29,36 +30,14 @@ func useTempDB(t *testing.T) *sql.DB {
 	path := filepath.Join(t.TempDir(), "sync.db")
 	t.Setenv("SYNC_DB_PATH", path)
 
-	db, err := sql.Open("sqlite3", path)
+	// Through the real opener, so the fixture carries the schema the program
+	// creates rather than a copy of it that can drift. That also settles the
+	// schema for this file, so a table a test renames away stays away.
+	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
 		t.Fatalf("open temp sqlite: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-
-	const schema = `
-CREATE TABLE users (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    username   TEXT NOT NULL UNIQUE,
-    password   TEXT NOT NULL,
-    name       TEXT NOT NULL,
-    avatar     TEXT,
-    userId     TEXT,
-    email      TEXT,
-    access     TEXT NOT NULL,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    status     TEXT DEFAULT 'active'
-);
-CREATE TABLE auth_configs (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    provider    TEXT NOT NULL UNIQUE,
-    config_json TEXT NOT NULL,
-    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
-    enabled     BOOLEAN DEFAULT false
-);`
-	if _, err := db.Exec(schema); err != nil {
-		t.Fatalf("create schema: %v", err)
-	}
 	return db
 }
 
@@ -66,7 +45,7 @@ CREATE TABLE auth_configs (
 func emptyIdentityDB(t *testing.T) {
 	t.Helper()
 	isolateCrontab(t)
-	t.Setenv("SYNC_DB_PATH", filepath.Join(t.TempDir(), "empty.db"))
+	tablelessDB(t)
 }
 
 // unopenableDB points SYNC_DB_PATH at a path whose parent is a regular file.
@@ -124,4 +103,45 @@ func envelope(t *testing.T, rec *httptest.ResponseRecorder) map[string]interface
 func cheapPasswordHashing(t *testing.T) {
 	t.Helper()
 	t.Setenv("SYNC_PASSWORD_ITERATIONS", "1")
+}
+
+// tablelessDB points SYNC_DB_PATH at a database whose tables have been removed,
+// which is the state a migration that did not finish — or a file restored from
+// the wrong backup — leaves behind.
+//
+// Pointing at an empty file no longer produces one: opening the control database
+// creates its schema, so the tables have to be dropped after that has happened.
+func tablelessDB(t *testing.T) {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "empty.db")
+	t.Setenv("SYNC_DB_PATH", path)
+
+	// Opening it is what creates the schema.
+	db, err := sqlite.OpenSQLiteDB()
+	if err != nil {
+		t.Fatalf("open the control database: %v", err)
+	}
+	defer db.Close()
+
+	rows, err := db.Query(
+		`SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'`)
+	if err != nil {
+		t.Fatalf("list tables: %v", err)
+	}
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		names = append(names, name)
+	}
+	rows.Close()
+
+	for _, name := range names {
+		if _, err := db.Exec(`DROP TABLE IF EXISTS "` + name + `"`); err != nil {
+			t.Fatalf("drop %s: %v", name, err)
+		}
+	}
 }

@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -79,7 +78,7 @@ func TestTheDailyWindowIsTheJSTDay(t *testing.T) {
 }
 
 func TestSyncTablesHandlerReportsAMissingTable(t *testing.T) {
-	t.Setenv("SYNC_DB_PATH", filepath.Join(t.TempDir(), "empty.db"))
+	tablelessDB(t)
 
 	rec := httptest.NewRecorder()
 	serveWithURLParams(rec, httptest.NewRequest(http.MethodGet, "/sync/{id}/tables", nil),

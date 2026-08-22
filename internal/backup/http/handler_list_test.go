@@ -3,7 +3,6 @@ package backuphttp
 import (
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"testing"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -35,7 +34,7 @@ func TestBackupListHandlerReturnsTheTaskTable(t *testing.T) {
 }
 
 func TestBackupListHandlerReportsAMissingTable(t *testing.T) {
-	t.Setenv("SYNC_DB_PATH", filepath.Join(t.TempDir(), "empty.db"))
+	tablelessDB(t)
 
 	rec := httptest.NewRecorder()
 	BackupListHandler(rec, httptest.NewRequest(http.MethodGet, "/backup", nil))
