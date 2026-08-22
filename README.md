@@ -179,6 +179,8 @@ loudly instead of filling the disk.
 | `SYNC_MONGO_FLUSH_INTERVAL` | How long a partly filled batch of MongoDB changes waits before being applied, e.g. `200ms`. Default `500ms`. Lower is a tighter recovery point at the cost of more, smaller writes. |
 | `SYNC_VERIFY_INTERVAL` | How often to compare each table against its source, e.g. `1h`. Unset means never. |
 | `SYNC_VERIFY_REPAIR` | `true` to also repair the differences the comparison finds, rather than only report them. |
+| `SYNC_MYSQL_CHECKPOINT_INTERVAL` | How often the MySQL binlog position is recorded, e.g. `1s`. Default `200ms`; `0` records every transaction, which costs a round trip and an fsync on the target for each one. After an unclean stop, replication replays at most this interval. |
+| `SYNC_MONITORING_RETENTION_DAYS` | How many days of monitoring history to keep. Default `30`; `0` keeps everything, and the log grows by a row per table per interval on the same volume as the replication state. |
 
 ## Contributing
 

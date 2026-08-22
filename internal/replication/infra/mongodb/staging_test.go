@@ -708,3 +708,59 @@ func TestWhereTheLagComesFrom(t *testing.T) {
 	}
 	t.Errorf("the target had not caught up three minutes after the writes stopped")
 }
+
+// TestTheTargetIsShardedLikeTheSource is why this suite needs a sharded cluster.
+// A sharded source replicated into an unsharded target is not the same
+// collection: every document lands on whichever shard is primary for the target
+// database, so the copy has one shard's capacity where the source had three. The
+// region it exists to stand in for could not be stood in for.
+func TestTheTargetIsShardedLikeTheSource(t *testing.T) {
+	name, source, target := stgCollection(t, "payments_sharded")
+	ctx := context.Background()
+
+	const seeded = 500
+	docs := make([]interface{}, 0, seeded)
+	for i := 0; i < seeded; i++ {
+		docs = append(docs, payment(i))
+	}
+	if _, err := source.InsertMany(ctx, docs); err != nil {
+		t.Fatalf("seed the source: %v", err)
+	}
+
+	stgStart(t, stgTask(t, name))
+	harness.Eventually(t, 3*time.Minute, func() error {
+		if n := stgCount(t, target); n != seeded {
+			return fmt.Errorf("the target holds %d of %d documents", n, seeded)
+		}
+		return nil
+	})
+
+	client := stgConnect(t, stgTargetDB)
+	key, err := collectionShardKey(ctx, client, stgTargetDB+"."+name)
+	if err != nil {
+		t.Fatalf("read the target's shard key: %v", err)
+	}
+	if key == nil {
+		t.Fatal("the target collection is not sharded, so it holds the whole " +
+			"collection on one shard")
+	}
+	t.Logf("the target is sharded on %v", key.Key)
+
+	// And the documents are actually spread, not merely allowed to be.
+	var stats []bson.M
+	cursor, err := client.Database(stgTargetDB).Collection(name).Aggregate(ctx,
+		mongo.Pipeline{bson.D{{Key: "$collStats", Value: bson.D{
+			{Key: "storageStats", Value: bson.D{}},
+		}}}})
+	if err != nil {
+		t.Fatalf("collStats: %v", err)
+	}
+	if err := cursor.All(ctx, &stats); err != nil {
+		t.Fatalf("read collStats: %v", err)
+	}
+	if len(stats) < 2 {
+		t.Errorf("the target reports storage on %d shard(s); the documents are not "+
+			"spread", len(stats))
+	}
+	t.Logf("the target's documents are spread over %d shards", len(stats))
+}

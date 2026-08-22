@@ -3,8 +3,10 @@
 package mysql
 
 import (
+	"bytes"
 	"database/sql"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,6 +16,7 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/retail-ai-inc/sync/internal/platform/config"
+	"github.com/retail-ai-inc/sync/internal/platform/metrics"
 	"github.com/retail-ai-inc/sync/test/harness"
 )
 
@@ -629,4 +632,62 @@ func TestTheFinalPositionIsRecordedOnACleanStop(t *testing.T) {
 		t.Fatal("no position was recorded")
 	}
 	t.Logf("recorded position: %s", payload)
+}
+
+// TestATableTheTaskDoesNotListIsReported covers the gap a named task leaves. A
+// task that names its tables replicates those and no more, which is the point of
+// naming them — but a table added at the source afterwards is then missing from
+// the replica, and "the disaster-recovery copy does not have that table" is not
+// something to find out during a failover.
+func TestATableTheTaskDoesNotListIsReported(t *testing.T) {
+	listed := harness.UniqueName("listed")
+	unlisted := harness.UniqueName("unlisted")
+	src, tgt := open(t, harness.MySQLSource, sourceDB), open(t, harness.MySQLTarget, targetDB)
+
+	createSourceTable(t, src, tgt, listed)
+	createSourceTable(t, src, tgt, unlisted)
+	mustExec(t, src, fmt.Sprintf("INSERT INTO %s (id, name) VALUES (1, 'seed')", listed))
+	mustExec(t, src, fmt.Sprintf("INSERT INTO %s (id, name) VALUES (1, 'seed')", unlisted))
+
+	var recorded bytes.Buffer
+	logger := logrus.New()
+	logger.SetOutput(&recorded)
+	logger.SetLevel(logrus.WarnLevel)
+
+	cfg := syncTask(t, listed)
+	syncer := NewMySQLSyncer(cfg, logger)
+	stop := harness.RunSyncer(t, syncer.Start)
+	t.Cleanup(stop)
+
+	harness.Eventually(t, 45*time.Second, func() error {
+		if n := countRows(t, tgt, listed, ""); n != 1 {
+			return fmt.Errorf("the listed table has not been copied")
+		}
+		return nil
+	})
+
+	// The unlisted table is not replicated, which is correct.
+	if n := countRows(t, tgt, unlisted, ""); n > 0 {
+		t.Errorf("the unlisted table was replicated (%d rows); a named task should "+
+			"replicate only what it names", n)
+	}
+
+	// But it is reported.
+	harness.Eventually(t, 30*time.Second, func() error {
+		if !strings.Contains(recorded.String(), unlisted) {
+			return fmt.Errorf("nothing warned about %s", unlisted)
+		}
+		return nil
+	})
+
+	labels := syncer.metricLabels()
+	var reported bool
+	for _, sample := range metrics.Default.Snapshot(metrics.Unreplicated) {
+		if sample.Labels.Key() == labels.Key() && sample.Value > 0 {
+			reported = true
+		}
+	}
+	if !reported {
+		t.Error("the unreplicated table count was not recorded")
+	}
 }

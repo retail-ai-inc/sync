@@ -1,2 +1,14 @@
 [mysqld]
+# ROW is what the replication path reads, and binlog_row_image must be FULL:
+# with MINIMAL the binlog carries only the changed columns, which cannot be told
+# apart from real NULLs, so a task refuses to start rather than write NULL over
+# columns nobody touched.
 binlog_format=ROW
+binlog_row_image=FULL
+
+# GTID, because that is what Cloud SQL runs with and what the checkpoint records
+# by preference: a position expressed as transactions stays meaningful after a
+# failover to another server, where a file and an offset do not. Without this the
+# GTID path is never exercised by the test suite.
+gtid_mode=ON
+enforce_gtid_consistency=ON

@@ -209,6 +209,12 @@ func (s *MongoDBSyncer) Start(ctx context.Context) error {
 		})
 	}
 
+	// A task that names its collections replicates exactly those, which is the
+	// point of naming them. But a collection added at the source afterwards is
+	// then not replicated and nothing says so, and "the disaster-recovery copy
+	// is missing a collection" is not something to find out during a failover.
+	go s.warnAboutUnlistedCollections(ctx, sourceDBName)
+
 	return s.awaitFault(ctx, func() {
 		for _, mapping := range s.cfg.Mappings {
 			if len(mapping.Tables) > 0 {
@@ -291,6 +297,12 @@ func (s *MongoDBSyncer) startCollections(ctx context.Context, tables []config.Ta
 			s.logger.Errorf("[MongoDB] Failed to create target collection %s.%s: %v", targetDBName, tableMap.TargetTable, err)
 			continue
 		}
+
+		// Match the source's partitioning before anything is copied: sharding an
+		// empty collection is immediate, and a sharded source replicated into an
+		// unsharded target has one shard's capacity where the source had all of
+		// them.
+		s.matchSharding(ctx, sourceDBName, tableMap.SourceTable, targetDBName, tableMap.TargetTable)
 
 		// Copy indexes based on AdvancedSettings
 		s.logger.Infof("[MongoDB] SyncIndexes: %v", tableMap.AdvancedSettings.SyncIndexes)
@@ -509,6 +521,66 @@ func (s *MongoDBSyncer) claimDirection(ctx context.Context, sourceDBName, target
 const discoveryInterval = time.Minute
 
 // hasConfiguredCollections reports whether the task names any collection. The
+// unlistedScanEvery is how often a task that names its collections is compared
+// against what the source actually holds.
+const unlistedScanEvery = 5 * time.Minute
+
+// warnAboutUnlistedCollections reports the collections the source has and this
+// task does not replicate.
+//
+// It does not start replicating them: a task that names its collections means
+// it, and quietly widening the scope would be worse than the gap. What it does
+// is make the gap visible, because the alternative is finding out during a
+// failover that the copy is missing a collection nobody added to the task.
+func (s *MongoDBSyncer) warnAboutUnlistedCollections(ctx context.Context, sourceDBName string) {
+	listed := map[string]bool{}
+	for _, mapping := range s.cfg.Mappings {
+		for _, table := range mapping.Tables {
+			if table.SourceTable != "" {
+				listed[table.SourceTable] = true
+			}
+		}
+	}
+
+	warned := map[string]bool{}
+	scan := func() {
+		names, err := discovery.MongoCollections(ctx, s.sourceClient.Database(sourceDBName))
+		if err != nil {
+			s.logger.Debugf("[MongoDB] Could not list the collections in %s: %v",
+				sourceDBName, err)
+			return
+		}
+		var missing []string
+		for _, name := range names {
+			if listed[name] || warned[name] {
+				continue
+			}
+			warned[name] = true
+			missing = append(missing, name)
+		}
+		if len(missing) == 0 {
+			return
+		}
+		s.logger.Warnf("[MongoDB] %s holds %d collections this task does not "+
+			"replicate: %v. They are not in the disaster-recovery copy. Add them to "+
+			"the task, or remove every collection from it to replicate the database "+
+			"as a whole.", sourceDBName, len(missing), missing)
+		metrics.SetUnreplicated(s.metricLabels(""), float64(len(warned)))
+	}
+
+	scan()
+	ticker := time.NewTicker(unlistedScanEvery)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			scan()
+		}
+	}
+}
+
 // configuration loader inserts a mapping with an empty table list for a task
 // that has none, so the check has to look past the mapping itself.
 func (s *MongoDBSyncer) hasConfiguredCollections() bool {

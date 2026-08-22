@@ -339,6 +339,22 @@ func SetTaskBlocked(labels Labels, blocked bool) {
 	Default.SetGauge(TaskBlocked, helpBlocked, labels, value)
 }
 
+// Coverage metrics. A task that names its tables replicates those and no more,
+// so a table added at the source afterwards is simply absent from the replica —
+// which is not something to discover during a failover.
+const (
+	// Unreplicated is how many tables or collections the source holds that a
+	// task does not carry.
+	Unreplicated = "sync_unreplicated_tables"
+
+	helpUnreplicated = "Tables or collections at the source that this task does not replicate"
+)
+
+// SetUnreplicated records how much of the source a task is not carrying.
+func SetUnreplicated(labels Labels, count float64) {
+	Default.SetGauge(Unreplicated, helpUnreplicated, labels, count)
+}
+
 // Buffer metrics. Change data waiting on local disk is the one thing that grows
 // when the target cannot keep up, and it is invisible until the volume fills.
 const (

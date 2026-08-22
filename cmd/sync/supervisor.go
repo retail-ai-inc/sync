@@ -291,6 +291,9 @@ func (s *supervisor) applyMonitoring(ctx context.Context, cfg *config.Config) {
 
 	app.StartLagAlerting(monitorCtx, cfg, s.log)
 	app.StartConsistencyChecks(monitorCtx, cfg, s.log)
+	// Trimming runs whether or not row-count monitoring is on: rows written
+	// before it was turned off do not remove themselves.
+	app.StartMonitoringRetention(monitorCtx, s.log)
 	if cfg.EnableTableRowCountMonitoring {
 		app.StartRowCountMonitoring(monitorCtx, cfg, s.log, cfg.MonitorInterval)
 	}

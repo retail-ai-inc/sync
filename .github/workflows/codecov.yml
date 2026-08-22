@@ -45,7 +45,12 @@ jobs:
 
       - name: Start Docker Compose services
         run: |
+          # Both stacks: the first carries MySQL, MariaDB and PostgreSQL, the
+          # second the MongoDB replica set and the Redis pair the integration
+          # suite addresses. Without the second, every MongoDB and Redis
+          # integration test is skipped and nothing says so.
           docker-compose -f docker/docker-compose.yml up -d
+          docker-compose -f docker/docker-compose.test.yml up -d
 
       - name: Wait for services to be ready
         run: |
@@ -72,9 +77,33 @@ jobs:
             echo "Waiting for MongoDB..."
             sleep 1
           done
-          
+
+          for port in 27117 27118 6479 6480; do
+            for i in {1..30}; do
+              nc -z localhost $port && echo "port $port is up" && break
+              echo "Waiting for port $port..."
+              sleep 1
+            done
+          done
+
           sleep 5
           echo "All services are up!"
+
+      - name: Initiate the MongoDB replica set
+        run: |
+          # A change stream needs a replica set, and a single-node set still has
+          # to be initiated. The main stack's source does this from init.js; the
+          # test stack's does not.
+          docker exec mongo_test_source mongosh --quiet --eval '
+            try { rs.status() } catch (e) {
+              rs.initiate({_id: "rs0", members: [{_id: 0, host: "127.0.0.1:27017"}]})
+            }'
+          for i in {1..30}; do
+            docker exec mongo_test_source mongosh --quiet --eval \
+              'db.hello().isWritablePrimary' | grep -q true && break
+            echo "Waiting for the replica set to elect itself..."
+            sleep 1
+          done
         
       - name: Run tests
         run: |
@@ -92,6 +121,13 @@ jobs:
             grep -v '^mode:' coverage.raw | sort -t' ' -k1,1 -k3,3nr | sort -t' ' -u -k1,1
           } > coverage.txt
 
+      - name: Run the integration suite
+        run: |
+          # The suite that talks to real servers. It ran only when somebody
+          # remembered to run it locally, which is not a regression check: every
+          # defect it has caught so far was found by hand.
+          go test -tags integration -count=1 -timeout 30m ./...
+
       - name: Upload results to Codecov
         uses: codecov/codecov-action@v5
         with:
@@ -101,4 +137,5 @@ jobs:
       - name: Tear down Docker Compose
         if: always()
         run: |
+          docker-compose -f docker/docker-compose.test.yml down
           docker-compose -f docker/docker-compose.yml down
