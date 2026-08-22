@@ -494,53 +494,102 @@ func TestTheDeleteKeyIsNotMasked(t *testing.T) {
 
 // ---------------------------------------------------------- error flag
 
-// TestAFailedStatementRaisesTheErrorFlag records the flag the position saver
-// consults before it writes: a statement that cannot be applied sets it, and the
-// call itself reports nothing to the caller.
-func TestAFailedStatementRaisesTheErrorFlag(t *testing.T) {
-	db := sqliteTarget(t, ordersSchema)
-	h := newHandler(t, db, mapTable("orders", "orders"))
-
-	// A column the target does not have, so the statement fails to prepare.
-	err := h.OnRow(&canal.RowsEvent{
+// failingEvent is a row event the target cannot apply, because it names a
+// column the target table does not have.
+func failingEvent() *canal.RowsEvent {
+	return &canal.RowsEvent{
 		Table:  sourceTable("orders", "id", "missing_column"),
 		Action: canal.InsertAction,
 		Rows:   [][]interface{}{{"1", "x"}},
-	})
-	if err != nil {
-		t.Fatalf("OnRow reported %v; the failure appears to be propagated now, so "+
-			"assert that instead", err)
+	}
+}
+
+// TestAFailedStatementIsReportedToCanal pins the contract that keeps the offset
+// honest: OnRow returns the failure, which stops canal rather than letting it
+// read on past a row that never landed.
+func TestAFailedStatementIsReportedToCanal(t *testing.T) {
+	db := sqliteTarget(t, ordersSchema)
+	h := newHandler(t, db, mapTable("orders", "orders"))
+
+	err := h.OnRow(failingEvent())
+	if err == nil {
+		t.Fatal("OnRow swallowed a statement the target could not apply")
+	}
+	if !strings.Contains(err.Error(), "main.orders") {
+		t.Errorf("error = %v, want the target table named", err)
 	}
 	if atomic.LoadInt32(&h.lastExecError) != 1 {
 		t.Error("the error flag was not raised")
 	}
 }
 
-// TestALaterSuccessClearsTheErrorFlag records the same defect the PostgreSQL
-// syncer has: the flag is a single field on the handler, cleared by any later
-// successful statement, so a failed row followed by a good one leaves the
-// position free to advance past the loss.
-func TestALaterSuccessClearsTheErrorFlag(t *testing.T) {
+// TestTheFirstFailureOfABatchIsReported covers a multi-row event: the remaining
+// rows are still attempted, so the target is as complete as it can be, but the
+// failure is not lost.
+func TestTheFirstFailureOfABatchIsReported(t *testing.T) {
 	db := sqliteTarget(t, ordersSchema)
 	h := newHandler(t, db, mapTable("orders", "orders"))
 
-	_ = h.OnRow(&canal.RowsEvent{
+	err := h.OnRow(&canal.RowsEvent{
 		Table:  sourceTable("orders", "id", "missing_column"),
 		Action: canal.InsertAction,
-		Rows:   [][]interface{}{{"1", "x"}},
+		Rows:   [][]interface{}{{"1", "x"}, {"2", "y"}},
 	})
-	if atomic.LoadInt32(&h.lastExecError) != 1 {
-		t.Fatal("the error flag was not raised")
+	if err == nil {
+		t.Fatal("OnRow reported nothing for a batch where every row failed")
+	}
+}
+
+// TestTheErrorFlagIsStickyAcrossEvents pins the other half. The flag guards the
+// position saver, so a later success must not clear it: the offset that follows
+// the failure is still an offset the target never caught up to.
+func TestTheErrorFlagIsStickyAcrossEvents(t *testing.T) {
+	db := sqliteTarget(t, ordersSchema)
+	h := newHandler(t, db, mapTable("orders", "orders"))
+
+	if err := h.OnRow(failingEvent()); err == nil {
+		t.Fatal("the failing event was not reported")
 	}
 
-	_ = h.OnRow(&canal.RowsEvent{
+	if err := h.OnRow(&canal.RowsEvent{
 		Table:  sourceTable("orders", "id", "customer", "email"),
 		Action: canal.InsertAction,
 		Rows:   [][]interface{}{{"2", "Ada", "y"}},
-	})
-	if atomic.LoadInt32(&h.lastExecError) != 0 {
-		t.Error("the error flag survived a later success; it appears to be scoped " +
-			"per event now, so assert that instead")
+	}); err != nil {
+		t.Fatalf("the following event failed too: %v", err)
+	}
+
+	if atomic.LoadInt32(&h.lastExecError) != 1 {
+		t.Error("a later success cleared the error flag, which would let the " +
+			"position advance past the row that was lost")
+	}
+}
+
+// TestThePositionIsNotWrittenAfterAFailure closes the loop between the two: the
+// saver consults the flag and leaves the file untouched, so a restart replays
+// from the last offset that was fully applied.
+func TestThePositionIsNotWrittenAfterAFailure(t *testing.T) {
+	db := sqliteTarget(t, ordersSchema)
+	h := newHandler(t, db, mapTable("orders", "orders"))
+	h.positionSaverPath = filepath.Join(t.TempDir(), "pos.json")
+
+	if err := h.OnPosSynced(nil, mysql.Position{Name: "binlog.1", Pos: 100}, nil, false); err != nil {
+		t.Fatalf("OnPosSynced before any failure: %v", err)
+	}
+	if err := h.OnRow(failingEvent()); err == nil {
+		t.Fatal("the failing event was not reported")
+	}
+	if err := h.OnPosSynced(nil, mysql.Position{Name: "binlog.1", Pos: 200}, nil, true); err != nil {
+		t.Fatalf("OnPosSynced after a failure: %v", err)
+	}
+
+	got := newSyncer(t).loadBinlogPosition(h.positionSaverPath)
+	if got == nil {
+		t.Fatal("no position was stored at all")
+	}
+	if got.Pos != 100 {
+		t.Errorf("stored offset %d, want the pre-failure 100: the saver advanced "+
+			"past a row that never reached the target", got.Pos)
 	}
 }
 

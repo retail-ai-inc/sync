@@ -565,32 +565,45 @@ func (h *MyEventHandler) OnRow(e *canal.RowsEvent) error {
 		columnNames[i] = col.Name
 	}
 
+	var firstErr error
+	fail := func(err error) {
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+
 	switch e.Action {
 	case canal.InsertAction:
 		for _, row := range e.Rows {
-			h.handleDML("INSERT", targetDBName, targetTableName, columnNames, table, row, nil)
+			fail(h.handleDML("INSERT", targetDBName, targetTableName, columnNames, table, row, nil))
 		}
 	case canal.UpdateAction:
 		for i := 0; i < len(e.Rows); i += 2 {
 			oldRow := e.Rows[i]
 			newRow := e.Rows[i+1]
-			h.handleDML("UPDATE", targetDBName, targetTableName, columnNames, table, newRow, oldRow)
+			fail(h.handleDML("UPDATE", targetDBName, targetTableName, columnNames, table, newRow, oldRow))
 		}
 	case canal.DeleteAction:
 		for _, row := range e.Rows {
-			h.handleDML("DELETE", targetDBName, targetTableName, columnNames, table, row, nil)
+			fail(h.handleDML("DELETE", targetDBName, targetTableName, columnNames, table, row, nil))
 		}
 	}
-	return nil
+	return firstErr
 }
 
+// handleDML applies one row event to the target and reports whether it landed.
+//
+// A failure here is not recoverable by carrying on: the position saver runs off
+// the same handler, so a swallowed error means the offset moves past a row that
+// never reached the target and no later run will replay it. The error is
+// therefore both recorded on the handler and returned, which stops canal.
 func (h *MyEventHandler) handleDML(
 	opType, tgtDB, tgtTable string,
 	cols []string,
 	table *schema.Table,
 	newRow []interface{},
 	oldRow []interface{},
-) {
+) error {
 	tableSecurity := security.FindTableSecurityFromMappings(tgtTable, h.mappings)
 
 	h.logger.Debugf("[MySQL][%s] Syncing from %s.%s to %s.%s",
@@ -641,14 +654,15 @@ func (h *MyEventHandler) handleDML(
 				}
 				ra, _ := res.RowsAffected()
 				h.logger.Debugf("[MySQL][INSERT] table=%s.%s rowsAffected=%d", tgtDB, tgtTable, ra)
-				atomic.StoreInt32(&h.lastExecError, 0)
 				return nil
 			})
 
 		if err != nil {
 			h.logger.Errorf("[MySQL][INSERT] table=%s.%s error=%v", tgtDB, tgtTable, err)
 			atomic.StoreInt32(&h.lastExecError, 1)
+			return fmt.Errorf("apply INSERT to %s.%s: %w", tgtDB, tgtTable, err)
 		}
+		return nil
 	case "UPDATE":
 		setClauses := make([]string, len(cols))
 		for i, colName := range cols {
@@ -662,7 +676,7 @@ func (h *MyEventHandler) handleDML(
 		}
 		if len(whereClauses) == 0 {
 			h.logger.Warnf("[MySQL][UPDATE] table=%s.%s no PK => skip", tgtDB, tgtTable)
-			return
+			return nil
 		}
 		query = fmt.Sprintf("UPDATE %s.%s SET %s WHERE %s",
 			tgtDB, tgtTable,
@@ -698,14 +712,15 @@ func (h *MyEventHandler) handleDML(
 				}
 				ra, _ := res.RowsAffected()
 				h.logger.Debugf("[MySQL][UPDATE] table=%s.%s rowsAffected=%d", tgtDB, tgtTable, ra)
-				atomic.StoreInt32(&h.lastExecError, 0)
 				return nil
 			})
 
 		if err != nil {
 			h.logger.Errorf("[MySQL][UPDATE] table=%s.%s error=%v", tgtDB, tgtTable, err)
 			atomic.StoreInt32(&h.lastExecError, 1)
+			return fmt.Errorf("apply UPDATE to %s.%s: %w", tgtDB, tgtTable, err)
 		}
+		return nil
 	case "DELETE":
 		var whereClauses []string
 		for _, pkIndex := range table.PKColumns {
@@ -713,7 +728,7 @@ func (h *MyEventHandler) handleDML(
 		}
 		if len(whereClauses) == 0 {
 			h.logger.Warnf("[MySQL][DELETE] table=%s.%s no PK => skip", tgtDB, tgtTable)
-			return
+			return nil
 		}
 		query = fmt.Sprintf("DELETE FROM %s.%s WHERE %s",
 			tgtDB, tgtTable,
@@ -735,19 +750,30 @@ func (h *MyEventHandler) handleDML(
 				}
 				ra, _ := res.RowsAffected()
 				h.logger.Debugf("[MySQL][DELETE] table=%s.%s rowsAffected=%d", tgtDB, tgtTable, ra)
-				atomic.StoreInt32(&h.lastExecError, 0)
 				return nil
 			})
 
 		if err != nil {
 			h.logger.Errorf("[MySQL][DELETE] table=%s.%s error=%v", tgtDB, tgtTable, err)
 			atomic.StoreInt32(&h.lastExecError, 1)
+			return fmt.Errorf("apply DELETE to %s.%s: %w", tgtDB, tgtTable, err)
 		}
 	}
+	return nil
 }
 
 func (h *MyEventHandler) OnPosSynced(header *replication.EventHeader, pos mysql.Position, gs mysql.GTIDSet, force bool) error {
 	if h.positionSaverPath == "" {
+		return nil
+	}
+
+	// The offset is only meaningful if everything before it reached the target.
+	// Once a statement has failed the flag stays raised for the life of the
+	// handler, so the stored position never moves past the loss and a restart
+	// replays from the last offset that was fully applied.
+	if atomic.LoadInt32(&h.lastExecError) != 0 {
+		h.logger.Warnf("[MySQL] Not writing position %v: an earlier statement "+
+			"failed to apply, so replication must resume from the stored offset", pos)
 		return nil
 	}
 
