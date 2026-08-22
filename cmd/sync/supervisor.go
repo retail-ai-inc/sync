@@ -182,25 +182,28 @@ func (s *supervisor) stopAll() {
 	}
 }
 
-// applyMonitoring brings the row-count monitor into line with the settings.
+// applyMonitoring brings the process-wide watchers into line with the settings.
+//
+// Lag alerting runs whatever the row-count switch says: how far behind the
+// disaster-recovery copy is, is not an optional statistic, and the check costs
+// one pass over the recorded metrics a minute.
 func (s *supervisor) applyMonitoring(ctx context.Context, cfg *config.Config) {
 	wanted := globalFingerprint(cfg)
-	if wanted == s.monitorFingerprint && (s.monitorCancel != nil) == cfg.EnableTableRowCountMonitoring {
+	if wanted == s.monitorFingerprint && s.monitorCancel != nil {
 		return
-	}
-
-	if s.monitorCancel != nil {
-		s.monitorCancel()
-		s.monitorCancel = nil
 	}
 	s.monitorFingerprint = wanted
 
-	if !cfg.EnableTableRowCountMonitoring {
-		return
+	if s.monitorCancel != nil {
+		s.monitorCancel()
 	}
 	monitorCtx, cancel := context.WithCancel(ctx)
 	s.monitorCancel = cancel
-	app.StartRowCountMonitoring(monitorCtx, cfg, s.log, cfg.MonitorInterval)
+
+	app.StartLagAlerting(monitorCtx, cfg, s.log)
+	if cfg.EnableTableRowCountMonitoring {
+		app.StartRowCountMonitoring(monitorCtx, cfg, s.log, cfg.MonitorInterval)
+	}
 }
 
 // syncerFor reports the Start function for a task's engine, or nil when the

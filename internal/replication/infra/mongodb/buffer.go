@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/retail-ai-inc/sync/internal/platform/metrics"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 )
@@ -44,6 +45,9 @@ type FileParseResult struct {
 	WriteModels []mongo.WriteModel
 	ParseTime   time.Duration
 	Error       error
+	// NewestEvent is when the source made the most recent change in the file.
+	// The applied lag is measured from it once the batch lands.
+	NewestEvent time.Time
 }
 
 func (s *MongoDBSyncer) diskWriter(ctx context.Context, eventChannel <-chan streamEvent, sourceDB, collectionName string) {
@@ -199,6 +203,7 @@ func (s *MongoDBSyncer) processBufferedChanges(ctx context.Context, sourceDB, co
 	var processedFiles []string
 	var allWriteModels []mongo.WriteModel
 	var writeSuccess = true
+	var newestEvent time.Time
 
 	// === STEP 2: File Parsing (Parallel) ===
 	step2StartTime := time.Now()
@@ -206,7 +211,7 @@ func (s *MongoDBSyncer) processBufferedChanges(ctx context.Context, sourceDB, co
 		batchID, len(selectedFiles))
 
 	// Use parallel parsing for better performance
-	allWriteModels, processedFiles, writeSuccess = s.parseFilesParallel(ctx, selectedFiles, sourceDB, collectionName, batchID)
+	allWriteModels, processedFiles, writeSuccess, newestEvent = s.parseFilesParallel(ctx, selectedFiles, sourceDB, collectionName, batchID)
 
 	step2Duration := time.Since(step2StartTime)
 	avgParseTime := time.Duration(0)
@@ -232,7 +237,12 @@ func (s *MongoDBSyncer) processBufferedChanges(ctx context.Context, sourceDB, co
 		if err != nil {
 			s.logger.Errorf("[MongoDB] [BatchID:%s] Database bulk write failed: %v", batchID, err)
 			writeSuccess = false
+			metrics.Failed(s.metricLabels(collectionName), len(allWriteModels))
 		} else {
+			metrics.Applied(s.metricLabels(collectionName), len(allWriteModels))
+			if !newestEvent.IsZero() {
+				metrics.SetLag(s.metricLabels(collectionName), time.Since(newestEvent).Seconds())
+			}
 			step4Duration = time.Since(step4StartTime)
 			opsPerSecond := float64(len(allWriteModels)) / step4Duration.Seconds()
 			s.logger.Debugf("[MongoDB] [BatchID:%s] Database bulk write completed - %d operations in %v (%.2f ops/sec)",
@@ -289,7 +299,7 @@ func (s *MongoDBSyncer) processBufferedChanges(ctx context.Context, sourceDB, co
 }
 
 // parseFilesParallel parses multiple files in parallel using worker goroutines
-func (s *MongoDBSyncer) parseFilesParallel(ctx context.Context, selectedFiles []string, sourceDB, collectionName, batchID string) ([]mongo.WriteModel, []string, bool) {
+func (s *MongoDBSyncer) parseFilesParallel(ctx context.Context, selectedFiles []string, sourceDB, collectionName, batchID string) ([]mongo.WriteModel, []string, bool, time.Time) {
 	// Determine optimal worker count based on CPU cores and file count
 	workerCount := runtime.NumCPU()
 	if workerCount > 8 {
@@ -371,12 +381,16 @@ func (s *MongoDBSyncer) parseFilesParallel(ctx context.Context, selectedFiles []
 	// happened to finish in. The buffer files are the change stream in sequence,
 	// so collecting them as they arrived would reorder one document's changes
 	// against another's — and, within a document, its own.
+	var newestEvent time.Time
 	for _, result := range fileResults {
 		if result.FilePath == "" || result.Error != nil {
 			continue
 		}
 		allWriteModels = append(allWriteModels, result.WriteModels...)
 		processedFiles = append(processedFiles, result.FilePath)
+		if result.NewestEvent.After(newestEvent) {
+			newestEvent = result.NewestEvent
+		}
 	}
 
 	// Calculate statistics
@@ -388,7 +402,7 @@ func (s *MongoDBSyncer) parseFilesParallel(ctx context.Context, selectedFiles []
 	s.logger.Debugf("[MongoDB] [BatchID:%s] Parallel parsing stats: processed=%d, avg=%v, min=%v, max=%v",
 		batchID, len(processedFiles), avgParseTime, minParseTime, maxParseTime)
 
-	return allWriteModels, processedFiles, writeSuccess
+	return allWriteModels, processedFiles, writeSuccess, newestEvent
 }
 
 // fileParseWorker is a worker goroutine that processes file parsing jobs
@@ -408,13 +422,14 @@ func (s *MongoDBSyncer) fileParseWorker(ctx context.Context, workerID int, jobs 
 		default:
 			// Process the file
 			startTime := time.Now()
-			writeModels, err := s.parseFileToWriteModels(ctx, job.FilePath, job.SourceDB, job.CollectionName)
+			writeModels, newest, err := s.parseFileWithTiming(ctx, job.FilePath, job.SourceDB, job.CollectionName)
 			parseTime := time.Since(startTime)
 
 			result := FileParseResult{
 				FilePath:    job.FilePath,
 				FileIndex:   job.FileIndex,
 				WriteModels: writeModels,
+				NewestEvent: newest,
 				ParseTime:   parseTime,
 				Error:       err,
 			}
@@ -428,9 +443,16 @@ func (s *MongoDBSyncer) fileParseWorker(ctx context.Context, workerID int, jobs 
 
 // parseFileToWriteModels parses a file and returns all WriteModels without executing them
 func (s *MongoDBSyncer) parseFileToWriteModels(ctx context.Context, filePath string, sourceDB, collectionName string) ([]mongo.WriteModel, error) {
+	models, _, err := s.parseFileWithTiming(ctx, filePath, sourceDB, collectionName)
+	return models, err
+}
+
+// parseFileWithTiming reads one buffer file, reporting both the changes to
+// apply and when the source made the most recent of them.
+func (s *MongoDBSyncer) parseFileWithTiming(ctx context.Context, filePath string, sourceDB, collectionName string) ([]mongo.WriteModel, time.Time, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open file: %w", err)
+		return nil, time.Time{}, fmt.Errorf("failed to open file: %w", err)
 	}
 	defer file.Close()
 
@@ -456,6 +478,7 @@ func (s *MongoDBSyncer) parseFileToWriteModels(ctx context.Context, filePath str
 	})
 
 	var writeModels []mongo.WriteModel
+	var newest time.Time
 
 	for scanner.Scan() {
 		eventData := scanner.Bytes()
@@ -463,6 +486,9 @@ func (s *MongoDBSyncer) parseFileToWriteModels(ctx context.Context, filePath str
 			continue
 		}
 
+		if at, ok := eventClusterTime(bson.Raw(eventData)); ok && at.After(newest) {
+			newest = at
+		}
 		model := s.convertRawBSONToWriteModel(eventData, sourceDB, collectionName)
 		if model != nil {
 			writeModels = append(writeModels, model)
@@ -470,13 +496,13 @@ func (s *MongoDBSyncer) parseFileToWriteModels(ctx context.Context, filePath str
 	}
 
 	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("error reading from file stream: %w", err)
+		return nil, time.Time{}, fmt.Errorf("error reading from file stream: %w", err)
 	}
 
 	s.logger.Debugf("[MongoDB] Parsed file %s: extracted %d write models",
 		filepath.Base(filePath), len(writeModels))
 
-	return writeModels, nil
+	return writeModels, newest, nil
 }
 
 // Legacy method for backward compatibility - now deprecated

@@ -1,6 +1,11 @@
 package mongodb
 
 import (
+	"strconv"
+	"time"
+
+	"github.com/retail-ai-inc/sync/internal/platform/dsn"
+	"github.com/retail-ai-inc/sync/internal/platform/metrics"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 )
@@ -107,4 +112,31 @@ func orderedRuns(models []mongo.WriteModel) [][]mongo.WriteModel {
 		}
 	}
 	return runs
+}
+
+// eventClusterTime reports when the source made the change a raw event
+// describes. Change stream documents carry it as clusterTime.
+func eventClusterTime(raw bson.Raw) (time.Time, bool) {
+	value, err := raw.LookupErr("clusterTime")
+	if err != nil {
+		return time.Time{}, false
+	}
+	seconds, _, ok := value.TimestampOK()
+	if !ok || seconds == 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(int64(seconds), 0), true
+}
+
+// metricLabels identify one collection of one task in the metrics. The
+// endpoints are named without their credentials, because the exposition is
+// scraped and stored.
+func (s *MongoDBSyncer) metricLabels(collection string) metrics.Labels {
+	return metrics.Labels{
+		"task":       strconv.Itoa(s.cfg.ID),
+		"engine":     "mongodb",
+		"collection": collection,
+		"source":     dsn.Endpoint(s.cfg.Type, s.cfg.SourceConnection),
+		"target":     dsn.Endpoint(s.cfg.Type, s.cfg.TargetConnection),
+	}
 }

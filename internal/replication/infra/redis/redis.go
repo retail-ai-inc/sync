@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -14,6 +15,7 @@ import (
 	"github.com/retail-ai-inc/sync/internal/platform/config"
 	intRedis "github.com/retail-ai-inc/sync/internal/platform/dbconn/redis"
 	"github.com/retail-ai-inc/sync/internal/platform/dsn"
+	"github.com/retail-ai-inc/sync/internal/platform/metrics"
 	"github.com/retail-ai-inc/sync/internal/platform/resilience"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/directionlock"
 	"github.com/sirupsen/logrus"
@@ -126,6 +128,10 @@ func (r *RedisSyncer) Start(ctx context.Context) {
 		return
 	}
 	defer stopGuard()
+
+	labels := r.metricLabels()
+	metrics.SetTaskUp(labels, true)
+	defer metrics.SetTaskUp(labels, false)
 
 	r.checkKeyspaceNotifications(ctx)
 
@@ -245,8 +251,10 @@ func (r *RedisSyncer) copyKeys(ctx context.Context, keys []string) error {
 		if err := r.copyFullKey(ctx, k); err != nil {
 			r.logger.Errorf("[Redis] copyFullKey fail => key=%s, error=%v", k, err)
 			atomic.StoreInt32(&r.lastExecErr, 1)
+			metrics.Failed(r.metricLabels(), 1)
 		} else {
 			r.logger.Debugf("[Redis][COPY] key=%s copied successfully", k)
+			metrics.Applied(r.metricLabels(), 1)
 		}
 	}
 	return nil
@@ -618,4 +626,15 @@ func (r *RedisSyncer) claimDirection(ctx context.Context) (func(), error) {
 		r.logger.Warnf("[Redis] Could not refresh the replication direction claim: %v", err)
 	})
 	return stop, nil
+}
+
+// metricLabels identify this task in the metrics. The endpoints are named
+// without their credentials, because the exposition is scraped and stored.
+func (r *RedisSyncer) metricLabels() metrics.Labels {
+	return metrics.Labels{
+		"task":   strconv.Itoa(r.cfg.ID),
+		"engine": "redis",
+		"source": dsn.Endpoint("redis", r.cfg.SourceConnection),
+		"target": dsn.Endpoint("redis", r.cfg.TargetConnection),
+	}
 }

@@ -11,6 +11,7 @@ import (
 
 	"github.com/retail-ai-inc/sync/internal/platform/config"
 	"github.com/retail-ai-inc/sync/internal/platform/dsn"
+	"github.com/retail-ai-inc/sync/internal/platform/metrics"
 	"github.com/retail-ai-inc/sync/internal/platform/resilience"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/directionlock"
 	"github.com/sirupsen/logrus"
@@ -169,6 +170,9 @@ func (s *MongoDBSyncer) Start(ctx context.Context) {
 		return
 	}
 	defer stopGuard()
+
+	metrics.SetTaskUp(s.metricLabels(""), true)
+	defer metrics.SetTaskUp(s.metricLabels(""), false)
 
 	for _, mapping := range s.cfg.Mappings {
 		if len(mapping.Tables) > 0 {

@@ -375,7 +375,7 @@ func TestParseFilesParallelCollectsEveryFile(t *testing.T) {
 			insertEvent(t, string(rune('a'+i))), insertEvent(t, string(rune('A'+i)))))
 	}
 
-	models, processed, ok := s.parseFilesParallel(context.Background(), files, "shop", "orders", "b1")
+	models, processed, ok, _ := s.parseFilesParallel(context.Background(), files, "shop", "orders", "b1")
 	if !ok {
 		t.Error("parseFilesParallel reported a failure")
 	}
@@ -398,7 +398,7 @@ func TestOneUnreadableFileFailsTheWholeBatch(t *testing.T) {
 	good := writeStream(t, dir, "batch_1.bsonstream", insertEvent(t, "1"))
 	missing := filepath.Join(dir, "batch_2.bsonstream")
 
-	models, processed, ok := s.parseFilesParallel(context.Background(),
+	models, processed, ok, _ := s.parseFilesParallel(context.Background(),
 		[]string{good, missing}, "shop", "orders", "b1")
 
 	if ok {
@@ -413,7 +413,7 @@ func TestOneUnreadableFileFailsTheWholeBatch(t *testing.T) {
 func TestParseFilesParallelOnAnEmptySelection(t *testing.T) {
 	s := newBufferSyncer(t)
 
-	models, processed, ok := s.parseFilesParallel(context.Background(), nil, "shop", "orders", "b1")
+	models, processed, ok, _ := s.parseFilesParallel(context.Background(), nil, "shop", "orders", "b1")
 	if !ok || len(models) != 0 || len(processed) != 0 {
 		t.Errorf("= %d models, %d files, ok=%v", len(models), len(processed), ok)
 	}

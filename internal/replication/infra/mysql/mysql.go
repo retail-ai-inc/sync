@@ -21,6 +21,7 @@ import (
 	"github.com/go-mysql-org/go-mysql/schema"
 	"github.com/retail-ai-inc/sync/internal/platform/config"
 	"github.com/retail-ai-inc/sync/internal/platform/dsn"
+	"github.com/retail-ai-inc/sync/internal/platform/metrics"
 	"github.com/retail-ai-inc/sync/internal/platform/resilience"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/directionlock"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/security"
@@ -137,6 +138,7 @@ func (s *MySQLSyncer) Start(ctx context.Context) {
 		lastExecError:     0,
 		TargetConnection:  s.cfg.TargetConnection,
 		flavor:            cfg.Flavor,
+		labels:            s.metricLabels(),
 	}
 	c.SetEventHandler(h)
 
@@ -187,6 +189,9 @@ func (s *MySQLSyncer) Start(ctx context.Context) {
 			}
 		}
 	}()
+
+	metrics.SetTaskUp(s.metricLabels(), true)
+	defer metrics.SetTaskUp(s.metricLabels(), false)
 
 	<-ctx.Done()
 	s.logger.Info("[MySQL] Synchronization stopped.")
@@ -782,6 +787,12 @@ type MyEventHandler struct {
 	// flavor names the server dialect the recorded GTID set belongs to, so a
 	// MariaDB set is not read back as a MySQL one.
 	flavor string
+	// labels identify this task in the metrics.
+	labels metrics.Labels
+	// sourceEventAt is when the source made the change the buffer is holding.
+	// The applied lag is measured from it, which is the number a
+	// disaster-recovery setup is judged on.
+	sourceEventAt time.Time
 	// dialect is the flavour the target speaks. The zero value is MySQL, so a
 	// handler built without naming one behaves as production does.
 	dialect dialect
@@ -823,6 +834,14 @@ func (h *MyEventHandler) OnRow(e *canal.RowsEvent) error {
 	columnNames := make([]string, len(table.Columns))
 	for i, col := range table.Columns {
 		columnNames[i] = col.Name
+	}
+
+	if e.Header != nil && e.Header.Timestamp > 0 {
+		at := time.Unix(int64(e.Header.Timestamp), 0)
+		h.mu.Lock()
+		h.sourceEventAt = at
+		h.mu.Unlock()
+		metrics.SetReadLag(h.labels, time.Since(at).Seconds())
 	}
 
 	var firstErr error
@@ -984,6 +1003,7 @@ func (h *MyEventHandler) flush() error {
 	pending := h.pending
 	h.pending = nil
 	db := h.targetDB
+	eventAt := h.sourceEventAt
 	h.mu.Unlock()
 
 	if len(pending) == 0 {
@@ -1013,7 +1033,13 @@ func (h *MyEventHandler) flush() error {
 		h.logger.Errorf("[MySQL] Failed to apply a source transaction of %d "+
 			"statements: %v", len(pending), err)
 		atomic.StoreInt32(&h.lastExecError, 1)
+		metrics.Failed(h.labels, len(pending))
 		return fmt.Errorf("apply source transaction: %w", err)
+	}
+
+	metrics.Applied(h.labels, len(pending))
+	if !eventAt.IsZero() {
+		metrics.SetLag(h.labels, time.Since(eventAt).Seconds())
 	}
 	h.logger.Debugf("[MySQL] Applied a source transaction of %d statements", len(pending))
 	return nil
@@ -1124,4 +1150,15 @@ func (s *MySQLSyncer) claimDirection(ctx context.Context, targetDB *sql.DB) (fun
 		stop()
 		_ = sourceDB.Close()
 	}, nil
+}
+
+// metricLabels identify this task in the metrics. The endpoints are named
+// without their credentials, because the exposition is scraped and stored.
+func (s *MySQLSyncer) metricLabels() metrics.Labels {
+	return metrics.Labels{
+		"task":   strconv.Itoa(s.cfg.ID),
+		"engine": s.cfg.Type,
+		"source": dsn.Endpoint(s.cfg.Type, s.cfg.SourceConnection),
+		"target": dsn.Endpoint(s.cfg.Type, s.cfg.TargetConnection),
+	}
 }

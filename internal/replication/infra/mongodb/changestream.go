@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/retail-ai-inc/sync/internal/platform/metrics"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -99,6 +100,9 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 			event := streamEvent{
 				RawData:     cs.Current,
 				ResumeToken: cs.ResumeToken(),
+			}
+			if at, ok := eventClusterTime(cs.Current); ok {
+				metrics.SetReadLag(s.metricLabels(collectionName), time.Since(at).Seconds())
 			}
 
 			select {

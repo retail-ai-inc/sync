@@ -14,6 +14,7 @@ import (
 	"github.com/retail-ai-inc/sync/internal/platform/config"
 	"github.com/retail-ai-inc/sync/internal/platform/httpapi"
 	"github.com/retail-ai-inc/sync/internal/platform/logging"
+	"github.com/retail-ai-inc/sync/internal/platform/metrics"
 	"github.com/retail-ai-inc/sync/internal/platform/webui"
 	"github.com/sirupsen/logrus"
 )
@@ -56,6 +57,11 @@ func main() {
 	// configured and must never require a credential.
 	router.Get("/healthz", httpapi.Health)
 	router.Get("/readyz", httpapi.Ready)
+
+	// The exposition a scraper reads. It sits outside /api and takes no
+	// credential, which is what every scraper expects; keeping the port off the
+	// public network is the requirement that replaces the token.
+	router.Get("/metrics", metrics.Handler)
 
 	router.Get("/*", func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
