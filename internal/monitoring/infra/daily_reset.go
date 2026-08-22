@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/retail-ai-inc/sync/internal/monitoring/domain"
-
 	// "github.com/sirupsen/logrus"
 
 	"github.com/sirupsen/logrus"
@@ -140,10 +138,10 @@ func resetInMemoryAndStored(tx *sql.Tx, syncTaskID int) error {
 	}
 	rowsAffected, _ := result.RowsAffected()
 
-	// Also reset in-memory domain.ChangeStreamInfo statistics for this sync task
-	domain.ResetInMemoryStatistics(syncTaskID)
-
-	logrus.Infof("[MongoDB] Daily statistics reset completed for task_id=%d: %d records reset (database + memory)",
+	// There is nothing in memory to reset any more: the figures are built from
+	// the replication counters when they are asked for, rather than accumulated
+	// in a registry of their own.
+	logrus.Infof("[MongoDB] Daily statistics reset completed for task_id=%d: %d records reset",
 		syncTaskID, rowsAffected)
 	return nil
 }

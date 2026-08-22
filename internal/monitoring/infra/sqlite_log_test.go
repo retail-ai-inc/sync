@@ -10,6 +10,7 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/retail-ai-inc/sync/internal/monitoring/domain"
+	"github.com/retail-ai-inc/sync/internal/platform/metrics"
 )
 
 // useMonitoringDB points the package at a throwaway SQLite file carrying the
@@ -360,33 +361,59 @@ func TestAStreamThatStoppedIsStillRecorded(t *testing.T) {
 	}
 }
 
-// The whole registry that feeds this table is disconnected: domain.RegisterChangeStream,
-// domain.UpdateChangeStreamActivity, UpdateChangeStreamDetailedActivity,
-// domain.AccumulateChangeStreamActivity, domain.RecordChangeStreamError and
-// domain.DeactivateChangeStream have no callers anywhere outside their own
-// definitions, so changeStreamTracker is permanently empty. The monitoring loop
-// calls domain.GetActiveChangeStreamsByTaskID, gets an empty map, and hands it here —
-// where the upsert loop has nothing to iterate. StoreChangeStreamStatistics
-// returns nil, the caller logs a success, and not one row is ever written or
-// updated. This is why the production table holds 33 rows created in 2025 whose
-// counters are all still zero (T-052).
-func TestAnEmptyRegistryWritesNothingAndReportsSuccess(t *testing.T) {
+// TestTheFiguresComeFromTheReplicationCounters covers where the statistics are
+// built from. They used to come from a registry — RegisterChangeStream and six
+// functions that updated it — which nothing in the tree ever called, so the map
+// was permanently empty: the collector asked a task for its streams, got
+// nothing, wrote nothing, and logged that it had stored them. A copy of the
+// production database shows the result: thirty-three rows created in June 2025,
+// every counter still zero.
+func TestTheFiguresComeFromTheReplicationCounters(t *testing.T) {
 	conn := useMonitoringDB(t)
 
-	// What domain.GetActiveChangeStreamsByTaskID returns in production. Nothing
-	// in this package registers a stream, and the seven writers that could are
-	// themselves uncalled (T-052), so the registry is empty without a reset —
-	// which the assertion below states outright.
-	empty := domain.GetActiveChangeStreamsByTaskID(1)
-	if len(empty) != 0 {
-		t.Fatalf("the tracker is not empty: %d entries", len(empty))
+	labels := metrics.Labels{
+		"task": "1", "engine": "mongodb", "collection": "orders", "source": "tokyo:27017",
+	}
+	t.Cleanup(func() { metrics.Default.Forget(labels) })
+	metrics.Applied(labels, 12)
+	metrics.Failed(labels, 3)
+
+	streams := changeStreamActivity(1)
+	if len(streams) != 1 {
+		t.Fatalf("%d streams were reported, want the one the counters name: %v", len(streams), streams)
 	}
 
-	if err := StoreChangeStreamStatistics(1, empty); err != nil {
-		t.Fatalf("StoreChangeStreamStatistics(empty) = %v — an empty registry appears to be reported now; assert the error instead", err)
+	if err := StoreChangeStreamStatistics(1, streams); err != nil {
+		t.Fatalf("StoreChangeStreamStatistics: %v", err)
+	}
+
+	got, ok := readStats(t, conn, 1, "tokyo:27017.orders")
+	if !ok {
+		t.Fatalf("no row was written for the collection: %v", streams)
+	}
+	if got.Executed != 12 {
+		t.Errorf("executed = %d, want 12", got.Executed)
+	}
+	if got.Errors != 3 {
+		t.Errorf("errors = %d, want 3", got.Errors)
+	}
+}
+
+// TestATaskWithNoActivityWritesNothing is the other half: a task whose syncers
+// have recorded nothing has no streams to report, and inventing rows of zeroes
+// for it is what made the old table so misleading.
+func TestATaskWithNoActivityWritesNothing(t *testing.T) {
+	conn := useMonitoringDB(t)
+
+	empty := changeStreamActivity(4242)
+	if len(empty) != 0 {
+		t.Fatalf("%d streams were reported for a task with no counters", len(empty))
+	}
+	if err := StoreChangeStreamStatistics(4242, empty); err != nil {
+		t.Fatalf("StoreChangeStreamStatistics: %v", err)
 	}
 	if n := countRows(t, conn, "changestream_statistics"); n != 0 {
-		t.Fatalf("%d rows were written from an empty registry", n)
+		t.Errorf("%d rows were written for a task with no activity", n)
 	}
 }
 

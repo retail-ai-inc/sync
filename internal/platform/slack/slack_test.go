@@ -2,7 +2,10 @@ package slack
 
 import (
 	"context"
+	"encoding/json"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -143,7 +146,9 @@ func TestIsConfigured(t *testing.T) {
 	}{
 		{"both set", "https://hooks.example/x", "#ops", true},
 		{"no webhook", "", "#ops", false},
-		{"no channel", "https://hooks.example/x", "", false},
+		// A webhook carries its own default channel, so one is enough. This used
+		// to require a channel and a shell script as well.
+		{"no channel", "https://hooks.example/x", "", true},
 		{"neither", "", "", false},
 	}
 
@@ -157,25 +162,69 @@ func TestIsConfigured(t *testing.T) {
 	}
 }
 
-// Notifications are delivered by shelling out to cloudbuild.sh, which is
-// looked for at three hard-coded paths. In any deployment that does not ship
-// the script at one of them, IsConfigured returns false, SendNotification
-// returns nil, and the only trace is a Debug-level line. Every alert — sync
-// failure, backup failure — is silently dropped while the caller is told it
-// succeeded.
-func TestAMissingScriptSilentlyDropsEveryNotification(t *testing.T) {
+// TestWithoutTheScriptTheWebhookIsUsed covers every deployment that does not
+// ship cloudbuild.sh at one of three hardcoded paths. IsConfigured returned
+// false, SendNotification returned nil, and the only trace was a debug line — so
+// every alert, including "replication has stopped", was dropped while the caller
+// was told it had been sent.
+func TestWithoutTheScriptTheWebhookIsUsed(t *testing.T) {
 	chdirWithoutScript(t)
 
-	n := NewSlackNotifier("https://hooks.example/x", "#ops", quietLogger())
+	var got map[string]interface{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(server.Close)
 
-	if n.IsConfigured() {
-		t.Fatal("IsConfigured() = true without the script — the transport appears to have changed")
+	n := NewSlackNotifier(server.URL, "#ops", quietLogger())
+	if !n.IsConfigured() {
+		t.Fatal("IsConfigured() = false with a webhook and no script")
 	}
-	if err := n.SendNotification(context.Background(), "the tokyo cluster is down", nil); err != nil {
-		t.Fatalf("SendNotification() = %v — a dropped notification appears to be reported now; assert the error instead", err)
-	}
+
 	if err := n.SendError(context.Background(), "replication", "target diverged"); err != nil {
-		t.Fatalf("SendError() = %v — a dropped notification appears to be reported now", err)
+		t.Fatalf("SendError: %v", err)
+	}
+	if got == nil {
+		t.Fatal("nothing was posted to the webhook")
+	}
+	if text, _ := got["text"].(string); !strings.Contains(text, "replication") {
+		t.Errorf("posted %#v, want the alert", got)
+	}
+	if got["channel"] != "#ops" {
+		t.Errorf("channel = %v", got["channel"])
+	}
+}
+
+// TestAnAlertThatCouldNotBeSentIsReported is the other half: an alert nobody
+// received must not read as one that was sent.
+func TestAnAlertThatCouldNotBeSentIsReported(t *testing.T) {
+	chdirWithoutScript(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte("invalid_token"))
+	}))
+	t.Cleanup(server.Close)
+
+	n := NewSlackNotifier(server.URL, "#ops", quietLogger())
+
+	err := n.SendNotification(context.Background(), "the tokyo cluster is down", nil)
+	if err == nil {
+		t.Fatal("SendNotification = nil for an alert Slack refused")
+	}
+	if !strings.Contains(err.Error(), "invalid_token") {
+		t.Errorf("err = %v, want it to carry what Slack said", err)
+	}
+}
+
+// TestNoWebhookIsNotAFailure covers a deployment that has asked for no alerts.
+func TestNoWebhookIsNotAFailure(t *testing.T) {
+	chdirWithoutScript(t)
+
+	n := NewSlackNotifier("", "", quietLogger())
+	if err := n.SendNotification(context.Background(), "anything", nil); err != nil {
+		t.Errorf("SendNotification = %v with no webhook configured", err)
 	}
 }
 

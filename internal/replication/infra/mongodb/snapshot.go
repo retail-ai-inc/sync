@@ -78,7 +78,7 @@ func (s *MongoDBSyncer) doInitialSync(ctx context.Context, sourceColl, targetCol
 		if errD := cursor.Decode(&doc); errD != nil {
 			return fmt.Errorf("decode doc fail => %v", errD)
 		}
-		batch = append(batch, doc)
+		batch = append(batch, s.maskDocument(sourceColl.Name(), doc))
 		if len(batch) >= batchSize {
 			written, err := s.copyBatch(ctx, targetColl, batch, targetDB)
 			if err != nil {

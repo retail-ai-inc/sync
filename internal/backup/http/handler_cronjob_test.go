@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	_ "github.com/mattn/go-sqlite3"
@@ -112,5 +113,29 @@ func TestTwoRunsOfOneJobGetDistinctIDs(t *testing.T) {
 	}
 	if n := app.RunCount(); n != 2 {
 		t.Errorf("the register holds %d entries for two runs", n)
+	}
+
+	// Both run in the background against the temporary database this test owns,
+	// so they have to finish before it is taken away.
+	settle(t, first, second)
+}
+
+// settle waits for background runs to reach an outcome, so the temporary
+// database they write to outlives them.
+func settle(t *testing.T, taskIDs ...string) {
+	t.Helper()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for _, taskID := range taskIDs {
+		for {
+			run, ok := app.LookupRun(taskID)
+			if !ok || (run.Status != "pending" && run.Status != "running") {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("the run %s is still %s", taskID, run.Status)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
 	}
 }

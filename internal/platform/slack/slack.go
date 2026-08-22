@@ -1,11 +1,16 @@
 package slack
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -90,25 +95,34 @@ func findCloudBuildScript() string {
 	return ""
 }
 
-// IsConfigured checks if Slack notification is properly configured
+// IsConfigured checks if Slack notification is properly configured.
+//
+// It no longer requires cloudbuild.sh. A webhook URL is what Slack needs, and
+// this used to refuse to send without a shell script it looked for in three
+// hardcoded paths — so any deployment that did not have the script in one of
+// them dropped every alert, including the ones about replication having stopped,
+// while telling the caller the notification had been sent.
 func (s *SlackNotifier) IsConfigured() bool {
-	if s.webhookURL == "" || s.channel == "" {
-		return false
+	return s.webhookURL != ""
+}
+
+// SendNotification sends a notification to Slack.
+//
+// It posts to the webhook directly. The script is still used when one is
+// present, because a deployment may rely on what it adds, but it is no longer
+// required — and an alert that could not be sent is now an error rather than a
+// debug line and a nil.
+func (s *SlackNotifier) SendNotification(ctx context.Context, message string, opts *SlackNotificationOptions) error {
+	if !s.IsConfigured() {
+		// Not an error: a deployment with no webhook has asked for no alerts.
+		// One that has a webhook and cannot reach it is a different thing, and
+		// that one is reported.
+		s.logger.Debugf("[Slack] Notification skipped - no webhook configured: %s", message)
+		return nil
 	}
 
 	if s.scriptPath == "" {
-		s.logger.Warn("[Slack] cloudbuild.sh script not found in any location")
-		return false
-	}
-
-	return true
-}
-
-// SendNotification sends a notification to Slack using the cloudbuild.sh script
-func (s *SlackNotifier) SendNotification(ctx context.Context, message string, opts *SlackNotificationOptions) error {
-	if !s.IsConfigured() {
-		s.logger.Debugf("[Slack] Notification skipped - not configured: %s", message)
-		return nil
+		return s.postToWebhook(ctx, message, opts)
 	}
 
 	// Set default options if not provided
@@ -166,6 +180,77 @@ func (s *SlackNotifier) SendNotification(ctx context.Context, message string, op
 	s.logger.Infof("[Slack] Notification sent successfully")
 	s.logger.Debugf("[Slack] Command output: %s", string(output))
 
+	return nil
+}
+
+// postToWebhook sends the message to Slack over HTTP.
+func (s *SlackNotifier) postToWebhook(ctx context.Context, message string, opts *SlackNotificationOptions) error {
+	if opts == nil {
+		opts = &SlackNotificationOptions{AlertType: SlackAlertGood}
+	}
+
+	attachment := map[string]interface{}{
+		"color": string(opts.AlertType),
+		"text":  message,
+	}
+	var fields []map[string]interface{}
+	for name, value := range opts.ExtraFields {
+		fields = append(fields, map[string]interface{}{"title": name, "value": value, "short": true})
+	}
+	if opts.Trigger != "" {
+		fields = append(fields, map[string]interface{}{"title": "Trigger", "value": opts.Trigger, "short": true})
+	}
+	if opts.BranchName != "" {
+		fields = append(fields, map[string]interface{}{"title": "Branch", "value": opts.BranchName, "short": true})
+	}
+	if opts.CommitURL != "" {
+		fields = append(fields, map[string]interface{}{"title": "Commit", "value": opts.CommitURL, "short": false})
+	}
+	if len(fields) > 0 {
+		// A stable order, so the same alert always reads the same way.
+		sort.Slice(fields, func(i, j int) bool {
+			return fields[i]["title"].(string) < fields[j]["title"].(string)
+		})
+		attachment["fields"] = fields
+	}
+
+	payload := map[string]interface{}{
+		"username":    s.username,
+		"text":        message,
+		"attachments": []interface{}{attachment},
+	}
+	if s.channel != "" {
+		payload["channel"] = s.channel
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("render the Slack message: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.webhookURL, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build the Slack request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		s.logger.Errorf("[Slack] Failed to send notification: %v", err)
+		return fmt.Errorf("send the Slack notification: %w", err)
+	}
+	defer resp.Body.Close()
+
+	answer, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+	if resp.StatusCode != http.StatusOK {
+		s.logger.Errorf("[Slack] Failed to send notification: %s: %s", resp.Status, answer)
+		return fmt.Errorf("send the Slack notification: %s: %s", resp.Status, answer)
+	}
+
+	s.logger.Infof("[Slack] Notification sent successfully")
 	return nil
 }
 

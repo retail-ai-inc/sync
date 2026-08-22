@@ -106,6 +106,10 @@ func TestBackupRunHandlerActuallyRunsTheJob(t *testing.T) {
 	if _, found := app.LookupRun(taskID); !found {
 		t.Errorf("the run %q is not registered", taskID)
 	}
+
+	// It runs in the background against the temporary database this test owns,
+	// so it has to finish before that is taken away.
+	settle(t, taskID)
 }
 
 // ---------------------------------------------------------- BackupUpdate
