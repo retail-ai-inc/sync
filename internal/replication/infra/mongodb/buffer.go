@@ -70,6 +70,33 @@ const defaultBufferLimitBytes = 2 << 30
 // full.
 const bufferFullPause = 5 * time.Second
 
+// defaultFlushInterval is how long a partly filled batch of changes waits before
+// being written out for the applier to pick up.
+//
+// It is the syncer's own contribution to the recovery point, and it is paid on
+// every change that arrives more slowly than a batch fills: measured against a
+// sharded MongoDB 8.0 cluster at 50 writes a second, a two-second interval put
+// the median end-to-end latency at 3.3s where the change stream alone delivered
+// in 1.75s. Half a second keeps the batching worthwhile — a busy collection
+// still flushes on size long before the timer — while giving that back.
+const defaultFlushInterval = 500 * time.Millisecond
+
+// flushInterval reports how long a partial batch waits, which
+// SYNC_MONGO_FLUSH_INTERVAL overrides with any duration Go can parse ("200ms",
+// "2s"). Lower trades write amplification for a tighter recovery point; the two
+// are genuinely in tension and which matters more is an operational decision.
+func flushInterval() time.Duration {
+	raw := os.Getenv("SYNC_MONGO_FLUSH_INTERVAL")
+	if raw == "" {
+		return defaultFlushInterval
+	}
+	parsed, err := time.ParseDuration(raw)
+	if err != nil || parsed <= 0 {
+		return defaultFlushInterval
+	}
+	return parsed
+}
+
 // bufferLimitBytes reports the cap, which SYNC_MONGO_BUFFER_LIMIT_BYTES
 // overrides. A value of zero or less turns the cap off, which is a choice an
 // operator can make and this one will not make for them.
@@ -109,8 +136,8 @@ func (s *MongoDBSyncer) diskWriter(ctx context.Context, eventChannel <-chan stre
 
 	var buffer []streamEvent
 	const batchSize = 100
-	flushInterval := 2 * time.Second
-	timer := time.NewTimer(flushInterval)
+	interval := flushInterval()
+	timer := time.NewTimer(interval)
 	defer timer.Stop()
 
 	limit := bufferLimitBytes()
@@ -155,13 +182,13 @@ func (s *MongoDBSyncer) diskWriter(ctx context.Context, eventChannel <-chan stre
 			buffer = append(buffer, event)
 			if len(buffer) >= batchSize {
 				s.flushBufferToDisk(ctx, &buffer, sourceDB, collectionName)
-				timer.Reset(flushInterval)
+				timer.Reset(interval)
 			}
 		case <-timer.C:
 			if len(buffer) > 0 {
 				s.flushBufferToDisk(ctx, &buffer, sourceDB, collectionName)
 			}
-			timer.Reset(flushInterval)
+			timer.Reset(interval)
 		}
 	}
 }

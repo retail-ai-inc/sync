@@ -1,4 +1,4 @@
-//go:build integration
+//go:build integration || staging
 
 // Package harness provides shared fixtures for the integration suite: endpoint
 // discovery, convergence polling, and sync task construction.

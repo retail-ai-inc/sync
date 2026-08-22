@@ -2,6 +2,7 @@ package mongodb
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -101,6 +102,14 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 						"longer reaches back that far, so a fresh copy is needed: clear "+
 						"the stored checkpoint. Until then nothing is being replicated",
 						sourceDB, collectionName, err)
+				case errors.Is(err, context.Canceled), ctx.Err() != nil:
+					// The task is being stopped. A shutdown is not a failure,
+					// and logging one as an error means every deploy leaves
+					// something in the log that looks like a fault — which is
+					// how a real fault goes unnoticed.
+					s.logger.Infof("[MongoDB] Change stream for %s.%s closed on shutdown",
+						sourceDB, collectionName)
+					return nil
 				case isRecoverableError(err):
 					s.logger.Warnf("[MongoDB] Recoverable error detected for %s.%s, will be retried by guardian", sourceDB, collectionName)
 					return err

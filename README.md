@@ -176,6 +176,7 @@ loudly instead of filling the disk.
 | `SYNC_TOKEN_SECRET` | Signing secret for API tokens. Without it a generated one is used, so tokens do not survive a restart. |
 | `SYNC_LAG_ALERT_SECONDS` | Replication lag, in seconds, past which a task is reported as alerting. |
 | `SYNC_MONGO_BUFFER_LIMIT_BYTES` | Cap on the MongoDB change buffer directory. |
+| `SYNC_MONGO_FLUSH_INTERVAL` | How long a partly filled batch of MongoDB changes waits before being applied, e.g. `200ms`. Default `500ms`. Lower is a tighter recovery point at the cost of more, smaller writes. |
 | `SYNC_VERIFY_INTERVAL` | How often to compare each table against its source, e.g. `1h`. Unset means never. |
 | `SYNC_VERIFY_REPAIR` | `true` to also repair the differences the comparison finds, rather than only report them. |
 
