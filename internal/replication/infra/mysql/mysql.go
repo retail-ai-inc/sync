@@ -22,7 +22,7 @@ import (
 	"github.com/retail-ai-inc/sync/internal/replication/infra/security"
 	"github.com/sirupsen/logrus"
 
-	_ "github.com/go-sql-driver/mysql"
+	mysqldriver "github.com/go-sql-driver/mysql"
 )
 
 type MySQLSyncer struct {
@@ -468,27 +468,39 @@ func (s *MySQLSyncer) loadBinlogPosition(path string) *mysql.Position {
 	return &pos
 }
 
+// parseAddr reports the host and port canal should dial.
+//
+// The driver's own parser is used rather than splitting on punctuation: "@"
+// and ":" are both legal inside a password, and Cloud SQL generates passwords
+// that contain them. Splitting by hand recovered the wrong credentials and the
+// only symptom was an authentication failure that named neither.
 func (s *MySQLSyncer) parseAddr(dsn string) string {
-	parts := strings.Split(dsn, "@tcp(")
-	if len(parts) < 2 {
-		s.logger.Errorf("[MySQL] Invalid DSN => %s", dsn)
+	// An empty DSN parses into the driver's defaults, which would have canal
+	// quietly dial 127.0.0.1:3306 instead of the configured source.
+	if dsn == "" {
+		s.logger.Error("[MySQL] No source connection configured")
 		return ""
 	}
-	addr := strings.Split(parts[1], ")")[0]
-	return addr
+	cfg, err := mysqldriver.ParseDSN(dsn)
+	if err != nil {
+		s.logger.Errorf("[MySQL] Invalid DSN => %v", err)
+		return ""
+	}
+	if cfg.Net != "tcp" {
+		s.logger.Errorf("[MySQL] Replication needs a tcp DSN, got net=%q", cfg.Net)
+		return ""
+	}
+	return cfg.Addr
 }
 
+// parseUserPassword recovers the credentials canal should authenticate with.
 func (s *MySQLSyncer) parseUserPassword(dsn string) (string, string) {
-	parts := strings.Split(dsn, "@")
-	if len(parts) < 2 {
+	cfg, err := mysqldriver.ParseDSN(dsn)
+	if err != nil {
+		s.logger.Errorf("[MySQL] Invalid DSN => %v", err)
 		return "", ""
 	}
-	userInfo := parts[0]
-	userParts := strings.Split(userInfo, ":")
-	if len(userParts) < 2 {
-		return "", ""
-	}
-	return userParts[0], userParts[1]
+	return cfg.User, cfg.Passwd
 }
 
 func (s *MySQLSyncer) getTableColumns(ctx context.Context, db *sql.DB, database, table string) ([]string, error) {

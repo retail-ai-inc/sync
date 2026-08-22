@@ -56,7 +56,7 @@ func TestParseUserPassword(t *testing.T) {
 	}{
 		{"standard", "root:secret@tcp(localhost:3306)/db", "root", "secret"},
 		{"no credentials", "tcp(localhost:3306)/db", "", ""},
-		{"user without password", "root@tcp(localhost:3306)/db", "", ""},
+		{"user without password", "root@tcp(localhost:3306)/db", "root", ""},
 		{"empty", "", "", ""},
 	}
 
@@ -71,46 +71,51 @@ func TestParseUserPassword(t *testing.T) {
 	}
 }
 
-// TestParseUserPasswordTruncatesOnSpecialCharacters records that credentials
-// are recovered by splitting the DSN on "@" and then on ":", with no awareness
-// that either character is legal inside a password. A password containing one
-// is silently truncated, and the syncer then fails to authenticate with an
-// error that says nothing about the mangled credential.
-//
-// The DSN is assembled by config.buildDSNByType from the values an operator
-// typed into the UI, so nothing rejects such a password earlier either.
-func TestParseUserPasswordTruncatesOnSpecialCharacters(t *testing.T) {
+// TestParseUserPasswordSurvivesSpecialCharacters covers the characters that
+// used to truncate the credentials. Both are legal inside a password and both
+// appear in passwords Cloud SQL generates; the DSN is assembled from whatever
+// an operator typed into the UI, so nothing rejects them earlier either.
+func TestParseUserPasswordSurvivesSpecialCharacters(t *testing.T) {
 	s := newSyncer(t)
 
 	tests := []struct {
-		name           string
-		dsn            string
-		wantUser, want string
+		name               string
+		dsn                string
+		wantUser, wantPass string
 	}{
-		{
-			"at sign in the password",
-			"root:p@ss@tcp(localhost:3306)/db",
-			"root", "p", // want root/p@ss
-		},
-		{
-			"colon in the password",
-			"root:pa:ss@tcp(localhost:3306)/db",
-			"root", "pa", // want root/pa:ss
-		},
+		{"at sign", "root:p@ss@tcp(localhost:3306)/db", "root", "p@ss"},
+		{"colon", "root:pa:ss@tcp(localhost:3306)/db", "root", "pa:ss"},
+		{"both", "root:p@s:s@tcp(localhost:3306)/db", "root", "p@s:s"},
+		{"slash", "root:p/ss@tcp(localhost:3306)/db", "root", "p/ss"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			user, pass := s.parseUserPassword(tt.dsn)
-			if pass == "p@ss" || pass == "pa:ss" {
-				t.Fatalf("the password now survives (%q); parsing may have been "+
-					"fixed, so assert the correct value instead", pass)
-			}
-			if user != tt.wantUser || pass != tt.want {
+			if user != tt.wantUser || pass != tt.wantPass {
 				t.Errorf("parseUserPassword(%q) = %q/%q, want %q/%q",
-					tt.dsn, user, pass, tt.wantUser, tt.want)
+					tt.dsn, user, pass, tt.wantUser, tt.wantPass)
 			}
 		})
+	}
+}
+
+// TestTheAddressSurvivesSpecialCharacters is the same guarantee for the host
+// and port, which were recovered from the same split.
+func TestTheAddressSurvivesSpecialCharacters(t *testing.T) {
+	s := newSyncer(t)
+
+	if got := s.parseAddr("root:p@ss@tcp(db.internal:3306)/shop"); got != "db.internal:3306" {
+		t.Errorf("parseAddr = %q, want db.internal:3306", got)
+	}
+}
+
+// TestAnEmptyDSNIsNotTheDriverDefault records the guard in front of the parser.
+// The driver reads an empty DSN as its own defaults, which would have canal
+// dial 127.0.0.1:3306 rather than report that nothing was configured.
+func TestAnEmptyDSNIsNotTheDriverDefault(t *testing.T) {
+	if got := newSyncer(t).parseAddr(""); got != "" {
+		t.Errorf("parseAddr(\"\") = %q, want the empty string", got)
 	}
 }
 
