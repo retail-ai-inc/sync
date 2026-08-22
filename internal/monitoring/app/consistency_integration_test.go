@@ -126,7 +126,7 @@ func TestEachKindOfDivergenceIsReported(t *testing.T) {
 			t.Fatalf("seed the target: %v", err)
 		}
 	}
-	if _, err := target.Exec("INSERT INTO "+table+" (id, amount) VALUES (99, '100')"); err != nil {
+	if _, err := target.Exec("INSERT INTO " + table + " (id, amount) VALUES (99, '100')"); err != nil {
 		t.Fatalf("seed the extra row: %v", err)
 	}
 
@@ -159,7 +159,7 @@ func TestACompositePrimaryKeyCompares(t *testing.T) {
 	// One entry of one account is lost, which must not be confused with the
 	// other entries that share its first key column.
 	if _, err := target.Exec(
-		"DELETE FROM "+table+" WHERE account = 'acct-1' AND entry = 4"); err != nil {
+		"DELETE FROM " + table + " WHERE account = 'acct-1' AND entry = 4"); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 
@@ -206,7 +206,7 @@ func TestARepairMakesTheTargetMatch(t *testing.T) {
 		}
 	}
 	if _, err := target.Exec(
-		"INSERT INTO "+table+" (account, entry, amount) VALUES ('acct-9', 1, '1')"); err != nil {
+		"INSERT INTO " + table + " (account, entry, amount) VALUES ('acct-9', 1, '1')"); err != nil {
 		t.Fatalf("seed the extra row: %v", err)
 	}
 
@@ -227,7 +227,7 @@ func TestARepairMakesTheTargetMatch(t *testing.T) {
 
 	var amount string
 	if err := target.QueryRow(
-		"SELECT amount FROM "+table+" WHERE account = 'acct-1' AND entry = 10").
+		"SELECT amount FROM " + table + " WHERE account = 'acct-1' AND entry = 10").
 		Scan(&amount); err != nil {
 		t.Fatalf("read the repaired row: %v", err)
 	}
@@ -236,7 +236,7 @@ func TestARepairMakesTheTargetMatch(t *testing.T) {
 	}
 	var extras int
 	if err := target.QueryRow(
-		"SELECT COUNT(*) FROM "+table+" WHERE account = 'acct-9'").Scan(&extras); err != nil {
+		"SELECT COUNT(*) FROM " + table + " WHERE account = 'acct-9'").Scan(&extras); err != nil {
 		t.Fatalf("count the extra rows: %v", err)
 	}
 	if extras != 0 {

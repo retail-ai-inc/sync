@@ -228,7 +228,13 @@ func (r *RedisSyncer) scanSource(ctx context.Context, page func(keys []string)) 
 // scanAll walks a keyspace. A cluster keeps its keys on many nodes and SCAN
 // only ever walks the node it reached, so each master is scanned in turn.
 func scanAll(ctx context.Context, client goredis.UniversalClient, page func(keys []string)) error {
-	const batchSize = 100
+	// The page size is what the reconciliation's cost is measured in: it reads
+	// both sides and writes the differences in one round trip each per page, so
+	// across a region boundary the pass costs three round trips per page rather
+	// than three per key. Five hundred keys of payment-sized values is a
+	// hundred kilobytes or so in flight — small enough not to matter, large
+	// enough that a million keys is two thousand pages.
+	const batchSize = 500
 
 	scanOne := func(ctx context.Context, c goredis.UniversalClient) error {
 		var cursor uint64
@@ -516,11 +522,17 @@ func (r *RedisSyncer) reconcileLoop(ctx context.Context) {
 // source no longer has.
 func (r *RedisSyncer) reconcile(ctx context.Context) {
 	start := time.Now()
-	copied, removed := 0, 0
+	var examined, copied, removed int
 
 	if err := r.scanSource(ctx, func(keys []string) {
-		_ = r.copyKeys(ctx, keys)
-		copied += len(keys)
+		n, err := r.reconcileBatch(ctx, keys)
+		if err != nil {
+			r.logger.Errorf("[Redis] Reconciliation could not compare a batch: %v", err)
+			atomic.StoreInt32(&r.lastExecErr, 1)
+			return
+		}
+		examined += len(keys)
+		copied += n
 	}); err != nil {
 		r.logger.Errorf("[Redis] Reconciliation could not read the source: %v", err)
 		return
@@ -533,31 +545,191 @@ func (r *RedisSyncer) reconcile(ctx context.Context) {
 		return
 	}
 
-	r.logger.Infof("[Redis] Reconciliation finished in %v: %d keys copied, %d removed",
-		time.Since(start), copied, removed)
+	r.logger.Infof("[Redis] Reconciliation finished in %v: %d keys examined, "+
+		"%d copied, %d removed", time.Since(start), examined, copied, removed)
+}
+
+// reconcileBatch brings one page of keys in line and reports how many it had to
+// copy.
+//
+// Two things make this affordable. It compares before copying, because a replica
+// that is already correct is the normal case and re-sending a whole keyspace
+// every pass is not a comparison, it is a re-copy. And it pipelines, because the
+// cost is dominated by round trips: key by key, this did TTL, DUMP and RESTORE
+// in sequence for every key, which measured 568 keys a second against a server
+// on loopback — a million keys would have taken half an hour, and across a
+// region boundary far longer than any interval worth setting.
+func (r *RedisSyncer) reconcileBatch(ctx context.Context, keys []string) (int, error) {
+	if len(keys) == 0 {
+		return 0, nil
+	}
+
+	// One round trip for the source's payloads and expiries, one for the
+	// target's payloads.
+	sourceDumps, sourceTTLs, err := dumpBatch(ctx, r.source, keys)
+	if err != nil {
+		return 0, fmt.Errorf("read the source: %w", err)
+	}
+	targetDumps, _, err := dumpBatch(ctx, r.target, keys)
+	if err != nil {
+		return 0, fmt.Errorf("read the target: %w", err)
+	}
+
+	// The payload is what RESTORE takes, so comparing it compares exactly what
+	// would be written. Two servers of different versions can render the same
+	// value differently, in which case every key looks changed and this
+	// degrades to the copy-everything behaviour it replaces — slower, never
+	// wrong.
+	pipe := r.target.Pipeline()
+	queued := 0
+	for i, key := range keys {
+		payload := sourceDumps[i]
+		if payload == "" {
+			// Gone from the source since the scan. The target-side pass removes
+			// it; doing it here as well would race with a concurrent write.
+			continue
+		}
+		if targetDumps[i] == payload && sourceTTLs[i] == 0 {
+			continue // identical, and neither side expires it
+		}
+		if targetDumps[i] == payload {
+			// Same value, so only the expiry may differ. Setting it is one
+			// command rather than re-sending the value.
+			pipe.PExpire(ctx, key, time.Duration(sourceTTLs[i])*time.Millisecond)
+			queued++
+			continue
+		}
+		pipe.RestoreReplace(ctx, key,
+			time.Duration(sourceTTLs[i])*time.Millisecond, payload)
+		queued++
+	}
+	if queued == 0 {
+		return 0, nil
+	}
+
+	// A RESTORE that fails for one key must not hide the rest, so the errors are
+	// read per command rather than from Exec alone.
+	results, err := pipe.Exec(ctx)
+	if err != nil && err != goredis.Nil {
+		// Fall back to one key at a time, which reports precisely and is worth
+		// the round trips because it only happens when something is wrong.
+		r.logger.Warnf("[Redis] A reconciliation batch failed (%v); retrying it "+
+			"key by key", err)
+		return r.copyBatchIndividually(ctx, keys)
+	}
+	written := 0
+	for _, result := range results {
+		if result.Err() != nil && result.Err() != goredis.Nil {
+			r.logger.Warnf("[Redis] Reconciliation could not write a key: %v", result.Err())
+			atomic.StoreInt32(&r.lastExecErr, 1)
+			metrics.Failed(r.metricLabels(), 1)
+			continue
+		}
+		written++
+	}
+	metrics.Applied(r.metricLabels(), written)
+	return written, nil
+}
+
+// copyBatchIndividually is the fallback when a pipelined batch fails as a whole.
+func (r *RedisSyncer) copyBatchIndividually(ctx context.Context, keys []string) (int, error) {
+	copied := 0
+	for _, key := range keys {
+		if err := r.copyFullKey(ctx, key); err != nil {
+			r.logger.Errorf("[Redis] Reconciliation could not copy key=%s: %v", key, err)
+			atomic.StoreInt32(&r.lastExecErr, 1)
+			metrics.Failed(r.metricLabels(), 1)
+			continue
+		}
+		copied++
+	}
+	metrics.Applied(r.metricLabels(), copied)
+	return copied, nil
+}
+
+// dumpBatch reads the serialised value and the remaining expiry of every key in
+// one round trip each.
+//
+// A missing key comes back as an empty payload and a zero expiry, which is what
+// the caller wants to know and is not an error: the keyspace moves while it is
+// being walked.
+func dumpBatch(ctx context.Context, client goredis.UniversalClient, keys []string) (dumps []string, ttls []int64, err error) {
+	pipe := client.Pipeline()
+	dumpCmds := make([]*goredis.StringCmd, len(keys))
+	ttlCmds := make([]*goredis.DurationCmd, len(keys))
+	for i, key := range keys {
+		dumpCmds[i] = pipe.Dump(ctx, key)
+		ttlCmds[i] = pipe.PTTL(ctx, key)
+	}
+	if _, err := pipe.Exec(ctx); err != nil && err != goredis.Nil {
+		return nil, nil, err
+	}
+
+	dumps = make([]string, len(keys))
+	ttls = make([]int64, len(keys))
+	for i := range keys {
+		if payload, err := dumpCmds[i].Result(); err == nil {
+			dumps[i] = payload
+		}
+		// PTTL answers -1 for a key with no expiry and -2 for one that is gone;
+		// RESTORE takes 0 for "no expiry", so both become zero.
+		if ttl, err := ttlCmds[i].Result(); err == nil && ttl > 0 {
+			ttls[i] = ttl.Milliseconds()
+		}
+	}
+	return dumps, ttls, nil
 }
 
 // removeKeysMissingFromSource deletes the target keys the source no longer
 // holds, which is how a delete lost with a dropped subscription is corrected.
 func (r *RedisSyncer) removeKeysMissingFromSource(ctx context.Context, keys []string) int {
-	removed := 0
-	for _, key := range keys {
-		exists, err := r.source.Exists(ctx, key).Result()
+	if len(keys) == 0 {
+		return 0
+	}
+
+	// One round trip to ask the source about the whole page, rather than one per
+	// key. On a keyspace of any size the round trips are the entire cost.
+	pipe := r.source.Pipeline()
+	exists := make([]*goredis.IntCmd, len(keys))
+	for i, key := range keys {
+		exists[i] = pipe.Exists(ctx, key)
+	}
+	if _, err := pipe.Exec(ctx); err != nil && err != goredis.Nil {
+		r.logger.Errorf("[Redis] Reconciliation could not check a page against the "+
+			"source: %v", err)
+		return 0
+	}
+
+	var gone []string
+	for i, key := range keys {
+		n, err := exists[i].Result()
 		if err != nil {
 			r.logger.Errorf("[Redis] Reconciliation could not check key=%s: %v", key, err)
 			continue
 		}
-		if exists > 0 {
-			continue
+		if n == 0 {
+			gone = append(gone, key)
 		}
-		if err := r.target.Del(ctx, key).Err(); err != nil {
-			r.logger.Errorf("[Redis] Reconciliation could not remove key=%s: %v", key, err)
-			continue
-		}
-		r.logger.Debugf("[Redis][RECONCILE] key=%s removed; the source no longer has it", key)
-		removed++
 	}
-	return removed
+	if len(gone) == 0 {
+		return 0
+	}
+
+	// A cluster refuses a multi-key DEL across slots, so delete one command per
+	// key but in a single pipeline: the round trips are what cost, not the
+	// commands.
+	del := r.target.Pipeline()
+	for _, key := range gone {
+		del.Del(ctx, key)
+	}
+	if _, err := del.Exec(ctx); err != nil && err != goredis.Nil {
+		r.logger.Errorf("[Redis] Reconciliation could not remove keys the source no "+
+			"longer has: %v", err)
+		return 0
+	}
+	r.logger.Debugf("[Redis][RECONCILE] removed %d keys the source no longer has",
+		len(gone))
+	return len(gone)
 }
 
 // -------------------------------------------------------- stream watching

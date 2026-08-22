@@ -640,11 +640,14 @@ func TestTheInitialSyncReportsAScanFailure(t *testing.T) {
 func TestReconciliationCopiesTheSourceOver(t *testing.T) {
 	source := newFakeRedis(t).
 		on("SCAN", "*2\r\n$1\r\n0\r\n*1\r\n$5\r\nuser1\r\n").
-		on("TTL", ":-1\r\n").
+		on("PTTL", ":-1\r\n").
 		on("DUMP", bulk("payload")).
 		on("EXISTS", ":1\r\n")
 	target := newFakeRedis(t).
 		on("SCAN", "*2\r\n$1\r\n0\r\n*1\r\n$5\r\nuser1\r\n").
+		on("PTTL", ":-1\r\n").
+		// The target holds something else, so the value has to be sent.
+		on("DUMP", bulk("stale")).
 		on("RESTORE", "+OK\r\n")
 	s := newRedisSyncerWithFakes(t, source, target)
 
@@ -652,6 +655,80 @@ func TestReconciliationCopiesTheSourceOver(t *testing.T) {
 
 	if !target.sawCommand("RESTORE") {
 		t.Errorf("target commands = %v, want the source copied over", target.seen())
+	}
+}
+
+// TestReconciliationLeavesAnIdenticalKeyAlone is what makes the periodic pass
+// affordable: a replica that already agrees is the normal case, and re-sending
+// the whole keyspace every pass is not a comparison but a re-copy. Measured
+// against a real pair on loopback, comparing first took one pass over 20,000
+// keys from 35s to under a second.
+func TestReconciliationLeavesAnIdenticalKeyAlone(t *testing.T) {
+	source := newFakeRedis(t).
+		on("SCAN", "*2\r\n$1\r\n0\r\n*1\r\n$5\r\nuser1\r\n").
+		on("PTTL", ":-1\r\n").
+		on("DUMP", bulk("payload")).
+		on("EXISTS", ":1\r\n")
+	target := newFakeRedis(t).
+		on("SCAN", "*2\r\n$1\r\n0\r\n*1\r\n$5\r\nuser1\r\n").
+		on("PTTL", ":-1\r\n").
+		on("DUMP", bulk("payload")).
+		on("RESTORE", "+OK\r\n")
+	s := newRedisSyncerWithFakes(t, source, target)
+
+	s.reconcile(ctxFor(t))
+
+	if target.sawCommand("RESTORE") {
+		t.Errorf("an identical key was copied again: %v", target.seen())
+	}
+}
+
+// TestReconciliationSetsAnExpiryWithoutResendingTheValue covers the case where
+// only the expiry moved: one command instead of the whole value.
+func TestReconciliationSetsAnExpiryWithoutResendingTheValue(t *testing.T) {
+	source := newFakeRedis(t).
+		on("SCAN", "*2\r\n$1\r\n0\r\n*1\r\n$5\r\nuser1\r\n").
+		on("PTTL", ":60000\r\n").
+		on("DUMP", bulk("payload")).
+		on("EXISTS", ":1\r\n")
+	target := newFakeRedis(t).
+		on("SCAN", "*2\r\n$1\r\n0\r\n*1\r\n$5\r\nuser1\r\n").
+		on("PTTL", ":-1\r\n").
+		on("DUMP", bulk("payload")).
+		on("PEXPIRE", ":1\r\n").
+		on("RESTORE", "+OK\r\n")
+	s := newRedisSyncerWithFakes(t, source, target)
+
+	s.reconcile(ctxFor(t))
+
+	if !target.sawCommand("PEXPIRE") {
+		t.Errorf("the expiry was not set: %v", target.seen())
+	}
+	if target.sawCommand("RESTORE") {
+		t.Errorf("the value was re-sent for an expiry change: %v", target.seen())
+	}
+}
+
+// TestAKeyGoneFromTheSourceIsNotCopied covers the keyspace moving underneath the
+// walk: a key that expired between the scan and the read must not be written to
+// the target as an empty value.
+func TestAKeyGoneFromTheSourceIsNotCopied(t *testing.T) {
+	source := newFakeRedis(t).
+		on("SCAN", "*2\r\n$1\r\n0\r\n*1\r\n$5\r\nuser1\r\n").
+		on("PTTL", ":-2\r\n").
+		on("DUMP", "$-1\r\n"). // nil: the key is gone
+		on("EXISTS", ":0\r\n")
+	target := newFakeRedis(t).
+		on("SCAN", "*2\r\n$1\r\n0\r\n*0\r\n").
+		on("PTTL", ":-2\r\n").
+		on("DUMP", "$-1\r\n").
+		on("RESTORE", "+OK\r\n")
+	s := newRedisSyncerWithFakes(t, source, target)
+
+	s.reconcile(ctxFor(t))
+
+	if target.sawCommand("RESTORE") {
+		t.Errorf("a key the source no longer has was written: %v", target.seen())
 	}
 }
 
