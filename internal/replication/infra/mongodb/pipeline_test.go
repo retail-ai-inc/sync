@@ -470,23 +470,27 @@ func TestANilTokenIsNotStored(t *testing.T) {
 	}
 }
 
-// TestACorruptTokenFileIsRemoved records the self-repair: a file that will not
-// parse is deleted so the next start watches from now rather than failing
-// repeatedly. The changes between the corruption and the restart are lost.
-func TestACorruptTokenFileIsRemoved(t *testing.T) {
+// TestACorruptTokenIsCleared records the self-repair: a checkpoint that will
+// not parse is cleared so the next start watches from now rather than failing
+// repeatedly. The changes between the corruption and the restart are lost,
+// which is why the clearing is logged.
+func TestACorruptTokenIsCleared(t *testing.T) {
 	s := newBufferSyncer(t)
-	dir := t.TempDir()
-	s.cfg = config.SyncConfig{MongoDBResumeTokenPath: dir}
-	path := s.getResumeTokenPath("shop", "orders")
-	if err := os.WriteFile(path, []byte("not json at all"), 0o644); err != nil {
-		t.Fatalf("write: %v", err)
+	s.cfg = config.SyncConfig{MongoDBResumeTokenPath: t.TempDir()}
+	if err := s.store().Save(context.Background(), tokenKey("shop", "orders"), "not json at all"); err != nil {
+		t.Fatalf("Save: %v", err)
 	}
 
 	if got := s.loadMongoDBResumeToken("shop", "orders"); got != nil {
 		t.Errorf("token = %v, want none", got)
 	}
-	if _, err := os.Stat(path); err == nil {
-		t.Error("the corrupt file was left in place")
+
+	payload, err := s.store().Load(context.Background(), tokenKey("shop", "orders"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if payload != "" {
+		t.Errorf("the corrupt checkpoint was left in place: %q", payload)
 	}
 }
 

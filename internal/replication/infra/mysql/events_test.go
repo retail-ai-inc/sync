@@ -15,6 +15,7 @@ import (
 	"github.com/go-mysql-org/go-mysql/schema"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/retail-ai-inc/sync/internal/platform/config"
+	"github.com/retail-ai-inc/sync/internal/replication/infra/checkpoint"
 	"github.com/sirupsen/logrus"
 )
 
@@ -91,6 +92,31 @@ func securedTable(source, target string, fields ...string) []config.DatabaseMapp
 // apply feeds a row event through the handler the way canal does: the rows
 // arrive first and are buffered, then the XID that ends the source transaction
 // commits them on the target.
+// storedCheckpoint reads back what the saver wrote to a file, which is what a
+// test can inspect without a target database.
+func storedCheckpoint(t *testing.T, path string) *binlogCheckpoint {
+	t.Helper()
+
+	cp, err := newSyncer(t).loadCheckpoint(context.Background(), &checkpoint.FileStore{Path: path})
+	if err != nil {
+		t.Fatalf("loadCheckpoint: %v", err)
+	}
+	return cp
+}
+
+// fileHandler builds a handler whose checkpoints go to a file, so the position
+// saver can be exercised without a target database.
+func fileHandler(t *testing.T, db *sql.DB, mappings []config.DatabaseMapping, path string) *MyEventHandler {
+	t.Helper()
+
+	h := newHandler(t, db, mappings)
+	h.checkpoints = &checkpoint.FileStore{Path: path}
+
+	h.positionSaverPath = path
+	h.checkpoints = &checkpoint.FileStore{Path: path}
+	return h
+}
+
 func apply(h *MyEventHandler, e *canal.RowsEvent) error {
 	if err := h.OnRow(e); err != nil {
 		return err
@@ -581,8 +607,7 @@ func TestTheErrorFlagIsStickyAcrossEvents(t *testing.T) {
 // from the last offset that was fully applied.
 func TestThePositionIsNotWrittenAfterAFailure(t *testing.T) {
 	db := sqliteTarget(t, ordersSchema)
-	h := newHandler(t, db, mapTable("orders", "orders"))
-	h.positionSaverPath = filepath.Join(t.TempDir(), "pos.json")
+	h := fileHandler(t, db, mapTable("orders", "orders"), filepath.Join(t.TempDir(), "pos.json"))
 
 	if err := h.OnPosSynced(nil, mysql.Position{Name: "binlog.1", Pos: 100}, nil, false); err != nil {
 		t.Fatalf("OnPosSynced before any failure: %v", err)
@@ -608,8 +633,7 @@ func TestThePositionIsNotWrittenAfterAFailure(t *testing.T) {
 
 func TestOnPosSyncedWritesThePosition(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nested", "pos.json")
-	h := newHandler(t, nil, nil)
-	h.positionSaverPath = path
+	h := fileHandler(t, nil, nil, path)
 
 	pos := mysql.Position{Name: "binlog.000004", Pos: 1234}
 	if err := h.OnPosSynced(nil, pos, nil, false); err != nil {
@@ -644,8 +668,7 @@ func TestOnPosSyncedReportsAnUnwritablePath(t *testing.T) {
 	if err := os.WriteFile(blocker, nil, 0o644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	h := newHandler(t, nil, nil)
-	h.positionSaverPath = filepath.Join(blocker, "pos.json")
+	h := fileHandler(t, nil, nil, filepath.Join(blocker, "pos.json"))
 
 	if err := h.OnPosSynced(nil, mysql.Position{Name: "binlog.1", Pos: 1}, nil, false); err == nil {
 		t.Fatal("OnPosSynced to an unwritable path returned no error")
@@ -660,8 +683,7 @@ const sampleGTID = "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-5"
 // the source is failed over to a replica with its own binlog files.
 func TestTheSavedPositionCarriesTheGTIDSet(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "pos.json")
-	h := newHandler(t, nil, nil)
-	h.positionSaverPath = path
+	h := fileHandler(t, nil, nil, path)
 	h.flavor = mysql.MySQLFlavor
 
 	gtid, err := mysql.ParseMysqlGTIDSet(sampleGTID)
@@ -672,7 +694,7 @@ func TestTheSavedPositionCarriesTheGTIDSet(t *testing.T) {
 		t.Fatalf("OnPosSynced: %v", err)
 	}
 
-	cp := newSyncer(t).loadCheckpoint(path)
+	cp := storedCheckpoint(t, path)
 	if cp == nil {
 		t.Fatal("loadCheckpoint returned nil for a file the saver wrote")
 	}
@@ -691,15 +713,14 @@ func TestTheSavedPositionCarriesTheGTIDSet(t *testing.T) {
 // GTIDs turned off, and files written before they were recorded.
 func TestACheckpointWithNoGTIDSetFallsBackToTheOffset(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "pos.json")
-	h := newHandler(t, nil, nil)
-	h.positionSaverPath = path
+	h := fileHandler(t, nil, nil, path)
 
 	want := mysql.Position{Name: "binlog.000007", Pos: 990}
 	if err := h.OnPosSynced(nil, want, nil, false); err != nil {
 		t.Fatalf("OnPosSynced: %v", err)
 	}
 
-	cp := newSyncer(t).loadCheckpoint(path)
+	cp := storedCheckpoint(t, path)
 	if cp == nil {
 		t.Fatal("loadCheckpoint returned nil")
 	}
@@ -721,7 +742,7 @@ func TestAPositionFileFromAnOlderBuildStillLoads(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	cp := newSyncer(t).loadCheckpoint(path)
+	cp := storedCheckpoint(t, path)
 	if cp == nil {
 		t.Fatal("loadCheckpoint returned nil for a file in the old format")
 	}
@@ -762,8 +783,7 @@ func TestAMissingFlavourReadsAsMySQL(t *testing.T) {
 // makes a restart resume where the stream stopped.
 func TestTheSavedPositionRoundTrips(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "pos.json")
-	h := newHandler(t, nil, nil)
-	h.positionSaverPath = path
+	h := fileHandler(t, nil, nil, path)
 	want := mysql.Position{Name: "binlog.000009", Pos: 4711}
 
 	if err := h.OnPosSynced(nil, want, nil, true); err != nil {

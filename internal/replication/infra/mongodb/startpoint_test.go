@@ -1,8 +1,7 @@
 package mongodb
 
 import (
-	"os"
-	"path/filepath"
+	"context"
 	"testing"
 
 	"github.com/retail-ai-inc/sync/internal/platform/config"
@@ -121,25 +120,42 @@ func TestTheStartTimeIsPerCollection(t *testing.T) {
 
 // TestNoCheckpointPathMeansNoStartTime records that the whole mechanism is off
 // when nothing is configured to hold it.
-func TestNoCheckpointPathMeansNoStartTime(t *testing.T) {
+// TestWithNowhereToRecordItTheStartTimeIsLost covers the task with neither a
+// target connected nor a directory configured: there is nothing to write to, so
+// the copy is redone on every start. That is the safe direction to fail in.
+func TestWithNowhereToRecordItTheStartTimeIsLost(t *testing.T) {
 	s := checkpointSyncer(t)
 	s.cfg.MongoDBResumeTokenPath = ""
+	s.checkpoints = nil
 
 	s.saveStartTime("shop", "orders", primitive.Timestamp{T: 1, I: 1})
 	if got := s.loadStartTime("shop", "orders"); !got.IsZero() {
-		t.Errorf("start time = %+v with no path configured", got)
+		t.Errorf("start time = %+v with nowhere to record it", got)
 	}
 }
 
 func TestACorruptStartTimeReadsAsZero(t *testing.T) {
 	s := checkpointSyncer(t)
-	path := s.startTimePath("shop", "orders")
-	if err := writeFile(t, path, "not json"); err != nil {
-		t.Fatalf("write: %v", err)
+	if err := s.store().Save(context.Background(), startKey("shop", "orders"), "not json"); err != nil {
+		t.Fatalf("Save: %v", err)
 	}
 
 	if got := s.loadStartTime("shop", "orders"); !got.IsZero() {
-		t.Errorf("start time = %+v for an unreadable file", got)
+		t.Errorf("start time = %+v for an unreadable checkpoint", got)
+	}
+}
+
+// TestTheCheckpointGoesToTheTargetAsWell is what makes a syncer replaceable in
+// the other region: the file it used to be the only copy of goes away with the
+// machine the outage took.
+func TestTheCheckpointStillWorksWithNoTargetYet(t *testing.T) {
+	s := checkpointSyncer(t)
+	want := primitive.Timestamp{T: 1755800000, I: 4}
+
+	s.saveStartTime("shop", "orders", want)
+
+	if got := s.loadStartTime("shop", "orders"); got != want {
+		t.Errorf("start time = %+v, want %+v", got, want)
 	}
 }
 
@@ -181,20 +197,12 @@ func TestAResumeTokenMeansTheSnapshotWasMade(t *testing.T) {
 // TestWithNoCheckpointPathTheSnapshotIsNeverRecordedAsDone records the fallback:
 // there is nowhere to remember it, so the document count is what the copy has
 // to fall back on.
-func TestWithNoCheckpointPathTheSnapshotIsNeverRecordedAsDone(t *testing.T) {
+func TestWithNowhereToRecordItTheSnapshotIsNeverDone(t *testing.T) {
 	s := checkpointSyncer(t)
 	s.cfg.MongoDBResumeTokenPath = ""
+	s.checkpoints = nil
 
 	if s.snapshotDone("shop", "orders") {
-		t.Error("the copy was reported done with no path to record it in")
+		t.Error("the copy was reported done with nowhere to record it")
 	}
-}
-
-func writeFile(t *testing.T, path, body string) error {
-	t.Helper()
-
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	return os.WriteFile(path, []byte(body), 0o644)
 }

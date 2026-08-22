@@ -4,11 +4,8 @@ import (
 	"context"
 	"crypto/tls"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"net"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,6 +20,7 @@ import (
 	"github.com/retail-ai-inc/sync/internal/platform/dsn"
 	"github.com/retail-ai-inc/sync/internal/platform/metrics"
 	"github.com/retail-ai-inc/sync/internal/platform/resilience"
+	"github.com/retail-ai-inc/sync/internal/replication/infra/checkpoint"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/directionlock"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/discovery"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/security"
@@ -128,19 +126,27 @@ func (s *MySQLSyncer) Start(ctx context.Context) {
 	// a previous run that reached the stream wrote one. Without it the copy runs
 	// and its starting coordinates are pinned first, so writes made while it is
 	// running are replayed by the stream rather than falling between the two.
-	var checkpoint *binlogCheckpoint
-	if s.cfg.MySQLPositionPath != "" {
-		checkpoint = s.loadCheckpoint(s.cfg.MySQLPositionPath)
+	checkpoints := s.checkpointStore(targetDB)
+	stored, err := s.loadCheckpoint(ctx, checkpoints)
+	if err != nil {
+		// "There is no checkpoint" and "the checkpoint could not be read" lead
+		// to opposite decisions, and acting on the wrong one either re-copies
+		// the whole database or skips whatever was in flight.
+		s.logger.Errorf("[MySQL] Could not read the stored checkpoint, so this task "+
+			"cannot safely decide where to resume from: %v", err)
+		return
 	}
-	if checkpoint == nil {
-		checkpoint = s.snapshot(ctx, targetDB)
-		if checkpoint != nil && s.cfg.MySQLPositionPath != "" {
-			if err := writeCheckpoint(s.cfg.MySQLPositionPath, *checkpoint); err != nil {
-				s.logger.Errorf("[MySQL] Failed to store the snapshot checkpoint: %v", err)
+	if stored == nil {
+		stored = s.snapshot(ctx, targetDB)
+		if stored != nil {
+			if payload, encErr := checkpoint.Encode(*stored); encErr == nil {
+				if saveErr := checkpoints.Save(ctx, "", payload); saveErr != nil {
+					s.logger.Errorf("[MySQL] Failed to store the snapshot checkpoint: %v", saveErr)
+				}
 			}
 		}
 	} else {
-		s.logger.Infof("[MySQL] Resuming from a stored checkpoint: %+v", *checkpoint)
+		s.logger.Infof("[MySQL] Resuming from a stored checkpoint: %+v", *stored)
 	}
 
 	h := &MyEventHandler{
@@ -154,6 +160,7 @@ func (s *MySQLSyncer) Start(ctx context.Context) {
 		flavor:            cfg.Flavor,
 		labels:            s.metricLabels(),
 		discovering:       discovering,
+		checkpoints:       checkpoints,
 	}
 	c.SetEventHandler(h)
 
@@ -187,14 +194,14 @@ func (s *MySQLSyncer) Start(ctx context.Context) {
 	go func() {
 		var runErr error
 		switch {
-		case checkpoint == nil:
+		case stored == nil:
 			runErr = c.Run()
-		case checkpoint.gtidSet() != nil:
+		case stored.gtidSet() != nil:
 			// Preferred: the transactions themselves, which stay meaningful
 			// across a failover to a different server.
-			runErr = c.StartFromGTID(checkpoint.gtidSet())
+			runErr = c.StartFromGTID(stored.gtidSet())
 		default:
-			runErr = c.RunFrom(checkpoint.position())
+			runErr = c.RunFrom(stored.position())
 		}
 		if runErr != nil {
 			if strings.Contains(runErr.Error(), "context canceled") {
@@ -653,47 +660,53 @@ func (c *binlogCheckpoint) gtidSet() mysql.GTIDSet {
 	return set
 }
 
-// writeCheckpoint stores a checkpoint, creating the directory it lives in.
-func writeCheckpoint(path string, cp binlogCheckpoint) error {
-	if err := os.MkdirAll(filepath.Dir(path), os.ModePerm); err != nil {
-		return fmt.Errorf("create directory for %s: %w", path, err)
+// checkpointStore is where this task records its offset.
+//
+// It writes to the target database as well as the configured file. The file
+// alone was the problem: the syncer runs beside the source, so the outage this
+// setup exists to survive takes the record of what has been applied with it,
+// and a replacement started in the other region has no way to find out where to
+// resume from.
+func (s *MySQLSyncer) checkpointStore(targetDB *sql.DB) checkpoint.Store {
+	stores := []checkpoint.Store{
+		&checkpoint.SQLStore{
+			DB:     targetDB,
+			Schema: dsn.GetDatabaseName(s.cfg.Type, s.cfg.TargetConnection),
+			TaskID: s.cfg.ID,
+		},
 	}
-	data, err := json.Marshal(cp)
-	if err != nil {
-		return fmt.Errorf("marshal checkpoint: %w", err)
+	if s.cfg.MySQLPositionPath != "" {
+		stores = append(stores, &checkpoint.FileStore{Path: s.cfg.MySQLPositionPath})
 	}
-	return os.WriteFile(path, data, 0o644)
+	return &checkpoint.Layered{
+		Stores:  stores,
+		OnError: func(err error) { s.logger.Warnf("[MySQL] Checkpoint store: %v", err) },
+	}
 }
 
 // loadCheckpoint reads the stored position, reporting nil when there is none.
-func (s *MySQLSyncer) loadCheckpoint(path string) *binlogCheckpoint {
-	positionDir := filepath.Dir(path)
-	if err := os.MkdirAll(positionDir, os.ModePerm); err != nil {
-		s.logger.Warnf("[MySQL] create dir for position file => %s => %v", path, err)
-		return nil
-	}
-	data, err := os.ReadFile(path)
+func (s *MySQLSyncer) loadCheckpoint(ctx context.Context, store checkpoint.Store) (*binlogCheckpoint, error) {
+	payload, err := store.Load(ctx, "")
 	if err != nil {
-		s.logger.Infof("[MySQL] No binlog position file => %s => %v", path, err)
-		return nil
+		return nil, err
 	}
-	if len(data) <= 1 {
-		s.logger.Infof("[MySQL] binlog position file => %s => empty", path)
-		return nil
-	}
+
 	var cp binlogCheckpoint
-	if errU := json.Unmarshal(data, &cp); errU != nil {
-		s.logger.Errorf("[MySQL] unmarshal binlog position => %s => %v", path, errU)
-		return nil
+	found, err := checkpoint.Decode(payload, &cp)
+	if err != nil {
+		return nil, fmt.Errorf("read the stored checkpoint: %w", err)
 	}
-	return &cp
+	if !found || cp.Name == "" {
+		return nil, nil
+	}
+	return &cp, nil
 }
 
-// loadBinlogPosition reports the stored file-and-offset pair, for callers that
-// only need that half.
+// loadBinlogPosition reports the file-and-offset pair recorded in a file, for
+// callers that only need that half.
 func (s *MySQLSyncer) loadBinlogPosition(path string) *mysql.Position {
-	cp := s.loadCheckpoint(path)
-	if cp == nil {
+	cp, err := s.loadCheckpoint(context.Background(), &checkpoint.FileStore{Path: path})
+	if err != nil || cp == nil {
 		return nil
 	}
 	pos := cp.position()
@@ -796,9 +809,13 @@ type MyEventHandler struct {
 	mappings          []config.DatabaseMapping
 	logger            logrus.FieldLogger
 	positionSaverPath string
-	canal             *canal.Canal
-	lastExecError     int32
-	TargetConnection  string
+	// checkpoints is where the offset is recorded. It writes to the target
+	// database as well as the local file, so a syncer replaced in the other
+	// region can find out where to resume from.
+	checkpoints      checkpoint.Store
+	canal            *canal.Canal
+	lastExecError    int32
+	TargetConnection string
 	// flavor names the server dialect the recorded GTID set belongs to, so a
 	// MariaDB set is not read back as a MySQL one.
 	flavor string
@@ -1091,7 +1108,7 @@ func (h *MyEventHandler) OnPosSynced(header *replication.EventHeader, pos mysql.
 	// offset where it is.
 	_ = h.flush()
 
-	if h.positionSaverPath == "" {
+	if h.checkpoints == nil {
 		return nil
 	}
 
@@ -1107,21 +1124,19 @@ func (h *MyEventHandler) OnPosSynced(header *replication.EventHeader, pos mysql.
 
 	h.logger.Debugf("[MySQL] Syncing position: %v, force: %v", pos, force)
 
-	// Create directory if it doesn't exist
-	positionDir := filepath.Dir(h.positionSaverPath)
-	if err := os.MkdirAll(positionDir, os.ModePerm); err != nil {
-		h.logger.Errorf("[MySQL] Failed to create directory for position file: %v", err)
-		return err
-	}
-
 	cp := binlogCheckpoint{Name: pos.Name, Pos: pos.Pos}
 	if set != nil {
 		cp.GTID = set.String()
 		cp.Flavor = h.flavor
 	}
 
-	if err := writeCheckpoint(h.positionSaverPath, cp); err != nil {
-		h.logger.Errorf("[MySQL] Failed to write position file: %v", err)
+	payload, err := checkpoint.Encode(cp)
+	if err != nil {
+		h.logger.Errorf("[MySQL] Failed to marshal position: %v", err)
+		return err
+	}
+	if err := h.checkpoints.Save(context.Background(), "", payload); err != nil {
+		h.logger.Errorf("[MySQL] Failed to record the position: %v", err)
 		return err
 	}
 

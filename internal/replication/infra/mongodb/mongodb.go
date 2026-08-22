@@ -13,6 +13,7 @@ import (
 	"github.com/retail-ai-inc/sync/internal/platform/dsn"
 	"github.com/retail-ai-inc/sync/internal/platform/metrics"
 	"github.com/retail-ai-inc/sync/internal/platform/resilience"
+	"github.com/retail-ai-inc/sync/internal/replication/infra/checkpoint"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/directionlock"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/discovery"
 	"github.com/sirupsen/logrus"
@@ -47,6 +48,8 @@ type MongoDBSyncer struct {
 	enableDeadLetterQueue bool
 	// Global configuration for accessing Slack settings
 	globalConfig *config.Config
+	// checkpoints is where the resume tokens and start times are recorded.
+	checkpoints checkpoint.Store
 }
 
 func NewMongoDBSyncer(cfg config.SyncConfig, globalConfig *config.Config, logger *logrus.Logger) *MongoDBSyncer {
@@ -165,6 +168,8 @@ func (s *MongoDBSyncer) Start(ctx context.Context) {
 	// has been promoted, or a source that is itself somebody's target, means the
 	// pair has been reversed under us and carrying on would overwrite the newer
 	// side with the older one.
+	s.checkpoints = s.checkpointStore(targetDBName)
+
 	stopGuard, guardErr := s.claimDirection(ctx, sourceDBName, targetDBName)
 	if guardErr != nil {
 		s.logger.Errorf("[MongoDB] %v", guardErr)

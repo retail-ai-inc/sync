@@ -193,11 +193,13 @@ func TestLoadBinlogPosition(t *testing.T) {
 		}
 	})
 
-	t.Run("creates the parent directory", func(t *testing.T) {
+	t.Run("a missing directory is not an error", func(t *testing.T) {
+		// Reading no longer creates the directory it was going to read from.
+		// The saver creates it when it writes, which is the only moment it
+		// needs to exist.
 		path := filepath.Join(dir, "nested", "deep", "binlog.pos")
-		s.loadBinlogPosition(path)
-		if _, err := os.Stat(filepath.Dir(path)); err != nil {
-			t.Errorf("the parent directory was not created: %v", err)
+		if got := s.loadBinlogPosition(path); got != nil {
+			t.Errorf("loadBinlogPosition = %v for a path that does not exist", *got)
 		}
 	})
 }

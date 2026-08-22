@@ -3,8 +3,6 @@ package redis
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,6 +15,7 @@ import (
 	"github.com/retail-ai-inc/sync/internal/platform/dsn"
 	"github.com/retail-ai-inc/sync/internal/platform/metrics"
 	"github.com/retail-ai-inc/sync/internal/platform/resilience"
+	"github.com/retail-ai-inc/sync/internal/replication/infra/checkpoint"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/directionlock"
 	"github.com/sirupsen/logrus"
 )
@@ -42,6 +41,10 @@ type RedisSyncer struct {
 	lastExecErr int32
 
 	positionPath string
+	// checkpoints is where the stream offsets are recorded. They go to the
+	// target as well as the local file, so a syncer replaced in the other
+	// region can find out where to resume from.
+	checkpoints checkpoint.Store
 	// reconcileEvery is how often the keyspace is fully compared. Zero turns
 	// the comparison off.
 	reconcileEvery time.Duration
@@ -128,6 +131,8 @@ func (r *RedisSyncer) Start(ctx context.Context) {
 		return
 	}
 	defer stopGuard()
+
+	r.checkpoints = r.checkpointStore()
 
 	labels := r.metricLabels()
 	metrics.SetTaskUp(labels, true)
@@ -566,39 +571,45 @@ func isAlreadyAppended(err error) bool {
 
 // ------------------------------------------------------------- positions
 
-// streamPositionPath names the file holding one stream's position. The stream
-// name is part of it because a task may replicate more than one.
-func (r *RedisSyncer) streamPositionPath(stream string) string {
-	if r.positionPath == "" {
-		return ""
+// checkpointStore is where this task records its stream offsets.
+//
+// It writes to the target as well as the configured file. The file alone was
+// the problem: the syncer runs beside the source, so the outage this setup
+// exists to survive takes the record of what has been applied with it.
+func (r *RedisSyncer) checkpointStore() checkpoint.Store {
+	var stores []checkpoint.Store
+	if r.target != nil {
+		stores = append(stores, &checkpoint.RedisStore{Client: r.target, TaskID: r.cfg.ID})
 	}
-	return r.positionPath + "." + stream
+	if r.positionPath != "" {
+		stores = append(stores, &checkpoint.FileStore{Path: r.positionPath})
+	}
+	return &checkpoint.Layered{
+		Stores:  stores,
+		OnError: func(err error) { r.logger.Warnf("[Redis] Checkpoint store: %v", err) },
+	}
 }
 
 func (r *RedisSyncer) loadStreamPosition(stream string) string {
-	path := r.streamPositionPath(stream)
-	if path == "" {
-		return ""
+	store := r.checkpoints
+	if store == nil {
+		store = r.checkpointStore()
 	}
-	data, err := os.ReadFile(path)
+	id, err := store.Load(context.Background(), stream)
 	if err != nil {
-		r.logger.Infof("[Redis] No stream position file => %v", err)
+		r.logger.Warnf("[Redis] Could not read the stream position for %s: %v", stream, err)
 		return ""
 	}
-	return strings.TrimSpace(string(data))
+	return strings.TrimSpace(id)
 }
 
 func (r *RedisSyncer) saveStreamPosition(stream, id string) {
-	path := r.streamPositionPath(stream)
-	if path == "" {
-		return
+	store := r.checkpoints
+	if store == nil {
+		store = r.checkpointStore()
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		r.logger.Errorf("[Redis] mkdir fail: %v", err)
-		return
-	}
-	if err := os.WriteFile(path, []byte(id), 0644); err != nil {
-		r.logger.Errorf("[Redis] write position fail: %v", err)
+	if err := store.Save(context.Background(), stream, id); err != nil {
+		r.logger.Errorf("[Redis] Could not record the stream position for %s: %v", stream, err)
 	}
 }
 

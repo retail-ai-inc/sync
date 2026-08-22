@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/go-mysql-org/go-mysql/mysql"
+	"github.com/retail-ai-inc/sync/internal/replication/infra/checkpoint"
 )
 
 // statusConn hands back a pinned connection to a SQLite database, which is what
@@ -129,10 +130,16 @@ func TestTheCheckpointFileRoundTrips(t *testing.T) {
 		GTID: sampleGTID, Flavor: mysql.MySQLFlavor,
 	}
 
-	if err := writeCheckpoint(path, want); err != nil {
-		t.Fatalf("writeCheckpoint: %v", err)
+	payload, err := checkpoint.Encode(want)
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
 	}
-	got := newSyncer(t).loadCheckpoint(path)
+	store := &checkpoint.FileStore{Path: path}
+	if err := store.Save(context.Background(), "", payload); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	got := storedCheckpoint(t, path)
 	if got == nil {
 		t.Fatal("loadCheckpoint returned nil")
 	}
@@ -147,7 +154,8 @@ func TestAnUnwritableCheckpointPathIsReported(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	if err := writeCheckpoint(filepath.Join(blocker, "pos.json"), binlogCheckpoint{}); err == nil {
+	store := &checkpoint.FileStore{Path: filepath.Join(blocker, "pos.json")}
+	if err := store.Save(context.Background(), "", "{}"); err == nil {
 		t.Error("writing under a regular file returned no error")
 	}
 }
