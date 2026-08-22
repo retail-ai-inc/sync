@@ -348,11 +348,19 @@ func UpdateAuthConfig(provider string, config map[string]interface{}) error {
 	// Extract the enabled field value, default is false
 	enabled, _ := config["enabled"].(bool)
 
-	// Remove the enabled field from config, as it will be stored separately
-	delete(config, "enabled")
+	// The enabled flag is stored in its own column, so it is left out of the
+	// document — from a copy. This used to delete it from the caller's own map,
+	// so a caller that reused the map afterwards found the field gone.
+	stored := make(map[string]interface{}, len(config))
+	for key, value := range config {
+		if key == "enabled" {
+			continue
+		}
+		stored[key] = value
+	}
 
 	// Convert config to JSON
-	configJSON, err := json.Marshal(config)
+	configJSON, err := json.Marshal(stored)
 	if err != nil {
 		return err
 	}

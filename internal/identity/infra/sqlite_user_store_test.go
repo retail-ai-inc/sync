@@ -414,7 +414,11 @@ func TestGetAuthConfigMissingProvider(t *testing.T) {
 // TestUpdateAuthConfigMutatesTheCallersMap records a side effect: the function
 // deletes "enabled" from the map it was handed, because that value goes to its
 // own column. A caller that reuses the map afterwards silently loses the field.
-func TestUpdateAuthConfigMutatesTheCallersMap(t *testing.T) {
+// TestUpdateAuthConfigLeavesTheCallersMapAlone covers a shared map being
+// written to. The enabled flag is stored in its own column, so it is left out of
+// the document — but it used to be deleted from the caller's own map, so a
+// caller that reused it afterwards found the field gone.
+func TestUpdateAuthConfigLeavesTheCallersMapAlone(t *testing.T) {
 	useTempDB(t)
 
 	cfg := map[string]interface{}{"client_id": "id", "enabled": true}
@@ -422,8 +426,16 @@ func TestUpdateAuthConfigMutatesTheCallersMap(t *testing.T) {
 		t.Fatalf("UpdateAuthConfig: %v", err)
 	}
 
-	if _, present := cfg["enabled"]; present {
-		t.Error("the caller's map kept its enabled key; the function may now copy " +
-			"before deleting, which would be an improvement")
+	if _, present := cfg["enabled"]; !present {
+		t.Error("the caller's map lost its enabled key")
+	}
+
+	// And the stored document does not carry it.
+	stored, err := GetAuthConfig("google")
+	if err != nil {
+		t.Fatalf("GetAuthConfig: %v", err)
+	}
+	if stored["enabled"] != true {
+		t.Errorf("enabled = %v, want it read back from its own column", stored["enabled"])
 	}
 }
