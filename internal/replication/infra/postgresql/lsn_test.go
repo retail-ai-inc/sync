@@ -262,19 +262,41 @@ func TestBuildReplicationDSNReportsAnUnparseableURL(t *testing.T) {
 	}
 }
 
-// TestBuildReplicationDSNAcceptsAKeywordDSN records that the builder only
-// understands URL form. libpq's keyword form ("host=x dbname=y") parses as a
-// relative URL path, so the replication parameter is appended as a query string
-// and the result is not a valid keyword DSN any more.
+// TestBuildReplicationDSNAcceptsAKeywordDSN covers libpq's other connection
+// string form. "host=x dbname=y" parses as a relative URL path rather than
+// failing, so the replication parameter used to be appended as a query string
+// onto something that has no query string, and the connection was refused with
+// an error naming neither.
 func TestBuildReplicationDSNAcceptsAKeywordDSN(t *testing.T) {
-	got, err := newSyncer(t, config.SyncConfig{}).
-		buildReplicationDSN("host=127.0.0.1 dbname=shop")
+	s := newSyncer(t, config.SyncConfig{})
+
+	got, err := s.buildReplicationDSN("host=127.0.0.1 dbname=shop")
 	if err != nil {
 		t.Fatalf("buildReplicationDSN: %v", err)
 	}
-	if !strings.Contains(got, "?replication=database") {
-		t.Fatalf("dsn = %q; the keyword form appears to be handled now, so assert "+
-			"that instead", got)
+	if want := "host=127.0.0.1 dbname=shop replication=database"; got != want {
+		t.Errorf("dsn = %q, want %q", got, want)
+	}
+
+	// A value already there is replaced rather than repeated.
+	got, err = s.buildReplicationDSN("host=127.0.0.1 replication=false dbname=shop")
+	if err != nil {
+		t.Fatalf("buildReplicationDSN: %v", err)
+	}
+	if strings.Contains(got, "replication=false") {
+		t.Errorf("dsn = %q, still carries the old value", got)
+	}
+}
+
+// TestBuildReplicationDSNRefusesWhatIsNeitherForm covers a connection string
+// that is neither: it used to be accepted as a relative URL and fail much later.
+func TestBuildReplicationDSNRefusesWhatIsNeitherForm(t *testing.T) {
+	s := newSyncer(t, config.SyncConfig{})
+
+	for _, given := range []string{"", "   ", "127.0.0.1:5432/shop"} {
+		if got, err := s.buildReplicationDSN(given); err == nil {
+			t.Errorf("buildReplicationDSN(%q) = %q, want a refusal", given, got)
+		}
 	}
 }
 

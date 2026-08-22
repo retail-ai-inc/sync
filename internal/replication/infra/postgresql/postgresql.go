@@ -191,8 +191,28 @@ func (s *PostgreSQLSyncer) Start(ctx context.Context) error {
 }
 
 // buildReplicationDSN constructs replication DSN
+// buildReplicationDSN turns the task's connection string into one that opens a
+// replication connection.
+//
+// libpq accepts two forms, and only the URL one used to be handled: the keyword
+// form ("host=x dbname=y") parses as a relative path rather than failing, so the
+// replication parameter was appended as a query string onto something that has
+// no query string and the connection was refused with an error naming neither.
 func (s *PostgreSQLSyncer) buildReplicationDSN(normalDSN string) (string, error) {
-	u, err := url.Parse(normalDSN)
+	trimmed := strings.TrimSpace(normalDSN)
+	if trimmed == "" {
+		return "", fmt.Errorf("the source connection string is empty")
+	}
+
+	if !strings.HasPrefix(trimmed, "postgres://") && !strings.HasPrefix(trimmed, "postgresql://") {
+		if !strings.Contains(trimmed, "=") {
+			return "", fmt.Errorf("%q is neither a postgres:// URL nor a keyword "+
+				"connection string", normalDSN)
+		}
+		return replicationKeywords(trimmed), nil
+	}
+
+	u, err := url.Parse(trimmed)
 	if err != nil {
 		return "", err
 	}
@@ -200,6 +220,19 @@ func (s *PostgreSQLSyncer) buildReplicationDSN(normalDSN string) (string, error)
 	q.Set("replication", "database")
 	u.RawQuery = q.Encode()
 	return u.String(), nil
+}
+
+// replicationKeywords sets replication=database in a keyword connection string,
+// replacing any value already there.
+func replicationKeywords(dsn string) string {
+	var kept []string
+	for _, field := range strings.Fields(dsn) {
+		if key, _, found := strings.Cut(field, "="); found && key == "replication" {
+			continue
+		}
+		kept = append(kept, field)
+	}
+	return strings.Join(append(kept, "replication=database"), " ")
 }
 
 // ensureReplicationSlot ensures the replication slot exists
@@ -663,8 +696,12 @@ func (s *PostgreSQLSyncer) startLogicalReplication(ctx context.Context) error {
 				}
 				committed, procErr := s.processMessage(xld, &s.state)
 				if procErr != nil {
+					// Carrying on here is how a row that never reached the target
+					// was left behind while the stream moved past it. The task
+					// stops; the supervisor decides whether to start it again, and
+					// it resumes from the last position everything was applied at.
 					s.logger.Errorf("[PostgreSQL] processMessage error: %v", procErr)
-					continue
+					return procErr
 				}
 				if committed {
 					if atomic.LoadInt32(&s.lastExecError) == 0 {
@@ -702,7 +739,10 @@ func (s *PostgreSQLSyncer) processMessage(xld pglogrepl.XLogData, state *replica
 		state.relations[typed.RelationID] = typed
 
 	case *pglogrepl.BeginMessage:
-		if state.lastWrittenLSN > typed.FinalLSN {
+		// The comparison is >=, not >. A transaction whose end LSN is exactly the
+		// recorded position has already been applied in full; replaying it
+		// re-inserts rows that are there and re-deletes rows that are not.
+		if state.lastWrittenLSN >= typed.FinalLSN {
 			s.logger.Debugf("[PostgreSQL] Stale begin => lastWrittenLSN=%s > msgLSN=%s", state.lastWrittenLSN, typed.FinalLSN)
 			state.processMessages = false
 			return false, nil
@@ -718,24 +758,35 @@ func (s *PostgreSQLSyncer) processMessage(xld pglogrepl.XLogData, state *replica
 
 	case *pglogrepl.InsertMessageV2:
 		if !state.processMessages {
-			s.logger.Debug("[PostgreSQL][INSERT] Stale insert => ignoring")
+
 			return false, nil
 		}
 		return s.handleInsert(typed, state)
 
 	case *pglogrepl.UpdateMessageV2:
 		if !state.processMessages {
-			s.logger.Debug("[PostgreSQL][UPDATE] Stale update => ignoring")
+
 			return false, nil
 		}
 		return s.handleUpdate(typed, state)
 
 	case *pglogrepl.DeleteMessageV2:
 		if !state.processMessages {
-			s.logger.Debug("[PostgreSQL][DELETE] Stale delete => ignoring")
+
 			return false, nil
 		}
 		return s.handleDelete(typed, state)
+
+	case *pglogrepl.TruncateMessageV2:
+		// A TRUNCATE at the source is not replicated onto the target, for the
+		// same reason a DROP is not: the disaster-recovery copy is the only thing
+		// left to recover from, and a mistaken truncate would take it too.
+		// Ignoring it silently is not an option either — the target would go on
+		// holding rows the source no longer has, and nothing would ever say so.
+		return false, domain.Unrecoverable("the source truncated a replicated "+
+			"table (relations %v). Replication has stopped: truncating the target "+
+			"is not something this will do on its own. Truncate it by hand and "+
+			"restart the task, or make the copy again.", typed.RelationIDs)
 
 	default:
 		s.logger.Debugf("[PostgreSQL] Unhandled message => %T", typed)
@@ -758,74 +809,13 @@ func (s *PostgreSQLSyncer) handleInsert(
 		return false, nil
 	}
 
-	// Get table security configuration
-	tableSecurity := security.FindTableSecurityFromMappings(rel.RelationName, s.cfg.Mappings)
+	table := security.FindTableSecurityFromMappings(rel.RelationName, s.cfg.Mappings)
 
-	// Print security configuration
-	s.logger.Debugf("[PostgreSQL] Table=%s security configuration: enabled=%v, rules=%d",
-		rel.RelationName, tableSecurity.SecurityEnabled, len(tableSecurity.FieldSecurity))
-
-	colNames := make([]string, len(msg.Tuple.Columns))
-	colValues := make([]string, len(msg.Tuple.Columns))
-
-	// Print data before processing
-	if tableSecurity.SecurityEnabled && len(tableSecurity.FieldSecurity) > 0 {
-		s.logger.Debugf("[PostgreSQL][INSERT] Data before processing: table=%s", rel.RelationName)
-		for i, col := range msg.Tuple.Columns {
-			if i < len(rel.Columns) {
-				colName := rel.Columns[i].Name
-				colNames[i] = colName
-				s.logger.Debugf("  Column[%d]: %s = %v", i, colName, string(col.Data))
-			}
-		}
+	query, args, err := buildInsert(rel, msg.Tuple, table)
+	if err != nil {
+		return false, err
 	}
-
-	for i, col := range msg.Tuple.Columns {
-		if i >= len(rel.Columns) {
-			continue
-		}
-		colName := rel.Columns[i].Name
-		colNames[i] = colName
-
-		// Apply security processing
-		var value string
-		switch col.DataType {
-		case 'n':
-			value = "NULL"
-		case 't':
-			value = string(col.Data)
-			// Apply security processing to values
-			if tableSecurity.SecurityEnabled {
-				processed := security.ProcessValue(value, colName, tableSecurity)
-				if processedStr, ok := processed.(string); ok {
-					value = processedStr
-				}
-			}
-			value = "'" + strings.ReplaceAll(value, "'", "''") + "'"
-		default:
-			value = "NULL"
-		}
-		colValues[i] = value
-	}
-
-	// Print data after processing
-	if tableSecurity.SecurityEnabled && len(tableSecurity.FieldSecurity) > 0 {
-		s.logger.Debugf("[PostgreSQL][INSERT] Data after processing: table=%s", rel.RelationName)
-		for i, value := range colValues {
-			if i < len(colNames) {
-				s.logger.Debugf("  Column[%d]: %s = %v", i, colNames[i], value)
-			}
-		}
-	}
-
-	sqlStr := fmt.Sprintf("INSERT INTO %s.%s (%s) VALUES (%s)",
-		rel.Namespace,
-		rel.RelationName,
-		strings.Join(colNames, ", "),
-		strings.Join(colValues, ", "),
-	)
-	err := s.replicateQuery(st.replicaConn, sqlStr, "INSERT", fmt.Sprintf("%s.%s", rel.Namespace, rel.RelationName))
-	return false, err
+	return false, s.replicateQuery(st.replicaConn, query, args, "INSERT", relationName(rel))
 }
 
 // handleUpdate handles update operations
@@ -843,42 +833,13 @@ func (s *PostgreSQLSyncer) handleUpdate(
 		return false, nil
 	}
 
-	var setClauses []string
-	for idx, col := range msg.NewTuple.Columns {
-		if idx >= len(rel.Columns) {
-			continue
-		}
-		colName := rel.Columns[idx].Name
-		switch col.DataType {
-		case 'n':
-			setClauses = append(setClauses, fmt.Sprintf("%s=NULL", colName))
-		case 't':
-			val := strings.ReplaceAll(string(col.Data), "'", "''")
-			setClauses = append(setClauses, fmt.Sprintf("%s='%s'", colName, val))
-		default:
-			setClauses = append(setClauses, fmt.Sprintf("%s=NULL", colName))
-		}
-	}
+	table := security.FindTableSecurityFromMappings(rel.RelationName, s.cfg.Mappings)
 
-	var whereClauses []string
-	if msg.OldTuple == nil {
-		whereClauses = s.buildWhereClausesFromPK(rel, msg.NewTuple.Columns)
-	} else {
-		whereClauses = s.buildWhereClausesFromPK(rel, msg.OldTuple.Columns)
+	query, args, err := buildUpdate(rel, msg.OldTuple, msg.NewTuple, s.keyColumns(rel), table)
+	if err != nil {
+		return false, err
 	}
-	if len(whereClauses) == 0 {
-		s.logger.Debugf("[PostgreSQL][UPDATE] No PK => skip, relID=%d", msg.RelationID)
-		return false, nil
-	}
-
-	sqlStr := fmt.Sprintf("UPDATE %s.%s SET %s WHERE %s",
-		rel.Namespace,
-		rel.RelationName,
-		strings.Join(setClauses, ", "),
-		strings.Join(whereClauses, " AND "),
-	)
-	err := s.replicateQuery(st.replicaConn, sqlStr, "UPDATE", fmt.Sprintf("%s.%s", rel.Namespace, rel.RelationName))
-	return false, err
+	return false, s.replicateQuery(st.replicaConn, query, args, "UPDATE", relationName(rel))
 }
 
 // handleDelete handles delete operations
@@ -896,93 +857,39 @@ func (s *PostgreSQLSyncer) handleDelete(
 		return false, nil
 	}
 
-	primaryKeys, err := s.getPrimaryKeyColumns(rel.Namespace, rel.RelationName)
+	query, args, err := buildDelete(rel, msg.OldTuple, s.keyColumns(rel))
 	if err != nil {
-		s.logger.Warnf("[PostgreSQL][DELETE] Failed to get primary keys: %v", err)
-		return s.handleDeleteWithAllColumns(msg, st, rel)
+		return false, err
 	}
-
-	if len(primaryKeys) == 0 {
-		s.logger.Debugf("[PostgreSQL][DELETE] No primary keys found, using all columns")
-		return s.handleDeleteWithAllColumns(msg, st, rel)
-	}
-
-	var whereClauses []string
-	for idx, col := range msg.OldTuple.Columns {
-		if idx >= len(rel.Columns) {
-			continue
-		}
-		colName := rel.Columns[idx].Name
-
-		isPK := false
-		for _, pk := range primaryKeys {
-			if pk == colName {
-				isPK = true
-				break
-			}
-		}
-
-		if !isPK {
-			continue
-		}
-
-		switch col.DataType {
-		case 'n':
-			whereClauses = append(whereClauses, fmt.Sprintf("%s IS NULL", colName))
-		case 't':
-			val := strings.ReplaceAll(string(col.Data), "'", "''")
-			whereClauses = append(whereClauses, fmt.Sprintf("%s='%s'", colName, val))
-		default:
-			whereClauses = append(whereClauses, fmt.Sprintf("%s IS NULL", colName))
-		}
-	}
-
-	if len(whereClauses) == 0 {
-		s.logger.Warnf("[PostgreSQL][DELETE] No WHERE conditions could be built with primary keys, using all columns")
-		return s.handleDeleteWithAllColumns(msg, st, rel)
-	}
-
-	sqlStr := fmt.Sprintf("DELETE FROM %s.%s WHERE %s",
-		rel.Namespace,
-		rel.RelationName,
-		strings.Join(whereClauses, " AND "),
-	)
-	err = s.replicateQuery(st.replicaConn, sqlStr, "DELETE", fmt.Sprintf("%s.%s", rel.Namespace, rel.RelationName))
-	return false, err
+	return false, s.replicateQuery(st.replicaConn, query, args, "DELETE", relationName(rel))
 }
 
-// handleDeleteWithAllColumns handles delete operations with all columns
-func (s *PostgreSQLSyncer) handleDeleteWithAllColumns(
-	msg *pglogrepl.DeleteMessageV2,
-	st *replicationState,
-	rel *pglogrepl.RelationMessageV2,
-) (bool, error) {
-	var whereClauses []string
-	for idx, col := range msg.OldTuple.Columns {
-		if idx >= len(rel.Columns) {
-			continue
-		}
-		colName := rel.Columns[idx].Name
-		switch col.DataType {
-		case 'n':
-			whereClauses = append(whereClauses, fmt.Sprintf("%s IS NULL", colName))
-		case 't':
-			val := strings.ReplaceAll(string(col.Data), "'", "''")
-			whereClauses = append(whereClauses, fmt.Sprintf("%s='%s'", colName, val))
-		default:
-			whereClauses = append(whereClauses, fmt.Sprintf("%s IS NULL", colName))
-		}
+// relationName names a table for a log line.
+func relationName(rel *pglogrepl.RelationMessageV2) string {
+	return rel.Namespace + "." + rel.RelationName
+}
+
+// keyColumns reports the primary key of a replicated table, or nothing when it
+// has none or the source cannot be asked.
+//
+// It used to call straight into getPrimaryKeyColumns, which reads through the
+// source connection: one DELETE while the source was down dereferenced a nil
+// connection and took the whole process with it. The fallback for a table with
+// no key — match on every column — is what happens when the key is unknown.
+func (s *PostgreSQLSyncer) keyColumns(rel *pglogrepl.RelationMessageV2) []string {
+	if s.sourceConnNormal == nil {
+		s.logger.Warnf("[PostgreSQL] The source connection is gone, so %s is "+
+			"addressed by every column rather than by its key", relationName(rel))
+		return nil
 	}
-	if len(whereClauses) == 0 {
-		return false, nil
+
+	keys, err := s.getPrimaryKeyColumns(rel.Namespace, rel.RelationName)
+	if err != nil {
+		s.logger.Warnf("[PostgreSQL] Could not read the primary key of %s, so it is "+
+			"addressed by every column: %v", relationName(rel), err)
+		return nil
 	}
-	sqlStr := fmt.Sprintf("DELETE FROM %s.%s WHERE %s",
-		rel.Namespace,
-		rel.RelationName,
-		strings.Join(whereClauses, " AND "),
-	)
-	err := s.replicateQuery(st.replicaConn, sqlStr, "DELETE", fmt.Sprintf("%s.%s", rel.Namespace, rel.RelationName))
-	return false, err
+	return keys
 }
 
 // getPrimaryKeyColumns retrieves primary key columns
@@ -1017,48 +924,34 @@ func (s *PostgreSQLSyncer) getPrimaryKeyColumns(schema, tableName string) ([]str
 	return primaryKeys, nil
 }
 
-// buildWhereClausesFromPK builds WHERE clauses from primary key
-func (s *PostgreSQLSyncer) buildWhereClausesFromPK(
-	rel *pglogrepl.RelationMessageV2,
-	cols []*pglogrepl.TupleDataColumn,
-) []string {
-	var clauses []string
-	if rel == nil || len(rel.Columns) == 0 {
-		return clauses
-	}
-	for idx, col := range cols {
-		if idx >= len(rel.Columns) {
-			continue
-		}
-		colName := rel.Columns[idx].Name
-		switch col.DataType {
-		case 'n':
-			clauses = append(clauses, fmt.Sprintf("%s IS NULL", colName))
-		case 't':
-			val := strings.ReplaceAll(string(col.Data), "'", "''")
-			clauses = append(clauses, fmt.Sprintf("%s='%s'", colName, val))
-		default:
-			clauses = append(clauses, fmt.Sprintf("%s IS NULL", colName))
-		}
-	}
-	return clauses
-}
-
-// replicateQuery executes replication queries
-func (s *PostgreSQLSyncer) replicateQuery(db *sql.DB, query, opType, tableName string) error {
+// replicateQuery executes replication queries.
+//
+// A statement that failed used to be forgiven by the next one that succeeded:
+// the flag the commit path reads was cleared on every success, including the
+// next statement of the same transaction. The commit then advanced the LSN past
+// a row that never reached the target, and nothing would ever send it again.
+// Once a statement has failed the flag stays raised for the life of the syncer,
+// so the position never moves past the loss and a restart replays from the last
+// position everything was applied at.
+func (s *PostgreSQLSyncer) replicateQuery(db *sql.DB, query string, args []interface{}, opType, tableName string) error {
 	s.logger.Debugf("[PostgreSQL][%s] table=%s query=%s", opType, tableName, query)
 
 	err := resilience.RetryDBOperation(context.Background(), s.logger,
 		fmt.Sprintf("%s on %s", opType, tableName),
 		func() error {
-			res, err := db.Exec(query)
+			res, err := db.Exec(query, args...)
 			if err != nil {
 				return err
 			}
 
 			rowsAff, _ := res.RowsAffected()
+			if rowsAff == 0 && (opType == "UPDATE" || opType == "DELETE") {
+				// The row the source changed is not on the target. Saying so is
+				// the only way this shows up at all: the statement succeeded.
+				s.logger.Warnf("[PostgreSQL][%s] table=%s matched no row on the target",
+					opType, tableName)
+			}
 			s.logger.Debugf("[PostgreSQL][%s] table=%s rowsAffected=%d", opType, tableName, rowsAff)
-			atomic.StoreInt32(&s.lastExecError, 0)
 			return nil
 		})
 

@@ -2,11 +2,13 @@ package postgresql
 
 import (
 	"encoding/binary"
+	"errors"
 	"sync/atomic"
 	"testing"
 
 	"github.com/jackc/pglogrepl"
 	"github.com/retail-ai-inc/sync/internal/platform/config"
+	"github.com/retail-ai-inc/sync/internal/replication/domain"
 )
 
 // The encoders below produce the pgoutput wire format the decoder expects, so
@@ -190,20 +192,19 @@ func TestAStaleBeginIsSkipped(t *testing.T) {
 	}
 }
 
-// TestABeginAtExactlyTheWrittenLSNIsApplied records where the boundary sits:
-// the comparison is strictly greater-than, so a transaction whose final LSN
-// equals the last written position is applied again. The last transaction before
-// a restart is therefore replayed — safe for an idempotent DELETE, a duplicate
-// for an INSERT.
-func TestABeginAtExactlyTheWrittenLSNIsApplied(t *testing.T) {
+// TestATransactionAtTheWrittenLSNIsNotReplayed covers the boundary after a
+// restart. The comparison used to be strictly greater, so a transaction whose
+// end LSN is exactly the recorded position — the last one applied before the
+// restart — was applied a second time: a duplicate for an INSERT, and for a
+// DELETE a statement that matches nothing.
+func TestATransactionAtTheWrittenLSNIsNotReplayed(t *testing.T) {
 	st := stateWith(nil)
 	st.lastWrittenLSN = 100
 	s := newSyncer(t, config.SyncConfig{})
 
 	feed(t, s, st, 20, beginBytes(100))
-	if !st.processMessages {
-		t.Error("a BEGIN at the written LSN was skipped; the comparison appears to " +
-			"be inclusive now, so assert that instead")
+	if st.processMessages {
+		t.Error("a transaction already applied in full was opened again")
 	}
 }
 
@@ -329,7 +330,14 @@ func TestADeleteOutsideATransactionIsDropped(t *testing.T) {
 // not implement — TRUNCATE among them — are logged at debug level and skipped.
 // A TRUNCATE on the source is therefore never replicated, and the target keeps
 // rows the source no longer has.
-func TestAnUnhandledMessageTypeIsIgnored(t *testing.T) {
+// TestATruncateStopsReplicationRatherThanBeingIgnored covers a TRUNCATE at the
+// source. It used to fall into the default branch and be logged at debug level,
+// so the target went on holding rows the source no longer had and nothing said
+// so. Applying it is not the answer either — the disaster-recovery copy is the
+// only thing left to recover from, and a mistaken truncate would take it too —
+// so replication stops and an operator decides, which is what a destructive DDL
+// does on the MySQL side.
+func TestATruncateStopsReplicationRatherThanBeingIgnored(t *testing.T) {
 	db := targetDB(t, ordersSchema)
 	if _, err := db.Exec(`INSERT INTO orders VALUES ('1','Ada','x')`); err != nil {
 		t.Fatalf("seed: %v", err)
@@ -345,11 +353,16 @@ func TestAnUnhandledMessageTypeIsIgnored(t *testing.T) {
 	truncate = append(truncate, u32(1)...)
 	truncate = append(truncate, 0)
 	truncate = append(truncate, u32(1)...)
-	feed(t, s, st, 30, truncate)
 
+	_, err := s.processMessage(pglogrepl.XLogData{ServerWALEnd: 30, WALData: truncate}, st)
+	if err == nil {
+		t.Fatal("a TRUNCATE was ignored")
+	}
+	if !errors.Is(err, domain.ErrUnrecoverable) {
+		t.Errorf("err = %v, want something a restart will not paper over", err)
+	}
 	if got := rows(t, db); len(got) != 1 {
-		t.Errorf("rows = %v; TRUNCATE appears to be replicated now, so assert that "+
-			"instead", got)
+		t.Errorf("rows = %v, want the target left as it was", got)
 	}
 }
 
@@ -385,14 +398,14 @@ func TestTheReceivedLSNAdvancesOnEveryMessage(t *testing.T) {
 	}
 }
 
-// TestOneSuccessfulStatementClearsTheErrorFlag records the reason a failed row
-// can be lost for good. The syncer keeps a single "last statement failed" flag,
-// and the commit path only writes the LSN when it reads zero. But the flag is
-// reset by *any* later successful statement, including one in the same
-// transaction — so a transaction where the first row fails and the second
-// succeeds is recorded as fully applied, the LSN moves past it, and the failed
-// row is never retried.
-func TestOneSuccessfulStatementClearsTheErrorFlag(t *testing.T) {
+// TestAFailedStatementIsNotForgivenByALaterSuccess covers permanent, silent
+// loss of one row. The commit path only advances the LSN when the error flag
+// reads zero — but the flag used to be cleared by any later successful
+// statement, including the next statement of the same transaction. A transaction
+// whose first row failed and whose second succeeded was recorded as fully
+// applied, the position moved past it, and nothing would ever send that row
+// again.
+func TestAFailedStatementIsNotForgivenByALaterSuccess(t *testing.T) {
 	db := targetDB(t, ordersSchema)
 	st := stateWith(db)
 	s := newSyncer(t, config.SyncConfig{})
@@ -412,12 +425,7 @@ func TestOneSuccessfulStatementClearsTheErrorFlag(t *testing.T) {
 
 	feed(t, s, st, 40, insertBytes(2, text("2"), text("Ada"), text("y")))
 
-	if atomic.LoadInt32(&s.lastExecError) != 0 {
-		t.Fatalf("the error flag survived a later success; the flag appears to be " +
-			"per-transaction now, so assert that instead")
-	}
-	// The first row never reached the target, and nothing records that.
-	if got := rows(t, db); len(got) != 1 || got[0] != "2|Ada|y" {
-		t.Errorf("rows = %v", got)
+	if atomic.LoadInt32(&s.lastExecError) != 1 {
+		t.Error("a later success cleared the record of the row that was lost")
 	}
 }
