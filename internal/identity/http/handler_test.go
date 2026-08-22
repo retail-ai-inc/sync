@@ -11,7 +11,6 @@ import (
 
 func TestAuthLoginHandlerIssuesATokenForACorrectPassword(t *testing.T) {
 	db := useTempDB(t)
-	resetSessionGlobals(t)
 	insertUser(t, db, "alice", "secret", "Alice", domain.AccessAdmin)
 
 	rec := postJSON(AuthLoginHandler, http.MethodPost, "/login",
@@ -43,7 +42,6 @@ func TestAuthLoginHandlerIssuesATokenForACorrectPassword(t *testing.T) {
 // the status treats a failed login as a success.
 func TestARejectedLoginAnswersHTTP200(t *testing.T) {
 	db := useTempDB(t)
-	resetSessionGlobals(t)
 	insertUser(t, db, "alice", "secret", "Alice", domain.AccessAdmin)
 
 	rec := postJSON(AuthLoginHandler, http.MethodPost, "/login",
@@ -67,7 +65,6 @@ func TestARejectedLoginAnswersHTTP200(t *testing.T) {
 
 func TestAuthLoginHandlerReportsAStoreFailure(t *testing.T) {
 	emptyIdentityDB(t)
-	resetSessionGlobals(t)
 
 	rec := postJSON(AuthLoginHandler, http.MethodPost, "/login",
 		`{"username":"alice","password":"secret"}`)
@@ -123,10 +120,10 @@ func TestAuthCurrentUserHandlerReportsAStoreFailure(t *testing.T) {
 	}
 }
 
-func TestAuthLogoutHandlerClearsTheSession(t *testing.T) {
-	resetSessionGlobals(t)
-	domain.Current().Authenticate("alice", domain.AccessAdmin)
-
+// TestAuthLogoutHandlerAnswersSuccess pins what logging out means now: the
+// client discards its token and the server has nothing to clear. It used to
+// clear the one session the whole process shared.
+func TestAuthLogoutHandlerAnswersSuccess(t *testing.T) {
 	rec := postJSON(AuthLogoutHandler, http.MethodPost, "/logout", "")
 
 	if rec.Code != http.StatusOK {
@@ -135,14 +132,10 @@ func TestAuthLogoutHandlerClearsTheSession(t *testing.T) {
 	if envelope(t, rec)["success"] != true {
 		t.Error("success is not true")
 	}
-	if domain.Current().Username() != "" {
-		t.Errorf("the session still holds %q", domain.Current().Username())
-	}
 }
 
 func TestUpdatePasswordHandlerChangesThePassword(t *testing.T) {
 	db := useTempDB(t)
-	resetSessionGlobals(t)
 	insertUser(t, db, "alice", "secret", "Alice", domain.AccessAdmin)
 	token := domain.GenerateUserToken("alice", domain.AccessAdmin)
 
@@ -170,7 +163,6 @@ func TestUpdatePasswordHandlerChangesThePassword(t *testing.T) {
 
 func TestUpdatePasswordHandlerRejectsAWrongOldPassword(t *testing.T) {
 	db := useTempDB(t)
-	resetSessionGlobals(t)
 	insertUser(t, db, "alice", "secret", "Alice", domain.AccessAdmin)
 	token := domain.GenerateUserToken("alice", domain.AccessAdmin)
 
@@ -189,19 +181,20 @@ func TestUpdatePasswordHandlerRejectsAWrongOldPassword(t *testing.T) {
 	}
 }
 
+// TestUpdatePasswordHandlerReportsALookupFailure covers the store failing after
+// the caller has been identified. With no users table the token cannot be
+// verified either, so the answer is the 401 shape.
 func TestUpdatePasswordHandlerReportsALookupFailure(t *testing.T) {
 	emptyIdentityDB(t)
-	resetSessionGlobals(t)
-	domain.Current().Authenticate("alice", domain.AccessAdmin)
 
-	rec := postJSON(UpdatePasswordHandler, http.MethodPut, "/updatePassword",
-		`{"oldPassword":"secret","newPassword":"new"}`)
+	req := httptest.NewRequest(http.MethodPut, "/updatePassword",
+		strings.NewReader(`{"oldPassword":"secret","newPassword":"new"}`))
+	req.Header.Set("Authorization", "Bearer "+domain.GenerateUserToken("alice", domain.AccessAdmin))
+	rec := httptest.NewRecorder()
+	UpdatePasswordHandler(rec, req)
 
-	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("status = %d, want 500 (body: %q)", rec.Code, rec.Body.String())
-	}
-	if envelope(t, rec)["errorMessage"] != "Internal server error" {
-		t.Errorf("errorMessage = %v", envelope(t, rec)["errorMessage"])
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 (body: %q)", rec.Code, rec.Body.String())
 	}
 }
 
@@ -216,7 +209,6 @@ func TestUpdatePasswordHandlerReportsALookupFailure(t *testing.T) {
 // still visible — so a test that reads it sees a header the client never gets.
 func TestTheUnauthorizedPasswordBodyHasNoContentType(t *testing.T) {
 	useTempDB(t)
-	resetSessionGlobals(t)
 
 	rec := postJSON(UpdatePasswordHandler, http.MethodPut, "/updatePassword", `{}`)
 
@@ -238,7 +230,6 @@ func TestTheUnauthorizedPasswordBodyHasNoContentType(t *testing.T) {
 // client.
 func TestASuccessfulPasswordChangeDoesCarryContentType(t *testing.T) {
 	db := useTempDB(t)
-	resetSessionGlobals(t)
 	insertUser(t, db, "alice", "secret", "Alice", domain.AccessAdmin)
 	token := domain.GenerateUserToken("alice", domain.AccessAdmin)
 
@@ -655,7 +646,6 @@ func TestUpdateOAuthConfigHandlerReportsAStoreFailure(t *testing.T) {
 
 func TestAuthGoogleCallbackHandlerRefusesAnEmptyCode(t *testing.T) {
 	useTempDB(t)
-	resetSessionGlobals(t)
 
 	rec := postJSON(AuthGoogleCallbackHandler, http.MethodPost, "/login/google/callback",
 		`{"code":""}`)
@@ -674,7 +664,6 @@ func TestAuthGoogleCallbackHandlerRefusesAnEmptyCode(t *testing.T) {
 
 func TestAuthGoogleCallbackHandlerReportsAMissingConfiguration(t *testing.T) {
 	useTempDB(t)
-	resetSessionGlobals(t)
 
 	rec := postJSON(AuthGoogleCallbackHandler, http.MethodPost, "/login/google/callback",
 		`{"code":"a-code"}`)
@@ -692,7 +681,6 @@ func TestAuthGoogleCallbackHandlerReportsAMissingConfiguration(t *testing.T) {
 // carrying status "error" and currentAuthority "guest".
 func TestEveryGoogleFailureAnswersHTTP200WithTheGuestShape(t *testing.T) {
 	db := useTempDB(t)
-	resetSessionGlobals(t)
 	storeOAuthConfig(t, db, "google", `{"clientId":"id"}`, true)
 
 	rec := postJSON(AuthGoogleCallbackHandler, http.MethodPost, "/login/google/callback",

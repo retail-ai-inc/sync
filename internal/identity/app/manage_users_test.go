@@ -193,12 +193,12 @@ func TestOnlyTheNamedFieldsAreWritten(t *testing.T) {
 // identity it held, so a caller already signed in as that user stays signed in.
 func TestDeactivatingAUserDoesNotEndTheirSession(t *testing.T) {
 	db := useTempDB(t)
-	resetSession(t)
 	insertUser(t, db, "alice", "secret", "Alice", domain.AccessAdmin)
 	if _, err := db.Exec(`UPDATE users SET userId='uid-alice' WHERE username='alice'`); err != nil {
 		t.Fatalf("set userId: %v", err)
 	}
-	if ok, _, _, err := Login("alice", "secret"); err != nil || !ok {
+	ok, _, token, err := Login("alice", "secret")
+	if err != nil || !ok {
 		t.Fatalf("Login = %v, %v", ok, err)
 	}
 
@@ -206,9 +206,10 @@ func TestDeactivatingAUserDoesNotEndTheirSession(t *testing.T) {
 		t.Fatalf("ChangeUserAccess = %v / %q", err, rejection)
 	}
 
-	if domain.Current().Username() != "alice" {
-		t.Fatalf("the session was cleared; deactivation appears to sign the user out " +
-			"now, so assert that instead")
+	// Deactivating an account does now end its sessions, because the token is
+	// checked against the stored status on every request.
+	if got := IdentifyFromHeader(token); got != "" {
+		t.Errorf("a deactivated user's token still proves %q", got)
 	}
 }
 

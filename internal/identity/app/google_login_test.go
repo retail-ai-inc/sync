@@ -20,8 +20,6 @@ func storeGoogleConfig(t *testing.T, cfg string) {
 
 func TestGoogleLoginRefusesAnEmptyCode(t *testing.T) {
 	useTempDB(t)
-	resetSession(t)
-	domain.Current().Authenticate("alice", "admin")
 
 	authority, token, msg := GoogleLogin("")
 
@@ -31,34 +29,34 @@ func TestGoogleLoginRefusesAnEmptyCode(t *testing.T) {
 	if authority != "" || token != "" {
 		t.Errorf("authority/token = %q/%q for a refused code", authority, token)
 	}
-	if domain.Current().Access() != domain.AccessGuest {
-		t.Errorf("the session holds %q, want guest", domain.Current().Access())
-	}
 }
 
-// TestOnlyTheEmptyCodeBranchTouchesTheSession records that of the eleven ways
-// this flow can fail, exactly one downgrades the caller to a guest. The other
-// ten leave whatever identity the process held in place, so a failed Google
-// sign-in usually leaves the previous user signed in.
-func TestOnlyTheEmptyCodeBranchTouchesTheSession(t *testing.T) {
-	useTempDB(t)
-	resetSession(t)
-	domain.Current().Authenticate("alice", "admin")
+// TestAFailedGoogleLoginAffectsNobodyElse records what a failure means now that
+// the token is the whole identity: it produces no token and touches nothing.
+// The flow used to write to a session the whole process shared, and only one of
+// its eleven failure branches did, so a failed Google sign-in usually left the
+// previous user signed in and occasionally signed them out.
+func TestAFailedGoogleLoginAffectsNobodyElse(t *testing.T) {
+	db := useTempDB(t)
+	insertUser(t, db, "alice", "secret", "Alice", "admin")
+	_, _, existing, err := Login("alice", "secret")
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
 
 	// No configuration is stored, so this fails at the second branch.
 	if _, _, msg := GoogleLogin("a-code"); msg != "Please configure Google OAuth information first" {
 		t.Fatalf("message = %q, want the missing-configuration one", msg)
 	}
 
-	if domain.Current().Username() != "alice" {
-		t.Fatalf("the session was cleared by a failure other than the empty code; " +
-			"every branch appears to reject now, so assert that instead")
+	if got := IdentifyFromHeader(existing); got != "alice" {
+		t.Errorf("an unrelated caller's token proves %q after a failed Google "+
+			"sign-in, want alice", got)
 	}
 }
 
 func TestGoogleLoginWithoutAStoredConfiguration(t *testing.T) {
 	useTempDB(t)
-	resetSession(t)
 
 	_, _, msg := GoogleLogin("a-code")
 	if msg != "Please configure Google OAuth information first" {
@@ -83,7 +81,6 @@ func TestGoogleLoginReportsEachMissingCredential(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			useTempDB(t)
-			resetSession(t)
 			storeGoogleConfig(t, tt.cfg)
 
 			_, _, msg := GoogleLogin("a-code")
@@ -116,7 +113,6 @@ func TestGoogleLoginReportsEachMissingCredential(t *testing.T) {
 // identity Google's error responses leave behind.
 func TestAnEmptyGoogleIdentityCreatesAUserAndIssuesAToken(t *testing.T) {
 	useTempDB(t)
-	resetSession(t)
 
 	username, access, err := infraSaveGoogleUser("", "")
 	if err != nil {

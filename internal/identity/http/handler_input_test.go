@@ -5,12 +5,11 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
-	"sync"
 	"testing"
 
 	_ "github.com/mattn/go-sqlite3"
+	"github.com/retail-ai-inc/sync/internal/identity/app"
 	"github.com/retail-ai-inc/sync/internal/identity/domain"
 )
 
@@ -21,18 +20,6 @@ func postJSON(h http.HandlerFunc, method, path, body string) *httptest.ResponseR
 	rec := httptest.NewRecorder()
 	h(rec, req)
 	return rec
-}
-
-// resetSessionGlobals restores the process-wide session, which several
-// handlers both read and write.
-func resetSessionGlobals(t *testing.T) {
-	t.Helper()
-
-	prevAccess, prevUser := domain.Current().Access(), domain.Current().Username()
-	t.Cleanup(func() {
-		domain.Current().Authenticate(prevUser, prevAccess)
-	})
-	domain.Current().Clear()
 }
 
 func TestHandlersRejectMalformedJSON(t *testing.T) {
@@ -51,7 +38,6 @@ func TestHandlersRejectMalformedJSON(t *testing.T) {
 	for _, tc := range cases {
 		for _, body := range []string{"", "{", "not json", `{"a":}`, `[1,2,3`} {
 			t.Run(fmt.Sprintf("%s/%q", tc.name, body), func(t *testing.T) {
-				resetSessionGlobals(t)
 
 				rec := postJSON(tc.handler, tc.method, tc.path, body)
 				if rec.Code != http.StatusBadRequest {
@@ -63,7 +49,6 @@ func TestHandlersRejectMalformedJSON(t *testing.T) {
 }
 
 func TestUpdateUserAccessRejectsAnEmptyUserID(t *testing.T) {
-	resetSessionGlobals(t)
 
 	rec := postJSON(UpdateUserAccessHandler, http.MethodPut, "/users/access", `{"access":"admin"}`)
 
@@ -73,7 +58,6 @@ func TestUpdateUserAccessRejectsAnEmptyUserID(t *testing.T) {
 }
 
 func TestUpdateUserAccessRejectsAnUnknownAccessLevel(t *testing.T) {
-	resetSessionGlobals(t)
 
 	for _, level := range []string{"root", "superuser", "Admin", "GUEST", "owner"} {
 		body := fmt.Sprintf(`{"userId":"u1","access":%q}`, level)
@@ -93,7 +77,6 @@ func TestUpdateUserAccessRejectsAnUnknownAccessLevel(t *testing.T) {
 // client that branches on the status code treats a rejected privilege change
 // as applied.
 func TestARejectedAccessLevelStillReturnsHTTP200(t *testing.T) {
-	resetSessionGlobals(t)
 
 	rec := postJSON(UpdateUserAccessHandler, http.MethodPut, "/users/access", `{"userId":"u1","access":"root"}`)
 
@@ -103,7 +86,6 @@ func TestARejectedAccessLevelStillReturnsHTTP200(t *testing.T) {
 }
 
 func TestDeleteUserRejectsAnEmptyUserID(t *testing.T) {
-	resetSessionGlobals(t)
 
 	rec := postJSON(DeleteUserHandler, http.MethodDelete, "/users", `{"userId":""}`)
 
@@ -113,7 +95,6 @@ func TestDeleteUserRejectsAnEmptyUserID(t *testing.T) {
 }
 
 func TestAuthCurrentUserRequiresAToken(t *testing.T) {
-	resetSessionGlobals(t)
 
 	for _, header := range []string{"", "Bearer", "Bearer nonsense", "nonsense", "Basic dXNlcjpwYXNz"} {
 		req := httptest.NewRequest(http.MethodGet, "/currentUser", nil)
@@ -133,7 +114,6 @@ func TestAuthCurrentUserRequiresAToken(t *testing.T) {
 // The 401 body carries "success": true alongside errorCode 401, so a client
 // keying off that field reads an authentication failure as a success.
 func TestTheUnauthorizedBodyClaimsSuccess(t *testing.T) {
-	resetSessionGlobals(t)
 
 	rec := httptest.NewRecorder()
 	AuthCurrentUserHandler(rec, httptest.NewRequest(http.MethodGet, "/currentUser", nil))
@@ -151,7 +131,6 @@ func TestTheUnauthorizedBodyClaimsSuccess(t *testing.T) {
 }
 
 func TestUpdateAdminPasswordRequiresAnAuthorizationHeader(t *testing.T) {
-	resetSessionGlobals(t)
 
 	rec := postJSON(UpdateAdminPasswordHandler, http.MethodPut, "/updateAdminPassword", `{"newPassword":"x"}`)
 
@@ -161,7 +140,6 @@ func TestUpdateAdminPasswordRequiresAnAuthorizationHeader(t *testing.T) {
 }
 
 func TestUpdateAdminPasswordRejectsANonAdminToken(t *testing.T) {
-	resetSessionGlobals(t)
 
 	req := httptest.NewRequest(http.MethodPut, "/updateAdminPassword", strings.NewReader(`{"newPassword":"x"}`))
 	req.Header.Set("Authorization", "Bearer "+domain.GenerateUserToken("bob", "guest"))
@@ -175,7 +153,6 @@ func TestUpdateAdminPasswordRejectsANonAdminToken(t *testing.T) {
 }
 
 func TestUpdatePasswordRequiresAnIdentity(t *testing.T) {
-	resetSessionGlobals(t)
 
 	rec := postJSON(UpdatePasswordHandler, http.MethodPut, "/updatePassword", `{"newPassword":"x"}`)
 
@@ -185,7 +162,6 @@ func TestUpdatePasswordRequiresAnIdentity(t *testing.T) {
 }
 
 func TestGetOAuthConfigRequiresAProvider(t *testing.T) {
-	resetSessionGlobals(t)
 
 	rec := httptest.NewRecorder()
 	GetOAuthConfigHandler(rec, httptest.NewRequest(http.MethodGet, "/oauth//config", nil))
@@ -196,7 +172,6 @@ func TestGetOAuthConfigRequiresAProvider(t *testing.T) {
 }
 
 func TestUpdateOAuthConfigRequiresAnAdminToken(t *testing.T) {
-	resetSessionGlobals(t)
 
 	t.Run("no header", func(t *testing.T) {
 		rec := postJSON(UpdateOAuthConfigHandler, http.MethodPut, "/oauth/google/config", `{}`)
@@ -218,23 +193,41 @@ func TestUpdateOAuthConfigRequiresAnAdminToken(t *testing.T) {
 	})
 }
 
-// The session is a pair of package-level variables rather than per-request
-// state, so there is exactly one "current user" for the whole process. A
-// second client logging in silently reassigns who every session-reading
-// handler thinks it is talking to.
-func TestTheSessionIsProcessGlobal(t *testing.T) {
-	resetSessionGlobals(t)
+// TestTheAdminEndpointNeedsACredential is the fix for T-070 at the HTTP edge.
+// The session used to be a pair of package-level variables, so once anybody had
+// signed in as admin this handler issued an admin token to a caller who
+// presented nothing at all.
+func TestTheAdminEndpointNeedsACredential(t *testing.T) {
+	db := useTempDB(t)
+	insertUser(t, db, "admin", "adminpw", "Admin", domain.AccessAdmin)
 
-	domain.Current().Authenticate("admin", "admin")
+	// Somebody signs in as admin, the ordinary way.
+	if _, _, _, err := app.Login("admin", "adminpw"); err != nil {
+		t.Fatalf("Login: %v", err)
+	}
 
-	// Nobody presents a credential, yet the admin-only handler answers.
 	rec := httptest.NewRecorder()
 	GetAdminTokenHandler(rec, httptest.NewRequest(http.MethodGet, "/getAdminToken", nil))
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d — the handler appears to read per-request state now; assert that instead", rec.Code)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d for a caller presenting nothing, want 401 (body: %q)",
+			rec.Code, rec.Body.String())
 	}
+}
 
+// TestTheAdminEndpointAnswersACredentialledCaller is the other half.
+func TestTheAdminEndpointAnswersACredentialledCaller(t *testing.T) {
+	db := useTempDB(t)
+	insertUser(t, db, "admin", "adminpw", "Admin", domain.AccessAdmin)
+
+	req := httptest.NewRequest(http.MethodGet, "/getAdminToken", nil)
+	req.Header.Set("Authorization", "Bearer "+domain.GenerateUserToken("admin", domain.AccessAdmin))
+	rec := httptest.NewRecorder()
+	GetAdminTokenHandler(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d (body: %q)", rec.Code, rec.Body.String())
+	}
 	var resp map[string]interface{}
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("body is not JSON: %v (%q)", err, rec.Body.String())
@@ -242,63 +235,32 @@ func TestTheSessionIsProcessGlobal(t *testing.T) {
 	data, _ := resp["data"].(map[string]interface{})
 	token, _ := data["accessToken"].(string)
 	if !domain.ValidateAdminToken(token) {
-		t.Fatalf("no admin token was issued to an unauthenticated caller (body: %s)", rec.Body.String())
+		t.Errorf("no admin token was issued (body: %s)", rec.Body.String())
 	}
 }
 
-// Logging out is a global operation: it clears the one session pair, so one
-// client's logout revokes the session every other client is riding on.
-func TestLogoutClearsTheSessionForEveryone(t *testing.T) {
-	resetSessionGlobals(t)
-
-	domain.Current().Authenticate("admin", "admin")
+// TestOneCallersLogoutDoesNotSignAnybodyElseOut records that logging out is now
+// a client-side act: the token is the identity and nothing on the server holds
+// a session to clear. It used to clear the one session pair, so one client's
+// logout revoked the session every other client was riding on.
+func TestOneCallersLogoutDoesNotSignAnybodyElseOut(t *testing.T) {
+	db := useTempDB(t)
+	insertUser(t, db, "admin", "adminpw", "Admin", domain.AccessAdmin)
+	token := domain.GenerateUserToken("admin", domain.AccessAdmin)
 
 	rec := httptest.NewRecorder()
 	AuthLogoutHandler(rec, httptest.NewRequest(http.MethodPost, "/logout", nil))
-
-	if domain.Current().Access() != "" || domain.Current().Username() != "" {
-		t.Fatalf("access = %q, username = %q — logout appears to be per-session now",
-			domain.Current().Access(), domain.Current().Username())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("logout returned %d", rec.Code)
 	}
 
+	req := httptest.NewRequest(http.MethodGet, "/getAdminToken", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
 	rec = httptest.NewRecorder()
-	GetAdminTokenHandler(rec, httptest.NewRequest(http.MethodGet, "/getAdminToken", nil))
-	if rec.Code != http.StatusUnauthorized {
-		t.Errorf("after logout the admin handler returned %d, want 401", rec.Code)
-	}
-}
+	GetAdminTokenHandler(rec, req)
 
-// The session variables are written from handler goroutines with no
-// synchronisation, so concurrent requests race on them. Demonstrating that
-// costs the whole package: the race detector aborts it, and CI runs
-// `go test -race ./...`. The test is therefore skipped unless asked for.
-//
-//	SYNC_RACE_PROOF=1 go test -race -run TestConcurrentLoginsRace ./internal/identity/http/
-//
-// See T-070 in docs/TEST_FINDINGS.md.
-func TestConcurrentLoginsRaceOnTheSessionGlobals(t *testing.T) {
-	if os.Getenv("SYNC_RACE_PROOF") == "" {
-		t.Skip("set SYNC_RACE_PROOF=1 together with -race to demonstrate T-070")
+	if rec.Code != http.StatusOK {
+		t.Errorf("after another caller logged out the admin handler returned %d, want 200",
+			rec.Code)
 	}
-
-	resetSessionGlobals(t)
-
-	var wg sync.WaitGroup
-	for i := 0; i < 8; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			rec := httptest.NewRecorder()
-			GetAdminTokenHandler(rec, httptest.NewRequest(http.MethodGet, "/getAdminToken", nil))
-		}()
-	}
-	for i := 0; i < 8; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			rec := httptest.NewRecorder()
-			AuthLogoutHandler(rec, httptest.NewRequest(http.MethodPost, "/logout", nil))
-		}()
-	}
-	wg.Wait()
 }

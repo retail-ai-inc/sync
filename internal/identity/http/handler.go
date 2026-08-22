@@ -208,7 +208,7 @@ func UpdateAdminPasswordHandler(w http.ResponseWriter, r *http.Request) {
 
 // GetAdminTokenHandler GET /api/getAdminToken
 func GetAdminTokenHandler(w http.ResponseWriter, r *http.Request) {
-	token, ok := app.AdminToken()
+	token, ok := app.AdminToken(r.Header.Get("Authorization"))
 	if !ok {
 		writeFailure(w, http.StatusUnauthorized, "401", "Admin privileges required")
 		return

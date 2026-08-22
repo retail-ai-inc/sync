@@ -34,10 +34,10 @@ func TestUserIsNotAValidAccessLevel(t *testing.T) {
 			"so assert the new set")
 	}
 
-	s := freshSession()
-	s.Authenticate("alice", "user")
-	if !s.IsAuthenticated() {
-		t.Error("a session holding the unassignable level \"user\" is not authenticated")
+	// The login path still mints a token for whatever the users table holds, so
+	// a row carrying the unassignable level authenticates with it.
+	if _, access, ok := ParseUserToken(GenerateUserToken("alice", "user")); !ok || access != "user" {
+		t.Error("a token minted for the unassignable level does not prove it")
 	}
 }
 

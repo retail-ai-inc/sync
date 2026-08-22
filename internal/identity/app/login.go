@@ -2,50 +2,59 @@ package app
 
 import (
 	"errors"
-	"fmt"
 
 	"github.com/retail-ai-inc/sync/internal/identity/domain"
 	"github.com/retail-ai-inc/sync/internal/identity/infra"
 )
 
-// Login authenticates a username and password. On success it records the
-// identity on the process session and mints a user token; on failure it marks
-// the session as a guest. The boolean says which of the two happened.
+// Login authenticates a username and password and mints a token on success.
+//
+// It no longer records anything process-wide. The session used to be a single
+// package variable shared by every request, so a login on one connection
+// changed who a concurrent request was treated as; the token the caller gets
+// back is the whole of the identity now.
 func Login(username, password string) (ok bool, access, token string, err error) {
 	valid, userAccess, err := infra.ValidateUser(username, password)
 	if err != nil {
 		return false, "", "", err
 	}
 	if !valid {
-		domain.Current().Reject()
 		return false, domain.AccessGuest, "", nil
 	}
-	domain.Current().Authenticate(username, userAccess)
 	return true, userAccess, domain.GenerateUserToken(username, userAccess), nil
 }
 
-// Logout discards the identity the process holds.
-func Logout() { domain.Current().Clear() }
+// Logout is what the client calls when it discards its token. There is no
+// server-side session to end: the token is the identity, and it expires by
+// itself. It used to clear the one session the whole process shared, which
+// signed everybody out.
+func Logout() {}
 
-// ValidateUserToken reports whether a token is one of today's valid user
-// tokens, and for whom. It compares against every user in the store rather
-// than carrying a claim, so it needs the store.
+// ValidateUserToken reports whether a token proves an identity the store still
+// recognises, and for whom.
+//
+// The token itself names the user now, so the store is consulted once rather
+// than being scanned for a user whose derived token happens to match. The
+// store still has the last word: a user who has been deleted, deactivated, or
+// had their access level changed cannot go on using a token minted earlier.
 func ValidateUserToken(token string) (bool, string, string) {
-	users, err := infra.GetAllUsers()
-	if err != nil {
-		fmt.Println("Error getting users:", err)
+	username, access, ok := domain.ParseUserToken(token)
+	if !ok {
 		return false, "", ""
 	}
 
-	for _, user := range users {
-		username := user["username"].(string)
-		accessLevel := user["access"].(string)
-
-		if domain.GenerateUserToken(username, accessLevel) == token {
-			return true, username, accessLevel
-		}
+	user, err := infra.GetUserByUsername(username)
+	if err != nil || user == nil {
+		return false, "", ""
 	}
-	return false, "", ""
+	if status, _ := user["status"].(string); domain.IsDeactivated(status) {
+		return false, "", ""
+	}
+	stored, _ := user["access"].(string)
+	if stored != access {
+		return false, "", ""
+	}
+	return true, username, access
 }
 
 // IdentifyFromHeader resolves the username an Authorization header proves, or
@@ -66,11 +75,18 @@ func CurrentUser(username string) (map[string]interface{}, error) {
 	return infra.GetUserData(username)
 }
 
-// AdminToken mints an admin token if the process session is the admin. The
-// session is process-wide, so this grants a token to whoever asks once anybody
-// has logged in as admin (T-070).
-func AdminToken() (string, bool) {
-	if !domain.Current().IsAdmin() {
+// AdminToken mints an admin token for a caller who already proves the admin
+// identity.
+//
+// It used to consult the process-wide session instead, which handed an admin
+// token to anybody who asked for one once anybody at all had signed in as
+// admin — including a caller who had presented no credential (T-070).
+func AdminToken(authHeader string) (string, bool) {
+	if authHeader == "" {
+		return "", false
+	}
+	valid, _, access := ValidateUserToken(domain.ExtractTokenFromHeader(authHeader))
+	if !valid || access != domain.AccessAdmin {
 		return "", false
 	}
 	return domain.GenerateAdminToken(), true
@@ -98,16 +114,16 @@ func ChangePassword(username, oldPassword, newPassword string) error {
 }
 
 // ResolvePasswordChangeIdentity decides whose password a request may change:
-// the identity its token proves, or failing that the process session's
-// username. It reports false when neither is available.
+// the identity its token proves, and nothing else.
+//
+// It used to fall back to the process-wide session, so a request carrying no
+// token at all could change the password of whoever had last signed in.
 func ResolvePasswordChangeIdentity(authHeader string) (string, bool) {
-	if username := IdentifyFromHeader(authHeader); username != "" {
-		return username, true
-	}
-	if !domain.Current().IsAuthenticated() {
+	username := IdentifyFromHeader(authHeader)
+	if username == "" {
 		return "", false
 	}
-	return domain.Current().Username(), true
+	return username, true
 }
 
 // The messages the Google callback answers with. They are response text rather
@@ -127,13 +143,11 @@ const (
 	msgSaveUserPrefix  = "Failed to save user information: "
 )
 
-// GoogleLogin exchanges a Google authorization code for an identity. On
-// success it records the identity on the process session and returns the
-// access level with a freshly minted token. On any failure it marks the
-// session as a guest and returns the message the caller should answer with.
+// GoogleLogin exchanges a Google authorization code for an identity, returning
+// the access level and a freshly minted token, or the message the caller should
+// answer with. Like Login it records nothing process-wide.
 func GoogleLogin(code string) (authority, token, errorMessage string) {
 	if code == "" {
-		domain.Current().Reject()
 		return "", "", msgInvalidData
 	}
 
@@ -181,6 +195,5 @@ func GoogleLogin(code string) (authority, token, errorMessage string) {
 		return "", "", msgAccountInactive
 	}
 
-	domain.Current().Authenticate(username, userAccess)
 	return userAccess, domain.GenerateUserToken(username, userAccess), ""
 }

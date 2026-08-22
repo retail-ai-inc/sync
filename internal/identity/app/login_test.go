@@ -7,19 +7,8 @@ import (
 	"github.com/retail-ai-inc/sync/internal/identity/domain"
 )
 
-// resetSession clears the process-wide session and restores it afterwards, so
-// these tests do not leak an identity into each other.
-func resetSession(t *testing.T) {
-	t.Helper()
-
-	prevUser, prevAccess := domain.Current().Username(), domain.Current().Access()
-	t.Cleanup(func() { domain.Current().Authenticate(prevUser, prevAccess) })
-	domain.Current().Clear()
-}
-
 func TestLoginAcceptsAStoredPassword(t *testing.T) {
 	db := useTempDB(t)
-	resetSession(t)
 	insertUser(t, db, "alice", "secret", "Alice", "admin")
 
 	ok, access, token, err := Login("alice", "secret")
@@ -35,14 +24,13 @@ func TestLoginAcceptsAStoredPassword(t *testing.T) {
 	if token == "" {
 		t.Error("no token was minted")
 	}
-	if domain.Current().Username() != "alice" || domain.Current().Access() != "admin" {
-		t.Errorf("the session holds %q/%q", domain.Current().Username(), domain.Current().Access())
+	if _, _, ok := domain.ParseUserToken(token); !ok {
+		t.Error("the minted token does not verify")
 	}
 }
 
 func TestLoginRejectsAWrongPassword(t *testing.T) {
 	db := useTempDB(t)
-	resetSession(t)
 	insertUser(t, db, "alice", "secret", "Alice", "admin")
 
 	ok, access, token, err := Login("alice", "wrong")
@@ -58,25 +46,19 @@ func TestLoginRejectsAWrongPassword(t *testing.T) {
 	if token != "" {
 		t.Errorf("a token was minted for a rejected login: %q", token)
 	}
-	if domain.Current().Access() != domain.AccessGuest {
-		t.Errorf("the session holds %q, want guest", domain.Current().Access())
-	}
 }
 
-// TestARejectedLoginDowngradesWhoeverWasSignedIn records T-070 from the login
-// side: a failed attempt by one caller replaces the process-wide identity, so
-// an administrator working in another tab becomes a guest because somebody
-// mistyped a password.
-func TestARejectedLoginDowngradesWhoeverWasSignedIn(t *testing.T) {
+// TestOneCallersFailedLoginDoesNotAffectAnother is the fix for T-070 seen from
+// the login side. The identity used to live in one package variable shared by
+// every request, so a failed attempt by one caller downgraded an administrator
+// working in another tab to a guest.
+func TestOneCallersFailedLoginDoesNotAffectAnother(t *testing.T) {
 	db := useTempDB(t)
-	resetSession(t)
 	insertUser(t, db, "admin", "adminpw", "Admin", "admin")
 
-	if ok, _, _, err := Login("admin", "adminpw"); err != nil || !ok {
+	ok, _, token, err := Login("admin", "adminpw")
+	if err != nil || !ok {
 		t.Fatalf("Login(admin) = %v, %v", ok, err)
-	}
-	if !domain.Current().IsAdmin() {
-		t.Fatal("the admin did not sign in")
 	}
 
 	// A different caller fails to sign in.
@@ -84,15 +66,14 @@ func TestARejectedLoginDowngradesWhoeverWasSignedIn(t *testing.T) {
 		t.Fatal("the second login succeeded")
 	}
 
-	if domain.Current().IsAdmin() {
-		t.Fatal("the admin session survived somebody else's failed login; the session " +
-			"appears to be per-request now, so assert that instead")
+	if got := IdentifyFromHeader(token); got != "admin" {
+		t.Errorf("the first caller's token proves %q after somebody else's failed "+
+			"login, want admin", got)
 	}
 }
 
 func TestLoginOnAnUnknownUser(t *testing.T) {
 	useTempDB(t)
-	resetSession(t)
 
 	ok, _, _, err := Login("nobody", "secret")
 	if err != nil {
@@ -105,22 +86,28 @@ func TestLoginOnAnUnknownUser(t *testing.T) {
 
 func TestLoginReportsAStoreFailure(t *testing.T) {
 	emptyIdentityDB(t)
-	resetSession(t)
 
 	if _, _, _, err := Login("alice", "secret"); err == nil {
 		t.Error("Login on a database with no tables returned no error")
 	}
 }
 
-func TestLogoutClearsTheSession(t *testing.T) {
-	resetSession(t)
-	domain.Current().Authenticate("alice", "admin")
+// TestLogoutDoesNotSignAnybodyElseOut records what logging out means now that
+// the token is the identity: the client discards it, and nothing on the server
+// changes. It used to clear the one session the whole process shared, so one
+// caller logging out signed everybody out.
+func TestLogoutDoesNotSignAnybodyElseOut(t *testing.T) {
+	db := useTempDB(t)
+	insertUser(t, db, "alice", "secret", "Alice", "admin")
+	_, _, token, err := Login("alice", "secret")
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
 
 	Logout()
 
-	if domain.Current().Username() != "" || domain.Current().Access() != "" {
-		t.Errorf("the session holds %q/%q after Logout",
-			domain.Current().Username(), domain.Current().Access())
+	if got := IdentifyFromHeader(token); got != "alice" {
+		t.Errorf("another caller's token proves %q after a logout, want alice", got)
 	}
 }
 
@@ -217,41 +204,41 @@ func TestCurrentUserOnAnUnknownUser(t *testing.T) {
 	}
 }
 
-func TestAdminTokenRequiresTheAdminSession(t *testing.T) {
-	resetSession(t)
+// TestAdminTokenRequiresAnAdminCredential is the fix for T-070 at its sharpest.
+// The use case used to consult the process-wide session, so once anybody had
+// signed in as admin it handed an admin token to any caller at all — including
+// one that had presented nothing.
+func TestAdminTokenRequiresAnAdminCredential(t *testing.T) {
+	db := useTempDB(t)
+	insertUser(t, db, "admin", "adminpw", "Admin", "admin")
+	insertUser(t, db, "alice", "secret", "Alice", "guest")
 
-	if _, ok := AdminToken(); ok {
-		t.Error("AdminToken issued a token with no session")
+	if _, ok := AdminToken(""); ok {
+		t.Error("AdminToken issued a token to a caller presenting nothing")
+	}
+	if _, ok := AdminToken("Bearer not-a-token"); ok {
+		t.Error("AdminToken issued a token for an unreadable credential")
+	}
+	if _, ok := AdminToken("Bearer " + domain.GenerateUserToken("alice", "guest")); ok {
+		t.Error("AdminToken issued a token to a guest")
 	}
 
-	domain.Current().Authenticate("alice", "admin")
-	if _, ok := AdminToken(); ok {
-		t.Error("AdminToken issued a token to an admin-level non-admin user")
+	// Somebody else being signed in as admin must not help.
+	if _, _, _, err := Login("admin", "adminpw"); err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	if _, ok := AdminToken(""); ok {
+		t.Error("AdminToken issued a token to a caller presenting nothing while an " +
+			"admin was signed in elsewhere")
 	}
 
-	domain.Current().Authenticate("admin", "admin")
-	token, ok := AdminToken()
+	adminToken := domain.GenerateUserToken("admin", domain.AccessAdmin)
+	token, ok := AdminToken("Bearer " + adminToken)
 	if !ok {
-		t.Fatal("AdminToken refused the admin session")
+		t.Fatal("AdminToken refused a valid admin credential")
 	}
 	if !domain.ValidateAdminToken(token) {
 		t.Error("the minted token does not validate")
-	}
-}
-
-// TestAdminTokenNeedsNoCredential records T-070 at its sharpest: once anybody
-// has signed in as admin, this use case hands an admin token to any caller,
-// because the only thing it checks is the process-wide session.
-func TestAdminTokenNeedsNoCredential(t *testing.T) {
-	resetSession(t)
-	domain.Current().Authenticate("admin", "admin")
-
-	token, ok := AdminToken()
-	if !ok {
-		t.Fatal("AdminToken refused the admin session")
-	}
-	if token == "" {
-		t.Fatal("an empty token was issued")
 	}
 }
 
@@ -316,7 +303,6 @@ func TestUpdatingAnUnknownUsersPasswordIsSilent(t *testing.T) {
 
 func TestResolvePasswordChangeIdentity(t *testing.T) {
 	db := useTempDB(t)
-	resetSession(t)
 	insertUser(t, db, "alice", "secret", "Alice", "admin")
 	token := domain.GenerateUserToken("alice", "admin")
 
@@ -327,44 +313,31 @@ func TestResolvePasswordChangeIdentity(t *testing.T) {
 		}
 	})
 
-	t.Run("no token and no session", func(t *testing.T) {
-		domain.Current().Clear()
+	t.Run("no token", func(t *testing.T) {
 		if _, ok := ResolvePasswordChangeIdentity(""); ok {
 			t.Error("ResolvePasswordChangeIdentity accepted a caller with nothing")
 		}
 	})
 
-	t.Run("no token but a session", func(t *testing.T) {
-		domain.Current().Authenticate("bob", "admin")
-		username, ok := ResolvePasswordChangeIdentity("")
-		if !ok || username != "bob" {
-			t.Errorf("ResolvePasswordChangeIdentity = %q/%v", username, ok)
-		}
-	})
-
-	t.Run("a guest session is not an identity", func(t *testing.T) {
-		domain.Current().Reject()
-		if _, ok := ResolvePasswordChangeIdentity(""); ok {
-			t.Error("ResolvePasswordChangeIdentity accepted a guest")
+	t.Run("an unreadable token", func(t *testing.T) {
+		if _, ok := ResolvePasswordChangeIdentity("Bearer nonsense"); ok {
+			t.Error("ResolvePasswordChangeIdentity accepted an unreadable credential")
 		}
 	})
 }
 
-// TestAPasswordCanBeChangedWithNoTokenAtAll records the consequence of falling
-// back to the session: a caller who presents nothing changes the password of
-// whoever the process last authenticated.
-func TestAPasswordCanBeChangedWithNoTokenAtAll(t *testing.T) {
+// TestAPasswordCannotBeChangedWithNoTokenAtAll is the fix for the fallback that
+// let a caller presenting nothing change the password of whoever the process
+// had last authenticated.
+func TestAPasswordCannotBeChangedWithNoTokenAtAll(t *testing.T) {
 	db := useTempDB(t)
-	resetSession(t)
 	insertUser(t, db, "alice", "secret", "Alice", "admin")
-	domain.Current().Authenticate("alice", "admin")
-
-	username, ok := ResolvePasswordChangeIdentity("")
-	if !ok {
-		t.Fatal("ResolvePasswordChangeIdentity refused a caller with no token; the " +
-			"fallback appears to be gone, so assert that instead")
+	if _, _, _, err := Login("alice", "secret"); err != nil {
+		t.Fatalf("Login: %v", err)
 	}
-	if err := ChangePassword(username, "secret", "hijacked"); err != nil {
-		t.Fatalf("ChangePassword: %v", err)
+
+	if _, ok := ResolvePasswordChangeIdentity(""); ok {
+		t.Fatal("a caller with no token was given an identity to change the " +
+			"password of")
 	}
 }

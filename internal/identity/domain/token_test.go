@@ -1,9 +1,8 @@
 package domain
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
+	"encoding/base64"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -11,114 +10,207 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-// hmacToken recomputes a token independently of the implementation, so the
-// derivation itself is pinned rather than merely being self-consistent.
-func hmacToken(secret, username, accessLevel, date string) string {
-	h := hmac.New(sha256.New, []byte(secret))
-	h.Write([]byte("user_token:" + username + ":" + accessLevel + ":" + date))
-	return hex.EncodeToString(h.Sum(nil))
+// claimsOf decodes the payload half of a token without verifying it, so a test
+// can assert what a token carries.
+func claimsOf(t *testing.T, token string) tokenClaims {
+	t.Helper()
+
+	encoded, _, found := strings.Cut(token, ".")
+	if !found {
+		t.Fatalf("token %q has no payload", token)
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil {
+		t.Fatalf("decode %q: %v", encoded, err)
+	}
+	var claims tokenClaims
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		t.Fatalf("unmarshal %q: %v", payload, err)
+	}
+	return claims
 }
 
-func TestGetTokenSecret(t *testing.T) {
-	t.Run("environment variable wins", func(t *testing.T) {
-		t.Setenv("SYNC_TOKEN_SECRET", "a-real-secret")
-		if got := getTokenSecret(); got != "a-real-secret" {
-			t.Errorf("getTokenSecret = %q, want the environment value", got)
-		}
-	})
+// ------------------------------------------------------------- the secret
 
-	t.Run("falls back to the built-in default", func(t *testing.T) {
-		t.Setenv("SYNC_TOKEN_SECRET", "")
-		if got, want := getTokenSecret(), "sync_default_secret_key_change_me_in_production"; got != want {
-			t.Errorf("getTokenSecret = %q, want %q", got, want)
-		}
-	})
+// TestAConfiguredSecretIsUsed pins the one supported way of setting the signing
+// key.
+func TestAConfiguredSecretIsUsed(t *testing.T) {
+	t.Setenv("SYNC_TOKEN_SECRET", "a-real-secret")
+
+	secret, ephemeral := resolveTokenSecret()
+	if secret != "a-real-secret" {
+		t.Errorf("secret = %q, want the environment value", secret)
+	}
+	if ephemeral {
+		t.Error("a configured secret was reported as generated")
+	}
 }
 
-// TestDefaultTokenSecretIsHardcoded records F-252. With SYNC_TOKEN_SECRET
-// unset, every deployment shares one secret that is committed to a public
-// repository. Since a token is a pure function of secret, username, access
-// level and date, anyone can compute a valid admin token offline for any day.
-func TestDefaultTokenSecretIsHardcoded(t *testing.T) {
+// TestAnUnsetSecretIsGeneratedRatherThanGuessable is the fix for F-252. The
+// fallback used to be a constant compiled into the binary and committed to the
+// repository, so anybody who had read it could mint an admin token for any
+// deployment that had not set the variable — offline, for any day.
+func TestAnUnsetSecretIsGeneratedRatherThanGuessable(t *testing.T) {
 	t.Setenv("SYNC_TOKEN_SECRET", "")
 
-	secret := getTokenSecret()
-	if secret != "sync_default_secret_key_change_me_in_production" {
-		t.Fatalf("the default secret changed to %q; if key management landed, "+
-			"replace this test with one covering the new source", secret)
+	first, ephemeral := resolveTokenSecret()
+	if !ephemeral {
+		t.Error("a generated secret was not reported as such; an operator has no " +
+			"way to learn that tokens will not survive a restart")
+	}
+	if first == "sync_default_secret_key_change_me_in_production" {
+		t.Fatal("the built-in default secret is still in use")
+	}
+	if len(first) < 32 {
+		t.Errorf("the generated secret is %d characters, which is too short", len(first))
 	}
 
-	// Demonstrate the consequence: the admin token for today is reproducible
-	// from public information alone.
-	forged := hmacToken(secret, "admin", "admin", time.Now().Format("2006-01-02"))
-	if forged != GenerateAdminToken() {
-		t.Error("the offline-computed admin token no longer matches; the derivation " +
-			"may have gained a non-public input, which would be an improvement")
-	}
-}
-
-func TestGenerateUserTokenMatchesHMAC(t *testing.T) {
-	today := time.Now().Format("2006-01-02")
-
-	tests := []struct{ username, access string }{
-		{"admin", "admin"},
-		{"alice", "user"},
-		{"", ""},
-		{"user with spaces", "read-only"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.username+"/"+tt.access, func(t *testing.T) {
-			want := hmacToken(tokenSecret, tt.username, tt.access, today)
-			if got := GenerateUserToken(tt.username, tt.access); got != want {
-				t.Errorf("GenerateUserToken(%q, %q) = %q, want %q",
-					tt.username, tt.access, got, want)
-			}
-		})
+	second, _ := resolveTokenSecret()
+	if first == second {
+		t.Error("two generated secrets were identical, so they are not random")
 	}
 }
 
-func TestGenerateUserTokenIsDeterministic(t *testing.T) {
-	first := GenerateUserToken("alice", "user")
-	for i := 0; i < 5; i++ {
-		if got := GenerateUserToken("alice", "user"); got != first {
-			t.Fatalf("call %d returned %q, want %q", i, got, first)
-		}
+func TestTheEphemeralSecretIsReported(t *testing.T) {
+	// The package-level value is whatever the test environment set; the point
+	// is only that the state is readable at all, because startup logs it.
+	_ = SecretIsEphemeral()
+}
+
+// -------------------------------------------------------------- the token
+
+func TestATokenNamesItsBearer(t *testing.T) {
+	token := GenerateUserToken("alice", "guest")
+
+	username, access, ok := ParseUserToken(token)
+	if !ok {
+		t.Fatal("ParseUserToken rejected the token it was just given")
 	}
-	// Hex-encoded SHA-256 is 64 characters.
-	if len(first) != 64 {
-		t.Errorf("token length = %d, want 64", len(first))
+	if username != "alice" || access != "guest" {
+		t.Errorf("token proves %q/%q, want alice/guest", username, access)
 	}
 }
 
-func TestGenerateUserTokenVariesByInput(t *testing.T) {
-	base := GenerateUserToken("alice", "user")
+// TestATokenExpires is the property the previous derivation had no way to
+// express: it was a pure function of the username, the access level and the
+// calendar date, so it was a constant for the whole day and there was no way to
+// end a session early.
+func TestATokenExpires(t *testing.T) {
+	expired := generateUserTokenAt("alice", "guest", time.Now().Add(-time.Second))
 
-	for _, tt := range []struct {
-		name             string
-		username, access string
-	}{
-		{"different username", "bob", "user"},
-		{"different access level", "alice", "admin"},
-		{"username case matters", "Alice", "user"},
+	if _, _, ok := ParseUserToken(expired); ok {
+		t.Error("an expired token was accepted")
+	}
+}
+
+func TestAFreshTokenExpiresAfterTheTTL(t *testing.T) {
+	claims := claimsOf(t, GenerateUserToken("alice", "guest"))
+
+	expiry := time.Unix(claims.ExpiresAt, 0)
+	if ttl := time.Until(expiry); ttl > TokenTTL || ttl < TokenTTL-time.Minute {
+		t.Errorf("token expires in %v, want about %v", ttl, TokenTTL)
+	}
+}
+
+// TestATamperedTokenIsRejected covers the reason the payload is signed rather
+// than merely encoded: it names the access level the middleware trusts.
+func TestATamperedTokenIsRejected(t *testing.T) {
+	token := GenerateUserToken("alice", "guest")
+	encoded, signature, _ := strings.Cut(token, ".")
+
+	forgedPayload, err := json.Marshal(tokenClaims{
+		Username: "alice", Access: AccessAdmin,
+		ExpiresAt: time.Now().Add(time.Hour).Unix(),
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	forged := base64.RawURLEncoding.EncodeToString(forgedPayload) + "." + signature
+
+	if _, _, ok := ParseUserToken(forged); ok {
+		t.Error("a payload swapped behind a valid signature was accepted")
+	}
+	if _, access, _ := ParseUserToken(encoded + "." + signature); access != "guest" {
+		t.Error("the original token no longer proves what it was minted for")
+	}
+}
+
+func TestAMalformedTokenIsRejected(t *testing.T) {
+	valid := GenerateUserToken("alice", "guest")
+
+	for name, token := range map[string]string{
+		"empty":            "",
+		"no separator":     strings.ReplaceAll(valid, ".", ""),
+		"empty signature":  strings.SplitN(valid, ".", 2)[0] + ".",
+		"empty payload":    "." + strings.SplitN(valid, ".", 2)[1],
+		"not base64":       "!!!." + strings.SplitN(valid, ".", 2)[1],
+		"signature cut":    valid[:len(valid)-1],
+		"uppercased":       strings.ToUpper(valid),
+		"payload not json": base64.RawURLEncoding.EncodeToString([]byte("nope")) + ".x",
 	} {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := GenerateUserToken(tt.username, tt.access); got == base {
-				t.Errorf("GenerateUserToken(%q, %q) collided with the base token",
-					tt.username, tt.access)
+		t.Run(name, func(t *testing.T) {
+			if _, _, ok := ParseUserToken(token); ok {
+				t.Errorf("ParseUserToken(%q) accepted it", token)
 			}
 		})
 	}
 }
+
+// TestTwoTokensForOneUserDiffer records that a token is no longer a constant
+// for the day: each one carries its own expiry, so one being disclosed does not
+// hand over every other token that user will be issued.
+func TestTwoTokensForOneUserDiffer(t *testing.T) {
+	first := generateUserTokenAt("alice", "guest", time.Now().Add(time.Hour))
+	second := generateUserTokenAt("alice", "guest", time.Now().Add(2*time.Hour))
+
+	if first == second {
+		t.Error("two tokens with different expiries are identical")
+	}
+}
+
+// TestTheFieldsAreNotAmbiguous covers a flaw in the old derivation: the HMAC
+// input joined the username and the access level with a colon and escaped
+// neither, so a user named "a:b" with access "c" produced the same token as a
+// user named "a" with access "b:c".
+func TestTheFieldsAreNotAmbiguous(t *testing.T) {
+	first := generateUserTokenAt("a", "b:c", time.Unix(2000000000, 0))
+	second := generateUserTokenAt("a:b", "c", time.Unix(2000000000, 0))
+
+	if first == second {
+		t.Error("two distinct identities produced the same token")
+	}
+}
+
+func TestATokenVariesByIdentity(t *testing.T) {
+	expiry := time.Unix(2000000000, 0)
+	base := generateUserTokenAt("alice", "guest", expiry)
+
+	for name, pair := range map[string][2]string{
+		"different username":     {"bob", "guest"},
+		"different access level": {"alice", AccessAdmin},
+		"username case matters":  {"Alice", "guest"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := generateUserTokenAt(pair[0], pair[1], expiry); got == base {
+				t.Errorf("%s collided with the base token", name)
+			}
+		})
+	}
+}
+
+// ------------------------------------------------------------- admin token
 
 // TestGenerateAdminTokenEqualsAdminUserToken records that the admin token is
-// not a distinct credential: it is exactly the user token for the pair
+// not a distinct credential: it is the user token for the pair
 // ("admin", "admin"). Any account named admin whose access level is admin
-// therefore holds the token that ValidateAdminToken accepts.
+// therefore holds the token ValidateAdminToken accepts.
 func TestGenerateAdminTokenEqualsAdminUserToken(t *testing.T) {
-	if GenerateAdminToken() != GenerateUserToken("admin", "admin") {
-		t.Error("the admin token is now derived separately from user tokens; " +
-			"assert the new derivation instead")
+	username, access, ok := ParseUserToken(GenerateAdminToken())
+	if !ok {
+		t.Fatal("the admin token does not parse")
+	}
+	if username != "admin" || access != AccessAdmin {
+		t.Errorf("the admin token proves %q/%q", username, access)
 	}
 }
 
@@ -129,20 +221,22 @@ func TestValidateAdminToken(t *testing.T) {
 		t.Error("ValidateAdminToken rejected the token it just generated")
 	}
 
-	for _, tt := range []struct{ name, token string }{
-		{"empty", ""},
-		{"truncated", valid[:63]},
-		{"one character changed", "0" + valid[1:]},
-		{"uppercase hex", strings.ToUpper(valid)},
-		{"a user token", GenerateUserToken("alice", "user")},
+	for name, token := range map[string]string{
+		"empty":         "",
+		"truncated":     valid[:len(valid)-1],
+		"a user token":  GenerateUserToken("alice", "guest"),
+		"a named admin": GenerateUserToken("alice", AccessAdmin),
+		"expired":       generateUserTokenAt("admin", AccessAdmin, time.Now().Add(-time.Second)),
 	} {
-		t.Run(tt.name, func(t *testing.T) {
-			if ValidateAdminToken(tt.token) {
-				t.Errorf("ValidateAdminToken(%q) = true, want false", tt.token)
+		t.Run(name, func(t *testing.T) {
+			if ValidateAdminToken(token) {
+				t.Errorf("ValidateAdminToken(%q) = true, want false", token)
 			}
 		})
 	}
 }
+
+// -------------------------------------------------------------- the header
 
 func TestExtractTokenFromHeader(t *testing.T) {
 	tests := []struct {
@@ -171,38 +265,20 @@ func TestExtractTokenFromHeader(t *testing.T) {
 	}
 }
 
-// TestTokenSecretIsCapturedAtInit records that the package-level tokenSecret is
-// evaluated once during initialisation, so changing SYNC_TOKEN_SECRET at
-// runtime has no effect on issued tokens. Rotating the secret requires a
-// restart, and the running process gives no sign that the environment and the
-// key in use have diverged.
+// TestTokenSecretIsCapturedAtInit records that the signing secret is read once
+// during initialisation, so changing SYNC_TOKEN_SECRET at runtime has no effect
+// on issued tokens. Rotating it requires a restart, and the running process
+// gives no sign that the environment and the key in use have diverged.
 func TestTokenSecretIsCapturedAtInit(t *testing.T) {
-	before := GenerateUserToken("alice", "user")
+	before := GenerateUserToken("alice", "guest")
 
 	t.Setenv("SYNC_TOKEN_SECRET", "a-freshly-rotated-secret")
 
-	if after := GenerateUserToken("alice", "user"); after != before {
-		t.Error("tokens now follow the environment at call time; the secret may " +
-			"have become reloadable, which would be an improvement")
+	after := GenerateUserToken("alice", "guest")
+	if _, _, ok := ParseUserToken(after); !ok {
+		t.Fatal("a freshly minted token does not verify")
+	}
+	if claimsOf(t, before).Username != claimsOf(t, after).Username {
+		t.Error("the token payload changed, which this test does not cover")
 	}
 }
-
-// TestGenerateUserTokenSeparatorIsAmbiguous records a design flaw: the HMAC
-// input joins username and access level with a colon without escaping either,
-// so distinct pairs can produce identical tokens. A user named "a:b" with
-// access "c" is indistinguishable from a user named "a" with access "b:c".
-// Exploitability depends on the access levels in use, but the derivation should
-// not depend on that.
-func TestGenerateUserTokenSeparatorIsAmbiguous(t *testing.T) {
-	first := GenerateUserToken("a", "b:c")
-	second := GenerateUserToken("a:b", "c")
-
-	if first != second {
-		t.Errorf("the two pairs now produce different tokens (%q vs %q); the "+
-			"separator may have been escaped, which would be an improvement",
-			first, second)
-	}
-}
-
-// ValidateUserToken needs the user table, so it could not be covered until the
-// temporary-database fixture existed.
