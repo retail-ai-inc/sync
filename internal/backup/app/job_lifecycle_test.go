@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/retail-ai-inc/sync/internal/backup/domain"
@@ -217,19 +218,19 @@ func TestUpdateJobOnAnUnknownID(t *testing.T) {
 	}
 }
 
-// TestANonStringStoredStatusPanicsTheUpdate records T-112 through the use case:
-// the unchecked assertion in the status derivation kills the request.
-func TestANonStringStoredStatusPanicsTheUpdate(t *testing.T) {
+// TestAStoredStatusThatIsNotAStringDoesNotKillTheUpdate covers the unchecked
+// assertion through the use case: it used to panic, and the router installs no
+// recovery, so the connection was cut rather than answered.
+func TestAStoredStatusThatIsNotAStringDoesNotKillTheUpdate(t *testing.T) {
 	db := useTempJobDB(t)
 	id := insertJob(t, db, 1, `{"name":"n","status":1}`)
 
-	defer func() {
-		if recover() == nil {
-			t.Fatal("UpdateJob survived a numeric status; the assertion appears to be " +
-				"checked now, so assert the error instead")
-		}
-	}()
-	_ = UpdateJob(itoa(id), domain.Request{Name: "after"})
+	if err := UpdateJob(itoa(id), domain.Request{Name: "after"}); err != nil {
+		t.Fatalf("UpdateJob: %v", err)
+	}
+	if got := readConfig(t, db, id); !strings.Contains(got, `"status":"enabled"`) {
+		t.Errorf("stored document = %s, want the status derived from the column", got)
+	}
 }
 
 func TestDeleteJob(t *testing.T) {

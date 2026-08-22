@@ -1,6 +1,7 @@
 package infra
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/retail-ai-inc/sync/internal/backup/domain"
@@ -344,22 +345,20 @@ func TestSetEnableReplacesACorruptDocument(t *testing.T) {
 	}
 }
 
-// TestSetEnablePanicsOnANullDocument records the defect T-124.
-//
-// `null` is valid JSON, so the unmarshal succeeds and leaves the map nil. The
-// guard only tests the error, so the assignment that follows panics with
-// "assignment to entry in nil map" and the request dies with a 500 and no body.
-func TestSetEnablePanicsOnANullDocument(t *testing.T) {
+// TestANullDocumentDoesNotPanic covers a stored config_json of literal "null".
+// It is valid JSON, so the unmarshal succeeded and left the map nil; the guard
+// only tested the error, so the assignment that followed panicked with
+// "assignment to entry in nil map" and the request died with a 500 and no body.
+func TestANullDocumentDoesNotPanic(t *testing.T) {
 	db := useTempJobDB(t)
 	id := insertJob(t, db, 1, `null`)
 
-	defer func() {
-		if recover() == nil {
-			t.Fatal("SetEnable survived a null document; the guard appears to check " +
-				"the map as well as the error, so assert the new behaviour instead")
-		}
-	}()
-	_ = SetEnable(itoa(id), false, "now")
+	if err := SetEnable(itoa(id), false, "now"); err != nil {
+		t.Fatalf("SetEnable: %v", err)
+	}
+	if got := readConfig(t, db, id); got != `{"status":"disabled"}` {
+		t.Errorf("stored document = %s", got)
+	}
 }
 
 func TestSetEnableOnAnUnknownID(t *testing.T) {
@@ -370,19 +369,29 @@ func TestSetEnableOnAnUnknownID(t *testing.T) {
 	}
 }
 
-// TestSetEnableReportsAPlainErrorNotAFault records that this one call does not
-// tag its failures with a stage, unlike every other write in the store. The
-// endpoint therefore answers "pause fail" for a missing table, a missing row and
-// a locked database alike.
-func TestSetEnableReportsAPlainErrorNotAFault(t *testing.T) {
+// TestSetEnableTagsWhatWentWrong covers the one message an operator gets back.
+// This call did not tag its failures with a stage, unlike every other write in
+// the store, so the endpoint answered "pause fail" for a missing table, a
+// missing row and a locked database alike.
+func TestSetEnableTagsWhatWentWrong(t *testing.T) {
 	emptyJobDB(t)
 
 	err := SetEnable("1", true, "now")
 	if err == nil {
 		t.Fatal("SetEnable on a database with no tables returned no error")
 	}
-	if got := stageOf(err); got != "" {
-		t.Fatalf("stage = %q; the call tags its failures now, so assert the stage", got)
+	if got := stageOf(err); got != StageLookup {
+		t.Errorf("stage = %q, want %q (err = %v)", got, StageLookup, err)
+	}
+}
+
+// TestSetEnableOnAMissingRowSaysSo is the other half: a row that is not there is
+// not the same failure as a table that is not there.
+func TestSetEnableOnAMissingRowSaysSo(t *testing.T) {
+	useTempJobDB(t)
+
+	if err := SetEnable("404", true, "now"); !errors.Is(err, ErrNoSuchJob) {
+		t.Errorf("SetEnable on an unknown id = %v, want ErrNoSuchJob", err)
 	}
 }
 
@@ -444,16 +453,14 @@ func TestStampLastBackup(t *testing.T) {
 	}
 }
 
-// TestStampLastBackupOnAnUnknownIDSucceeds records that stamping a job that is
-// not there is reported as success: the UPDATE matches no row and the rows
-// affected count is never read. The run endpoint answers "started successfully"
-// for a job it did not touch.
-func TestStampLastBackupOnAnUnknownIDSucceeds(t *testing.T) {
+// TestStampLastBackupOnAnUnknownIDIsNotASuccess covers stamping a job that is
+// not there. The UPDATE matched no row and the count was never read, so the run
+// endpoint answered "started successfully" for a job it had not touched.
+func TestStampLastBackupOnAnUnknownIDIsNotASuccess(t *testing.T) {
 	useTempJobDB(t)
 
-	if err := StampLastBackup("999", "now"); err != nil {
-		t.Fatalf("StampLastBackup on an unknown id = %v; the rows affected count "+
-			"appears to be checked now, so assert the error instead", err)
+	if err := StampLastBackup("999", "now"); !errors.Is(err, ErrNoSuchJob) {
+		t.Errorf("StampLastBackup on an unknown id = %v, want ErrNoSuchJob", err)
 	}
 }
 

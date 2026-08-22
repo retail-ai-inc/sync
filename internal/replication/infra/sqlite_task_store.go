@@ -4,6 +4,7 @@
 package infra
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"time"
@@ -25,6 +26,10 @@ const (
 	StageInsert  = "insert fail"
 	StageUpdate  = "update fail"
 	StageDelete  = "delete fail"
+	StageLookup  = "query sync_tasks fail"
+	// StageDBFail is kept for callers outside this package that still name it;
+	// nothing here uses it any more, because "db fail" said less than
+	// "open db fail" for the same failure.
 	StageDBFail  = "db fail"
 	StageMonitor = "query monitoring_log fail"
 )
@@ -123,7 +128,10 @@ VALUES(?, ?, ?, ?)
 func UpdateTask(id string, enable int, now string, config domain.Config) error {
 	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
-		return faultAt(StageDBFail, err)
+		// The same failure as everywhere else, so the same wording: this used to
+		// say "db fail" while every other call said "open db fail", and the
+		// handler renders the stage.
+		return faultAt(StageOpen, err)
 	}
 	defer db.Close()
 
@@ -164,6 +172,14 @@ func DeleteTask(id string) error {
 	if ra, _ := res.RowsAffected(); ra == 0 {
 		return ErrNoSuchTask
 	}
+
+	// The task's monitoring history goes with it. There is no foreign key and no
+	// cascade, so those rows used to stay for good, pointing at an id that names
+	// nothing — and monitoring_log is the table that grows without bound.
+	if _, err := db.Exec(`DELETE FROM monitoring_log WHERE sync_task_id=?`, id); err != nil {
+		logrus.Warnf("[Store] Task %s was deleted but its monitoring history could "+
+			"not be: %v", id, err)
+	}
 	return nil
 }
 
@@ -173,13 +189,20 @@ func DeleteTask(id string) error {
 func SetEnable(id string, toStart bool) error {
 	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
-		return err
+		// Every other call in this file returns a Fault carrying the stage, so
+		// the handler can say which step failed. These two returned the driver's
+		// error bare, and "the table is missing", "the row is missing" and "the
+		// database is locked" all came out as one word.
+		return faultAt(StageOpen, err)
 	}
 	defer db.Close()
 
 	var oldCfgJSON string
 	if err = db.QueryRow(`SELECT config_json FROM sync_tasks WHERE id=?`, id).Scan(&oldCfgJSON); err != nil {
-		return err
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNoSuchTask
+		}
+		return faultAt(StageLookup, err)
 	}
 
 	statusStr, newEnable := domain.StatusStopped, 0
@@ -187,10 +210,7 @@ func SetEnable(id string, toStart bool) error {
 		statusStr, newEnable = domain.StatusRunning, 1
 	}
 
-	var data map[string]interface{}
-	if err2 := json.Unmarshal([]byte(oldCfgJSON), &data); err2 != nil {
-		data = make(map[string]interface{})
-	}
+	data := storedConfig(oldCfgJSON)
 	data["status"] = statusStr
 	newBytes, _ := json.Marshal(data)
 
@@ -202,26 +222,70 @@ SET enable=?,
     config_json=?
 WHERE id=?
 `, newEnable, nowStr, string(newBytes), id)
-	return err
+	if err != nil {
+		return faultAt(StageUpdate, err)
+	}
+	return nil
+}
+
+// storedConfig decodes a stored configuration document into a map that can be
+// written to.
+//
+// It never returns nil. A document of literal "null" decodes *without an error*
+// and leaves the map nil, which an err != nil guard does not catch — and the
+// caller then assigns into it, which panics on a nil map. Nothing writes "null"
+// today; one hand-edited row or one migration that went wrong would.
+func storedConfig(configJSON string) map[string]interface{} {
+	var data map[string]interface{}
+	if err := json.Unmarshal([]byte(configJSON), &data); err != nil || data == nil {
+		return make(map[string]interface{})
+	}
+	return data
+}
+
+// ReadTaskConfig returns a task's stored configuration.
+//
+// It reports why it could not, which ReadTaskEngine below cannot: that answers
+// the empty string for a database it could not open, a row that is not there, a
+// document that is empty, a document that will not parse and a table that does
+// not exist, and the caller reads all five as "not a MongoDB task" and quietly
+// falls back to stale figures.
+func ReadTaskConfig(id string) (domain.Config, error) {
+	var cfg domain.Config
+
+	db, err := sqlite.OpenSQLiteDB()
+	if err != nil {
+		return cfg, faultAt(StageOpen, err)
+	}
+	defer db.Close()
+
+	var configJSON string
+	if err := db.QueryRow("SELECT config_json FROM sync_tasks WHERE id = ?", id).Scan(&configJSON); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return cfg, ErrNoSuchTask
+		}
+		return cfg, faultAt(StageLookup, err)
+	}
+	opened, err := secret.OpenTaskConfig(configJSON)
+	if err != nil {
+		return cfg, faultAt(StageScan, err)
+	}
+	if opened == "" {
+		return cfg, faultAt(StageScan, errors.New("the stored configuration is empty"))
+	}
+	if err := json.Unmarshal([]byte(opened), &cfg); err != nil {
+		return cfg, faultAt(StageScan, err)
+	}
+	return cfg, nil
 }
 
 // ReadTaskEngine returns the engine named in a task's stored configuration,
 // empty when the row is missing or the document will not parse.
 func ReadTaskEngine(id string) string {
-	db, err := sqlite.OpenSQLiteDB()
+	cfg, err := ReadTaskConfig(id)
 	if err != nil {
-		return ""
-	}
-	defer db.Close()
-
-	var configJSON string
-	if err := db.QueryRow("SELECT config_json FROM sync_tasks WHERE id = ?", id).Scan(&configJSON); err != nil || configJSON == "" {
-		return ""
-	}
-	var cfg struct {
-		Type string `json:"type"`
-	}
-	if err := json.Unmarshal([]byte(configJSON), &cfg); err != nil {
+		logrus.Warnf("[Store] Could not read the engine of task %s, so it will be "+
+			"treated as one this does not measure live: %v", id, err)
 		return ""
 	}
 	return cfg.Type
@@ -263,11 +327,17 @@ func TodayTableStats(id string, now time.Time) ([]domain.TableStat, error) {
 	for rows.Next() {
 		var s domain.TableStat
 		if err := rows.Scan(&s.TableName, &s.SyncedToday, &s.TotalRows, &s.LastSyncTime); err != nil {
-			logrus.Warnf("[SyncTables] Error scanning row: %v", err)
-			continue
+			// A row that will not scan used to be dropped with a warning, so the
+			// table it described simply did not appear in the answer — and "this
+			// table had no traffic today" and "this table's row could not be
+			// read" look the same from the outside.
+			return nil, faultAt(StageScan, err)
 		}
 		s.SyncedToday = domain.ClampSyncedToday(s.SyncedToday)
 		stats = append(stats, s)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, faultAt(StageIterate, err)
 	}
 	return stats, nil
 }

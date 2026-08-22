@@ -2,6 +2,7 @@ package infra
 
 import (
 	"encoding/base64"
+	"errors"
 	"strconv"
 	"testing"
 	"time"
@@ -273,10 +274,11 @@ func TestDeleteTaskReportsAMissingTable(t *testing.T) {
 	}
 }
 
-// TestDeletingATaskLeavesItsMonitoringLog records that removing a task does not
-// remove the rows it produced. The monitoring log keeps growing with entries for
-// task ids nothing can resolve.
-func TestDeletingATaskLeavesItsMonitoringLog(t *testing.T) {
+// TestDeletingATaskRemovesItsMonitoringLog covers rows that used to outlive
+// what they described. There is no foreign key and no cascade, so the monitoring
+// log kept entries for task ids nothing could resolve — in the table that grows
+// without bound.
+func TestDeletingATaskRemovesItsMonitoringLog(t *testing.T) {
 	db := useTempTaskDB(t)
 	id := insertTask(t, db, 1, `{}`)
 	insertMonitoringRow(t, db, int(id), "2026-08-21 01:00:00", "orders", 10, 10)
@@ -289,9 +291,8 @@ func TestDeletingATaskLeavesItsMonitoringLog(t *testing.T) {
 	if err := db.QueryRow(`SELECT COUNT(*) FROM monitoring_log WHERE sync_task_id=?`, id).Scan(&count); err != nil {
 		t.Fatalf("count: %v", err)
 	}
-	if count == 0 {
-		t.Fatal("the monitoring rows were removed too; a cascade appears to have been " +
-			"added, so assert that instead")
+	if count != 0 {
+		t.Errorf("%d monitoring rows are left for a task that no longer exists", count)
 	}
 }
 
@@ -345,20 +346,21 @@ func TestSetEnableReplacesACorruptDocument(t *testing.T) {
 	}
 }
 
-// TestSetEnablePanicsOnANullDocument records the defect T-124 on the
-// replication side: `null` is valid JSON, the unmarshal succeeds with a nil map,
-// and the assignment that follows panics.
-func TestSetEnablePanicsOnANullDocument(t *testing.T) {
+// TestANullDocumentDoesNotPanic covers a stored config_json of literal "null" on
+// the replication side. It is valid JSON, so the unmarshal succeeded and left
+// the map nil; the guard only tested the error, so the assignment that followed
+// panicked with "assignment to entry in nil map" and the request died with a 500
+// and no body.
+func TestANullDocumentDoesNotPanic(t *testing.T) {
 	db := useTempTaskDB(t)
 	id := insertTask(t, db, 0, `null`)
 
-	defer func() {
-		if recover() == nil {
-			t.Fatal("SetEnable survived a null document; the guard appears to check " +
-				"the map as well as the error, so assert the new behaviour instead")
-		}
-	}()
-	_ = SetEnable(itoa(id), true)
+	if err := SetEnable(itoa(id), true); err != nil {
+		t.Fatalf("SetEnable: %v", err)
+	}
+	if got := readConfig(t, db, id); got != `{"status":"Running"}` {
+		t.Errorf("stored document = %s", got)
+	}
 }
 
 func TestSetEnableOnAnUnknownID(t *testing.T) {
@@ -369,18 +371,29 @@ func TestSetEnableOnAnUnknownID(t *testing.T) {
 	}
 }
 
-// TestSetEnableReportsAPlainErrorNotAFault records that this call, like its
-// backup counterpart, returns the driver's error untagged. The endpoint answers
-// "start fail" for a missing table, a missing row and a locked database alike.
-func TestSetEnableReportsAPlainErrorNotAFault(t *testing.T) {
+// TestSetEnableTagsWhatWentWrong covers the one message an operator gets back.
+// This call returned the driver's error untagged while every other call in the
+// package carries the stage, so "the table is missing", "the row is missing" and
+// "the database is locked" all came out as "start fail".
+func TestSetEnableTagsWhatWentWrong(t *testing.T) {
 	emptyTaskDB(t)
 
 	err := SetEnable("1", true)
 	if err == nil {
 		t.Fatal("SetEnable on a database with no tables returned no error")
 	}
-	if got := stageOf(err); got != "" {
-		t.Fatalf("stage = %q; the call tags its failures now, so assert the stage", got)
+	if got := stageOf(err); got != StageLookup {
+		t.Errorf("stage = %q, want %q (err = %v)", got, StageLookup, err)
+	}
+}
+
+// TestSetEnableOnAMissingRowSaysSo is the other half: a row that is not there is
+// not the same failure as a table that is not there.
+func TestSetEnableOnAMissingRowSaysSo(t *testing.T) {
+	useTempTaskDB(t)
+
+	if err := SetEnable("404", true); !errors.Is(err, ErrNoSuchTask) {
+		t.Errorf("SetEnable on an unknown id = %v, want ErrNoSuchTask", err)
 	}
 }
 
@@ -550,11 +563,11 @@ func TestTodayTableStatsReportsAMissingTable(t *testing.T) {
 	}
 }
 
-// TestARowThatWillNotScanIsSkippedNotReported records that a monitoring row
-// whose counts are text is logged and dropped, so the table simply does not
-// appear in the answer. A caller cannot tell a table with no traffic from a
-// table whose rows are unreadable.
-func TestARowThatWillNotScanIsSkippedNotReported(t *testing.T) {
+// TestARowThatWillNotScanIsReported covers a monitoring row whose counts are
+// text. It used to be logged and dropped, so the table simply did not appear in
+// the answer — and a table with no traffic and a table whose rows cannot be read
+// look the same from outside.
+func TestARowThatWillNotScanIsReported(t *testing.T) {
 	db := useTempTaskDB(t)
 	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
 	day := now.Format("2006-01-02")
@@ -566,12 +579,11 @@ func TestARowThatWillNotScanIsSkippedNotReported(t *testing.T) {
 	}
 
 	stats, err := TodayTableStats("1", now)
-	if err != nil {
-		t.Fatalf("TodayTableStats returned an error for an unscannable row: %v — "+
-			"the failure appears to be reported now, so assert that", err)
+	if err == nil {
+		t.Fatalf("TodayTableStats returned %d rows and no error for an unreadable row", len(stats))
 	}
-	if len(stats) != 0 {
-		t.Errorf("TodayTableStats returned %d rows, want 0: %+v", len(stats), stats)
+	if got := stageOf(err); got != StageScan {
+		t.Errorf("stage = %q, want %q", got, StageScan)
 	}
 }
 
@@ -583,7 +595,8 @@ func TestEveryStoreCallReportsAnUnopenableDatabase(t *testing.T) {
 	}{
 		{"ListTasks", func() error { _, err := ListTasks(); return err }, StageOpen},
 		{"InsertTask", func() error { _, err := InsertTask(1, "now", domain.Config{}); return err }, StageOpen},
-		{"UpdateTask", func() error { return UpdateTask("1", 1, "now", domain.Config{}) }, StageDBFail},
+		{"UpdateTask", func() error { return UpdateTask("1", 1, "now", domain.Config{}) }, StageOpen},
+		{"SetEnable", func() error { return SetEnable("1", true) }, StageOpen},
 		{"DeleteTask", func() error { return DeleteTask("1") }, StageOpen},
 		{"TodayTableStats", func() error { _, err := TodayTableStats("1", time.Now()); return err }, StageOpen},
 	} {
@@ -601,29 +614,22 @@ func TestEveryStoreCallReportsAnUnopenableDatabase(t *testing.T) {
 	}
 }
 
-// TestUpdateTaskTagsAnUnopenableDatabaseDifferently records that the update path
-// answers "db fail" where every other call answers "open db fail", for the same
-// failure. The two messages describe one condition.
-func TestUpdateTaskTagsAnUnopenableDatabaseDifferently(t *testing.T) {
+// TestEveryCallNamesTheSameFailureTheSameWay covers two messages for one
+// condition. The update path answered "db fail" where every other call answered
+// "open db fail", and SetEnable answered with nothing at all.
+func TestEveryCallNamesTheSameFailureTheSameWay(t *testing.T) {
 	unopenableDB(t)
 
-	if got := stageOf(UpdateTask("1", 1, "now", domain.Config{})); got != StageDBFail {
-		t.Fatalf("stage = %q; the messages appear to agree now, so assert the shared one", got)
-	}
-	if StageDBFail == StageOpen {
-		t.Error("the two stages are the same string now")
-	}
-}
-
-func TestSetEnableDoesNotTagAnUnopenableDatabase(t *testing.T) {
-	unopenableDB(t)
-
-	err := SetEnable("1", true)
-	if err == nil {
-		t.Fatal("SetEnable returned no error for an unopenable database")
-	}
-	if got := stageOf(err); got != "" {
-		t.Errorf("stage = %q, want no tag", got)
+	for name, call := range map[string]func() error{
+		"UpdateTask": func() error { return UpdateTask("1", 1, "now", domain.Config{}) },
+		"DeleteTask": func() error { return DeleteTask("1") },
+		"SetEnable":  func() error { return SetEnable("1", true) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := stageOf(call()); got != StageOpen {
+				t.Errorf("stage = %q, want %q", got, StageOpen)
+			}
+		})
 	}
 }
 

@@ -282,40 +282,32 @@ func TestAPartialUpdateWipesTheRestOfTheConfig(t *testing.T) {
 	}
 }
 
-// The stored config's status and name are read with unchecked type assertions.
-// A value of any other JSON type panics, and with no Recoverer in the router
-// (T-072) that aborts the connection rather than returning a 500.
-func TestANonStringStatusPanics(t *testing.T) {
-	conn := useTempTaskDB(t)
-	insertBackupTask(t, conn, 1, `{"name":"n","status":123}`)
+// TestAStoredValueOfTheWrongTypeIsAnswered covers the stored status and name,
+// which were read with unchecked type assertions. A value of any other JSON type
+// panicked, and with no recovery in the router that aborted the connection
+// rather than returning anything at all.
+func TestAStoredValueOfTheWrongTypeIsAnswered(t *testing.T) {
+	for name, stored := range map[string]string{
+		"a numeric status": `{"name":"n","status":123}`,
+		"a numeric name":   `{"name":42,"status":"enabled"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			conn := useTempTaskDB(t)
+			insertBackupTask(t, conn, 1, stored)
 
-	defer func() {
-		if recover() == nil {
-			t.Fatal("a numeric status no longer panics — the assertion appears to be checked now; assert the error response instead")
-		}
-	}()
+			rec := httptest.NewRecorder()
+			serveWithURLParams(rec,
+				httptest.NewRequest(http.MethodPut, "/backup/{id}", strings.NewReader(`{}`)),
+				BackupUpdateHandler, map[string]string{"id": "1"})
 
-	rec := httptest.NewRecorder()
-	serveWithURLParams(rec, httptest.NewRequest(http.MethodPut, "/backup/{id}", strings.NewReader(`{"name":"x"}`)),
-		BackupUpdateHandler, map[string]string{"id": "1"})
-	_ = rec
-}
-
-func TestANonStringNamePanics(t *testing.T) {
-	conn := useTempTaskDB(t)
-	insertBackupTask(t, conn, 1, `{"name":42,"status":"enabled"}`)
-
-	defer func() {
-		if recover() == nil {
-			t.Fatal("a numeric name no longer panics — the assertion appears to be checked now; assert the error response instead")
-		}
-	}()
-
-	rec := httptest.NewRecorder()
-	// An empty name in the request makes the handler fall back to the stored one.
-	serveWithURLParams(rec, httptest.NewRequest(http.MethodPut, "/backup/{id}", strings.NewReader(`{}`)),
-		BackupUpdateHandler, map[string]string{"id": "1"})
-	_ = rec
+			if rec.Code == 0 {
+				t.Fatal("nothing was written to the response")
+			}
+			if rec.Body.Len() == 0 {
+				t.Error("the response has no body")
+			}
+		})
+	}
 }
 
 // next_backup_time is written from calculateNextBackupTime, which ignores the

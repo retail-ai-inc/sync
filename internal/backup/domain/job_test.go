@@ -280,7 +280,8 @@ func TestDeriveUpdateStatus(t *testing.T) {
 		{"no stored status, enabled", map[string]interface{}{}, 1, StatusEnabled},
 		{"no stored status, disabled", map[string]interface{}{}, 0, StatusDisabled},
 		{"nil map, enabled", nil, 1, StatusEnabled},
-		{"empty stored status still wins", map[string]interface{}{"status": ""}, 1, ""},
+		{"an empty stored status is not a status", map[string]interface{}{"status": ""}, 1, StatusEnabled},
+		{"a status that is not a string is not a status", map[string]interface{}{"status": 1}, 0, StatusDisabled},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := DeriveUpdateStatus(tt.stored, tt.enable); got != tt.want {
@@ -290,37 +291,41 @@ func TestDeriveUpdateStatus(t *testing.T) {
 	}
 }
 
-// TestAnEmptyStoredStatusOverridesTheEnableColumn records a sharper edge than
-// the list path has: DeriveUpdateStatus checks whether the key is present, not
-// whether its value is usable, so a document holding "status": "" makes an
-// update store an empty status. The list endpoint then falls back to the enable
-// column and the two disagree.
-func TestAnEmptyStoredStatusOverridesTheEnableColumn(t *testing.T) {
+// TestTheUpdateAndTheListAgreeOnTheStatus covers one job with two statuses. The
+// test used to be on the key rather than the value, so a document holding
+// "status": "" made an update store an empty status — and the list endpoint,
+// seeing an empty status, fell back to the enable column and reported something
+// else.
+func TestTheUpdateAndTheListAgreeOnTheStatus(t *testing.T) {
 	got := DeriveUpdateStatus(map[string]interface{}{"status": ""}, 1)
 
-	if got != "" {
-		t.Fatalf("DeriveUpdateStatus = %q for a present-but-empty status, want %q — "+
-			"presence and usability are distinguished now, so assert that", got, "")
-	}
-	if listView := NewBackupJob(1, 1, "", "", "", "").Status(Config{Status: got}); listView != StatusEnabled {
+	listView := NewBackupJob(1, 1, "", "", "", "").Status(Config{Status: got})
+	if listView != got {
 		t.Errorf("the list endpoint reads %q where the update stored %q", listView, got)
+	}
+	if got != StatusEnabled {
+		t.Errorf("DeriveUpdateStatus = %q, want %q", got, StatusEnabled)
 	}
 }
 
-// TestANonStringStoredStatusPanics records T-112: the assertion on the stored
-// value is unchecked, so a document whose status is a number or a boolean kills
-// the request with a runtime panic rather than an error.
-func TestANonStringStoredStatusPanics(t *testing.T) {
+// TestAStoredStatusThatIsNotAStringDoesNotPanic covers a document whose status
+// is a number or a boolean. The assertion was unchecked, so it killed the
+// request with a runtime panic — and the router installs no recovery, so that
+// panic reached net/http and cut the connection instead of answering.
+func TestAStoredStatusThatIsNotAStringDoesNotPanic(t *testing.T) {
 	for _, value := range []interface{}{1, true, nil, []interface{}{}} {
-		t.Run("", func(t *testing.T) {
-			defer func() {
-				if recover() == nil {
-					t.Fatalf("DeriveUpdateStatus survived a %T status; the assertion "+
-						"appears to be checked now, so assert the error instead", value)
-				}
-			}()
-			DeriveUpdateStatus(map[string]interface{}{"status": value}, 1)
-		})
+		if got := DeriveUpdateStatus(map[string]interface{}{"status": value}, 1); got != StatusEnabled {
+			t.Errorf("DeriveUpdateStatus with a %T status = %q, want %q", value, got, StatusEnabled)
+		}
+	}
+}
+
+// TestAStoredNameThatIsNotAStringDoesNotPanic is the same for the name.
+func TestAStoredNameThatIsNotAStringDoesNotPanic(t *testing.T) {
+	for _, value := range []interface{}{42, true, nil} {
+		if got := DeriveUpdateName(map[string]interface{}{"name": value}, "7"); got != "Backup Task 7" {
+			t.Errorf("DeriveUpdateName with a %T name = %q", value, got)
+		}
 	}
 }
 
@@ -353,16 +358,12 @@ func TestTheGeneratedNamesDisagreeBetweenCreateAndUpdate(t *testing.T) {
 	}
 }
 
-// TestANonStringStoredNamePanics records the same unchecked assertion on the
-// name.
-func TestANonStringStoredNamePanics(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Fatal("DeriveUpdateName survived a numeric name; the assertion appears " +
-				"to be checked now, so assert the error instead")
-		}
-	}()
-	DeriveUpdateName(map[string]interface{}{"name": 42}, "7")
+// TestAStoredNameThatIsNotAStringFallsBack covers the same unchecked assertion
+// on the name.
+func TestAStoredNameThatIsNotAStringFallsBack(t *testing.T) {
+	if got := DeriveUpdateName(map[string]interface{}{"name": 42}, "7"); got != "Backup Task 7" {
+		t.Errorf("DeriveUpdateName = %q, want the generated name", got)
+	}
 }
 
 func TestParseStoredConfig(t *testing.T) {
@@ -389,31 +390,23 @@ func TestParseStoredConfig(t *testing.T) {
 	}
 }
 
-// TestAJSONNullDocumentYieldsANilMap records a defect this test suite found.
-//
-// ParseStoredConfig guards on the unmarshal error, but the four bytes `null`
-// are valid JSON: Unmarshal succeeds and leaves the map nil. Reading a nil map
-// is harmless, so this function's own callers survive — but the same guard is
-// written out again in both SetEnable implementations, which then assign to the
-// map and panic with "assignment to entry in nil map".
-//
-// A config_json column holding `null` therefore makes pause, resume, start and
-// stop crash the request. Nothing writes that value today; a hand-edited row or
-// a failed migration would.
-func TestAJSONNullDocumentYieldsANilMap(t *testing.T) {
+// TestAJSONNullDocumentIsAWritableMap covers a stored document of literal
+// "null", which is valid JSON: Unmarshal succeeds and leaves the map nil, so a
+// guard that only tests the error does not catch it. Both SetEnable
+// implementations then assign into that map, which panics with "assignment to
+// entry in nil map" — pause, resume, start and stop all died with a 500 and no
+// body. Nothing writes "null" today; one hand-edited row or one failed migration
+// would.
+func TestAJSONNullDocumentIsAWritableMap(t *testing.T) {
 	got := ParseStoredConfig("null")
 
-	if got != nil {
-		t.Fatal("ParseStoredConfig(\"null\") no longer returns nil; the guard appears " +
-			"to check the map as well as the error, so assert the empty map instead")
+	if got == nil {
+		t.Fatal("ParseStoredConfig(\"null\") returned nil, which its callers write to")
 	}
-
-	defer func() {
-		if recover() == nil {
-			t.Error("assigning to the returned map no longer panics")
-		}
-	}()
-	got["status"] = "enabled"
+	got["status"] = "disabled" // would panic on a nil map
+	if len(got) != 1 {
+		t.Errorf("the map holds %d entries, want the one just written", len(got))
+	}
 }
 
 // TestACorruptStoredConfigIsIndistinguishableFromAnEmptyOne records that

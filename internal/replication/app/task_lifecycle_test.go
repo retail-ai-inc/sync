@@ -121,11 +121,12 @@ func TestAnUpdateWipesWhateverTheRequestOmits(t *testing.T) {
 	}
 }
 
-// TestAnUpdateAlsoDefaultsTheNameAndStatus records that the update applies the
-// same defaults as the create, so a request that omits the name renames the
-// task to "Sync Task" rather than keeping what was stored. The backup update
-// carries the stored name over; this one does not.
-func TestAnUpdateAlsoDefaultsTheNameAndStatus(t *testing.T) {
+// TestAnUpdateKeepsTheStoredNameAndStatus covers what omitting a field means on
+// an update. The create-time defaults used to be applied, so a request that only
+// meant to change the mappings renamed the task to "Sync Task" and stopped it —
+// while the backup update, for the same omission, read the stored name and
+// status back. The two endpoints disagreed about the same thing.
+func TestAnUpdateKeepsTheStoredNameAndStatus(t *testing.T) {
 	db := useTempTaskDB(t)
 	id := insertTask(t, db, 1, `{"taskName":"orders","type":"mongodb","status":"Running"}`)
 
@@ -133,16 +134,29 @@ func TestAnUpdateAlsoDefaultsTheNameAndStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UpdateTask: %v", err)
 	}
-	if stored.TaskName != "Sync Task" {
-		t.Fatalf("TaskName = %q; the stored name appears to be carried over now, "+
-			"so assert that instead", stored.TaskName)
+	if stored.TaskName != "orders" {
+		t.Errorf("TaskName = %q, want the stored name", stored.TaskName)
 	}
-	if stored.Status != domain.StatusStopped {
-		t.Errorf("Status = %q, want %q — an update with no status stops the task",
-			stored.Status, domain.StatusStopped)
+	if stored.Status != domain.StatusRunning {
+		t.Errorf("Status = %q, want the stored status", stored.Status)
 	}
-	if !strings.Contains(readConfig(t, db, id), `"taskName":"Sync Task"`) {
-		t.Error("the renamed task was not stored")
+	if !strings.Contains(readConfig(t, db, id), `"taskName":"orders"`) {
+		t.Error("the stored name was not written back")
+	}
+}
+
+// TestANewTaskStillGetsItsDefaults is the other half: the defaults belong to a
+// task that does not exist yet.
+func TestANewTaskStillGetsItsDefaults(t *testing.T) {
+	useTempTaskDB(t)
+
+	_, stored, _, _, err := CreateTask(domain.Request{SourceType: "mongodb"})
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	if stored.TaskName != "Sync Task" || stored.Status != domain.StatusStopped {
+		t.Errorf("name/status = %q/%q, want the create-time defaults",
+			stored.TaskName, stored.Status)
 	}
 }
 

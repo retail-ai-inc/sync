@@ -21,7 +21,24 @@ func CreateTask(req domain.Request) (id int64, stored domain.Request, now string
 
 // UpdateTask replaces a task's configuration and reports the request as
 // normalised.
+//
+// A name or a status the request omits is taken from the stored task, not from
+// the defaults a *new* task gets. Applying the create-time defaults meant an
+// update that only meant to change the mappings renamed the task to "Sync Task"
+// and stopped it — the backup side has always read its old name and status back,
+// and the two endpoints disagreed about what omitting a field means.
 func UpdateTask(id string, req domain.Request) (stored domain.Request, err error) {
+	if req.TaskName == "" || req.Status == "" {
+		if existing, readErr := infra.ReadTaskConfig(id); readErr == nil {
+			if req.TaskName == "" {
+				req.TaskName = existing.TaskName
+			}
+			if req.Status == "" {
+				req.Status = existing.Status
+			}
+		}
+	}
+
 	enable := req.Normalise()
 	return req, infra.UpdateTask(id, enable, httpx.TimeNowStr(), domain.ConfigFrom(req))
 }

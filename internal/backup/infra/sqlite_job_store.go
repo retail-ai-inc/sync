@@ -4,6 +4,7 @@
 package infra
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 
@@ -173,13 +174,20 @@ func DeleteJob(id string) error {
 func SetEnable(id string, enable bool, now string) error {
 	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
-		return err
+		// Every other call here returns a Fault carrying the stage, so the
+		// handler can say which step failed. This one returned the driver's
+		// error bare, and "the table is missing", "the row is missing" and "the
+		// database is locked" all came out as "pause fail".
+		return faultAt(StageOpen, err)
 	}
 	defer db.Close()
 
 	var oldCfgJSON string
 	if err = db.QueryRow(`SELECT config_json FROM backup_tasks WHERE id=?`, id).Scan(&oldCfgJSON); err != nil {
-		return err
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNoSuchJob
+		}
+		return faultAt(StageLookup, err)
 	}
 
 	statusStr, newEnable := domain.StatusDisabled, 0
@@ -187,10 +195,9 @@ func SetEnable(id string, enable bool, now string) error {
 		statusStr, newEnable = domain.StatusEnabled, 1
 	}
 
-	var data map[string]interface{}
-	if err := json.Unmarshal([]byte(oldCfgJSON), &data); err != nil {
-		data = make(map[string]interface{})
-	}
+	// See ParseStoredConfig: a stored "null" decodes without an error into a nil
+	// map, and assigning into one panics.
+	data := domain.ParseStoredConfig(oldCfgJSON)
 	data["status"] = statusStr
 	newBytes, _ := json.Marshal(data)
 
@@ -201,7 +208,10 @@ SET enable=?,
     config_json=?
 WHERE id=?
 `, newEnable, now, string(newBytes), id)
-	return err
+	if err != nil {
+		return faultAt(StageUpdate, err)
+	}
+	return nil
 }
 
 // JobExists reports whether an id names a row.
@@ -227,8 +237,14 @@ func StampLastBackup(id, now string) error {
 	}
 	defer db.Close()
 
-	if _, err := db.Exec("UPDATE backup_tasks SET last_backup_time=? WHERE id=?", now, id); err != nil {
+	res, err := db.Exec("UPDATE backup_tasks SET last_backup_time=? WHERE id=?", now, id)
+	if err != nil {
 		return faultAt(StageUpdate, err)
+	}
+	// An id that matches no row used to be a success, so "run this backup now"
+	// answered "started successfully" for a job that does not exist.
+	if ra, _ := res.RowsAffected(); ra == 0 {
+		return ErrNoSuchJob
 	}
 	return nil
 }

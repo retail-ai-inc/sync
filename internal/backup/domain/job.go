@@ -194,23 +194,29 @@ func (r *Run) Advance(status, message string, err error) {
 // status is not a string panics and the request dies with a 500 and no body
 // (T-112). Preserved as it stands.
 func DeriveUpdateStatus(oldConfig map[string]interface{}, enable int) string {
-	status := StatusDisabled
-	if val, ok := oldConfig["status"]; ok {
-		status = val.(string)
-	} else if enable == 1 {
-		status = StatusEnabled
+	// The test is on the value, not on the key. A stored `"status": ""` used to
+	// be carried through as an empty status, which the list endpoint then read as
+	// absent and answered from the enable column instead — so one job had two
+	// statuses depending on which endpoint was asked. The assertion was
+	// unchecked too, so a status stored as a number panicked.
+	if val, ok := oldConfig["status"].(string); ok && val != "" {
+		return val
 	}
-	return status
+	if enable == 1 {
+		return StatusEnabled
+	}
+	return StatusDisabled
 }
 
 // DeriveUpdateName reports the name an update keeps when the request omits one:
 // the stored name, or a generated one when there is none.
 //
-// The assertion on the stored value is unchecked, so a configuration whose name
-// is not a string panics. Preserved as it stands.
+// The assertion used to be unchecked, so a stored name that was not a string —
+// a number, say — panicked. The router installs no recovery, so that panic
+// reached net/http and cut the connection rather than answering.
 func DeriveUpdateName(oldConfig map[string]interface{}, id string) string {
-	if name, ok := oldConfig["name"]; ok {
-		return name.(string)
+	if name, ok := oldConfig["name"].(string); ok && name != "" {
+		return name
 	}
 	return fmt.Sprintf("Backup Task %s", id)
 }
@@ -218,9 +224,14 @@ func DeriveUpdateName(oldConfig map[string]interface{}, id string) string {
 // ParseStoredConfig decodes a stored configuration document into a map. A
 // document that will not parse yields an empty map rather than an error, which
 // is what the update path has always done.
+//
+// It never returns nil. A stored document of literal "null" decodes *without an
+// error* and leaves the map nil, which the err != nil guard does not catch — and
+// the callers then assign into it, which panics on a nil map. Nothing writes
+// "null" today; one hand-edited row or one migration that went wrong would.
 func ParseStoredConfig(configJSON string) map[string]interface{} {
 	var data map[string]interface{}
-	if err := json.Unmarshal([]byte(configJSON), &data); err != nil {
+	if err := json.Unmarshal([]byte(configJSON), &data); err != nil || data == nil {
 		return make(map[string]interface{})
 	}
 	return data

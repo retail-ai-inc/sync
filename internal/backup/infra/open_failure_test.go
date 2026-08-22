@@ -49,18 +49,19 @@ func TestEveryStoreCallReportsAnUnopenableDatabase(t *testing.T) {
 	}
 }
 
-// TestSetEnableDoesNotTagAnUnopenableDatabase records the odd one out: SetEnable
-// returns the driver's error untouched, so the endpoint cannot tell a database
-// it could not open from a row it could not find.
-func TestSetEnableDoesNotTagAnUnopenableDatabase(t *testing.T) {
+// TestSetEnableTagsAnUnopenableDatabase covers the odd one out. SetEnable
+// returned the driver's error untouched, so the endpoint could not tell a
+// database it failed to open from a row it failed to find — both came out as
+// "pause fail".
+func TestSetEnableTagsAnUnopenableDatabase(t *testing.T) {
 	unopenableDB(t)
 
 	err := SetEnable("1", true, "now")
 	if err == nil {
 		t.Fatal("SetEnable returned no error for an unopenable database")
 	}
-	if got := stageOf(err); got != "" {
-		t.Fatalf("stage = %q; the call tags its failures now, so assert the stage", got)
+	if got := stageOf(err); got != StageOpen {
+		t.Errorf("stage = %q, want %q", got, StageOpen)
 	}
 }
 
