@@ -159,14 +159,16 @@ func TestTheRedisBranchNeverReportsTables(t *testing.T) {
 	}
 }
 
-// TestTheProbeIgnoresTheRequestContext records that every branch builds its own
-// context from context.Background() rather than deriving one from the request,
-// so cancelling the request does not stop the probe. The MongoDB branch runs for
-// its full ten seconds whatever the caller does.
-func TestTheProbeIgnoresTheRequestContext(t *testing.T) {
+// TestTheProbeStopsWhenTheRequestDoes covers a caller that gives up. Every
+// branch built its context from context.Background() rather than from the
+// request, so cancelling the request did not stop the probe — the MongoDB branch
+// ran for its full ten seconds however long the caller had been gone.
+func TestTheProbeStopsWhenTheRequestDoes(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
+	// An address that will not answer, so only the cancellation can end this.
 	req := httptest.NewRequest(http.MethodPost, "/test-connection",
-		strings.NewReader(`{"dbType":"redis","host":"127.0.0.1","port":"1"}`)).WithContext(ctx)
+		strings.NewReader(`{"dbType":"mongodb","host":"10.255.255.1","port":"27017","database":"x"}`)).
+		WithContext(ctx)
 	cancel() // already cancelled before the handler runs
 
 	rec := httptest.NewRecorder()
@@ -174,10 +176,9 @@ func TestTheProbeIgnoresTheRequestContext(t *testing.T) {
 	TestConnectionHandler(rec, req)
 
 	if rec.Code != http.StatusInternalServerError {
-		t.Errorf("status = %d for a cancelled request, want the probe to run anyway "+
-			"and report its own failure", rec.Code)
+		t.Errorf("status = %d, want the failure reported", rec.Code)
 	}
-	if elapsed := time.Since(start); elapsed < 10*time.Millisecond {
-		t.Logf("the probe returned in %v; it may honour the request context now", elapsed)
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("the probe took %v after its request was cancelled", elapsed)
 	}
 }

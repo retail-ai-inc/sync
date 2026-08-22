@@ -280,36 +280,24 @@ func TestParseMySQLConnectionURL(t *testing.T) {
 		{"host only", "db.example.com", "db.example.com", "3306"},
 		{"empty falls back to defaults", "", "localhost", "3306"},
 		{"empty port keeps the default", "db.example.com:", "db.example.com", "3306"},
+		// The field is labelled a connection URL in the interface, so this is
+		// what an operator fills in. It used to be split on every colon, so
+		// "mysql://u:p@db:3306" gave the host "mysql" and the port "//u" and
+		// mysqldump went looking for a machine called mysql.
+		{"a URL", "mysql://u:p@db.example.com:3307/orders", "db.example.com", "3307"},
+		{"a go-sql-driver DSN", "root:secret@tcp(db:3306)/orders", "db", "3306"},
+		{"credentials and no port", "root:secret@db.example.com", "db.example.com", "3306"},
+		{"a scheme and no credentials", "mysql://db.example.com:3307", "db.example.com", "3307"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			host, port, user, pass := parseMySQLConnectionURL(tt.url)
+			host, port := parseMySQLConnectionURL(tt.url)
 			if host != tt.host || port != tt.port {
 				t.Errorf("parseMySQLConnectionURL(%q) = %q/%q, want %q/%q",
 					tt.url, host, port, tt.host, tt.port)
 			}
-			// The signature promises credentials but the body always returns
-			// empty strings for them.
-			if user != "" || pass != "" {
-				t.Errorf("credentials = %q/%q; the function now parses them, "+
-					"so assert the parsed values instead", user, pass)
-			}
 		})
-	}
-}
-
-// TestParseMySQLConnectionURLMisreadsFullDSN records that the parser assumes a
-// bare host:port and splits on every colon, so a full DSN silently becomes a
-// nonsense host and port instead of being rejected.
-func TestParseMySQLConnectionURLMisreadsFullDSN(t *testing.T) {
-	host, port, _, _ := parseMySQLConnectionURL("root:secret@tcp(db:3306)/orders")
-
-	if host == "db" {
-		t.Fatalf("the parser now understands full DSNs; assert the parsed host instead")
-	}
-	if host != "root" || port != "secret@tcp(db" {
-		t.Errorf("host/port = %q/%q, want %q/%q", host, port, "root", "secret@tcp(db")
 	}
 }
 

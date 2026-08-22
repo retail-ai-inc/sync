@@ -22,26 +22,54 @@ func buildMongoDBConnectionString(url, username, password string) string {
 	})
 }
 
-// parseMySQLConnectionURL parses MySQL connection URL into components
-// Format: host:port or just host
-func parseMySQLConnectionURL(url string) (host, port, username, password string) {
-	parts := strings.Split(url, ":")
-	host = "localhost"
-	port = "3306"
-
-	if len(parts) >= 1 && parts[0] != "" {
-		host = parts[0]
+// parseMySQLConnectionURL reads the host and port a backup connects to.
+//
+// The field is labelled a connection URL in the interface, so an operator fills
+// in an ordinary DSN — and this used to be Split(url, ":") taking the first two
+// parts, so "mysql://u:p@db:3306" gave the host "mysql" and the port "//u", and
+// mysqldump went looking for a machine called mysql. The credentials come from
+// the job's own username and password fields; the two return values named for
+// them were always the empty string.
+func parseMySQLConnectionURL(url string) (host, port string) {
+	trimmed := strings.TrimSpace(url)
+	host, port = "localhost", "3306"
+	if trimmed == "" {
+		return host, port
 	}
-	if len(parts) >= 2 && parts[1] != "" {
-		port = parts[1]
+
+	// A scheme, if there is one, and then anything before an @ is credentials
+	// this does not use.
+	if _, rest, found := strings.Cut(trimmed, "://"); found {
+		trimmed = rest
+	}
+	if _, rest, found := strings.Cut(trimmed, "@"); found {
+		trimmed = rest
+	}
+	// A trailing path is the database name, which the job names separately.
+	trimmed, _, _ = strings.Cut(trimmed, "/")
+	// A DSN in go-sql-driver's own form wraps the address in tcp(...).
+	if inside, _, found := strings.Cut(strings.TrimPrefix(trimmed, "tcp("), ")"); found {
+		trimmed = inside
 	}
 
-	return host, port, "", ""
+	if givenHost, givenPort, found := strings.Cut(trimmed, ":"); found {
+		if givenHost != "" {
+			host = givenHost
+		}
+		if givenPort != "" {
+			port = givenPort
+		}
+		return host, port
+	}
+	if trimmed != "" {
+		host = trimmed
+	}
+	return host, port
 }
 
 // buildMySQLConnectionString builds MySQL connection parameters
 func buildMySQLConnectionString(url, username, password string) (host, port, user, pass string) {
-	host, port, _, _ = parseMySQLConnectionURL(url)
+	host, port = parseMySQLConnectionURL(url)
 	user = username
 	pass = password
 	return

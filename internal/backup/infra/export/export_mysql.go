@@ -502,11 +502,14 @@ func (e *BackupExecutor) exportMySQLMergedTables(ctx context.Context, connection
 
 // getMySQLTables queries MySQL INFORMATION_SCHEMA to get tables matching regex pattern
 func (e *BackupExecutor) getMySQLTables(ctx context.Context, config *ExecutorBackupConfig, pattern string) ([]string, error) {
-	// Parse connection URL
-	host, port, username, password := parseMySQLConnectionURL(config.Database.URL)
+	// Parse connection URL. The credentials are the job's own fields: this used
+	// to read them out of the URL, where they never were — the two return values
+	// were always empty, so every one of these connections was anonymous.
+	host, port := parseMySQLConnectionURL(config.Database.URL)
 
 	// Build DSN
-	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s", username, password, host, port, config.Database.Database)
+	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s",
+		config.Database.Username, config.Database.Password, host, port, config.Database.Database)
 
 	// Connect to MySQL
 	db, err := sql.Open("mysql", dsn)

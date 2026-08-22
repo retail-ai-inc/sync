@@ -188,7 +188,7 @@ func TestGetMySQLSchemaPutsThePrimaryKeyFirst(t *testing.T) {
 // comparator reports less(i,j) and less(j,i) both true for two primary fields,
 // so sort.Slice is outside its contract and the primary columns come out
 // neither in declaration order nor sorted by name.
-func TestACompositePrimaryKeyHasNoDefinedOrder(t *testing.T) {
+func TestACompositePrimaryKeyComesBackSorted(t *testing.T) {
 	table := harness.UniqueName("schemacomposite")
 	src := openSchemaMySQL(t, harness.MySQLSource, schemaSourceDB)
 
@@ -212,14 +212,10 @@ func TestACompositePrimaryKeyHasNoDefinedOrder(t *testing.T) {
 		t.Fatalf("got %d primary fields, want 3: %v", len(primaries), primaries)
 	}
 
-	sorted := true
 	for i := 1; i < len(primaries); i++ {
 		if primaries[i-1] > primaries[i] {
-			sorted = false
+			t.Errorf("the primary columns are not in order: %v", primaries)
 		}
-	}
-	if sorted {
-		t.Fatalf("the primary columns came out sorted (%v) — sortFieldsByName appears to be fixed; assert the sorted order instead", primaries)
 	}
 }
 
@@ -373,14 +369,11 @@ func TestGetMongoDBSchemaInfersFieldsFromDocuments(t *testing.T) {
 	}
 
 	for name, wantType := range map[string]string{
-		"name":   "string",
-		"age":    "int",
-		"score":  "float",
-		"active": "bool",
-		// Not "array": the driver decodes a BSON array into primitive.A, which
-		// getMongoFieldType's `case []interface{}` does not match. See
-		// TestTheArrayBranchIsDeadForRealDocuments.
-		"tags":            "primitive.A",
+		"name":            "string",
+		"age":             "int",
+		"score":           "float",
+		"active":          "bool",
+		"tags":            "array",
 		"address":         "object",
 		"address.city":    "string",
 		"address.geo":     "object",
@@ -436,7 +429,7 @@ func TestGetMongoDBSchemaMergesFieldsAcrossDocuments(t *testing.T) {
 // only in older documents is invisible to the schema, so a collection whose
 // shape changed at some point reports only the newest shape — and the UI builds
 // table mappings from this list.
-func TestOnlyTheNewestTenDocumentsAreSampled(t *testing.T) {
+func TestTheSampleReachesBeyondTheNewestFewDocuments(t *testing.T) {
 	collection := harness.UniqueName("msample")
 	client := openSchemaMongo(t)
 	coll := client.Database(schemaSourceDB).Collection(collection)
@@ -464,14 +457,17 @@ func TestOnlyTheNewestTenDocumentsAreSampled(t *testing.T) {
 	if !seen["current_field"] {
 		t.Fatalf("current_field is missing, so the sample did not work at all: %v", seen)
 	}
-	if seen["legacy_field"] {
-		t.Fatalf("legacy_field was found — the sample appears to cover the whole collection now; assert the full schema instead")
+	if !seen["legacy_field"] {
+		t.Errorf("legacy_field is missing: a field only the older documents carry "+
+			"is invisible to the interface that builds table mappings from this (%v)", seen)
 	}
 }
 
-// _id is present in every document and is reported with a Go type name
-// (T-081), because getMongoFieldType's switch has no case for ObjectID.
-func TestTheMongoIDTypeIsAGoTypeName(t *testing.T) {
+// TestTheMongoIDTypeIsADatabaseType covers the field every document has. It was
+// reported as "primitive.ObjectID" — the Go type the driver decodes it into —
+// because the switch had no case for it, so every schema query returned at least
+// one type name the interface cannot map to a column type.
+func TestTheMongoIDTypeIsADatabaseType(t *testing.T) {
 	collection := harness.UniqueName("mid")
 	client := openSchemaMongo(t)
 	coll := client.Database(schemaSourceDB).Collection(collection)
@@ -485,8 +481,8 @@ func TestTheMongoIDTypeIsAGoTypeName(t *testing.T) {
 
 	for _, f := range fieldsFrom(t, resp) {
 		if f["name"] == "_id" {
-			if f["type"] != "primitive.ObjectID" {
-				t.Fatalf("_id type = %v — ObjectID appears to be handled now; assert the database type instead", f["type"])
+			if f["type"] != "objectId" {
+				t.Errorf("_id type = %v, want objectId", f["type"])
 			}
 			return
 		}
@@ -594,12 +590,12 @@ func TestMongoCredentialsAreIgnoredWithoutAPassword(t *testing.T) {
 	}
 }
 
-// getMongoFieldType has a `case []interface{}: return "array"` branch, but the
-// driver decodes every BSON array into primitive.A — a named type that the case
-// does not match. The branch is therefore dead for real documents, and arrays
-// are always reported as the Go type name. The unit test that shows "array"
-// passes only because it constructs a plain []interface{} by hand.
-func TestTheArrayBranchIsDeadForRealDocuments(t *testing.T) {
+// TestAnArrayIsReportedAsAnArray covers what the driver really produces. The
+// array case matched a bare []interface{} while the driver decodes a BSON array
+// into primitive.A, so the branch was dead for real documents and every array
+// came back as the Go type name. The unit test that showed "array" passed only
+// because it built a plain []interface{} by hand.
+func TestAnArrayIsReportedAsAnArray(t *testing.T) {
 	collection := harness.UniqueName("marray")
 	client := openSchemaMongo(t)
 	coll := client.Database(schemaSourceDB).Collection(collection)
@@ -620,8 +616,8 @@ func TestTheArrayBranchIsDeadForRealDocuments(t *testing.T) {
 		name := f["name"].(string)
 		switch name {
 		case "strings", "numbers", "empty", "nested":
-			if f["type"] != "primitive.A" {
-				t.Fatalf("%s type = %v — arrays appear to be recognised now; assert \"array\" instead", name, f["type"])
+			if f["type"] != "array" {
+				t.Errorf("%s type = %v, want array", name, f["type"])
 			}
 		}
 	}

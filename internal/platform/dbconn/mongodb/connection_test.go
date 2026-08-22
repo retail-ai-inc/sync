@@ -210,11 +210,11 @@ func TestItConnectsToTheTargetNotTheSource(t *testing.T) {
 	}
 }
 
-// TestAMissingTargetConnectionBecomesAnEmptyURI records that the connection
-// parameters are read out of a map with no checks, so a configuration with no
-// targetConn builds "mongodb://:@:/?authSource=admin" and fails on the URI
-// rather than reporting the missing configuration.
-func TestAMissingTargetConnectionBecomesAnEmptyURI(t *testing.T) {
+// TestAMissingTargetConnectionIsReportedAsOne covers a task with no target. The
+// parameters were read out of a map with no checks, so the result was
+// "mongodb://:@:/?authSource=admin" and the failure came back as an error about
+// the URI — which says nothing about what is actually missing.
+func TestAMissingTargetConnectionIsReportedAsOne(t *testing.T) {
 	db := useTempTaskDB(t)
 	id := insertTask(t, db, `{"type":"mongodb"}`)
 
@@ -228,9 +228,8 @@ func TestAMissingTargetConnectionBecomesAnEmptyURI(t *testing.T) {
 	if database != "" {
 		t.Errorf("database = %q, want empty", database)
 	}
-	if strings.Contains(err.Error(), "targetConn") {
-		t.Fatalf("error = %q; the missing configuration appears to be reported now, "+
-			"so assert that instead", err)
+	if !strings.Contains(err.Error(), "target host and database") {
+		t.Errorf("error = %q, want it to name what is missing", err)
 	}
 }
 

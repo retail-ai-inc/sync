@@ -98,12 +98,19 @@ func ConnectMongoDBFromTaskID(ctx context.Context, taskID string, logger *logrus
 		return nil, "", fmt.Errorf("task is not MongoDB type: %s", config.Type)
 	}
 
-	// Extract connection parameters
+	// Extract connection parameters. A task with no target connection used to
+	// produce "mongodb://:@:/?authSource=admin" and fail with an error about the
+	// URI, which says nothing about what is actually missing.
 	host := config.TargetConn["host"]
 	port := config.TargetConn["port"]
 	username := config.TargetConn["user"]
 	password := config.TargetConn["password"]
 	database := config.TargetConn["database"]
+
+	if host == "" || database == "" {
+		logger.Errorf("[MongoDB] Task %s has no target connection", taskID)
+		return nil, "", fmt.Errorf("task %s does not name a target host and database", taskID)
+	}
 
 	// Connect to MongoDB
 	return ConnectMongoDB(

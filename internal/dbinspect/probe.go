@@ -112,7 +112,10 @@ func TestConnectionHandler(w http.ResponseWriter, r *http.Request) {
 			"database": req.Database,
 		})
 
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		// The request's own context, so a client that gives up stops the probe
+		// with it. It used to be context.Background(), so a ten-second MongoDB
+		// probe ran to completion however long the caller had been gone.
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		defer cancel()
 
 		client, err := mongo.Connect(ctx, options.Client().ApplyURI(uri))
@@ -137,7 +140,7 @@ func TestConnectionHandler(w http.ResponseWriter, r *http.Request) {
 		tables = collections
 
 	case "redis":
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 		defer cancel()
 
 		dbIndex, err := strconv.Atoi(req.Database)

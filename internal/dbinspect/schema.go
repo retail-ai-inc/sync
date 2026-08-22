@@ -12,6 +12,7 @@ import (
 
 	"github.com/sirupsen/logrus"
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
@@ -159,7 +160,11 @@ func getMongoDBSchema(c context.Context, req SchemaRequest) (SchemaResponse, err
 
 	// Get sample documents to extract nested fields (last 10 documents)
 	var sampleDocs []bson.M
-	findOptions := options.Find().SetSort(bson.D{{Key: "$natural", Value: -1}}).SetLimit(10)
+	// A hundred documents, newest first. It used to be ten, and the shape a
+	// collection is reported to have is what the interface builds table mappings
+	// out of — so a field that only the older documents carry was invisible, and
+	// a collection whose shape had changed reported only its newest form.
+	findOptions := options.Find().SetSort(bson.D{{Key: "$natural", Value: -1}}).SetLimit(schemaSampleSize)
 	findCursor, err := collection.Find(ctx, bson.M{}, findOptions)
 	if err != nil {
 		return SchemaResponse{}, fmt.Errorf("failed to query documents: %w", err)
@@ -224,24 +229,44 @@ func extractNestedFields(doc map[string]interface{}, prefix string, fields map[s
 	}
 }
 
-// getMongoFieldType gets MongoDB field type
+// schemaSampleSize is how many documents a collection's shape is inferred from.
+// More than this and a large collection makes the endpoint slow; fewer and a
+// field that is not on every document goes unnoticed.
+const schemaSampleSize = 100
+
+// getMongoFieldType gets MongoDB field type.
+//
+// The switch used to name none of the types the driver actually decodes BSON
+// into, so every one of them fell through and came back as a Go type name: an
+// _id was "primitive.ObjectID" and every array was "primitive.A", because the
+// array case matched a bare []interface{} and the driver produces primitive.A.
+// Every schema query therefore returned at least two type names the caller —
+// the interface that builds table mappings out of this — cannot map.
 func getMongoFieldType(value interface{}) string {
 	switch value.(type) {
-	case int, int32, int64:
+	case int, int32, int64, primitive.Timestamp:
 		return "int"
 	case float32, float64:
 		return "float"
-	case string:
+	case primitive.Decimal128:
+		return "decimal"
+	case string, primitive.Symbol, primitive.JavaScript:
 		return "string"
 	case bool:
 		return "bool"
-	case time.Time:
+	case time.Time, primitive.DateTime:
 		return "date"
-	case bson.M, map[string]interface{}:
+	case primitive.ObjectID:
+		return "objectId"
+	case primitive.Binary:
+		return "binary"
+	case primitive.Regex:
+		return "regex"
+	case bson.M, map[string]interface{}, bson.D:
 		return "object"
-	case []interface{}:
+	case []interface{}, primitive.A:
 		return "array"
-	case nil:
+	case nil, primitive.Null:
 		return "null"
 	default:
 		return fmt.Sprintf("%T", value)

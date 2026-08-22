@@ -43,35 +43,39 @@ func TestGetMongoFieldType(t *testing.T) {
 	}
 }
 
-// Anything outside the switch falls through to a Go type name, so the schema a
-// client receives leaks driver-internal types instead of a database type.
-func TestUnknownMongoTypesLeakGoTypeNames(t *testing.T) {
+// TestTheDriversTypesAreNamedAsDatabaseTypes covers what a caller receives. The
+// switch named none of the types the driver actually decodes BSON into, so every
+// one of them fell through to a Go type name — an _id was "primitive.ObjectID"
+// and every array was "primitive.A", because the array case matched a bare
+// []interface{} while the driver produces primitive.A. The interface builds
+// table mappings out of this, so every schema query returned at least two type
+// names it could not map.
+func TestTheDriversTypesAreNamedAsDatabaseTypes(t *testing.T) {
 	tests := []struct {
 		value interface{}
 		want  string
 	}{
-		{primitive.NewObjectID(), "primitive.ObjectID"},
-		{primitive.NewDateTimeFromTime(time.Now()), "primitive.DateTime"},
-		{primitive.Decimal128{}, "primitive.Decimal128"},
-		{bson.A{1, 2}, "primitive.A"},
-		{bson.D{{Key: "a", Value: 1}}, "primitive.D"},
-		{uint8(1), "uint8"},
-		{[]byte("x"), "[]uint8"},
+		{primitive.NewObjectID(), "objectId"},
+		{primitive.NewDateTimeFromTime(time.Now()), "date"},
+		{primitive.Decimal128{}, "decimal"},
+		{bson.A{1, 2}, "array"},
+		{bson.D{{Key: "a", Value: 1}}, "object"},
+		{primitive.Binary{}, "binary"},
+		{primitive.Null{}, "null"},
 	}
 
 	for _, tc := range tests {
-		got := getMongoFieldType(tc.value)
-		if got != tc.want {
-			t.Fatalf("getMongoFieldType(%T) = %q, want %q — the switch appears to have been extended; assert the new database type instead", tc.value, got, tc.want)
+		if got := getMongoFieldType(tc.value); got != tc.want {
+			t.Errorf("getMongoFieldType(%T) = %q, want %q", tc.value, got, tc.want)
 		}
 	}
 }
 
-// _id is the field a MongoDB schema always has, and it is reported as an
-// opaque Go type name rather than something a client can map to a column type.
-func TestObjectIDIsNotReportedAsAKnownType(t *testing.T) {
-	if got := getMongoFieldType(primitive.NewObjectID()); got != "primitive.ObjectID" {
-		t.Fatalf("getMongoFieldType(ObjectID) = %q — ObjectID appears to be handled now; assert the intended type instead", got)
+// TestAnUnknownTypeIsStillNamed is the other half: something the switch does not
+// list still comes back as something rather than as nothing.
+func TestAnUnknownTypeIsStillNamed(t *testing.T) {
+	if got := getMongoFieldType(uint8(1)); got == "" {
+		t.Error("an unrecognised type was reported as nothing")
 	}
 }
 
@@ -123,17 +127,21 @@ func TestExtractNestedFieldsWalksBSONTypes(t *testing.T) {
 	}
 }
 
-// A bson.D is walked into, but the entry recorded for the container itself is
-// typed by the switch, which does not list bson.D — so the parent reads as a
-// Go type name while its children read as database types.
-func TestNestedBSONDContainerIsTypedAsAGoValue(t *testing.T) {
+// TestANestedContainerIsTypedLikeItsChildren covers a bson.D, which is walked
+// into. The entry recorded for the container itself was typed by the switch,
+// which did not list bson.D — so the parent read as a Go type name while its
+// children read as database types.
+func TestANestedContainerIsTypedLikeItsChildren(t *testing.T) {
 	fields := map[string]string{}
 	extractNestedFields(map[string]interface{}{
 		"d": bson.D{{Key: "inner", Value: "v"}},
 	}, "", fields)
 
-	if fields["d"] != "primitive.D" {
-		t.Fatalf("d = %q, want primitive.D — bson.D appears to be typed as an object now", fields["d"])
+	if fields["d"] != "object" {
+		t.Errorf("d = %q, want object", fields["d"])
+	}
+	if fields["d.inner"] != "string" {
+		t.Errorf("d.inner = %q, want string", fields["d.inner"])
 	}
 }
 
