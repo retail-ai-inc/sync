@@ -350,23 +350,33 @@ func (s *MongoDBSyncer) parseFilesParallel(ctx context.Context, selectedFiles []
 			s.logger.Errorf("[MongoDB] [BatchID:%s] Parallel parsing failed for file %s (index %d): %v",
 				batchID, filepath.Base(result.FilePath), result.FileIndex, result.Error)
 			writeSuccess = false
-		} else {
-			allWriteModels = append(allWriteModels, result.WriteModels...)
-			processedFiles = append(processedFiles, result.FilePath)
-			totalParseTime += result.ParseTime
-
-			if result.ParseTime > maxParseTime {
-				maxParseTime = result.ParseTime
-			}
-			if result.ParseTime < minParseTime {
-				minParseTime = result.ParseTime
-			}
-
-			// Log individual file parsing time
-			s.logger.Debugf("[MongoDB] [BatchID:%s] Parsed file %s (%d/%d) - %d models in %v",
-				batchID, filepath.Base(result.FilePath), result.FileIndex+1, len(selectedFiles),
-				len(result.WriteModels), result.ParseTime)
+			continue
 		}
+
+		totalParseTime += result.ParseTime
+		if result.ParseTime > maxParseTime {
+			maxParseTime = result.ParseTime
+		}
+		if result.ParseTime < minParseTime {
+			minParseTime = result.ParseTime
+		}
+
+		// Log individual file parsing time
+		s.logger.Debugf("[MongoDB] [BatchID:%s] Parsed file %s (%d/%d) - %d models in %v",
+			batchID, filepath.Base(result.FilePath), result.FileIndex+1, len(selectedFiles),
+			len(result.WriteModels), result.ParseTime)
+	}
+
+	// Assemble in the order the files were written, not the order the workers
+	// happened to finish in. The buffer files are the change stream in sequence,
+	// so collecting them as they arrived would reorder one document's changes
+	// against another's — and, within a document, its own.
+	for _, result := range fileResults {
+		if result.FilePath == "" || result.Error != nil {
+			continue
+		}
+		allWriteModels = append(allWriteModels, result.WriteModels...)
+		processedFiles = append(processedFiles, result.FilePath)
 	}
 
 	// Calculate statistics

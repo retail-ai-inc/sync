@@ -63,7 +63,32 @@ func (s *MongoDBSyncer) convertRawBSONToWriteModel(rawData bson.Raw, sourceDB, c
 	return nil
 }
 
+// flushWriteModels applies a batch of changes to the target.
+//
+// The batch is split into runs that hold at most one write per document, and
+// the runs are applied in sequence, so two changes to the same document in one
+// batch cannot land the wrong way round while writes to unrelated documents
+// still go out together.
 func (s *MongoDBSyncer) flushWriteModels(ctx context.Context, targetColl *mongo.Collection, models []mongo.WriteModel, sourceDB, collectionName string) error {
+	if len(models) == 0 {
+		return nil
+	}
+
+	runs := orderedRuns(models)
+	if len(runs) > 1 {
+		s.logger.Debugf("[MongoDB] Batch for %s.%s touches some documents more than "+
+			"once; applying it as %d ordered runs", sourceDB, collectionName, len(runs))
+	}
+	for _, run := range runs {
+		if err := s.flushOneRun(ctx, targetColl, run, sourceDB, collectionName); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// flushOneRun applies one run, in which no document appears twice.
+func (s *MongoDBSyncer) flushOneRun(ctx context.Context, targetColl *mongo.Collection, models []mongo.WriteModel, sourceDB, collectionName string) error {
 	if len(models) == 0 {
 		return nil
 	}
