@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
@@ -34,11 +35,22 @@ func RecordRun(taskID string, run *domain.Run) {
 }
 
 // LookupRun returns a recorded run.
+//
+// A copy, not the pointer. The lock guards the map, not the Run behind it, and
+// the background goroutine writes to that Run as the export proceeds — so the
+// status endpoint used to serialise a struct that was being changed underneath
+// it, which is a data race and shows up as a status and a message from two
+// different moments.
 func LookupRun(taskID string) (*domain.Run, bool) {
 	runsLock.RLock()
 	defer runsLock.RUnlock()
+
 	run, exists := runs[taskID]
-	return run, exists
+	if !exists {
+		return nil, false
+	}
+	snapshot := *run
+	return &snapshot, true
 }
 
 // AdvanceRun moves a recorded run to a new status. An unknown task id is
@@ -120,24 +132,30 @@ func execute(taskID string, id int) {
 // ErrJobNotFound means the id names no job.
 var ErrJobNotFound = errors.New("no such task")
 
-// MarkRun stamps a job's last backup time and nothing else.
+// StartRun runs a job now, in the background, and reports the task id to poll.
 //
-// This is the second of two ways to "run a backup" and it does not run one: it
-// records the time and answers that the job started. The one that actually
-// exports is SubmitRun. Reconciling the two is aggregate work (#59).
-func MarkRun(id string) error {
+// It used to stamp last_backup_time and answer "started successfully" without
+// running anything at all: no executor was built, no command ran, nothing was
+// written anywhere. So "back this up now" produced a dashboard entry saying the
+// job had just succeeded, and an operator checking before a switchover that the
+// data was recoverable saw a fresh, successful backup that did not exist. That
+// is worse than showing "never backed up".
+func StartRun(id string) (taskID string, err error) {
 	exists, err := infra.JobExists(id)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if !exists {
-		return ErrJobNotFound
+		return "", ErrJobNotFound
 	}
-	if err := infra.StampLastBackup(id, httpx.TimeNowStr()); err != nil {
-		return err
+
+	numeric, err := strconv.Atoi(id)
+	if err != nil {
+		return "", fmt.Errorf("%q is not a job id: %w", id, err)
 	}
+
 	logrus.Infof("[Backup] Manually triggered backup task: %s", id)
-	return nil
+	return SubmitRun(numeric), nil
 }
 
 // RunCount reports how many runs the register holds. Nothing in production

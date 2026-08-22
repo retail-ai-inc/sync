@@ -22,15 +22,37 @@ func resetTaskStatus(t *testing.T) {
 func TestTaskStatusRoundTrip(t *testing.T) {
 	resetTaskStatus(t)
 
-	want := &domain.Run{TaskID: "t1", BackupID: 7, Status: "pending", Message: "queued"}
-	RecordRun("t1", want)
+	stored := &domain.Run{TaskID: "t1", BackupID: 7, Status: "pending", Message: "queued"}
+	RecordRun("t1", stored)
 
 	got, ok := LookupRun("t1")
 	if !ok {
 		t.Fatal("getTaskStatus reported the task as missing")
 	}
-	if got != want {
-		t.Errorf("getTaskStatus returned %#v, want the stored pointer", got)
+	if *got != *stored {
+		t.Errorf("getTaskStatus returned %#v, want %#v", got, stored)
+	}
+}
+
+// TestLookupRunHandsBackACopy covers a live pointer being serialised. The lock
+// guards the map, not the Run behind it, and the background goroutine writes to
+// that Run as the export proceeds — so the status endpoint used to read a struct
+// that was being changed underneath it, which is a data race and shows up as a
+// status and a message from two different moments.
+func TestLookupRunHandsBackACopy(t *testing.T) {
+	resetTaskStatus(t)
+
+	stored := &domain.Run{TaskID: "t1", BackupID: 7, Status: "pending", Message: "queued"}
+	RecordRun("t1", stored)
+
+	got, _ := LookupRun("t1")
+	if got == stored {
+		t.Fatal("LookupRun returned the pointer the background run writes through")
+	}
+
+	AdvanceRun("t1", "completed", "done", nil)
+	if got.Status != "pending" {
+		t.Errorf("the copy changed underneath the caller: %q", got.Status)
 	}
 }
 

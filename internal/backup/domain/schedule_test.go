@@ -7,28 +7,42 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-// NextBackupTime takes a cron expression and never reads it. Every
-// backup task reports the same next run — twenty-four hours from now —
-// regardless of its actual schedule, so the value shown in the UI is unrelated
-// to when the job will fire.
-func TestNextBackupTimeIgnoresTheCronExpression(t *testing.T) {
-	schedules := []string{
-		"*/5 * * * *", // every five minutes
-		"0 3 * * *",   // 03:00 daily
-		"0 0 1 * *",   // monthly
-		"",            // not a schedule at all
-		"not a cron",  // malformed
-	}
+// TestNextBackupTimeReadsTheCronExpression covers a figure shown to operators.
+// It used to ignore the expression and answer "twenty-four hours from now"
+// whatever it said, so a job running every five minutes and one running monthly
+// displayed the same time and neither was true.
+func TestNextBackupTimeReadsTheCronExpression(t *testing.T) {
+	now := time.Now().UTC()
 
-	want := time.Now().UTC().Add(24 * time.Hour).Format("2006-01-02 15:04:05")
-	for _, expr := range schedules {
-		got := NextBackupTime(expr)
-		parsed, err := time.Parse("2006-01-02 15:04:05", got)
-		if err != nil {
-			t.Fatalf("NextBackupTime(%q) = %q, not a SQL datetime: %v", expr, got, err)
-		}
-		if delta := parsed.Sub(time.Now().UTC().Add(24 * time.Hour)); delta < -2*time.Second || delta > 2*time.Second {
-			t.Fatalf("NextBackupTime(%q) = %q, no longer now+24h (want ~%s) — the expression appears to be parsed now; assert the real next run instead", expr, got, want)
+	for expr, within := range map[string]time.Duration{
+		"*/5 * * * *": 6 * time.Minute,
+		"0 * * * *":   61 * time.Minute,
+		"0 3 * * *":   25 * time.Hour,
+		"0 0 1 * *":   32 * 24 * time.Hour,
+	} {
+		t.Run(expr, func(t *testing.T) {
+			got := NextBackupTime(expr)
+			parsed, err := time.Parse("2006-01-02 15:04:05", got)
+			if err != nil {
+				t.Fatalf("NextBackupTime(%q) = %q: %v", expr, got, err)
+			}
+			if !parsed.After(now) {
+				t.Errorf("NextBackupTime(%q) = %q, which is not in the future", expr, got)
+			}
+			if parsed.Sub(now) > within {
+				t.Errorf("NextBackupTime(%q) = %q, more than %v away", expr, got, within)
+			}
+		})
+	}
+}
+
+// TestNextBackupTimeOfSomethingThatIsNotASchedule covers the other half: an
+// expression that cannot be read answers nothing, so the column is empty rather
+// than carrying a confident wrong answer.
+func TestNextBackupTimeOfSomethingThatIsNotASchedule(t *testing.T) {
+	for _, expr := range []string{"", "not a cron", "0 3 * *", "0 99 * * *"} {
+		if got := NextBackupTime(expr); got != "" {
+			t.Errorf("NextBackupTime(%q) = %q, want nothing", expr, got)
 		}
 	}
 }

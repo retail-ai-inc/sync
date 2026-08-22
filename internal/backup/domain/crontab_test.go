@@ -62,28 +62,41 @@ func TestAnUnparseableTaskIsSilentlyLeftOutOfTheCrontab(t *testing.T) {
 	}
 }
 
-// A task with an empty schedule still produces a crontab line, which begins
-// with the curl command instead of five time fields. crontab rejects the whole
-// file when it hits that line, so one misconfigured task drops every backup
-// schedule on the host.
-func TestAnEmptyScheduleProducesAMalformedCrontabLine(t *testing.T) {
-	cfg, err := json.Marshal(BackupConfig{Name: "no schedule"})
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
+// TestAScheduleThatIsNotOneIsLeftOut covers one misconfigured job taking every
+// other backup with it. A schedule that is not a cron expression was written out
+// anyway, producing a line that begins with the curl command instead of five
+// time fields — and crontab refuses the whole file when any line is malformed,
+// so every backup schedule on the host disappeared.
+func TestAScheduleThatIsNotOneIsLeftOut(t *testing.T) {
+	for name, schedule := range map[string]string{
+		"empty":        "",
+		"prose":        "every five minutes",
+		"too short":    "0 3 * *",
+		"out of range": "0 99 * * *",
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg, err := json.Marshal(BackupConfig{Name: "bad", Schedule: schedule})
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			good, err := json.Marshal(BackupConfig{Name: "good", Schedule: "0 3 * * *"})
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
 
-	got := GenerateCrontabEntries([]BackupTask{{ID: 9, ConfigJSON: string(cfg)}}, "http://api")
+			got := GenerateCrontabEntries([]BackupTask{
+				{ID: 9, ConfigJSON: string(cfg)},
+				{ID: 10, ConfigJSON: string(good)},
+			}, "http://api")
 
-	var entry string
-	for _, line := range got {
-		if strings.Contains(line, "execute/9") {
-			entry = line
-		}
-	}
-	if entry == "" {
-		t.Fatalf("no entry was generated — an empty schedule appears to be rejected now:\n%s", strings.Join(got, "\n"))
-	}
-	if !strings.HasPrefix(entry, " /usr/bin/curl") {
-		t.Fatalf("entry = %q — the empty schedule appears to be handled now", entry)
+			joined := strings.Join(got, "\n")
+			if strings.Contains(joined, "execute/9") {
+				t.Errorf("the job with the schedule %q reached the crontab:\n%s", schedule, joined)
+			}
+			// And the job either side of it is untouched.
+			if !strings.Contains(joined, "execute/10") {
+				t.Errorf("a valid job was dropped along with it:\n%s", joined)
+			}
+		})
 	}
 }

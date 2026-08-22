@@ -280,24 +280,26 @@ func TestCountRecordsMiscountsNonJSONL(t *testing.T) {
 	}
 }
 
-// A JSONL line longer than the 1MB scanner buffer aborts the count with an
-// error rather than being counted. MongoDB documents may be up to 16MB, so a
-// single large document makes the record count for the whole file unavailable.
-func TestCountRecordsFailsOnADocumentLargerThanOneMegabyte(t *testing.T) {
+// TestCountRecordsHandlesALargeDocument covers a document bigger than the
+// scanner's buffer. That buffer used to be a megabyte while a MongoDB document
+// may be sixteen, so one large document turned the record count for the whole
+// file into an error — and the count is what the caller reports as the size of
+// the backup.
+func TestCountRecordsHandlesALargeDocument(t *testing.T) {
 	e := newExecutor()
 	path := filepath.Join(t.TempDir(), "big.json")
 
 	big := fmt.Sprintf(`{"blob":"%s"}`, strings.Repeat("x", 2*1024*1024))
-	if err := os.WriteFile(path, []byte(big+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(big+"\n{\"id\":2}\n"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 
-	_, _, err := e.countRecordsInFile(path)
-	if err == nil {
-		t.Fatalf("countRecordsInFile() = nil — the buffer appears to have been raised; assert the count instead")
+	count, _, err := e.countRecordsInFile(path)
+	if err != nil {
+		t.Fatalf("countRecordsInFile: %v", err)
 	}
-	if !strings.Contains(err.Error(), "too long") {
-		t.Errorf("err = %v, want a token-too-long error", err)
+	if count != 2 {
+		t.Errorf("count = %d, want 2", count)
 	}
 }
 
@@ -315,16 +317,22 @@ func TestUseExternalCommandsHonoursTheEnvironmentVariable(t *testing.T) {
 	}
 }
 
-// The switch is an exact string comparison against "true", so the spellings
-// operators normally use are silently ignored and the memory-hungry in-process
-// path is taken instead.
-func TestUseExternalCommandsRejectsOtherTruthySpellings(t *testing.T) {
+// TestUseExternalCommandsAcceptsTheUsualSpellings covers what an operator
+// actually writes. The comparison was == "true", so every other spelling was
+// ignored in silence and the memory-hungry in-process path ran instead.
+func TestUseExternalCommandsAcceptsTheUsualSpellings(t *testing.T) {
 	e := newExecutor()
 
 	for _, value := range []string{"1", "TRUE", "True", "yes", "on", " true"} {
 		t.Setenv("USE_EXTERNAL_BACKUP", value)
+		if !e.UseExternalCommands() {
+			t.Errorf("USE_EXTERNAL_BACKUP=%q was ignored", value)
+		}
+	}
+	for _, value := range []string{"", "0", "no", "off", "maybe"} {
+		t.Setenv("USE_EXTERNAL_BACKUP", value)
 		if e.UseExternalCommands() {
-			t.Fatalf("USE_EXTERNAL_BACKUP=%q is now accepted — the parsing appears to have been widened", value)
+			t.Errorf("USE_EXTERNAL_BACKUP=%q was read as yes", value)
 		}
 	}
 }

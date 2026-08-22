@@ -8,57 +8,76 @@ import (
 	"github.com/retail-ai-inc/sync/internal/backup/domain"
 )
 
-func TestMarkRunStampsAnExistingJob(t *testing.T) {
-	db := useTempJobDB(t)
-	id := insertJob(t, db, 1, `{"name":"nightly"}`)
+// settled waits for a run to reach an outcome, so a test does not depend on how
+// fast the background goroutine gets there.
+func settled(t *testing.T, taskID string) domain.Run {
+	t.Helper()
 
-	if err := MarkRun(itoa(id)); err != nil {
-		t.Fatalf("MarkRun: %v", err)
-	}
-
-	var lastBackup time.Time
-	if err := db.QueryRow(`SELECT last_backup_time FROM backup_tasks WHERE id=?`, id).
-		Scan(&lastBackup); err != nil {
-		t.Fatalf("read last_backup_time: %v", err)
-	}
-	if time.Since(lastBackup) > time.Minute {
-		t.Errorf("last_backup_time = %v, want roughly now", lastBackup)
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		run, ok := snapshotRun(t, taskID)
+		if !ok {
+			t.Fatalf("the run %s is not registered", taskID)
+		}
+		if run.Status != domain.RunPending && run.Status != domain.RunRunning {
+			return run
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the run %s is still %s", taskID, run.Status)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
-// TestMarkRunRunsNothing records the second of the two ways to "run a backup":
-// this one stamps the timestamp and returns. No executor is built, no export
-// happens, and no run is registered — yet the endpoint that calls it answers
-// "Backup job started successfully".
-func TestMarkRunRunsNothing(t *testing.T) {
+// TestStartRunActuallyRunsTheJob covers "back this up now". It used to stamp
+// last_backup_time and answer "started successfully" without running anything:
+// no executor was built, no command ran, nothing was written anywhere. So the
+// dashboard showed a fresh, successful backup that did not exist — and an
+// operator checking before a switchover that the data was recoverable saw
+// exactly what they were hoping for.
+func TestStartRunActuallyRunsTheJob(t *testing.T) {
 	db := useTempJobDB(t)
 	id := insertJob(t, db, 1, `{"name":"nightly","sourceType":"mongodb"}`)
 	ForgetRuns()
 	t.Cleanup(ForgetRuns)
 
-	if err := MarkRun(itoa(id)); err != nil {
-		t.Fatalf("MarkRun: %v", err)
+	taskID, err := StartRun(itoa(id))
+	if err != nil {
+		t.Fatalf("StartRun: %v", err)
+	}
+	if !strings.HasPrefix(taskID, "backup_") {
+		t.Errorf("taskID = %q, want one to poll", taskID)
 	}
 
-	if n := RunCount(); n != 0 {
-		t.Fatalf("MarkRun registered %d run(s); it appears to execute now, so assert "+
-			"that instead", n)
+	run, ok := snapshotRun(t, taskID)
+	if !ok {
+		t.Fatal("no run was registered, so nothing is running and nothing can be polled")
+	}
+	if run.BackupID != int(id) {
+		t.Errorf("BackupID = %d, want %d", run.BackupID, id)
+	}
+
+	// The job names no tables, so the export refuses it — which is the point:
+	// the run reaches a real outcome instead of being reported as a success that
+	// never happened.
+	if final := settled(t, taskID); final.Status != domain.RunFailed {
+		t.Errorf("Status = %q, want the export's refusal to have been recorded", final.Status)
 	}
 }
 
-func TestMarkRunOnAnUnknownJob(t *testing.T) {
+func TestStartRunOnAnUnknownJob(t *testing.T) {
 	useTempJobDB(t)
 
-	if err := MarkRun("999"); err != ErrJobNotFound {
-		t.Errorf("MarkRun on an unknown id = %v, want ErrJobNotFound", err)
+	if _, err := StartRun("999"); err != ErrJobNotFound {
+		t.Errorf("StartRun on an unknown id = %v, want ErrJobNotFound", err)
 	}
 }
 
-func TestMarkRunReportsAMissingTable(t *testing.T) {
+func TestStartRunReportsAMissingTable(t *testing.T) {
 	emptyJobDB(t)
 
-	if err := MarkRun("1"); err == nil {
-		t.Error("MarkRun on a database with no tables returned no error")
+	if _, err := StartRun("1"); err == nil {
+		t.Error("StartRun on a database with no tables returned no error")
 	}
 }
 

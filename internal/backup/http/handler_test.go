@@ -76,17 +76,17 @@ func TestBackupRunHandlerReportsAMissingTable(t *testing.T) {
 	}
 }
 
-// "Manually triggered backup" runs no backup. The handler checks the task
-// exists, stamps last_backup_time with the current time, and answers "Backup
-// job started successfully" — no executor is constructed, no command is run,
-// nothing is written anywhere. The dashboard then shows a backup that happened
-// seconds ago and does not exist, which is worse than showing none: an operator
-// checking recoverability before a failover sees a fresh successful backup.
-func TestBackupRunHandlerRecordsASuccessWithoutRunningAnything(t *testing.T) {
+// TestBackupRunHandlerActuallyRunsTheJob covers "back this up now". It used to
+// stamp last_backup_time and answer "Backup job started successfully" without
+// running anything at all — no executor, no command, nothing written anywhere —
+// so the dashboard showed a fresh, successful backup that did not exist. That is
+// worse than showing "never backed up": an operator checking before a switchover
+// that the data was recoverable saw exactly what they were hoping for.
+func TestBackupRunHandlerActuallyRunsTheJob(t *testing.T) {
 	conn := useTempTaskDB(t)
 	insertBackupTask(t, conn, 1, `{"name":"nightly","sourceType":"mongodb","schedule":"0 3 * * *"}`)
-
-	before := time.Now().UTC().Add(-time.Second)
+	app.ForgetRuns()
+	t.Cleanup(app.ForgetRuns)
 
 	rec := httptest.NewRecorder()
 	serveWithURLParams(rec, httptest.NewRequest(http.MethodPost, "/backup/{id}/run", nil),
@@ -96,23 +96,15 @@ func TestBackupRunHandlerRecordsASuccessWithoutRunningAnything(t *testing.T) {
 	if resp["success"] != true {
 		t.Fatalf("success = %v (body: %s)", resp["success"], rec.Body.String())
 	}
-	if resp["message"] != "Backup job started successfully" {
-		t.Errorf("message = %v", resp["message"])
+	taskID, _ := resp["taskId"].(string)
+	if taskID == "" {
+		t.Fatal("no task id came back, so there is nothing to poll and nothing running")
 	}
-
-	// The driver converts DATETIME columns to time.Time.
-	var lastBackup time.Time
-	if err := conn.QueryRow("SELECT last_backup_time FROM backup_tasks WHERE id=1").Scan(&lastBackup); err != nil {
-		t.Fatalf("read last_backup_time: %v", err)
+	if n := app.RunCount(); n != 1 {
+		t.Errorf("%d runs were registered, want 1", n)
 	}
-	if !lastBackup.After(before) {
-		t.Fatalf("last_backup_time = %v, expected it to be stamped with now — the handler appears to run a real backup now; assert the executed backup instead", lastBackup)
-	}
-
-	// Nothing else changed: no task status was registered, which is what a real
-	// asynchronous run does (see BackupExecuteHandler).
-	if n := app.RunCount(); n != 0 {
-		t.Fatalf("%d background tasks were registered — the handler appears to execute now", n)
+	if _, found := app.LookupRun(taskID); !found {
+		t.Errorf("the run %q is not registered", taskID)
 	}
 }
 
@@ -310,10 +302,10 @@ func TestAStoredValueOfTheWrongTypeIsAnswered(t *testing.T) {
 	}
 }
 
-// next_backup_time is written from calculateNextBackupTime, which ignores the
-// cron expression entirely (T-074), so every update stamps the same now+24h
-// regardless of the schedule the caller just set.
-func TestTheStoredNextBackupTimeIgnoresTheSchedule(t *testing.T) {
+// TestTheStoredNextBackupTimeFollowsTheSchedule covers what an update writes
+// into next_backup_time. It used to be "twenty-four hours from now" whatever the
+// caller had just set the schedule to.
+func TestTheStoredNextBackupTimeFollowsTheSchedule(t *testing.T) {
 	conn := useTempTaskDB(t)
 	insertBackupTask(t, conn, 1, `{"name":"n","status":"enabled"}`)
 
@@ -329,8 +321,8 @@ func TestTheStoredNextBackupTimeIgnoresTheSchedule(t *testing.T) {
 	if err := conn.QueryRow("SELECT next_backup_time FROM backup_tasks WHERE id=1").Scan(&next); err != nil {
 		t.Fatalf("read next_backup_time: %v", err)
 	}
-	// A five-minute schedule should put the next run minutes away, not a day.
-	if d := time.Until(next); d < 23*time.Hour {
-		t.Fatalf("next_backup_time is %v away — the schedule appears to be parsed now; assert the real next run instead", d)
+	// A five-minute schedule puts the next run minutes away, not a day.
+	if d := time.Until(next); d > 10*time.Minute {
+		t.Errorf("next_backup_time is %v away for a five-minute schedule", d)
 	}
 }

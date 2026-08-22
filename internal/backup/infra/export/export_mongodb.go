@@ -28,8 +28,11 @@ const ZIPFilenameSeparator = "-"
 
 // UseExternalCommands checks whether to use external command mode
 func (e *BackupExecutor) UseExternalCommands() bool {
-	// Can be controlled through environment variables
-	if os.Getenv("USE_EXTERNAL_BACKUP") == "true" {
+	// Can be controlled through environment variables. The comparison used to be
+	// == "true", so "1", "TRUE", "yes" and "on" — the spellings an operator
+	// reaches for — were ignored in silence and the memory-hungry in-process path
+	// ran instead.
+	if truthy(os.Getenv("USE_EXTERNAL_BACKUP")) {
 		return true
 	}
 
@@ -420,7 +423,21 @@ func (e *BackupExecutor) exportMongoDBMergedTables(ctx context.Context, connStr,
 	return nil
 }
 
-// countRecordsInFile counts the number of records in JSONL file
+// truthy reads the spellings of "yes" that turn up in an environment variable.
+func truthy(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "true", "1", "yes", "y", "on":
+		return true
+	}
+	return false
+}
+
+// countRecordsInFile counts the number of records in JSONL file.
+//
+// The scanner's buffer used to be a megabyte while a MongoDB document may be
+// sixteen, so one large document turned the whole file's record count into an
+// error rather than a number — and the count is what the caller reports as the
+// size of the backup.
 func (e *BackupExecutor) countRecordsInFile(filePath string) (int, float64, error) {
 	stat, err := os.Stat(filePath)
 	if err != nil {
@@ -436,10 +453,10 @@ func (e *BackupExecutor) countRecordsInFile(filePath string) (int, float64, erro
 	defer file.Close()
 
 	scanner := bufio.NewScanner(file)
-	// Increase buffer size to handle large JSON lines (default is 64KB, set to 1MB)
-	const maxCapacity = 1024 * 1024 // 1MB
-	buf := make([]byte, maxCapacity)
-	scanner.Buffer(buf, maxCapacity)
+	// A BSON document may be 16 MB, and mongoexport writes one per line. The
+	// buffer allows for that plus the expansion from BSON to JSON.
+	const maxCapacity = 64 * 1024 * 1024
+	scanner.Buffer(make([]byte, 0, 1024*1024), maxCapacity)
 
 	count := 0
 

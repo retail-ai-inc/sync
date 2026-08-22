@@ -284,13 +284,14 @@ func TestACorruptTaskIsSkippedNotReported(t *testing.T) {
 	}
 }
 
-// TestAnEmptyScheduleProducesAMalformedLine records that no validation stands
-// between a job with no schedule and the crontab: the entry is written with the
-// schedule field empty, which makes the whole crontab file invalid and can stop
-// every other entry in it from running.
-func TestAnEmptyScheduleProducesAMalformedLine(t *testing.T) {
+// TestAJobWithNoScheduleDoesNotReachTheCrontab covers one misconfigured job
+// taking every other backup with it. Nothing stood between a job with no
+// schedule and the crontab: the line was written with the schedule field empty,
+// which makes the whole file invalid, and crontab then refuses all of it.
+func TestAJobWithNoScheduleDoesNotReachTheCrontab(t *testing.T) {
 	db := useTempJobDB(t)
 	insertJob(t, db, 1, `{"name":"noschedule"}`)
+	insertJob(t, db, 1, `{"name":"nightly","schedule":"0 3 * * *"}`)
 	binDir, _ := stubCrontab(t, "", 0)
 
 	if err := NewCronManager(db, "http://api").SyncCrontab(context.Background()); err != nil {
@@ -298,8 +299,12 @@ func TestAnEmptyScheduleProducesAMalformedLine(t *testing.T) {
 	}
 
 	got := installed(t, binDir)
-	if !strings.Contains(got, " /usr/bin/curl") {
-		t.Fatalf("the malformed entry is gone; validation appears to have been added, "+
-			"so assert the rejection instead: %s", got)
+	for _, line := range strings.Split(got, "\n") {
+		if strings.HasPrefix(strings.TrimLeft(line, " \t"), "/usr/bin/curl") {
+			t.Errorf("a line with no schedule reached the crontab: %s", got)
+		}
+	}
+	if !strings.Contains(got, "0 3 * * *") {
+		t.Errorf("the valid job was dropped with it: %s", got)
 	}
 }

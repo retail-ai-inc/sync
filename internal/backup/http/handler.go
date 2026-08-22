@@ -199,7 +199,8 @@ func BackupRunHandler(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	logrus.Infof("[Backup] BackupRunHandler => taskID=%s", id)
 
-	switch err := app.MarkRun(id); {
+	taskID, err := app.StartRun(id)
+	switch {
 	case err == nil:
 	case errors.Is(err, app.ErrJobNotFound):
 		httpx.ErrorJSON(w, "backup task not found", errors.New("no such task"))
@@ -211,6 +212,7 @@ func BackupRunHandler(w http.ResponseWriter, r *http.Request) {
 
 	httpx.WriteJSON(w, map[string]interface{}{
 		"success": true,
+		"taskId":  taskID,
 		"message": "Backup job started successfully",
 	})
 }
