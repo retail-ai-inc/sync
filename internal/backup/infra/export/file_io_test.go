@@ -302,37 +302,3 @@ func TestCountRecordsHandlesALargeDocument(t *testing.T) {
 		t.Errorf("count = %d, want 2", count)
 	}
 }
-
-func TestUseExternalCommandsHonoursTheEnvironmentVariable(t *testing.T) {
-	e := newExecutor()
-
-	t.Setenv("USE_EXTERNAL_BACKUP", "true")
-	if !e.UseExternalCommands() {
-		t.Error("UseExternalCommands() = false with USE_EXTERNAL_BACKUP=true")
-	}
-
-	t.Setenv("USE_EXTERNAL_BACKUP", "")
-	if e.UseExternalCommands() {
-		t.Error("UseExternalCommands() = true with the variable unset and low memory use")
-	}
-}
-
-// TestUseExternalCommandsAcceptsTheUsualSpellings covers what an operator
-// actually writes. The comparison was == "true", so every other spelling was
-// ignored in silence and the memory-hungry in-process path ran instead.
-func TestUseExternalCommandsAcceptsTheUsualSpellings(t *testing.T) {
-	e := newExecutor()
-
-	for _, value := range []string{"1", "TRUE", "True", "yes", "on", " true"} {
-		t.Setenv("USE_EXTERNAL_BACKUP", value)
-		if !e.UseExternalCommands() {
-			t.Errorf("USE_EXTERNAL_BACKUP=%q was ignored", value)
-		}
-	}
-	for _, value := range []string{"", "0", "no", "off", "maybe"} {
-		t.Setenv("USE_EXTERNAL_BACKUP", value)
-		if e.UseExternalCommands() {
-			t.Errorf("USE_EXTERNAL_BACKUP=%q was read as yes", value)
-		}
-	}
-}

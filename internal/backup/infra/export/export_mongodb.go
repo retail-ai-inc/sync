@@ -13,7 +13,6 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
-	"github.com/retail-ai-inc/sync/internal/backup/domain"
 	"github.com/retail-ai-inc/sync/internal/backup/infra/transfer"
 	"github.com/sirupsen/logrus"
 )
@@ -26,29 +25,6 @@ const JSONFilenameSeparator = "_"
 // Change this to customize ZIP filename format (e.g., "-", "_", ".")
 const ZIPFilenameSeparator = "-"
 
-// UseExternalCommands checks whether to use external command mode
-func (e *BackupExecutor) UseExternalCommands() bool {
-	// Can be controlled through environment variables. The comparison used to be
-	// == "true", so "1", "TRUE", "yes" and "on" — the spellings an operator
-	// reaches for — were ignored in silence and the memory-hungry in-process path
-	// ran instead.
-	if truthy(os.Getenv("USE_EXTERNAL_BACKUP")) {
-		return true
-	}
-
-	// Can also check available memory, automatically switch to external command mode if memory is insufficient
-	var m runtime.MemStats
-	runtime.ReadMemStats(&m)
-	currentMB := float64(m.Alloc) / 1024 / 1024
-
-	if currentMB > 2000 { // If Go process is already using more than 2GB, switch to external mode
-		logrus.Warnf("[BackupExecutor] High memory usage detected (%.2fMB), switching to external command mode", currentMB)
-		return true
-	}
-
-	return false
-}
-
 // logMemoryUsage logs memory usage information
 func (e *BackupExecutor) logMemoryUsage(phase string) {
 	var m runtime.MemStats
@@ -59,98 +35,6 @@ func (e *BackupExecutor) logMemoryUsage(phase string) {
 		float64(m.Alloc)/1024/1024,
 		float64(m.Sys)/1024/1024,
 		runtime.NumGoroutine())
-}
-
-// ExecuteExternalMongoBackup executes MongoDB backup using external commands
-// Avoids Go memory management issues by directly calling system commands
-func (e *BackupExecutor) ExecuteExternalMongoBackup(ctx context.Context, config ExecutorBackupConfig, tempDir string, task domain.BackupTask, collection string) error {
-	logrus.Infof("[BackupExecutor] 🚀 Using EXTERNAL COMMAND mode for collection: %s", collection)
-
-	// Log Go process memory (should remain stable)
-	e.logMemoryUsage("EXTERNAL_MODE_START")
-
-	// Build connection string
-	connStr := buildMongoDBConnectionString(config.Database.URL, config.Database.Username, config.Database.Password)
-
-	// Clean collection name and generate file paths
-	baseCollectionName := e.extractTablePrefix(collection)
-	logrus.Infof("[BackupExecutor] 🔍 Original collection name: %s, extracted base name: %s", collection, baseCollectionName)
-
-	dateStr := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
-	outputPath := fmt.Sprintf("%s/%s%s%s.json", tempDir, baseCollectionName, JSONFilenameSeparator, dateStr)
-	zipPath := fmt.Sprintf("%s/%s%s%s.zip", tempDir, baseCollectionName, ZIPFilenameSeparator, dateStr)
-
-	// Step 1: External mongoexport command
-	logrus.Infof("[BackupExecutor] 📤 Step 1: External mongoexport")
-	if err := e.executeExternalMongoExport(ctx, connStr, config.Database.Database, collection, outputPath); err != nil {
-		return fmt.Errorf("external mongoexport failed: %w", err)
-	}
-
-	e.logMemoryUsage("AFTER_MONGOEXPORT")
-
-	// Step 2: External zip command
-	logrus.Infof("[BackupExecutor] 🗜️ Step 2: External zip compression")
-	if err := transfer.Zip(ctx, tempDir, outputPath, zipPath); err != nil {
-		return fmt.Errorf("external zip failed: %w", err)
-	}
-
-	e.logMemoryUsage("AFTER_ZIP")
-
-	// Step 3: External gsutil upload (if GCS is configured)
-	if config.Destination.GCSPath != "" {
-		logrus.Infof("[BackupExecutor] ☁️ Step 3: External GCS upload")
-		gcsPath := fmt.Sprintf("%s/%s%s%s.zip", config.Destination.GCSPath, baseCollectionName, ZIPFilenameSeparator, dateStr)
-		if err := transfer.UploadGCS(ctx, zipPath, gcsPath); err != nil {
-			return fmt.Errorf("external GCS upload failed: %w", err)
-		}
-	}
-
-	e.logMemoryUsage("EXTERNAL_MODE_COMPLETE")
-
-	// Clean up temporary files
-	if err := os.Remove(outputPath); err != nil {
-		logrus.Warnf("[BackupExecutor] Failed to remove JSON file %s: %v", outputPath, err)
-	} else {
-		logrus.Debugf("[BackupExecutor] 🗑️  Cleaned up JSON file: %s", outputPath)
-	}
-
-	if err := os.Remove(zipPath); err != nil {
-		logrus.Warnf("[BackupExecutor] Failed to remove ZIP file %s: %v", zipPath, err)
-	} else {
-		logrus.Debugf("[BackupExecutor] 🗑️  Cleaned up ZIP file: %s", zipPath)
-	}
-
-	logrus.Infof("[BackupExecutor] ✅ External backup completed for collection: %s", collection)
-	return nil
-}
-
-// executeExternalMongoExport executes external mongoexport command
-func (e *BackupExecutor) executeExternalMongoExport(ctx context.Context, connStr, database, collection, outputPath string) error {
-	cmd := exec.CommandContext(ctx, "mongoexport",
-		"--uri", connStr,
-		"--db", database,
-		"--collection", collection,
-		"--out", outputPath,
-		"--quiet")
-
-	logrus.Infof("[BackupExecutor] Executing: mongoexport --db %s --collection %s --out %s", database, collection, outputPath)
-
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("mongoexport failed: %w, output: %s", err, string(output))
-	}
-
-	// Check output file
-	if _, err := os.Stat(outputPath); err != nil {
-		return fmt.Errorf("mongoexport output file not created: %w", err)
-	}
-
-	// Log file size
-	if stat, err := os.Stat(outputPath); err == nil {
-		logrus.Infof("[BackupExecutor] ✅ Mongoexport completed: %.2f MB", float64(stat.Size())/1024/1024)
-	}
-
-	return nil
 }
 
 // executeExternalMongoExportSimple complete external command backup: mongoexport -> zip -> GCS upload
@@ -288,6 +172,13 @@ func (e *BackupExecutor) executeExternalMongoExportWithOptions(ctx context.Conte
 func (e *BackupExecutor) exportMongoDBMergedTables(ctx context.Context, connStr, database string, tables []string, tempDir string, config ExecutorBackupConfig) error {
 	logrus.Infof("[BackupExecutor] 🚀 Starting multi-table merge backup for %d tables: %v", len(tables), tables)
 
+	// The name of the output file is derived from the first table, so an empty
+	// group would take the whole process down with an index out of range rather
+	// than fail one backup.
+	if len(tables) == 0 {
+		return fmt.Errorf("no tables to back up")
+	}
+
 	// Log Go process memory (should remain stable)
 	e.logMemoryUsage("MERGED_TABLES_START")
 
@@ -397,11 +288,19 @@ func (e *BackupExecutor) exportMongoDBMergedTables(ctx context.Context, connStr,
 
 	e.logMemoryUsage("AFTER_EXTERNAL_ZIP")
 
-	// Step 3: External GCS upload
-	gcsPath := fmt.Sprintf("%s/%s", config.Destination.GCSPath, zipFileName)
-	logrus.Infof("[BackupExecutor] ☁️ Step 3: External GCS upload")
-	if err := transfer.UploadGCS(ctx, zipPath, gcsPath); err != nil {
-		return fmt.Errorf("external GCS upload failed: %w", err)
+	// Step 3: External GCS upload, when there is somewhere to upload to.
+	//
+	// The single-collection path has always checked; this one did not, so it
+	// ran gsutil cp with a destination of "/<name>.zip" and failed the whole
+	// backup. A job configured without a bucket therefore worked while its
+	// pattern matched one collection and started failing the day it matched
+	// two — which for a monthly naming scheme is the first of the month.
+	if config.Destination.GCSPath != "" {
+		gcsPath := fmt.Sprintf("%s/%s", config.Destination.GCSPath, zipFileName)
+		logrus.Infof("[BackupExecutor] ☁️ Step 3: External GCS upload")
+		if err := transfer.UploadGCS(ctx, zipPath, gcsPath); err != nil {
+			return fmt.Errorf("external GCS upload failed: %w", err)
+		}
 	}
 
 	e.logMemoryUsage("MERGED_TABLES_COMPLETE")
@@ -421,15 +320,6 @@ func (e *BackupExecutor) exportMongoDBMergedTables(ctx context.Context, connStr,
 
 	logrus.Infof("[BackupExecutor] ✅ Multi-table merge backup completed successfully for %d tables", len(tables))
 	return nil
-}
-
-// truthy reads the spellings of "yes" that turn up in an environment variable.
-func truthy(value string) bool {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "true", "1", "yes", "y", "on":
-		return true
-	}
-	return false
 }
 
 // countRecordsInFile counts the number of records in JSONL file.

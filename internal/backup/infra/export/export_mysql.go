@@ -98,11 +98,19 @@ func (e *BackupExecutor) executeExternalMySQLBackupSimple(ctx context.Context, c
 		e.logMemoryUsage("AFTER_ZIP")
 	}
 
-	// Step 3: External GCS upload
-	gcsPath := fmt.Sprintf("%s/%s", config.Destination.GCSPath, uploadName)
-	logrus.Infof("[BackupExecutor] ☁️ Step 3: External GCS upload")
-	if err := transfer.UploadGCS(ctx, uploadPath, gcsPath); err != nil {
-		return fmt.Errorf("external GCS upload failed: %w", err)
+	// Step 3: External GCS upload, when there is somewhere to upload to.
+	//
+	// Neither MySQL path used to check. A job with no bucket configured ran
+	// gsutil cp against a destination of "/<name>.sql", which fails, so the
+	// backup was reported as failed although the dump had been taken — and the
+	// dump was then deleted with the temporary directory. The MongoDB
+	// single-collection path has always checked; this is the same rule.
+	if config.Destination.GCSPath != "" {
+		gcsPath := fmt.Sprintf("%s/%s", config.Destination.GCSPath, uploadName)
+		logrus.Infof("[BackupExecutor] ☁️ Step 3: External GCS upload")
+		if err := transfer.UploadGCS(ctx, uploadPath, gcsPath); err != nil {
+			return fmt.Errorf("external GCS upload failed: %w", err)
+		}
 	}
 
 	e.logMemoryUsage("MYSQL_BACKUP_COMPLETE")
@@ -361,6 +369,13 @@ except Exception as e:
 func (e *BackupExecutor) exportMySQLMergedTables(ctx context.Context, connectionURL, database string, tables []string, tempDir string, config ExecutorBackupConfig) error {
 	logrus.Infof("[BackupExecutor] 🚀 Starting MySQL multi-table merge backup for %d tables: %v", len(tables), tables)
 
+	// The name of the output file is derived from the first table, so an empty
+	// group would take the whole process down with an index out of range rather
+	// than fail one backup.
+	if len(tables) == 0 {
+		return fmt.Errorf("no tables to back up")
+	}
+
 	e.logMemoryUsage("MYSQL_MERGED_START")
 
 	// Parse connection URL
@@ -479,11 +494,14 @@ func (e *BackupExecutor) exportMySQLMergedTables(ctx context.Context, connection
 		e.logMemoryUsage("AFTER_ZIP")
 	}
 
-	// Step 3: External GCS upload
-	gcsPath := fmt.Sprintf("%s/%s", config.Destination.GCSPath, uploadName)
-	logrus.Infof("[BackupExecutor] ☁️ Step 3: External GCS upload")
-	if err := transfer.UploadGCS(ctx, uploadPath, gcsPath); err != nil {
-		return fmt.Errorf("external GCS upload failed: %w", err)
+	// Step 3: External GCS upload, when there is somewhere to upload to — see
+	// executeExternalMySQLBackupSimple.
+	if config.Destination.GCSPath != "" {
+		gcsPath := fmt.Sprintf("%s/%s", config.Destination.GCSPath, uploadName)
+		logrus.Infof("[BackupExecutor] ☁️ Step 3: External GCS upload")
+		if err := transfer.UploadGCS(ctx, uploadPath, gcsPath); err != nil {
+			return fmt.Errorf("external GCS upload failed: %w", err)
+		}
 	}
 
 	e.logMemoryUsage("MYSQL_MERGED_COMPLETE")
