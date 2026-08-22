@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strconv"
@@ -18,12 +20,27 @@ import (
 
 // The in-memory register of runs.
 //
-// Nothing ever removes an entry, so the map grows for the lifetime of the
-// process (T-115). Preserved as it stands.
+// Nothing used to remove an entry, so it grew for the lifetime of the process:
+// one record per backup ever submitted, reclaimed only by a restart. Finished
+// runs are dropped once they are older than runRetention, which is long enough
+// for a caller to have polled the outcome.
+const runRetention = 24 * time.Hour
+
 var (
 	runs     = make(map[string]*domain.Run)
 	runsLock sync.RWMutex
 )
+
+// forgetOldRuns drops finished runs nobody is going to ask about again. The
+// caller holds the lock.
+func forgetOldRuns() {
+	cutoff := time.Now().Add(-runRetention)
+	for id, run := range runs {
+		if run.CompletedAt != nil && run.CompletedAt.Before(cutoff) {
+			delete(runs, id)
+		}
+	}
+}
 
 // RecordRun files a run under its task id. SubmitRun uses it after minting the
 // id; it is exported because the status endpoint's tests need to seed a run
@@ -31,6 +48,8 @@ var (
 func RecordRun(taskID string, run *domain.Run) {
 	runsLock.Lock()
 	defer runsLock.Unlock()
+
+	forgetOldRuns()
 	runs[taskID] = run
 }
 
@@ -74,12 +93,12 @@ func ForgetRuns() {
 
 // SubmitRun registers a run for a job and starts it in the background,
 // returning the task id the caller can poll.
-//
-// The task id is the job id and the current Unix second, so two submissions of
-// the same job within one second collide and the second overwrites the first
-// (T-114). Preserved as it stands.
 func SubmitRun(id int) string {
-	taskID := fmt.Sprintf("backup_%d_%d", id, time.Now().Unix())
+	// The id used to be the job id and the current Unix second, so two
+	// submissions of the same job within one second produced the same id and the
+	// second overwrote the first — the caller that submitted first then polled
+	// somebody else's run.
+	taskID := fmt.Sprintf("backup_%d_%d_%s", id, time.Now().UnixNano(), randomSuffix())
 
 	logrus.Infof("[Backup] Submitting backup task: %d with taskID: %s", id, taskID)
 
@@ -93,6 +112,15 @@ func SubmitRun(id int) string {
 
 	go execute(taskID, id)
 	return taskID
+}
+
+// randomSuffix makes a task id unique even against a clock that has not moved.
+func randomSuffix() string {
+	buf := make([]byte, 4)
+	if _, err := rand.Read(buf); err != nil {
+		return "0"
+	}
+	return hex.EncodeToString(buf)
 }
 
 // execute runs a job to completion and records how it went.

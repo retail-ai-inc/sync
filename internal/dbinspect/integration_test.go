@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/retail-ai-inc/sync/internal/platform/dsn"
@@ -219,19 +220,20 @@ func TestACompositePrimaryKeyComesBackSorted(t *testing.T) {
 	}
 }
 
-// A table that does not exist is not an error: INFORMATION_SCHEMA simply
-// returns no rows, and the handler answers 200 with an empty field list. The
-// only trace is a warn-level log line, so a client cannot distinguish "this
-// table has no columns" from "this table does not exist".
-func TestAMissingTableLooksLikeAnEmptySchema(t *testing.T) {
+// TestAMissingTableIsReported covers a table name that is wrong.
+// INFORMATION_SCHEMA answers with no rows, which the handler used to serve as a
+// success with an empty field list — indistinguishable from a table with no
+// columns, which cannot exist. The only trace was a warn-level log line.
+func TestAMissingTableIsReported(t *testing.T) {
 	_, resp := postSchema(t, schemaRequestBody(t, "table_that_does_not_exist"))
 
-	if resp["success"] != true {
-		t.Fatalf("success = %v — a missing table appears to be reported now; assert the error instead", resp["success"])
+	if resp["success"] == true {
+		t.Fatalf("a missing table was reported as a successful lookup: %#v", resp)
 	}
-	data := resp["data"].(map[string]interface{})
-	if data["fields"] != nil {
-		t.Fatalf("fields = %#v, want null for a missing table", data["fields"])
+	if message, _ := resp["error"].(string); !strings.Contains(message, "does not exist") {
+		if message, _ = resp["message"].(string); !strings.Contains(message, "does not exist") {
+			t.Errorf("response = %#v, want it to say the table is not there", resp)
+		}
 	}
 }
 

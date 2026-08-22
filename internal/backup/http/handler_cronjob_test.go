@@ -3,11 +3,9 @@ package backuphttp
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
-	"time"
 
 	"github.com/go-chi/chi/v5"
 	_ "github.com/mattn/go-sqlite3"
@@ -97,32 +95,22 @@ func TestBackupExecuteHandlerRejectsANonNumericID(t *testing.T) {
 	}
 }
 
-// The task ID is derived from the backup ID and a one-second timestamp, so two
-// runs of the same backup inside the same second produce the same ID and the
-// second silently replaces the first's status entry. The caller that submitted
-// the first run then polls a status that belongs to a different execution.
-func TestTaskIDsCollideWithinTheSameSecond(t *testing.T) {
+// TestTwoRunsOfOneJobGetDistinctIDs covers two submissions of the same job
+// inside one second. The id was the backup id and a one-second timestamp, so
+// both produced the same one and the second silently replaced the first's
+// record — the caller that submitted first then polled somebody else's run.
+func TestTwoRunsOfOneJobGetDistinctIDs(t *testing.T) {
 	app.ForgetRuns()
 	t.Cleanup(app.ForgetRuns)
+	useTempTaskDB(t)
 
-	now := time.Now().Unix()
-	first := fmt.Sprintf("backup_%d_%d", 7, now)
-	second := fmt.Sprintf("backup_%d_%d", 7, now)
+	first := app.SubmitRun(7)
+	second := app.SubmitRun(7)
 
-	if first != second {
-		t.Fatal("the ID format no longer collides within a second — it appears to include a unique component now")
+	if first == second {
+		t.Fatalf("both runs were given the id %q", first)
 	}
-
-	app.RecordRun(first, &domain.Run{TaskID: first, BackupID: 7, Status: "running", Message: "run 1"})
-	app.RecordRun(second, &domain.Run{TaskID: second, BackupID: 7, Status: "pending", Message: "run 2"})
-
-	got, _ := app.LookupRun(first)
-	if got.Message != "run 2" {
-		t.Fatalf("message = %q — the collision no longer overwrites; assert the distinct entries instead", got.Message)
-	}
-
-	n := app.RunCount()
-	if n != 1 {
-		t.Fatalf("the run register holds %d entries for two runs — the IDs appear to be unique now", n)
+	if n := app.RunCount(); n != 2 {
+		t.Errorf("the register holds %d entries for two runs", n)
 	}
 }

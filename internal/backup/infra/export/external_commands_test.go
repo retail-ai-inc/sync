@@ -698,9 +698,12 @@ func TestExecuteExternalMySQLCSVPipesThroughPython(t *testing.T) {
 	}
 }
 
-// MySQL's batch mode marks NULL as \N; the python converter turns it into an
-// empty field, which is indistinguishable from an empty string in the CSV.
-func TestCSVExportCannotDistinguishNullFromEmpty(t *testing.T) {
+// TestCSVExportKeepsNullApartFromEmpty covers what a restore puts back. MySQL's
+// batch mode marks NULL as \N and the converter turned it into an empty field,
+// which is what an empty string also produced — so restoring from a CSV backup
+// replaced every NULL with ”. A NULL is now an unquoted empty field and an
+// empty string is "".
+func TestCSVExportKeepsNullApartFromEmpty(t *testing.T) {
 	binDir := stubPATH(t)
 	stubBin(t, binDir, "mysql", `printf 'a\tb\n\\N\t\n'`, 0)
 	linkRealBinary(t, binDir, "python3")
@@ -718,8 +721,9 @@ func TestCSVExportCannotDistinguishNullFromEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read output: %v", err)
 	}
-	if !strings.Contains(string(data), `"",""`) {
-		t.Fatalf("output = %q — NULL appears to be distinguishable now; assert the new encoding instead", data)
+	// The row is a NULL followed by an empty string.
+	if !strings.Contains(string(data), "\n,\"\"\n") {
+		t.Errorf("output = %q, want the NULL unquoted and the empty string quoted", data)
 	}
 }
 

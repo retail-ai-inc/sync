@@ -265,13 +265,10 @@ func (e *BackupExecutor) executeExternalMySQLCSV(ctx context.Context, host, port
 	// Python script for TSV to CSV conversion with MySQL escape sequence handling
 	// MySQL --batch mode uses its own escape sequences: \n \t \\ \N (NULL)
 	pythonScript := `
-import csv, sys
+import sys
 
 def unescape_mysql(value):
-    """Unescape MySQL batch mode escape sequences"""
-    if value == '\\N':  # MySQL NULL representation
-        return ''
-    # Replace MySQL escape sequences
+    """Unescape MySQL batch mode escape sequences."""
     value = value.replace('\\\\', '\x00')  # Temporarily replace \\ with placeholder
     value = value.replace('\\n', '\n')     # \n -> newline
     value = value.replace('\\t', '\t')     # \t -> tab
@@ -280,13 +277,23 @@ def unescape_mysql(value):
     value = value.replace('\x00', '\\')    # Restore backslash
     return value
 
+def render(field):
+    """One CSV field.
+
+    A NULL is written as an empty field with no quotes; everything else is
+    quoted, so an empty string comes out as "" and the two stay apart. csv's own
+    writer cannot express that before Python 3.12, and turning NULL into ''
+    means restoring from the backup replaces every NULL with an empty string.
+    """
+    if field == '\\N':  # MySQL NULL representation
+        return ''
+    return '"' + unescape_mysql(field).replace('"', '""') + '"'
+
 try:
-    writer = csv.writer(sys.stdout, quoting=csv.QUOTE_ALL, lineterminator='\n')
     for line in sys.stdin:
-        line = line.rstrip('\n\r')  # Remove line ending
-        fields = line.split('\t')   # Split by tab
-        fields = [unescape_mysql(f) for f in fields]  # Unescape each field
-        writer.writerow(fields)
+        line = line.rstrip('\n\r')          # Remove line ending
+        fields = line.split('\t')            # Split by tab
+        sys.stdout.write(','.join(render(f) for f in fields) + '\n')
 except Exception as e:
     sys.stderr.write(f'Python CSV conversion error: {e}\n')
     sys.exit(1)

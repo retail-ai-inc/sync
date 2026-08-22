@@ -340,9 +340,13 @@ func getMySQLSchema(c context.Context, req SchemaRequest) (SchemaResponse, error
 		return SchemaResponse{}, fmt.Errorf("failed to iterate through results: %w", err)
 	}
 
-	// If no fields found, return empty array instead of error
+	// INFORMATION_SCHEMA answers a table that does not exist with no rows, which
+	// is indistinguishable from a table with no columns — and a table with no
+	// columns cannot exist. Saying so is the difference between "you named the
+	// wrong table" and "this table is oddly empty".
 	if len(fields) == 0 {
-		logrus.Warnf("[MySQL] Table is empty or does not exist: %s.%s", req.Connection.Database, req.TableName)
+		return SchemaResponse{}, fmt.Errorf("%s.%s does not exist",
+			req.Connection.Database, req.TableName)
 	}
 
 	return SchemaResponse{Fields: fields}, nil

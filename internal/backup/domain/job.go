@@ -171,14 +171,17 @@ func IsTerminal(status string) bool {
 
 // Advance moves a run to a new status.
 //
-// A nil error leaves any previously recorded error in place, so a run that
-// fails and is then recovered keeps its stale error text (T-113). Preserved as
-// it stands.
+// The error goes with the status. A nil error used to leave whatever was there
+// before, so a run that failed and was then retried successfully came back as
+// "completed" carrying the text of the failure — which reads as a backup that
+// both worked and did not.
 func (r *Run) Advance(status, message string, err error) {
 	r.Status = status
 	r.Message = message
 	if err != nil {
 		r.Error = err.Error()
+	} else {
+		r.Error = ""
 	}
 	if IsTerminal(status) {
 		now := time.Now()
@@ -189,10 +192,6 @@ func (r *Run) Advance(status, message string, err error) {
 // DeriveUpdateStatus reports the status an update keeps for a job. A status
 // recorded in the stored configuration wins; otherwise the enable column
 // decides.
-//
-// The assertion on the stored value is unchecked, so a configuration whose
-// status is not a string panics and the request dies with a 500 and no body
-// (T-112). Preserved as it stands.
 func DeriveUpdateStatus(oldConfig map[string]interface{}, enable int) string {
 	// The test is on the value, not on the key. A stored `"status": ""` used to
 	// be carried through as an empty status, which the list endpoint then read as

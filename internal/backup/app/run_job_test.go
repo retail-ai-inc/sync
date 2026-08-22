@@ -123,10 +123,11 @@ func TestUpdateBackupTaskStatusUnknownTaskIsSilent(t *testing.T) {
 	}
 }
 
-// A later update never clears an error a previous one recorded, so a task that
-// fails and is then retried into "completed" reports success while still
-// carrying the failure text.
-func TestARecoveredTaskKeepsItsStaleError(t *testing.T) {
+// TestARecoveredTaskDropsItsStaleError covers a run that failed and was then
+// retried. A later update never cleared an error a previous one had recorded, so
+// the run came back as "completed" carrying the text of the failure — which
+// reads as a backup that both worked and did not.
+func TestARecoveredTaskDropsItsStaleError(t *testing.T) {
 	resetTaskStatus(t)
 	RecordRun("t1", &domain.Run{TaskID: "t1", Status: "running"})
 
@@ -137,30 +138,52 @@ func TestARecoveredTaskKeepsItsStaleError(t *testing.T) {
 	if got.Status != "completed" {
 		t.Fatalf("status = %q, want completed", got.Status)
 	}
-	if got.Error != "timeout" {
-		t.Fatalf("Error = %q, no longer stale — it appears to be cleared now; assert the empty error instead", got.Error)
+	if got.Error != "" {
+		t.Errorf("Error = %q, want it cleared with the status", got.Error)
 	}
 }
 
-// Nothing ever removes an entry from taskStatusMap: every backup run leaves a
-// domain.Run in memory for the lifetime of the process, and the only way
-// to reclaim it is a restart.
-func TestTaskStatusEntriesAreNeverEvicted(t *testing.T) {
+// TestFinishedRunsAreEventuallyForgotten covers a register that only a restart
+// used to reclaim: every backup ever submitted left a record in memory for the
+// life of the process.
+func TestFinishedRunsAreEventuallyForgotten(t *testing.T) {
 	resetTaskStatus(t)
 
+	old := time.Now().Add(-30 * 24 * time.Hour)
 	for i := 0; i < 500; i++ {
 		id := fmt.Sprintf("task_%d", i)
 		RecordRun(id, &domain.Run{
-			TaskID:    id,
-			Status:    "completed",
-			CreatedAt: time.Now().Add(-30 * 24 * time.Hour),
+			TaskID:      id,
+			Status:      "completed",
+			CreatedAt:   old,
+			CompletedAt: &old,
 		})
-		AdvanceRun(id, "completed", "done", nil)
 	}
 
-	n := RunCount()
+	// Recording anything is what sweeps the finished ones out.
+	RecordRun("recent", &domain.Run{TaskID: "recent", Status: "running"})
 
-	if n != 500 {
-		t.Fatalf("the run register holds %d of 500 month-old completed tasks — eviction appears to have been added; assert the retention policy instead", n)
+	if n := RunCount(); n != 1 {
+		t.Errorf("the register holds %d entries, want just the running one", n)
+	}
+}
+
+// TestARunningRunIsNotForgotten is the other half: a run still in flight, and a
+// finished one somebody may still be polling, both stay.
+func TestARunningRunIsNotForgotten(t *testing.T) {
+	resetTaskStatus(t)
+
+	justFinished := time.Now()
+	RecordRun("running", &domain.Run{TaskID: "running", Status: "running", CreatedAt: time.Now()})
+	RecordRun("finished", &domain.Run{
+		TaskID:      "finished",
+		Status:      "completed",
+		CompletedAt: &justFinished,
+	})
+
+	RecordRun("another", &domain.Run{TaskID: "another", Status: "pending"})
+
+	if n := RunCount(); n != 3 {
+		t.Errorf("the register holds %d entries, want all three", n)
 	}
 }

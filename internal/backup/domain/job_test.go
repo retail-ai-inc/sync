@@ -252,11 +252,11 @@ func TestRunAdvanceRecordsTheError(t *testing.T) {
 	}
 }
 
-// TestARecoveredRunKeepsItsStaleError records T-113: Advance only writes the
-// error field when it is handed one, so a run that fails and is then advanced to
-// completed still carries the failure text. A caller polling the run sees
-// status "completed" next to an error message.
-func TestARecoveredRunKeepsItsStaleError(t *testing.T) {
+// TestARecoveredRunDropsItsStaleError covers a run that failed and was then
+// advanced to completed. Advance only wrote the error field when it was handed
+// one, so the run still carried the failure text — and a caller polling it saw
+// "completed" next to an error message.
+func TestARecoveredRunDropsItsStaleError(t *testing.T) {
 	run := &Run{TaskID: "t"}
 	run.Advance(RunFailed, "boom", errors.New("disk full"))
 	run.Advance(RunCompleted, "recovered", nil)
@@ -264,8 +264,8 @@ func TestARecoveredRunKeepsItsStaleError(t *testing.T) {
 	if run.Status != RunCompleted {
 		t.Fatalf("Status = %q, want %q", run.Status, RunCompleted)
 	}
-	if run.Error != "disk full" {
-		t.Fatalf("Error = %q; the stale error is cleared now, so assert that instead", run.Error)
+	if run.Error != "" {
+		t.Errorf("Error = %q, want it cleared with the status", run.Error)
 	}
 }
 
