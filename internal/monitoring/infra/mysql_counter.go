@@ -9,6 +9,7 @@ import (
 	// "github.com/sirupsen/logrus"
 	"context"
 
+	_ "github.com/go-sql-driver/mysql" // this package opens MySQL itself
 	"github.com/retail-ai-inc/sync/internal/platform/config"
 	"github.com/retail-ai-inc/sync/internal/platform/dsn"
 	"github.com/sirupsen/logrus"
@@ -61,8 +62,9 @@ func CountAndLogMySQLOrMariaDB(ctx context.Context, sc config.SyncConfig, log *l
 			srcName := tblMap.SourceTable
 			tgtName := tblMap.TargetTable
 
-			srcCount := getRowCountWithContext(ctx, db, fmt.Sprintf("%s.%s", srcDBName, srcName))
-			tgtCount := getRowCountWithContext(ctx, db2, fmt.Sprintf("%s.%s", tgtDBName, tgtName))
+			srcCount, srcOK := countOrMark(ctx, db, fmt.Sprintf("%s.%s", srcDBName, srcName), log)
+			tgtCount, tgtOK := countOrMark(ctx, db2, fmt.Sprintf("%s.%s", tgtDBName, tgtName), log)
+			action := rowCountAction(srcOK, tgtOK)
 
 			// 1) Log output
 			log.WithFields(logrus.Fields{
@@ -73,11 +75,11 @@ func CountAndLogMySQLOrMariaDB(ctx context.Context, sc config.SyncConfig, log *l
 				"tgt_db":         tgtDBName,
 				"tgt_table":      tgtName,
 				"tgt_row_count":  tgtCount,
-				"monitor_action": "row_count_minutely",
-			}).Info("row_count_minutely")
+				"monitor_action": action,
+			}).Info(action)
 
 			// 2) Insert into database monitoring_log with sync_task_id
-			storeMonitoringLog(sc.ID, dbType, srcDBName, srcName, srcCount, tgtDBName, tgtName, tgtCount, "row_count_minutely")
+			storeMonitoringLog(sc.ID, dbType, srcDBName, srcName, srcCount, tgtDBName, tgtName, tgtCount, action)
 		}
 	}
 }

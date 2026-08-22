@@ -111,8 +111,12 @@ func CountAndLogMongoDB(ctx context.Context, sc config.SyncConfig, log *logrus.L
 		}
 	}
 
-	// Log comprehensive ChangeStream status for each sync task
-	activeStreams := domain.GetActiveChangeStreamsByTaskID(sc.ID)
+	// Log comprehensive ChangeStream status for each sync task.
+	//
+	// These come from the counters the replication side maintains. They used to
+	// come from a registry nothing ever wrote to, so every number stored here
+	// was zero and had been for a year.
+	activeStreams := changeStreamActivity(sc.ID)
 
 	// Always check ChangeStream statistics and daily reset
 	csDetails := make([]string, 0, len(activeStreams))

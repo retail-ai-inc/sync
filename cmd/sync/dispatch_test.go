@@ -46,18 +46,34 @@ func TestAnUnknownSyncTypeIsDropped(t *testing.T) {
 	}
 }
 
-// TestSyncTypeMatchingIsCaseSensitive records that the switch has no case
-// folding and no aliases, so a configuration value that differs only in case is
-// treated as unknown and the task never runs. The API stores what the UI sends
-// and nothing normalises it.
-func TestSyncTypeMatchingIsCaseSensitive(t *testing.T) {
-	for _, engine := range []string{"MongoDB", "MySQL", "MariaDB", "PostgreSQL", "Redis", "postgres", "mongo"} {
+// TestTheEngineNameIsMatchedWithoutRegardToCase covers a task that was measured
+// but never replicated. The monitoring side folds case and this switch did not,
+// so a type stored as "MongoDB" — which is how the interface spells it — had its
+// row counts recorded every minute, appeared on the dashboard for both sides,
+// and never had a syncer started for it. The API stores what the interface sends
+// and nothing normalises it on the way in.
+func TestTheEngineNameIsMatchedWithoutRegardToCase(t *testing.T) {
+	for _, engine := range []string{
+		"MongoDB", "MySQL", "MariaDB", "PostgreSQL", "Redis", " mysql ", "MONGODB",
+	} {
+		sc := baseTask()
+		sc.Type = engine
+
+		if syncerFor(sc, cfgWith(), quietLog()) == nil {
+			t.Errorf("type %q was not dispatched", engine)
+		}
+	}
+}
+
+// TestAnEngineThisDoesNotReplicateIsStillUnknown is the other half: folding case
+// is not the same as accepting an alias for something that was never supported.
+func TestAnEngineThisDoesNotReplicateIsStillUnknown(t *testing.T) {
+	for _, engine := range []string{"postgres", "mongo", "cassandra"} {
 		sc := baseTask()
 		sc.Type = engine
 
 		if syncerFor(sc, cfgWith(), quietLog()) != nil {
-			t.Errorf("type %q is dispatched now — the switch appears to normalise "+
-				"case; assert that instead", engine)
+			t.Errorf("type %q was dispatched", engine)
 		}
 	}
 }

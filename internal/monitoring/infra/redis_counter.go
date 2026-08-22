@@ -47,33 +47,37 @@ func CountAndLogRedis(ctx context.Context, sc config.SyncConfig, log *logrus.Log
 	srcDBName := dsn.GetDatabaseName(sc.Type, sc.SourceConnection)
 	tgtDBName := dsn.GetDatabaseName(sc.Type, sc.TargetConnection)
 
-	srcCount, err := srcClient.DBSize(ctx).Result()
-	if err != nil {
-		log.WithError(err).WithField("db_type", dbType).
+	srcCount, srcErr := srcClient.DBSize(ctx).Result()
+	if srcErr != nil {
+		log.WithError(srcErr).WithField("db_type", dbType).
 			Error("Failed to get source DB size")
 		srcCount = -1
 	}
 
-	tgtCount, err := tgtClient.DBSize(ctx).Result()
-	if err != nil {
-		log.WithError(err).WithField("db_type", dbType).
+	tgtCount, tgtErr := tgtClient.DBSize(ctx).Result()
+	if tgtErr != nil {
+		log.WithError(tgtErr).WithField("db_type", dbType).
 			Error("Failed to get target DB size")
 		tgtCount = -1
 	}
 
-	for range sc.Mappings {
-		log.WithFields(logrus.Fields{
-			"db_type":        dbType,
-			"src_db":         srcDBName,
-			"src_row_count":  srcCount,
-			"tgt_db":         tgtDBName,
-			"tgt_row_count":  tgtCount,
-			"monitor_action": "row_count_minutely",
-		}).Info("row_count_minutely")
+	// One row. What is being reported is the size of each database, which has
+	// nothing to do with how many mappings the task lists — and the loop used to
+	// be over the mappings, so three mappings wrote the same row three times and
+	// a task with none wrote nothing at all while the sizes were measured and
+	// thrown away.
+	action := rowCountAction(srcErr == nil, tgtErr == nil)
+	log.WithFields(logrus.Fields{
+		"db_type":        dbType,
+		"src_db":         srcDBName,
+		"src_row_count":  srcCount,
+		"tgt_db":         tgtDBName,
+		"tgt_row_count":  tgtCount,
+		"monitor_action": action,
+	}).Info(action)
 
-		// Insert into database monitoring_log with sync_task_id
-		storeMonitoringLog(sc.ID, dbType, srcDBName, "", srcCount, tgtDBName, "", tgtCount, "row_count_minutely")
-	}
+	// Insert into database monitoring_log with sync_task_id
+	storeMonitoringLog(sc.ID, dbType, srcDBName, "", srcCount, tgtDBName, "", tgtCount, action)
 }
 
 // getRowCount is used by MySQL / MariaDB / PostgreSQL

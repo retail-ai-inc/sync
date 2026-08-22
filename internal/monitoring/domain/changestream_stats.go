@@ -169,6 +169,10 @@ func ResetInMemoryStatistics(syncTaskID int) {
 			cs.DeletedCount = 0
 			cs.ErrorCount = 0
 			cs.EventCount = 0
+			// The message that went with the count goes too. Keeping it meant a
+			// stream reporting no errors while still displaying yesterday's.
+			cs.LastErrorMsg = ""
+			cs.LastErrorTime = time.Time{}
 			// Keep other fields like Created, LastActivity, Active unchanged
 			resetCount++
 			logrus.Debugf("[MongoDB] Reset in-memory statistics for ChangeStream: %s", key)

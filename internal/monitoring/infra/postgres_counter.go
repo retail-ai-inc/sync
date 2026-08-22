@@ -9,6 +9,7 @@ import (
 	// "github.com/sirupsen/logrus"
 	"context"
 
+	_ "github.com/lib/pq" // this package opens PostgreSQL itself
 	"github.com/retail-ai-inc/sync/internal/platform/config"
 	"github.com/retail-ai-inc/sync/internal/platform/dsn"
 	"github.com/sirupsen/logrus"
@@ -73,8 +74,9 @@ func CountAndLogPostgreSQL(ctx context.Context, sc config.SyncConfig, log *logru
 			fullSrc := fmt.Sprintf("%s.%s", srcSchema, srcName)
 			fullTgt := fmt.Sprintf("%s.%s", tgtSchema, tgtName)
 
-			srcCount := getRowCountWithContext(ctx, db, fullSrc)
-			tgtCount := getRowCountWithContext(ctx, db2, fullTgt)
+			srcCount, srcOK := countOrMark(ctx, db, fullSrc, log)
+			tgtCount, tgtOK := countOrMark(ctx, db2, fullTgt, log)
+			action := rowCountAction(srcOK, tgtOK)
 
 			log.WithFields(logrus.Fields{
 				"db_type":        dbType,
@@ -86,11 +88,11 @@ func CountAndLogPostgreSQL(ctx context.Context, sc config.SyncConfig, log *logru
 				"tgt_table":      tgtName,
 				"tgt_db":         tgtDBName,
 				"tgt_row_count":  tgtCount,
-				"monitor_action": "row_count_minutely",
-			}).Info("row_count_minutely")
+				"monitor_action": action,
+			}).Info(action)
 
 			// Insert into database monitoring_log with sync_task_id
-			storeMonitoringLog(sc.ID, dbType, srcDBName, srcName, srcCount, tgtDBName, tgtName, tgtCount, "row_count_minutely")
+			storeMonitoringLog(sc.ID, dbType, srcDBName, srcName, srcCount, tgtDBName, tgtName, tgtCount, action)
 		}
 	}
 }

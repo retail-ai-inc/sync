@@ -111,60 +111,100 @@ func TestGetRowCountWithContext(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	if got := getRowCountWithContext(t.Context(), conn, "monitoring_log"); got != 2 {
+	got, err := getRowCountWithContext(t.Context(), conn, "monitoring_log")
+	if err != nil {
+		t.Fatalf("getRowCountWithContext: %v", err)
+	}
+	if got != 2 {
 		t.Errorf("getRowCountWithContext = %d, want 2", got)
 	}
-	if got := getRowCountWithContext(t.Context(), conn, "changestream_statistics"); got != 0 {
+
+	got, err = getRowCountWithContext(t.Context(), conn, "changestream_statistics")
+	if err != nil {
+		t.Fatalf("getRowCountWithContext: %v", err)
+	}
+	if got != 0 {
 		t.Errorf("getRowCountWithContext on an empty table = %d, want 0", got)
 	}
 }
 
-// Every failure is flattened into -1 and returned as if it were a count: a
-// missing table, a permission error, a dropped connection and a cancelled
-// context are indistinguishable from one another and, once stored, from real
-// data. storeMonitoringLog then writes -1 into src_row_count / tgt_row_count,
-// so monitoring_log accumulates rows that look like measurements but are not.
-func TestARowCountFailureIsIndistinguishableFromData(t *testing.T) {
+// TestAFailureToCountIsNotACount covers rows that look like measurements and are
+// not. Every failure used to be flattened into -1 and returned as a count, so a
+// missing table, a permission that was not granted, a dropped connection and a
+// cancelled context were indistinguishable from each other and, once stored,
+// from real data.
+func TestAFailureToCountIsNotACount(t *testing.T) {
 	conn := useMonitoringDB(t)
 
-	if got := getRowCountWithContext(t.Context(), conn, "no_such_table"); got != -1 {
-		t.Fatalf("getRowCountWithContext on a missing table = %d, want -1 — errors appear to be reported now; assert the new signal instead", got)
+	if _, err := getRowCountWithContext(t.Context(), conn, "no_such_table"); err == nil {
+		t.Error("counting a missing table reported no error")
 	}
 
 	cancelled, cancelNow := context.WithCancel(t.Context())
 	cancelNow()
-	if got := getRowCountWithContext(cancelled, conn, "monitoring_log"); got != -1 {
-		t.Errorf("getRowCountWithContext with a cancelled context = %d, want -1", got)
-	}
-
-	// And -1 is persisted as though it were a row count.
-	storeMonitoringLog(7, "mysql", "src", "orders", -1, "tgt", "orders", -1, "row_count_minutely")
-
-	var srcCount, tgtCount int64
-	if err := conn.QueryRow(
-		`SELECT src_row_count, tgt_row_count FROM monitoring_log WHERE sync_task_id = 7`,
-	).Scan(&srcCount, &tgtCount); err != nil {
-		t.Fatalf("read back: %v", err)
-	}
-	if srcCount != -1 || tgtCount != -1 {
-		t.Fatalf("stored counts = %d/%d — the sentinel appears to be filtered now", srcCount, tgtCount)
+	if _, err := getRowCountWithContext(cancelled, conn, "monitoring_log"); err == nil {
+		t.Error("counting with a cancelled context reported no error")
 	}
 }
 
-// The table name is interpolated straight into the SQL text. Table names come
-// from the sync task configuration, so anyone who can create or edit a task
-// through the API controls a fragment of a query that runs against the source
-// and target databases.
-func TestTheTableNameIsInterpolatedIntoTheQuery(t *testing.T) {
+// TestAFailedMeasurementIsRecordedAsOne covers what reaches the dashboard. A row
+// is still written — writing nothing would leave the last good numbers looking
+// current — but under an action that says the counts were not taken, so -1 is
+// no longer something a reader has to guess about.
+func TestAFailedMeasurementIsRecordedAsOne(t *testing.T) {
+	conn := useMonitoringDB(t)
+
+	if got := rowCountAction(true, true); got != actionRowCount {
+		t.Errorf("action for two good counts = %q, want %q", got, actionRowCount)
+	}
+	for name, args := range map[string][2]bool{
+		"source failed": {false, true},
+		"target failed": {true, false},
+		"both failed":   {false, false},
+	} {
+		if got := rowCountAction(args[0], args[1]); got != actionCountFailed {
+			t.Errorf("action when the %s = %q, want %q", name, got, actionCountFailed)
+		}
+	}
+
+	storeMonitoringLog(7, "mysql", "src", "orders", -1, "tgt", "orders", -1, actionCountFailed)
+
+	var action string
+	if err := conn.QueryRow(
+		`SELECT monitor_action FROM monitoring_log WHERE sync_task_id = 7`,
+	).Scan(&action); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if action != actionCountFailed {
+		t.Errorf("stored action = %q, want %q", action, actionCountFailed)
+	}
+}
+
+// TestATableNameThatIsNotOneIsRefused covers the query fragment a task's
+// configuration used to control. The name was interpolated straight into the SQL
+// text, unquoted and unchecked, and it runs against both the source and the
+// target.
+func TestATableNameThatIsNotOneIsRefused(t *testing.T) {
 	conn := useMonitoringDB(t)
 	if _, err := conn.Exec(`INSERT INTO monitoring_log (db_type) VALUES ('a'), ('b'), ('c')`); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
-	// A "table name" that is really a query fragment is accepted and changes
-	// what the count means.
-	if got := getRowCountWithContext(t.Context(), conn, "monitoring_log WHERE db_type = 'a'"); got != 1 {
-		t.Fatalf("a WHERE clause smuggled through the table name returned %d — the name appears to be validated or quoted now; assert the rejection instead", got)
+	for _, name := range []string{
+		"monitoring_log WHERE db_type = 'a'",
+		"monitoring_log; DROP TABLE monitoring_log",
+		`monitoring_log"`,
+		"",
+		"a.b.c",
+	} {
+		if got, err := getRowCountWithContext(t.Context(), conn, name); err == nil {
+			t.Errorf("the table name %q was accepted and counted %d", name, got)
+		}
+	}
+
+	// A qualified name is still a name.
+	if _, err := getRowCountWithContext(t.Context(), conn, "main.monitoring_log"); err != nil {
+		t.Errorf("a schema-qualified name was refused: %v", err)
 	}
 }
 
@@ -290,10 +330,12 @@ func TestStoreChangeStreamStatisticsClampsPendingAtZero(t *testing.T) {
 	}
 }
 
-// Inactive streams are skipped rather than marked, so a collection whose change
-// stream has died keeps its last row forever. The table cannot distinguish "no
-// events since the last cycle" from "this stream stopped and nobody noticed".
-func TestAnInactiveStreamKeepsItsLastRow(t *testing.T) {
+// TestAStreamThatStoppedIsStillRecorded covers a row that used to freeze. An
+// inactive stream was skipped rather than written, so a collection whose change
+// stream had died kept its last numbers forever and the table could not
+// distinguish "no events since the last cycle" from "this stopped and nobody
+// noticed".
+func TestAStreamThatStoppedIsStillRecorded(t *testing.T) {
 	conn := useMonitoringDB(t)
 
 	stream := &domain.ChangeStreamInfo{SyncTaskID: 1, Active: true, ReceivedEvents: 100, ExecutedEvents: 100}
@@ -304,7 +346,7 @@ func TestAnInactiveStreamKeepsItsLastRow(t *testing.T) {
 	}
 
 	stream.Active = false
-	stream.ReceivedEvents = 500 // would be written if inactive streams were stored
+	stream.ReceivedEvents = 500
 	if err := StoreChangeStreamStatistics(1, streams); err != nil {
 		t.Fatalf("second store: %v", err)
 	}
@@ -313,8 +355,8 @@ func TestAnInactiveStreamKeepsItsLastRow(t *testing.T) {
 	if !ok {
 		t.Fatal("the row was removed")
 	}
-	if got.Received != 100 {
-		t.Fatalf("received = %d — inactive streams appear to be recorded now; assert the new signal instead", got.Received)
+	if got.Received != 500 {
+		t.Errorf("received = %d, want the figures the stream last reported", got.Received)
 	}
 }
 
@@ -497,12 +539,12 @@ func TestResetDailyStatisticsOnlyTouchesItsOwnTask(t *testing.T) {
 	}
 }
 
-// A last_updated value the writer never produces aborts the whole cycle:
-// resetDailyStatisticsIfNeeded parses it with a single fixed layout and returns
-// an error, which StoreChangeStreamStatistics propagates before writing
-// anything. One malformed timestamp — from a manual edit or an older schema —
-// stops statistics for that task permanently.
-func TestAnUnparseableTimestampStopsStatisticsForTheTask(t *testing.T) {
+// TestATimestampInAnotherLayoutDoesNotStopTheStatistics covers a stored value
+// the writer does not produce — a hand edit, or a row from an older schema. It
+// used to be parsed with one fixed layout and the failure aborted the whole
+// call before anything was written, so one such row stopped that task's
+// statistics permanently.
+func TestATimestampInAnotherLayoutDoesNotStopTheStatistics(t *testing.T) {
 	conn := useMonitoringDB(t)
 
 	if _, err := conn.Exec(`
@@ -515,15 +557,31 @@ func TestAnUnparseableTimestampStopsStatisticsForTheTask(t *testing.T) {
 	streams := map[string]*domain.ChangeStreamInfo{
 		"db.coll": {SyncTaskID: 1, Active: true, ReceivedEvents: 999, ExecutedEvents: 999},
 	}
-	err := StoreChangeStreamStatistics(1, streams)
-
-	if err == nil {
-		t.Fatalf("StoreChangeStreamStatistics() = nil — the timestamp appears to be tolerated now; assert the write instead")
+	if err := StoreChangeStreamStatistics(1, streams); err != nil {
+		t.Fatalf("StoreChangeStreamStatistics: %v", err)
 	}
 
 	got, _ := readStats(t, conn, 1, "db.coll")
-	if got.Received != 5 {
-		t.Errorf("received = %d, want the pre-existing 5 (nothing should have been written)", got.Received)
+	if got.Received != 999 {
+		t.Errorf("received = %d, want the figures just reported", got.Received)
+	}
+}
+
+// TestAnUnreadableTimestampIsStillNotSilent is the other half: it is written
+// down, because a timestamp nothing here wrote means somebody or something has
+// been editing the table.
+func TestAnUnreadableTimestampIsStillNotSilent(t *testing.T) {
+	if _, err := parseStoredTime("not a time at all"); err == nil {
+		t.Error("parseStoredTime accepted a value that is not a timestamp")
+	}
+	for _, layout := range []string{
+		"2026-08-19 00:00:00",
+		"2026-08-19T00:00:00Z",
+		"2026-08-19 00:00:00.123456",
+	} {
+		if _, err := parseStoredTime(layout); err != nil {
+			t.Errorf("parseStoredTime(%q) = %v", layout, err)
+		}
 	}
 }
 

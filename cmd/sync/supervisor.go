@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/retail-ai-inc/sync/internal/monitoring/app"
@@ -301,8 +302,13 @@ func (s *supervisor) applyMonitoring(ctx context.Context, cfg *config.Config) {
 
 // syncerFor reports the Start function for a task's engine, or nil when the
 // engine is not one this build replicates.
+//
+// The comparison folds case, as the monitoring side already did. It did not, so
+// a task whose type was stored as "MongoDB" — which is how the interface spells
+// it — was measured every minute, appeared on the dashboard with row counts for
+// both sides, and was never replicated at all.
 func syncerFor(sc config.SyncConfig, global *config.Config, log *logrus.Logger) func(context.Context) error {
-	switch sc.Type {
+	switch strings.ToLower(strings.TrimSpace(sc.Type)) {
 	case "mongodb":
 		return func(ctx context.Context) error {
 			return replicationapp.NewMongoDBSyncer(sc, global, log).Start(ctx)

@@ -94,15 +94,13 @@ func TestTheMySQLCounterStopsAtTheTarget(t *testing.T) {
 	}
 }
 
-// TestThePostgreSQLCounterHasNoDriverOfItsOwn records that this package never
-// imports a PostgreSQL driver: the counter calls sql.Open("postgres", ...) and
-// relies on some other package in the same binary having registered it with a
-// blank import. In the production binary the replication syncer does, so the
-// counter works — but nothing in this package guarantees it, and dropping that
-// import elsewhere would break monitoring at runtime with "unknown driver".
-// The MySQL counter has the same dependency; it only reaches its ping in this
-// suite because a sibling test file imports the driver.
-func TestThePostgreSQLCounterHasNoDriverOfItsOwn(t *testing.T) {
+// TestThePostgreSQLCounterOpensItsOwnDriver covers a dependency this package
+// used to take on trust. It calls sql.Open("postgres", ...) without importing a
+// driver: in the production binary the replication syncer happens to import one,
+// so the counter worked — but nothing here guaranteed it, and dropping that
+// import elsewhere would have broken monitoring at runtime with "unknown
+// driver". The MySQL counter had the same dependency.
+func TestThePostgreSQLCounterOpensItsOwnDriver(t *testing.T) {
 	logger, out := captureLog()
 
 	CountAndLogPostgreSQL(briefCtx(t), config.SyncConfig{
@@ -112,9 +110,11 @@ func TestThePostgreSQLCounterHasNoDriverOfItsOwn(t *testing.T) {
 		Mappings:         oneMapping(),
 	}, logger)
 
-	if !strings.Contains(out.String(), "unknown driver") {
-		t.Fatalf("output = %q; the driver appears to be imported here now, so "+
-			"assert the ping failure instead", out.String())
+	if strings.Contains(out.String(), "unknown driver") {
+		t.Errorf("output = %q, want the connection to have been attempted", out.String())
+	}
+	if !strings.Contains(out.String(), "source") {
+		t.Errorf("output = %q, want the unreachable source reported", out.String())
 	}
 }
 

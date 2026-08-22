@@ -1,6 +1,8 @@
 package app
 
 import (
+	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -57,17 +59,27 @@ func StartRowCountMonitoring(ctx context.Context, cfg *config.Config, log *logru
 
 	go func() {
 		defer ticker.Stop()
+
+		measure := func() {
+			for _, sc := range cfg.SyncConfigs {
+				if !sc.Enable {
+					continue
+				}
+				countAndLogTables(ctx, sc, log)
+			}
+		}
+
+		// Once at startup, before waiting out the first interval. A process that
+		// restarts more often than the interval used to produce no measurement
+		// at all — and a restart is exactly when somebody wants to see one.
+		measure()
+
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				for _, sc := range cfg.SyncConfigs {
-					if !sc.Enable {
-						continue
-					}
-					countAndLogTables(ctx, sc, log)
-				}
+				measure()
 			}
 		}
 	}()
@@ -108,6 +120,7 @@ func logYesterdayDataVolume(ctx context.Context, cfg *config.Config, log *logrus
 	log.Infof("[Monitor] Processing yesterday's data volume: %s to %s (JST)",
 		yesterdayStart.Format("2006-01-02 15:04:05"), yesterdayEnd.Format("2006-01-02 15:04:05"))
 
+	var covered, skipped []string
 	for _, sc := range cfg.SyncConfigs {
 		if !sc.Enable {
 			continue
@@ -116,10 +129,20 @@ func logYesterdayDataVolume(ctx context.Context, cfg *config.Config, log *logrus
 		switch strings.ToLower(sc.Type) {
 		case "mongodb":
 			infra.LogYesterdayMongoDBVolume(ctx, sc, log, yesterdayStart, yesterdayEnd)
+			covered = append(covered, strconv.Itoa(sc.ID))
 		default:
-			log.Debugf("[Monitor] Daily summary for type %s not implemented", sc.Type)
+			skipped = append(skipped, fmt.Sprintf("%d (%s)", sc.ID, sc.Type))
 		}
 	}
 
-	log.Infof("[Monitor] Daily summary completed")
+	// "Daily summary completed" used to be printed whatever had happened, and
+	// only MongoDB is implemented — so a MySQL task with a dateRange condition
+	// never appeared in a summary that said it was complete.
+	if len(skipped) > 0 {
+		log.Warnf("[Monitor] Daily summary covered %d task(s); it has no "+
+			"implementation for %s, so those are missing from it",
+			len(covered), strings.Join(skipped, ", "))
+		return
+	}
+	log.Infof("[Monitor] Daily summary completed for %d task(s)", len(covered))
 }

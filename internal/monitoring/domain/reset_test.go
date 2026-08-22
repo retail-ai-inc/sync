@@ -37,10 +37,11 @@ func TestResetInMemoryStatistics(t *testing.T) {
 	}
 }
 
-// The error message is kept while the count that justified it is cleared, so
-// after a daily reset a stream reports zero errors alongside a stale
-// LastErrorMsg from a previous day.
-func TestResetInMemoryStatisticsKeepsTheStaleErrorMessage(t *testing.T) {
+// TestTheDailyResetClearsTheErrorTooCoversAStaleMessage. The count that
+// justified the message was cleared while the message was kept, so after a daily
+// reset a stream reported zero errors and displayed yesterday's failure beside
+// it.
+func TestTheDailyResetClearsTheErrorMessageToo(t *testing.T) {
 	resetTracker(t)
 
 	RegisterChangeStream(1, "db", "a")
@@ -52,8 +53,11 @@ func TestResetInMemoryStatisticsKeepsTheStaleErrorMessage(t *testing.T) {
 	if a.ErrorCount != 0 {
 		t.Fatalf("ErrorCount = %d, want 0", a.ErrorCount)
 	}
-	if a.LastErrorMsg != "yesterday's failure" {
-		t.Fatalf("LastErrorMsg = %q — it appears to be cleared now; assert the empty value instead", a.LastErrorMsg)
+	if a.LastErrorMsg != "" {
+		t.Errorf("LastErrorMsg = %q, want it cleared with the count", a.LastErrorMsg)
+	}
+	if !a.LastErrorTime.IsZero() {
+		t.Errorf("LastErrorTime = %v, want it cleared with the count", a.LastErrorTime)
 	}
 }
 

@@ -109,10 +109,11 @@ func TestDisabledTasksAreNotMeasured(t *testing.T) {
 	time.Sleep(80 * time.Millisecond)
 }
 
-// TestLogYesterdayDataVolumeOnlyHandlesMongoDB records that the daily summary is
-// implemented for one engine. A MySQL task with a dateRange condition is left
-// out of the summary the summary then claims to have completed.
-func TestLogYesterdayDataVolumeOnlyHandlesMongoDB(t *testing.T) {
+// TestTheDailySummarySaysWhatItLeftOut covers a summary that was only ever
+// implemented for MongoDB. It printed "Daily summary completed" whatever had
+// happened, so a MySQL task with a dateRange condition was missing from a
+// summary that reported itself complete.
+func TestTheDailySummarySaysWhatItLeftOut(t *testing.T) {
 	log, buf := capturingLogger()
 	cfg := &config.Config{SyncConfigs: []config.SyncConfig{
 		{ID: 1, Type: "mysql", Enable: true},
@@ -125,12 +126,17 @@ func TestLogYesterdayDataVolumeOnlyHandlesMongoDB(t *testing.T) {
 	logYesterdayDataVolume(context.Background(), cfg, log)
 
 	out := buf.String()
-	if !strings.Contains(out, "Daily summary completed") {
-		t.Errorf("the summary did not finish: %s", out)
+	if strings.Contains(out, "Daily summary completed") {
+		t.Errorf("the summary called itself complete while leaving four tasks out: %s", out)
 	}
-	if strings.Count(out, "Daily summary for type") != 4 {
-		t.Errorf("%d of the four non-MongoDB tasks were reported as unimplemented: %s",
-			strings.Count(out, "Daily summary for type"), out)
+	for _, engine := range []string{"mysql", "postgresql", "redis", "cassandra"} {
+		if !strings.Contains(out, engine) {
+			t.Errorf("the %s task was left out without being named: %s", engine, out)
+		}
+	}
+	// The disabled MongoDB task is skipped entirely, not reported as missing.
+	if strings.Contains(out, "5 (mongodb)") {
+		t.Errorf("a disabled task was reported as missing from the summary: %s", out)
 	}
 }
 

@@ -381,23 +381,21 @@ func TestRedisMonitoringDuplicatesRowsPerMapping(t *testing.T) {
 	countAndLogTables(t.Context(), sc, quietLogger())
 
 	got := readMonitoringLog(t, conn)
-	if len(got) != 3 {
-		t.Fatalf("monitoring_log holds %d rows for 3 mappings — the loop appears to have changed; assert the new shape instead", len(got))
+	if len(got) != 1 {
+		t.Fatalf("monitoring_log holds %d rows, want one measurement of the two "+
+			"databases: %v", len(got), got)
 	}
-	for i, r := range got {
-		if r.SrcTable != "" || r.TgtTable != "" {
-			t.Fatalf("row %d names tables (%q -> %q) — the monitor appears to record keys now", i, r.SrcTable, r.TgtTable)
-		}
-		if r.SrcCount != got[0].SrcCount || r.TgtCount != got[0].TgtCount {
-			t.Fatalf("row %d differs from row 0 — the rows appear to be per-mapping now", i)
-		}
+	if got[0].SrcTable != "" || got[0].TgtTable != "" {
+		t.Errorf("the row names tables (%q -> %q); what is measured is each "+
+			"database's size", got[0].SrcTable, got[0].TgtTable)
 	}
 }
 
-// A Redis task with no mappings writes nothing at all: the DBSize calls run and
-// their results are discarded, because the only write sits inside the mapping
-// loop. Such a task is silently unmonitored.
-func TestARedisTaskWithoutMappingsIsUnmonitored(t *testing.T) {
+// TestARedisTaskWithoutMappingsIsStillMonitored covers a task that was silently
+// unmeasured. The DBSize calls ran and their results were thrown away, because
+// the only write sat inside a loop over the mappings — and a mapping means
+// nothing to a Redis task, which replicates the whole keyspace.
+func TestARedisTaskWithoutMappingsIsStillMonitored(t *testing.T) {
 	conn := useMonitoringDB(t)
 
 	sc := config.SyncConfig{
@@ -410,8 +408,8 @@ func TestARedisTaskWithoutMappingsIsUnmonitored(t *testing.T) {
 
 	countAndLogTables(t.Context(), sc, quietLogger())
 
-	if got := readMonitoringLog(t, conn); len(got) != 0 {
-		t.Fatalf("%d rows were written for a task with no mappings — it appears to be handled now", len(got))
+	if got := readMonitoringLog(t, conn); len(got) != 1 {
+		t.Errorf("%d rows were written for a task with no mappings, want one", len(got))
 	}
 }
 
@@ -562,11 +560,12 @@ func TestStartRowCountMonitoringStopsOnCancel(t *testing.T) {
 	}
 }
 
-// The ticker fires only after the first interval elapses, so a monitor
-// configured with the production interval writes nothing until then. Nothing is
-// recorded at startup, which means a process that restarts more often than its
-// monitor interval never produces a single measurement.
-func TestNoMeasurementIsTakenBeforeTheFirstTick(t *testing.T) {
+// TestAMeasurementIsTakenAtStartup covers a process that restarts more often
+// than its monitor interval. The ticker fires only after the first interval
+// elapses and nothing was recorded before it, so with the production interval
+// such a process produced no measurement at all — and a restart is exactly when
+// somebody wants one.
+func TestAMeasurementIsTakenAtStartup(t *testing.T) {
 	conn := useMonitoringDB(t)
 
 	sc := config.SyncConfig{
@@ -585,9 +584,9 @@ func TestNoMeasurementIsTakenBeforeTheFirstTick(t *testing.T) {
 	StartRowCountMonitoring(ctx, &config.Config{SyncConfigs: []config.SyncConfig{sc}},
 		quietLogger(), time.Hour)
 
-	harness.Consistently(t, time.Second, func() error {
-		if n := len(readMonitoringLog(t, conn)); n != 0 {
-			return fmt.Errorf("%d rows were written before the first tick", n)
+	harness.Eventually(t, 5*time.Second, func() error {
+		if n := len(readMonitoringLog(t, conn)); n == 0 {
+			return fmt.Errorf("no measurement was taken before the first tick, an hour away")
 		}
 		return nil
 	})
