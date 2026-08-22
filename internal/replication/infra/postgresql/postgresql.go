@@ -257,9 +257,15 @@ func (s *PostgreSQLSyncer) ensureReplicationSlot(ctx context.Context) error {
 			return fmt.Errorf("CreateReplicationSlot failed: %w", err)
 		}
 		s.logger.Infof("[PostgreSQL] Replication slot %s already exists, will use existing slot.", s.repSlot)
-		if s.currentLsn == 0 {
-			s.currentLsn = info.XLogPos
-		}
+		// Deliberately not info.XLogPos.
+		//
+		// That is where the server is writing *now*, and this branch is the
+		// restart case: setting it here told the server to stream from the
+		// present moment, so everything committed while the syncer was down was
+		// skipped and no later message ever carried it. Left at zero, the server
+		// resumes the slot from the position it last confirmed — which is what
+		// the slot has been holding the WAL for. A stored position, read a few
+		// lines further on, is more precise still and overrides this.
 		return nil
 	}
 	lsn, err2 := pglogrepl.ParseLSN(slot.ConsistentPoint)
@@ -650,11 +656,7 @@ func (s *PostgreSQLSyncer) startLogicalReplication(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			upErr := pglogrepl.SendStandbyStatusUpdate(ctx, s.sourceConnRepl, pglogrepl.StandbyStatusUpdate{
-				WALWritePosition: s.currentLsn,
-				ReplyRequested:   false,
-			})
-			if upErr != nil {
+			if upErr := s.confirmProgress(ctx); upErr != nil {
 				s.logger.Warnf("[PostgreSQL] SendStandbyStatusUpdate fail: %v", upErr)
 			}
 		default:
@@ -686,10 +688,7 @@ func (s *PostgreSQLSyncer) startLogicalReplication(ctx context.Context) error {
 					s.currentLsn = pkm.ServerWALEnd
 				}
 				if pkm.ReplyRequested {
-					_ = pglogrepl.SendStandbyStatusUpdate(ctx, s.sourceConnRepl, pglogrepl.StandbyStatusUpdate{
-						WALWritePosition: s.currentLsn,
-						ReplyRequested:   false,
-					})
+					_ = s.confirmProgress(ctx)
 				}
 
 			case pglogrepl.XLogDataByteID:
@@ -727,6 +726,27 @@ func (s *PostgreSQLSyncer) startLogicalReplication(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+// confirmProgress tells the source how far this syncer has got.
+//
+// The three positions are not the same thing, and reporting one number for all
+// of them is what made them dangerous: the server discards WAL the standby has
+// flushed, so confirming everything *received* let it recycle segments carrying
+// changes that had not been applied to the target yet. A restart then resumed
+// after a gap that no longer existed anywhere. Write is what has arrived; flush
+// and apply are what has been written to the target and recorded.
+func (s *PostgreSQLSyncer) confirmProgress(ctx context.Context) error {
+	applied := s.state.lastWrittenLSN
+	if applied > s.currentLsn {
+		applied = s.currentLsn
+	}
+	return pglogrepl.SendStandbyStatusUpdate(ctx, s.sourceConnRepl, pglogrepl.StandbyStatusUpdate{
+		WALWritePosition: s.currentLsn,
+		WALFlushPosition: applied,
+		WALApplyPosition: applied,
+		ReplyRequested:   false,
+	})
 }
 
 // processMessage processes replication messages

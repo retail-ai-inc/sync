@@ -26,6 +26,12 @@ var (
 	MySQLTarget = env("SYNC_TEST_MYSQL_TARGET", "127.0.0.1:3308")
 	RedisSource = env("SYNC_TEST_REDIS_SOURCE", "127.0.0.1:6479")
 	RedisTarget = env("SYNC_TEST_REDIS_TARGET", "127.0.0.1:6480")
+
+	// PostgreSQL lives in docker/docker-compose.yml rather than the test stack,
+	// because logical replication needs a server started with wal_level=logical
+	// and that is where the configuration file is mounted.
+	PostgresSource = env("SYNC_TEST_POSTGRES_SOURCE", "127.0.0.1:5432")
+	PostgresTarget = env("SYNC_TEST_POSTGRES_TARGET", "127.0.0.1:5433")
 )
 
 func env(key, fallback string) string {
