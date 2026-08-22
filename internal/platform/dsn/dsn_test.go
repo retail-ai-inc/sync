@@ -127,6 +127,10 @@ func TestAnUnreadableDSNHasNoEndpoint(t *testing.T) {
 	for _, tt := range []struct{ dbType, dsn string }{
 		{"mysql", "not a dsn"},
 		{"mongodb", "http://elsewhere"},
+		// An empty DSN must not be described as the driver's default host.
+		{"mysql", ""},
+		{"mongodb", ""},
+		{"redis", ""},
 	} {
 		if got := Endpoint(tt.dbType, tt.dsn); got != "" {
 			t.Errorf("Endpoint(%q, %q) = %q, want empty", tt.dbType, tt.dsn, got)

@@ -107,6 +107,12 @@ func Endpoint(dbType, connection string) string {
 
 // extractHost reports the host and port a DSN addresses.
 func extractHost(dbType, connection string) string {
+	// An empty DSN must not be described as an endpoint: the MySQL parser reads
+	// one as its own defaults, which would have a metric label and an error
+	// message name 127.0.0.1:3306 for a connection nobody configured.
+	if connection == "" {
+		return ""
+	}
 	switch strings.ToLower(dbType) {
 	case "mysql", "mariadb":
 		cfg, err := mysqldriver.ParseDSN(connection)

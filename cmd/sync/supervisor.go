@@ -201,6 +201,7 @@ func (s *supervisor) applyMonitoring(ctx context.Context, cfg *config.Config) {
 	s.monitorCancel = cancel
 
 	app.StartLagAlerting(monitorCtx, cfg, s.log)
+	app.StartConsistencyChecks(monitorCtx, cfg, s.log)
 	if cfg.EnableTableRowCountMonitoring {
 		app.StartRowCountMonitoring(monitorCtx, cfg, s.log, cfg.MonitorInterval)
 	}
