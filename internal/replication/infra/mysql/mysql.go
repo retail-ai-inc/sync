@@ -24,6 +24,7 @@ import (
 	"github.com/retail-ai-inc/sync/internal/platform/metrics"
 	"github.com/retail-ai-inc/sync/internal/platform/resilience"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/directionlock"
+	"github.com/retail-ai-inc/sync/internal/replication/infra/discovery"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/security"
 	"github.com/sirupsen/logrus"
 
@@ -66,10 +67,23 @@ func (s *MySQLSyncer) Start(ctx context.Context) {
 	cfg.TLSConfig = s.sourceTLS()
 	cfg.Dump.ExecutionPath = s.cfg.DumpExecutionPath
 
+	sourceDBName := dsn.GetDatabaseName(s.cfg.Type, s.cfg.SourceConnection)
+	discovering := !s.hasConfiguredTables()
+
 	var includeTables []string
-	for _, mapping := range s.cfg.Mappings {
-		for _, table := range mapping.Tables {
-			includeTables = append(includeTables, fmt.Sprintf("%s\\.%s", dsn.GetDatabaseName(s.cfg.Type, s.cfg.SourceConnection), table.SourceTable))
+	if discovering {
+		// Nothing was listed, so replicate the whole database — including the
+		// tables that appear after this point. A table created at the source
+		// used simply not to be replicated, with no warning anywhere, which
+		// looks exactly like everything working.
+		s.logger.Infof("[MySQL] No tables configured; replicating every table in %s, "+
+			"including ones created later", sourceDBName)
+		includeTables = []string{fmt.Sprintf("%s\\..*", sourceDBName)}
+	} else {
+		for _, mapping := range s.cfg.Mappings {
+			for _, table := range mapping.Tables {
+				includeTables = append(includeTables, fmt.Sprintf("%s\\.%s", sourceDBName, table.SourceTable))
+			}
 		}
 	}
 	cfg.IncludeTableRegex = includeTables
@@ -139,6 +153,7 @@ func (s *MySQLSyncer) Start(ctx context.Context) {
 		TargetConnection:  s.cfg.TargetConnection,
 		flavor:            cfg.Flavor,
 		labels:            s.metricLabels(),
+		discovering:       discovering,
 	}
 	c.SetEventHandler(h)
 
@@ -320,7 +335,7 @@ func (s *MySQLSyncer) doInitialSync(ctx context.Context, sourceDB *sql.Conn, tar
 	sourceDBName := dsn.GetDatabaseName(s.cfg.Type, s.cfg.SourceConnection)
 	targetDBName := dsn.GetDatabaseName(s.cfg.Type, s.cfg.TargetConnection)
 
-	for _, mapping := range s.cfg.Mappings {
+	for _, mapping := range s.resolveMappings(ctx, sourceDB, sourceDBName) {
 		for _, tableMap := range mapping.Tables {
 			exists, errExist := s.targetTableExists(ctx, targetDB, targetDBName, tableMap.TargetTable)
 			if errExist != nil {
@@ -789,6 +804,9 @@ type MyEventHandler struct {
 	flavor string
 	// labels identify this task in the metrics.
 	labels metrics.Labels
+	// discovering means the task listed no tables, so every table it sees is
+	// replicated under its own name.
+	discovering bool
 	// sourceEventAt is when the source made the change the buffer is holding.
 	// The applied lag is measured from it, which is the number a
 	// disaster-recovery setup is judged on.
@@ -827,8 +845,13 @@ func (h *MyEventHandler) OnRow(e *canal.RowsEvent) error {
 		}
 	}
 	if !found {
-		h.logger.Debugf("[MySQL] No mapping found for source table %s.%s => skip event", sourceDB, tableName)
-		return nil
+		if !h.discovering || discovery.IsInternal(tableName) {
+			h.logger.Debugf("[MySQL] No mapping found for source table %s.%s => skip event", sourceDB, tableName)
+			return nil
+		}
+		// The task lists no tables, so everything is replicated under its own
+		// name — including tables created after the task started.
+		targetTableName = tableName
 	}
 
 	columnNames := make([]string, len(table.Columns))
@@ -1161,4 +1184,40 @@ func (s *MySQLSyncer) metricLabels() metrics.Labels {
 		"source": dsn.Endpoint(s.cfg.Type, s.cfg.SourceConnection),
 		"target": dsn.Endpoint(s.cfg.Type, s.cfg.TargetConnection),
 	}
+}
+
+// hasConfiguredTables reports whether the task names any table at all. The
+// configuration loader inserts a mapping with an empty table list for a task
+// that has none, so the check has to look past the mapping itself.
+func (s *MySQLSyncer) hasConfiguredTables() bool {
+	for _, mapping := range s.cfg.Mappings {
+		for _, table := range mapping.Tables {
+			if table.SourceTable != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// resolveMappings reports the tables to copy, discovering them from the source
+// when the task lists none.
+func (s *MySQLSyncer) resolveMappings(ctx context.Context, conn *sql.Conn, sourceDBName string) []config.DatabaseMapping {
+	if s.hasConfiguredTables() {
+		return s.cfg.Mappings
+	}
+
+	tables, err := discovery.MySQLTables(ctx, conn, sourceDBName)
+	if err != nil {
+		s.logger.Errorf("[MySQL] Could not discover the tables in %s, so the initial "+
+			"copy has nothing to do: %v", sourceDBName, err)
+		return nil
+	}
+
+	mapped := make([]config.TableMapping, 0, len(tables))
+	for _, table := range tables {
+		mapped = append(mapped, config.TableMapping{SourceTable: table, TargetTable: table})
+	}
+	s.logger.Infof("[MySQL] Discovered %d tables in %s", len(mapped), sourceDBName)
+	return []config.DatabaseMapping{{Tables: mapped}}
 }

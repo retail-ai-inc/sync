@@ -287,3 +287,77 @@ func TestADDLWithNoTargetConnectionIsReported(t *testing.T) {
 		t.Errorf("error = %v", err)
 	}
 }
+
+// -------------------------------------------------------------- discovery
+
+// TestADiscoveredTableIsReplicatedUnderItsOwnName covers the task that lists no
+// tables. Every table it sees is replicated, including one created after the
+// task started — which used simply not to be replicated, with no warning
+// anywhere.
+func TestADiscoveredTableIsReplicatedUnderItsOwnName(t *testing.T) {
+	db := sqliteTarget(t, ordersSchema)
+	h := newHandler(t, db, nil)
+	h.discovering = true
+
+	if err := apply(h, insertEvent("1", "Ada", "a@x")); err != nil {
+		t.Fatalf("OnRow: %v", err)
+	}
+
+	if got := rows(t, db); len(got) != 1 {
+		t.Errorf("target holds %v, want the row from the discovered table", got)
+	}
+}
+
+// TestADiscoveredTablesSchemaChangeIsPropagated is the other half: a table
+// nobody listed still needs its columns kept in step.
+func TestADiscoveredTablesSchemaChangeIsPropagated(t *testing.T) {
+	db := sqliteTarget(t, ordersSchema)
+	h := newHandler(t, db, nil)
+	h.discovering = true
+
+	got := plan(t, h, "ALTER TABLE orders ADD COLUMN note TEXT")
+
+	if got.action != ddlApply {
+		t.Fatalf("action = %v, want apply (%s)", got.action, got.reason)
+	}
+	if !strings.Contains(got.query, "`main`.`orders`") {
+		t.Errorf("statement = %q, want the target named", got.query)
+	}
+}
+
+// TestTheDirectionLockIsNeverReplicated is why discovery filters names at all:
+// copying the lock table would tell the target it is a source, which is exactly
+// the state the lock exists to detect.
+func TestTheDirectionLockIsNeverReplicated(t *testing.T) {
+	db := sqliteTarget(t, ordersSchema)
+	h := newHandler(t, db, nil)
+	h.discovering = true
+
+	err := apply(h, &canal.RowsEvent{
+		Table:  sourceTable("_sync_direction_lock", "task_id", "role"),
+		Action: canal.InsertAction,
+		Rows:   [][]interface{}{{"1", "source"}},
+	})
+	if err != nil {
+		t.Fatalf("OnRow: %v", err)
+	}
+
+	if got := plan(t, h, "DROP TABLE _sync_direction_lock"); got.action != ddlSkip {
+		t.Errorf("action = %v, want skip: the lock table is not replicated data", got.action)
+	}
+}
+
+// TestWithoutDiscoveryAnUnlistedTableIsStillSkipped keeps the configured case
+// unchanged: a task that names its tables replicates only those.
+func TestWithoutDiscoveryAnUnlistedTableIsStillSkipped(t *testing.T) {
+	db := sqliteTarget(t, ordersSchema)
+	h := newHandler(t, db, mapTable("customers", "customers"))
+
+	if err := apply(h, insertEvent("1", "Ada", "a@x")); err != nil {
+		t.Fatalf("OnRow: %v", err)
+	}
+
+	if got := rows(t, db); len(got) != 0 {
+		t.Errorf("target holds %v, want nothing from an unlisted table", got)
+	}
+}

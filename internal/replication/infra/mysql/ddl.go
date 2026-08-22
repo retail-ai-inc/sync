@@ -15,6 +15,7 @@ import (
 
 	"github.com/retail-ai-inc/sync/internal/platform/dsn"
 	"github.com/retail-ai-inc/sync/internal/platform/resilience"
+	"github.com/retail-ai-inc/sync/internal/replication/infra/discovery"
 )
 
 // ddlAction is what the handler decided to do with one parsed statement.
@@ -111,6 +112,11 @@ func (h *MyEventHandler) targetTableFor(source string) (string, bool) {
 				return table.TargetTable, true
 			}
 		}
+	}
+	if h.discovering && !discovery.IsInternal(source) {
+		// The task lists no tables, so every table is replicated under its own
+		// name — schema changes to it included.
+		return source, true
 	}
 	return "", false
 }

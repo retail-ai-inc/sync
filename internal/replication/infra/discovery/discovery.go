@@ -1,0 +1,100 @@
+// Package discovery finds the tables and collections a task should replicate
+// when its configuration does not list them.
+//
+// Until now every table had to be typed into the UI one at a time, and a table
+// created at the source afterwards was simply not replicated — silently, with
+// no warning anywhere, until somebody noticed it missing from the
+// disaster-recovery copy. For a payment schema that grows a table for a new
+// settlement type, "silently not replicated" is the worst possible failure: it
+// looks exactly like everything working.
+package discovery
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"strings"
+
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo"
+)
+
+// internalPrefixes name the tables and collections this tool creates for
+// itself. Replicating them would copy one side's replication state onto the
+// other, which for the direction lock means telling the target it is a source.
+var internalPrefixes = []string{"_sync_"}
+
+// IsInternal reports whether a name belongs to the syncer rather than to the
+// data being replicated.
+func IsInternal(name string) bool {
+	for _, prefix := range internalPrefixes {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	// MongoDB's own bookkeeping collections.
+	return strings.HasPrefix(name, "system.")
+}
+
+// Querier is the part of database/sql this needs, so the caller may pass either
+// a pool or the pinned connection the consistent snapshot reads through.
+type Querier interface {
+	QueryContext(ctx context.Context, query string, args ...interface{}) (*sql.Rows, error)
+}
+
+// MySQLTables reports the base tables in a MySQL database.
+//
+// Views are excluded: replicating one would need the view's definition rather
+// than its rows, and the binlog carries no events for it anyway.
+func MySQLTables(ctx context.Context, db Querier, database string) ([]string, error) {
+	rows, err := db.QueryContext(ctx,
+		`SELECT table_name FROM information_schema.tables
+		 WHERE table_schema = ? AND table_type = 'BASE TABLE'
+		 ORDER BY table_name`, database)
+	if err != nil {
+		return nil, fmt.Errorf("list the tables in %s: %w", database, err)
+	}
+	defer rows.Close()
+
+	var tables []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("list the tables in %s: %w", database, err)
+		}
+		if IsInternal(name) {
+			continue
+		}
+		tables = append(tables, name)
+	}
+	return tables, rows.Err()
+}
+
+// MongoCollections reports the collections in a MongoDB database.
+func MongoCollections(ctx context.Context, db *mongo.Database) ([]string, error) {
+	names, err := db.ListCollectionNames(ctx, bson.M{})
+	if err != nil {
+		return nil, fmt.Errorf("list the collections in %s: %w", db.Name(), err)
+	}
+
+	var collections []string
+	for _, name := range names {
+		if IsInternal(name) {
+			continue
+		}
+		collections = append(collections, name)
+	}
+	return collections, nil
+}
+
+// Added reports the names in current that were not in known, so a caller can
+// act on what has appeared since it last looked.
+func Added(known map[string]bool, current []string) []string {
+	var added []string
+	for _, name := range current {
+		if !known[name] {
+			added = append(added, name)
+		}
+	}
+	return added
+}

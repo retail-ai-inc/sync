@@ -14,6 +14,7 @@ import (
 	"github.com/retail-ai-inc/sync/internal/platform/metrics"
 	"github.com/retail-ai-inc/sync/internal/platform/resilience"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/directionlock"
+	"github.com/retail-ai-inc/sync/internal/replication/infra/discovery"
 	"github.com/sirupsen/logrus"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -174,6 +175,17 @@ func (s *MongoDBSyncer) Start(ctx context.Context) {
 	metrics.SetTaskUp(s.metricLabels(""), true)
 	defer metrics.SetTaskUp(s.metricLabels(""), false)
 
+	if !s.hasConfiguredCollections() {
+		// Nothing was listed, so replicate the whole database and keep watching
+		// for collections created later. A collection created at the source
+		// used simply not to be replicated, with no warning anywhere, which
+		// looks exactly like everything working.
+		s.logger.Infof("[MongoDB] No collections configured; replicating every "+
+			"collection in %s, including ones created later", sourceDBName)
+		s.discoverAndWatch(ctx, sourceDBName, targetDBName)
+		return
+	}
+
 	for _, mapping := range s.cfg.Mappings {
 		if len(mapping.Tables) > 0 {
 			wg.Add(1)
@@ -196,7 +208,13 @@ func (s *MongoDBSyncer) syncDatabase(ctx context.Context, mapping config.Databas
 	targetDB := s.targetClient.Database(targetDBName)
 	s.logger.Infof("[MongoDB] Processing database mapping: %s -> %s", sourceDBName, targetDBName)
 
-	for _, tableMap := range mapping.Tables {
+	s.startCollections(ctx, mapping.Tables, sourceDB, targetDB, sourceDBName, targetDBName)
+}
+
+// startCollections brings up the copy and the change stream for each mapped
+// collection.
+func (s *MongoDBSyncer) startCollections(ctx context.Context, tables []config.TableMapping, sourceDB, targetDB *mongo.Database, sourceDBName, targetDBName string) {
+	for _, tableMap := range tables {
 		srcColl := sourceDB.Collection(tableMap.SourceTable)
 		tgtColl := targetDB.Collection(tableMap.TargetTable)
 		s.logger.Infof("[MongoDB] Processing collection mapping: %s -> %s", tableMap.SourceTable, tableMap.TargetTable)
@@ -406,4 +424,68 @@ func (s *MongoDBSyncer) claimDirection(ctx context.Context, sourceDBName, target
 		s.logger.Warnf("[MongoDB] Could not refresh the replication direction claim: %v", err)
 	})
 	return stop, nil
+}
+
+// discoveryInterval is how often a task with no configured collections looks
+// for ones that have appeared since it started.
+const discoveryInterval = time.Minute
+
+// hasConfiguredCollections reports whether the task names any collection. The
+// configuration loader inserts a mapping with an empty table list for a task
+// that has none, so the check has to look past the mapping itself.
+func (s *MongoDBSyncer) hasConfiguredCollections() bool {
+	for _, mapping := range s.cfg.Mappings {
+		for _, table := range mapping.Tables {
+			if table.SourceTable != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// discoverAndWatch replicates every collection in the source database, and goes
+// on looking for new ones until the context is cancelled.
+func (s *MongoDBSyncer) discoverAndWatch(ctx context.Context, sourceDBName, targetDBName string) {
+	sourceDB := s.sourceClient.Database(sourceDBName)
+	targetDB := s.targetClient.Database(targetDBName)
+	known := map[string]bool{}
+
+	scan := func() {
+		names, err := discovery.MongoCollections(ctx, sourceDB)
+		if err != nil {
+			s.logger.Errorf("[MongoDB] Could not discover the collections in %s: %v",
+				sourceDBName, err)
+			return
+		}
+		added := discovery.Added(known, names)
+		if len(added) == 0 {
+			return
+		}
+
+		tables := make([]config.TableMapping, 0, len(added))
+		for _, name := range added {
+			known[name] = true
+			tables = append(tables, config.TableMapping{
+				SourceTable: name, TargetTable: name,
+				AdvancedSettings: s.findTableAdvancedSettings(name),
+			})
+		}
+		s.logger.Infof("[MongoDB] Replicating %d newly discovered collections in %s: %v",
+			len(added), sourceDBName, added)
+		s.startCollections(ctx, tables, sourceDB, targetDB, sourceDBName, targetDBName)
+	}
+
+	scan()
+
+	ticker := time.NewTicker(discoveryInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			scan()
+		}
+	}
 }
