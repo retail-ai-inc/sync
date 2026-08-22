@@ -3,22 +3,28 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/retail-ai-inc/sync/internal/platform/dsn"
 
 	_ "github.com/go-sql-driver/mysql"
+	_ "github.com/lib/pq"
 	goredis "github.com/redis/go-redis/v9"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 
+	"github.com/retail-ai-inc/sync/internal/monitoring/infra"
 	"github.com/retail-ai-inc/sync/internal/platform/config"
+	"github.com/retail-ai-inc/sync/internal/platform/metrics"
 	"github.com/retail-ai-inc/sync/test/harness"
+	"github.com/sirupsen/logrus"
 )
 
 const (
@@ -590,4 +596,289 @@ func TestAMeasurementIsTakenAtStartup(t *testing.T) {
 		}
 		return nil
 	})
+}
+
+// recordingLogger collects log output so a test can read the fields a summary
+// reported. The daily summary writes its numbers to the log and nowhere else.
+func recordingLogger() (*logrus.Logger, *bytes.Buffer) {
+	var out bytes.Buffer
+	l := logrus.New()
+	l.SetOutput(&out)
+	l.SetLevel(logrus.DebugLevel)
+	l.SetFormatter(&logrus.JSONFormatter{})
+	return l, &out
+}
+
+// ---------------------------------------------------------------- PostgreSQL
+
+func postgresDSN(endpoint, database string) string {
+	return fmt.Sprintf("postgres://root:root@%s/%s?sslmode=disable", endpoint, database)
+}
+
+func openPostgres(t *testing.T, endpoint, database string) *sql.DB {
+	t.Helper()
+
+	db, err := sql.Open("postgres", postgresDSN(endpoint, database))
+	if err != nil {
+		t.Fatalf("open %s: %v", endpoint, err)
+	}
+	if err := db.Ping(); err != nil {
+		t.Fatalf("ping %s: %v", endpoint, err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return db
+}
+
+// TestCountAndLogPostgreSQLRecordsBothSides covers the PostgreSQL counter, which
+// had no test against a server at all — it is the number an operator reads to
+// decide whether the copy is complete, and a wrong one reads as a healthy match.
+func TestCountAndLogPostgreSQLRecordsBothSides(t *testing.T) {
+	conn := useMonitoringDB(t)
+
+	table := harness.UniqueName("pgmon")
+	src := openPostgres(t, harness.PostgresSource, sourceDB)
+	tgt := openPostgres(t, harness.PostgresTarget, targetDB)
+
+	ddl := fmt.Sprintf("CREATE TABLE %s (id INT PRIMARY KEY)", table)
+	if _, err := src.Exec(ddl); err != nil {
+		t.Fatalf("create source table: %v", err)
+	}
+	if _, err := tgt.Exec(ddl); err != nil {
+		t.Fatalf("create target table: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = src.Exec("DROP TABLE IF EXISTS " + table)
+		_, _ = tgt.Exec("DROP TABLE IF EXISTS " + table)
+	})
+
+	if _, err := src.Exec(fmt.Sprintf("INSERT INTO %s (id) VALUES (1),(2),(3)", table)); err != nil {
+		t.Fatalf("seed source: %v", err)
+	}
+	if _, err := tgt.Exec(fmt.Sprintf("INSERT INTO %s (id) VALUES (1),(2)", table)); err != nil {
+		t.Fatalf("seed target: %v", err)
+	}
+
+	sc := config.SyncConfig{
+		ID:               401,
+		Enable:           true,
+		Type:             "postgresql",
+		SourceConnection: postgresDSN(harness.PostgresSource, sourceDB),
+		TargetConnection: postgresDSN(harness.PostgresTarget, targetDB),
+		Mappings: []config.DatabaseMapping{{
+			Tables: []config.TableMapping{{SourceTable: table, TargetTable: table}},
+		}},
+	}
+
+	countAndLogTables(t.Context(), sc, quietLogger())
+
+	got := readMonitoringLog(t, conn)
+	if len(got) != 1 {
+		t.Fatalf("monitoring_log holds %d rows, want 1: %+v", len(got), got)
+	}
+	r := got[0]
+	if r.TaskID != 401 || r.DBType != "POSTGRESQL" {
+		t.Errorf("row = %+v", r)
+	}
+	if r.SrcCount != 3 || r.TgtCount != 2 {
+		t.Errorf("counts = %d -> %d, want 3 -> 2", r.SrcCount, r.TgtCount)
+	}
+}
+
+// TestAMissingPostgreSQLTableIsRecordedAsMinusOne records that a table named in
+// the configuration but absent from the database is stored as the -1 sentinel
+// rather than as zero, which would read as an empty table that is in sync.
+func TestAMissingPostgreSQLTableIsRecordedAsMinusOne(t *testing.T) {
+	conn := useMonitoringDB(t)
+
+	sc := config.SyncConfig{
+		ID:               402,
+		Enable:           true,
+		Type:             "postgresql",
+		SourceConnection: postgresDSN(harness.PostgresSource, sourceDB),
+		TargetConnection: postgresDSN(harness.PostgresTarget, targetDB),
+		Mappings: []config.DatabaseMapping{{
+			Tables: []config.TableMapping{{
+				SourceTable: "no_such_table_" + harness.UniqueName("x"),
+				TargetTable: "no_such_table_" + harness.UniqueName("y"),
+			}},
+		}},
+	}
+
+	countAndLogTables(t.Context(), sc, quietLogger())
+
+	got := readMonitoringLog(t, conn)
+	if len(got) != 1 {
+		t.Fatalf("monitoring_log holds %d rows, want 1: %+v", len(got), got)
+	}
+	if got[0].SrcCount != -1 || got[0].TgtCount != -1 {
+		t.Errorf("counts = %d -> %d, want -1 -> -1", got[0].SrcCount, got[0].TgtCount)
+	}
+}
+
+// TestAnUnreachablePostgreSQLSourceIsReported records that a source that cannot
+// be reached writes nothing rather than a row of zeroes.
+func TestAnUnreachablePostgreSQLSourceIsReported(t *testing.T) {
+	conn := useMonitoringDB(t)
+
+	sc := config.SyncConfig{
+		ID:               403,
+		Enable:           true,
+		Type:             "postgresql",
+		SourceConnection: postgresDSN("127.0.0.1:1", sourceDB),
+		TargetConnection: postgresDSN(harness.PostgresTarget, targetDB),
+		Mappings: []config.DatabaseMapping{{
+			Tables: []config.TableMapping{{SourceTable: "t", TargetTable: "t"}},
+		}},
+	}
+
+	countAndLogTables(t.Context(), sc, quietLogger())
+
+	if got := readMonitoringLog(t, conn); len(got) != 0 {
+		t.Errorf("monitoring_log holds %d rows for a source that was never reached: %+v", len(got), got)
+	}
+}
+
+// TestTheServerSideChangeStreamProbeRuns covers the branch that asks MongoDB
+// itself what change streams are open. It only runs once the task's own metrics
+// say it has streams, so the counters are seeded first — which is also what the
+// statistics table is now built from, after a year of it holding nothing but
+// zeroes.
+func TestTheServerSideChangeStreamProbeRuns(t *testing.T) {
+	conn := useMonitoringDB(t)
+
+	collection := harness.UniqueName("csprobe")
+	src := openMongo(t, harness.MongoSource)
+	tgt := openMongo(t, harness.MongoTarget)
+
+	srcColl := src.Database(sourceDB).Collection(collection)
+	tgtColl := tgt.Database(targetDB).Collection(collection)
+	t.Cleanup(func() {
+		_ = srcColl.Drop(context.Background())
+		_ = tgtColl.Drop(context.Background())
+	})
+	if _, err := srcColl.InsertOne(t.Context(), bson.M{"n": 1}); err != nil {
+		t.Fatalf("seed source: %v", err)
+	}
+
+	const taskID = 205
+	labels := metrics.Labels{
+		"task": "205", "engine": "mongodb", "collection": collection,
+		"source": harness.MongoSource,
+	}
+	t.Cleanup(func() { metrics.Default.Forget(labels) })
+	metrics.SetTaskUp(labels, true)
+	metrics.Applied(labels, 3)
+	metrics.Failed(labels, 1)
+
+	sc := config.SyncConfig{
+		ID:               taskID,
+		Enable:           true,
+		Type:             "mongodb",
+		SourceConnection: "mongodb://" + harness.MongoSource + "/" + sourceDB + "?directConnection=true",
+		TargetConnection: "mongodb://" + harness.MongoTarget + "/" + targetDB + "?directConnection=true",
+		Mappings: []config.DatabaseMapping{{
+			SourceDatabase: sourceDB,
+			TargetDatabase: targetDB,
+			Tables:         []config.TableMapping{{SourceTable: collection, TargetTable: collection}},
+		}},
+	}
+
+	countAndLogTables(t.Context(), sc, quietLogger())
+
+	// The statistics row carries what the syncer counted, not zeroes.
+	var received, executed int
+	err := conn.QueryRow(
+		`SELECT received, executed FROM changestream_statistics
+		  WHERE task_id = ? AND collection_name = ?`,
+		taskID, harness.MongoSource+"."+collection).Scan(&received, &executed)
+	if err != nil {
+		t.Fatalf("read changestream_statistics: %v", err)
+	}
+	if executed != 3 {
+		t.Errorf("executed = %d, want the 3 the metrics recorded", executed)
+	}
+	if received != 4 {
+		t.Errorf("received = %d, want applied plus failed", received)
+	}
+}
+
+// TestLogYesterdayMongoDBVolumeCountsTheDayThatEnded covers the daily summary,
+// which is the number a switchover decision is read off: how much of yesterday's
+// data reached the target. It only applies to collections whose count query
+// carries a dateRange condition.
+func TestLogYesterdayMongoDBVolumeCountsTheDayThatEnded(t *testing.T) {
+	// The summary reports a difference through the Slack path, which reads the
+	// global settings — without a control database of its own it would build one
+	// in the working directory.
+	useMonitoringDB(t)
+
+	collection := harness.UniqueName("yesterday")
+	src := openMongo(t, harness.MongoSource)
+	tgt := openMongo(t, harness.MongoTarget)
+
+	srcColl := src.Database(sourceDB).Collection(collection)
+	tgtColl := tgt.Database(targetDB).Collection(collection)
+	t.Cleanup(func() {
+		_ = srcColl.Drop(context.Background())
+		_ = tgtColl.Drop(context.Background())
+	})
+
+	jst, err := time.LoadLocation("Asia/Tokyo")
+	if err != nil {
+		t.Fatalf("load JST: %v", err)
+	}
+	now := time.Now().In(jst)
+	yesterday := now.AddDate(0, 0, -1)
+	start := time.Date(yesterday.Year(), yesterday.Month(), yesterday.Day(), 0, 0, 0, 0, jst)
+	end := time.Date(yesterday.Year(), yesterday.Month(), yesterday.Day(), 23, 59, 59, 999999999, jst)
+
+	// Two documents inside the window and one outside it, so a summary that
+	// ignored the range would report three.
+	if _, err := srcColl.InsertMany(t.Context(), []interface{}{
+		bson.M{"created_at": start.Add(2 * time.Hour)},
+		bson.M{"created_at": start.Add(20 * time.Hour)},
+		bson.M{"created_at": start.AddDate(0, 0, -3)},
+	}); err != nil {
+		t.Fatalf("seed source: %v", err)
+	}
+	if _, err := tgtColl.InsertOne(t.Context(), bson.M{"created_at": start.Add(2 * time.Hour)}); err != nil {
+		t.Fatalf("seed target: %v", err)
+	}
+
+	sc := config.SyncConfig{
+		ID:               206,
+		Enable:           true,
+		Type:             "mongodb",
+		SourceConnection: "mongodb://" + harness.MongoSource + "/" + sourceDB + "?directConnection=true",
+		TargetConnection: "mongodb://" + harness.MongoTarget + "/" + targetDB + "?directConnection=true",
+		Mappings: []config.DatabaseMapping{{
+			SourceDatabase: sourceDB,
+			TargetDatabase: targetDB,
+			Tables: []config.TableMapping{{
+				SourceTable: collection,
+				TargetTable: collection,
+				CountQuery: map[string]interface{}{
+					// The table is part of the condition: a count query can carry
+					// conditions for several collections and each names its own.
+					"conditions": []map[string]interface{}{
+						{"field": "created_at", "operator": "dateRange",
+							"table": collection, "value": "daily"},
+					},
+				},
+			}},
+		}},
+	}
+
+	logger, out := recordingLogger()
+	infra.LogYesterdayMongoDBVolume(t.Context(), sc, logger, start, end)
+
+	text := out.String()
+	if !strings.Contains(text, `"src_yesterday_count":2`) &&
+		!strings.Contains(text, `src_yesterday_count=2`) {
+		t.Errorf("summary = %q, want 2 source documents inside yesterday", text)
+	}
+	if !strings.Contains(text, `"tgt_yesterday_count":1`) &&
+		!strings.Contains(text, `tgt_yesterday_count=1`) {
+		t.Errorf("summary = %q, want 1 target document inside yesterday", text)
+	}
 }

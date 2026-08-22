@@ -78,7 +78,9 @@ jobs:
             sleep 1
           done
 
-          for port in 27117 27118 6479 6480; do
+          # 5433 is the PostgreSQL target and 3308 the MySQL one; the loops
+          # above wait only for each pair's source.
+          for port in 27117 27118 6479 6480 5433 3308 27018; do
             for i in {1..30}; do
               nc -z localhost $port && echo "port $port is up" && break
               echo "Waiting for port $port..."
@@ -111,7 +113,13 @@ jobs:
           # bounded context and layer, so a test in one package exercises code in
           # another. Without it every cross-package call counts as uncovered and
           # the report understates coverage by roughly eight points.
-          go test -race -coverpkg=./... -coverprofile=coverage.raw -covermode=atomic ./...
+          #
+          # -tags integration runs the suite that talks to the servers started
+          # above in the same pass. Run separately and without coverage, as it
+          # used to be, every line that only a real database reaches counted as
+          # uncovered — which is most of the replication engines, the part of
+          # this repository where a defect loses data.
+          go test -race -tags integration -timeout 30m -coverpkg=./... -coverprofile=coverage.raw -covermode=atomic ./...
           # -coverpkg emits one entry per test binary for every block in the
           # repository, which makes the profile 32x larger. Collapse it by keeping
           # the highest count seen for each block; `go tool cover` reports the same
@@ -120,13 +128,6 @@ jobs:
             echo "mode: atomic"
             grep -v '^mode:' coverage.raw | sort -t' ' -k1,1 -k3,3nr | sort -t' ' -u -k1,1
           } > coverage.txt
-
-      - name: Run the integration suite
-        run: |
-          # The suite that talks to real servers. It ran only when somebody
-          # remembered to run it locally, which is not a regression check: every
-          # defect it has caught so far was found by hand.
-          go test -tags integration -count=1 -timeout 30m ./...
 
       - name: Upload results to Codecov
         uses: codecov/codecov-action@v5

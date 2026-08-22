@@ -27,6 +27,14 @@ var (
 	RedisSource = env("SYNC_TEST_REDIS_SOURCE", "127.0.0.1:6479")
 	RedisTarget = env("SYNC_TEST_REDIS_TARGET", "127.0.0.1:6480")
 
+	// MongoDiscoverable is a MongoDB a client can reach without being told to
+	// connect directly. The test stack's source is a replica set whose member
+	// registers an address that only makes sense inside its own container, so a
+	// client that discovers the topology — rather than one pinned with
+	// directConnection — never finds a server. This one is a standalone, which
+	// every client can address either way.
+	MongoDiscoverable = env("SYNC_TEST_MONGO_DISCOVERABLE", "127.0.0.1:27018")
+
 	// PostgreSQL lives in docker/docker-compose.yml rather than the test stack,
 	// because logical replication needs a server started with wal_level=logical
 	// and that is where the configuration file is mounted.
