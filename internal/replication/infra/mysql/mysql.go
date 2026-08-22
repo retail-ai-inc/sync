@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -129,7 +130,7 @@ func (s *MySQLSyncer) Start(ctx context.Context) {
 					if newDB, err := resilience.ReopenSQLConnection(ctx, s.logger, s.cfg.TargetConnection, "mysql"); err == nil {
 						oldDB := targetDB
 						targetDB = newDB
-						h.targetDB = newDB // Update handler's DB reference
+						h.setTargetDB(newDB)
 
 						if oldDB != nil {
 							_ = oldDB.Close()
@@ -515,7 +516,13 @@ func (s *MySQLSyncer) getTableColumns(ctx context.Context, db *sql.DB, database,
 
 type MyEventHandler struct {
 	canal.DummyEventHandler
-	targetDB          *sql.DB
+	// mu guards targetDB and pending. Row events arrive on canal's goroutine
+	// while the health check may replace the connection from its own.
+	mu           sync.Mutex
+	pending      []statement
+	pendingLimit int
+	targetDB     *sql.DB
+
 	mappings          []config.DatabaseMapping
 	logger            logrus.FieldLogger
 	positionSaverPath string
@@ -575,194 +582,213 @@ func (h *MyEventHandler) OnRow(e *canal.RowsEvent) error {
 	switch e.Action {
 	case canal.InsertAction:
 		for _, row := range e.Rows {
-			fail(h.handleDML("INSERT", targetDBName, targetTableName, columnNames, table, row, nil))
+			fail(h.enqueue(h.buildStatement("INSERT", targetDBName, targetTableName, columnNames, table, row, nil)))
 		}
 	case canal.UpdateAction:
 		for i := 0; i < len(e.Rows); i += 2 {
 			oldRow := e.Rows[i]
 			newRow := e.Rows[i+1]
-			fail(h.handleDML("UPDATE", targetDBName, targetTableName, columnNames, table, newRow, oldRow))
+			fail(h.enqueue(h.buildStatement("UPDATE", targetDBName, targetTableName, columnNames, table, newRow, oldRow)))
 		}
 	case canal.DeleteAction:
 		for _, row := range e.Rows {
-			fail(h.handleDML("DELETE", targetDBName, targetTableName, columnNames, table, row, nil))
+			fail(h.enqueue(h.buildStatement("DELETE", targetDBName, targetTableName, columnNames, table, row, nil)))
 		}
 	}
 	return firstErr
 }
 
-// handleDML applies one row event to the target and reports whether it landed.
-//
-// A failure here is not recoverable by carrying on: the position saver runs off
-// the same handler, so a swallowed error means the offset moves past a row that
-// never reached the target and no later run will replay it. The error is
-// therefore both recorded on the handler and returned, which stops canal.
-func (h *MyEventHandler) handleDML(
+// statement is one DML the target has to run, already rendered with its
+// arguments, in the order the source produced it.
+type statement struct {
+	query string
+	args  []interface{}
+}
+
+// maxPendingStatements caps the transaction buffer. A source transaction larger
+// than this is split across more than one target transaction: atomicity is lost
+// for that transaction and the split is logged, but the alternative is holding
+// an unbounded stretch of the binlog in memory.
+const maxPendingStatements = 10000
+
+// buildStatement renders one row event, or reports nil when the event has
+// nothing the target can apply — an update or delete on a table with no primary
+// key, which cannot be addressed on the target at all.
+func (h *MyEventHandler) buildStatement(
 	opType, tgtDB, tgtTable string,
 	cols []string,
 	table *schema.Table,
 	newRow []interface{},
 	oldRow []interface{},
-) error {
+) *statement {
 	tableSecurity := security.FindTableSecurityFromMappings(tgtTable, h.mappings)
+	secured := tableSecurity.SecurityEnabled && len(tableSecurity.FieldSecurity) > 0
 
-	h.logger.Debugf("[MySQL][%s] Syncing from %s.%s to %s.%s",
-		opType, tgtDB, tgtTable, tgtDB, tgtTable)
+	// process applies the field security policy to a row, leaving it alone when
+	// the table has none.
+	process := func(row []interface{}) []interface{} {
+		if !secured {
+			return row
+		}
+		out := make([]interface{}, len(row))
+		for i, val := range row {
+			if i < len(cols) {
+				out[i] = security.ProcessValue(val, cols[i], tableSecurity)
+			} else {
+				out[i] = val
+			}
+		}
+		return out
+	}
 
-	var query string
 	switch opType {
 	case "INSERT":
-		query = upsertStatement(h.flavour(), tgtDB, tgtTable, cols, 1)
-		h.logger.Debugf("[MySQL][INSERT] table=%s.%s query=%s", tgtDB, tgtTable, query)
-
-		var processedValues []interface{}
-		if tableSecurity.SecurityEnabled && len(tableSecurity.FieldSecurity) > 0 {
-			processedValues = make([]interface{}, len(newRow))
-			for i, val := range newRow {
-				if i < len(cols) {
-					processedValues[i] = security.ProcessValue(val, cols[i], tableSecurity)
-				} else {
-					processedValues[i] = val
-				}
-			}
-		} else {
-			processedValues = newRow
+		return &statement{
+			query: upsertStatement(h.flavour(), tgtDB, tgtTable, cols, 1),
+			args:  process(newRow),
 		}
 
-		h.logger.Debugf("[MySQL] Table=%s security configuration: enabled=%v, rules=%d",
-			tgtTable, tableSecurity.SecurityEnabled, len(tableSecurity.FieldSecurity))
-
-		if tableSecurity.SecurityEnabled && len(tableSecurity.FieldSecurity) > 0 {
-			h.logger.Debugf("[MySQL][%s] Before processing: %v", opType, newRow)
-
-			for i, colName := range cols {
-				if i < len(newRow) {
-					h.logger.Debugf("   Column[%d]: %s = %v", i, colName, newRow[i])
-				}
-			}
-
-			// Add after assigning processedValues
-			h.logger.Debugf("[MySQL][%s] After processing: %v", opType, processedValues)
-		}
-
-		err := resilience.RetryDBOperation(context.Background(), h.logger,
-			fmt.Sprintf("INSERT on %s.%s", tgtDB, tgtTable),
-			func() error {
-				res, err := h.targetDB.Exec(query, processedValues...)
-				if err != nil {
-					return err
-				}
-				ra, _ := res.RowsAffected()
-				h.logger.Debugf("[MySQL][INSERT] table=%s.%s rowsAffected=%d", tgtDB, tgtTable, ra)
-				return nil
-			})
-
-		if err != nil {
-			h.logger.Errorf("[MySQL][INSERT] table=%s.%s error=%v", tgtDB, tgtTable, err)
-			atomic.StoreInt32(&h.lastExecError, 1)
-			return fmt.Errorf("apply INSERT to %s.%s: %w", tgtDB, tgtTable, err)
-		}
-		return nil
 	case "UPDATE":
+		if len(table.PKColumns) == 0 {
+			h.logger.Warnf("[MySQL][UPDATE] table=%s.%s no PK => skip", tgtDB, tgtTable)
+			return nil
+		}
 		setClauses := make([]string, len(cols))
 		for i, colName := range cols {
 			setClauses[i] = fmt.Sprintf("%s = ?", colName)
 		}
 		var whereClauses []string
-		var whereVals []interface{}
+		args := process(newRow)
 		for _, pkIndex := range table.PKColumns {
 			whereClauses = append(whereClauses, fmt.Sprintf("%s = ?", cols[pkIndex]))
-			whereVals = append(whereVals, oldRow[pkIndex])
+			args = append(args, oldRow[pkIndex])
 		}
-		if len(whereClauses) == 0 {
-			h.logger.Warnf("[MySQL][UPDATE] table=%s.%s no PK => skip", tgtDB, tgtTable)
-			return nil
-		}
-		query = fmt.Sprintf("UPDATE %s.%s SET %s WHERE %s",
-			tgtDB, tgtTable,
-			strings.Join(setClauses, ", "),
-			strings.Join(whereClauses, " AND "),
-		)
-		h.logger.Debugf("[MySQL][UPDATE] table=%s.%s query=%s", tgtDB, tgtTable, query)
-
-		// Apply security processing
-		var processedValues []interface{}
-		if tableSecurity.SecurityEnabled && len(tableSecurity.FieldSecurity) > 0 {
-			processedValues = make([]interface{}, len(newRow))
-			for i, val := range newRow {
-				if i < len(cols) {
-					processedValues[i] = security.ProcessValue(val, cols[i], tableSecurity)
-				} else {
-					processedValues[i] = val
-				}
-			}
-		} else {
-			processedValues = newRow
+		return &statement{
+			query: fmt.Sprintf("UPDATE %s.%s SET %s WHERE %s",
+				tgtDB, tgtTable,
+				strings.Join(setClauses, ", "),
+				strings.Join(whereClauses, " AND ")),
+			args: args,
 		}
 
-		// Merge updated values and WHERE clause values
-		args := append(processedValues, whereVals...)
-
-		err := resilience.RetryDBOperation(context.Background(), h.logger,
-			fmt.Sprintf("UPDATE on %s.%s", tgtDB, tgtTable),
-			func() error {
-				res, err := h.targetDB.Exec(query, args...)
-				if err != nil {
-					return err
-				}
-				ra, _ := res.RowsAffected()
-				h.logger.Debugf("[MySQL][UPDATE] table=%s.%s rowsAffected=%d", tgtDB, tgtTable, ra)
-				return nil
-			})
-
-		if err != nil {
-			h.logger.Errorf("[MySQL][UPDATE] table=%s.%s error=%v", tgtDB, tgtTable, err)
-			atomic.StoreInt32(&h.lastExecError, 1)
-			return fmt.Errorf("apply UPDATE to %s.%s: %w", tgtDB, tgtTable, err)
-		}
-		return nil
 	case "DELETE":
-		var whereClauses []string
-		for _, pkIndex := range table.PKColumns {
-			whereClauses = append(whereClauses, fmt.Sprintf("%s = ?", cols[pkIndex]))
-		}
-		if len(whereClauses) == 0 {
+		if len(table.PKColumns) == 0 {
 			h.logger.Warnf("[MySQL][DELETE] table=%s.%s no PK => skip", tgtDB, tgtTable)
 			return nil
 		}
-		query = fmt.Sprintf("DELETE FROM %s.%s WHERE %s",
-			tgtDB, tgtTable,
-			strings.Join(whereClauses, " AND "),
-		)
-		h.logger.Debugf("[MySQL][DELETE] table=%s.%s query=%s", tgtDB, tgtTable, query)
-
+		var whereClauses []string
 		var args []interface{}
 		for _, pkIndex := range table.PKColumns {
+			whereClauses = append(whereClauses, fmt.Sprintf("%s = ?", cols[pkIndex]))
 			args = append(args, newRow[pkIndex])
 		}
-
-		err := resilience.RetryDBOperation(context.Background(), h.logger,
-			fmt.Sprintf("DELETE on %s.%s", tgtDB, tgtTable),
-			func() error {
-				res, err := h.targetDB.Exec(query, args...)
-				if err != nil {
-					return err
-				}
-				ra, _ := res.RowsAffected()
-				h.logger.Debugf("[MySQL][DELETE] table=%s.%s rowsAffected=%d", tgtDB, tgtTable, ra)
-				return nil
-			})
-
-		if err != nil {
-			h.logger.Errorf("[MySQL][DELETE] table=%s.%s error=%v", tgtDB, tgtTable, err)
-			atomic.StoreInt32(&h.lastExecError, 1)
-			return fmt.Errorf("apply DELETE to %s.%s: %w", tgtDB, tgtTable, err)
+		return &statement{
+			query: fmt.Sprintf("DELETE FROM %s.%s WHERE %s",
+				tgtDB, tgtTable, strings.Join(whereClauses, " AND ")),
+			args: args,
 		}
 	}
 	return nil
 }
 
+// enqueue adds a statement to the open transaction, flushing early when the
+// buffer has grown past what is safe to hold.
+func (h *MyEventHandler) enqueue(stmt *statement) error {
+	if stmt == nil {
+		return nil
+	}
+
+	h.mu.Lock()
+	h.pending = append(h.pending, *stmt)
+	overflow := len(h.pending) >= h.maxPending()
+	h.mu.Unlock()
+
+	if !overflow {
+		return nil
+	}
+	h.logger.Warnf("[MySQL] Source transaction exceeds %d statements; applying it "+
+		"in more than one target transaction", h.maxPending())
+	return h.flush()
+}
+
+// maxPending reports the buffer cap. The zero value means the package default;
+// the field exists so a test can reach the cap without building ten thousand
+// statements.
+func (h *MyEventHandler) maxPending() int {
+	if h.pendingLimit > 0 {
+		return h.pendingLimit
+	}
+	return maxPendingStatements
+}
+
+// flush applies the buffered statements as one transaction on the target.
+//
+// Either every statement of a source transaction lands or none of it does. A
+// reader on the target can otherwise observe a state that never existed at the
+// source, which for a payment ledger means a debit without its matching credit.
+func (h *MyEventHandler) flush() error {
+	h.mu.Lock()
+	pending := h.pending
+	h.pending = nil
+	db := h.targetDB
+	h.mu.Unlock()
+
+	if len(pending) == 0 {
+		return nil
+	}
+	if db == nil {
+		return fmt.Errorf("apply %d statements: no target connection", len(pending))
+	}
+
+	err := resilience.RetryDBOperation(context.Background(), h.logger,
+		fmt.Sprintf("apply %d statements", len(pending)),
+		func() error {
+			tx, err := db.Begin()
+			if err != nil {
+				return err
+			}
+			for _, stmt := range pending {
+				if _, err := tx.Exec(stmt.query, stmt.args...); err != nil {
+					_ = tx.Rollback()
+					return fmt.Errorf("%s: %w", stmt.query, err)
+				}
+			}
+			return tx.Commit()
+		})
+
+	if err != nil {
+		h.logger.Errorf("[MySQL] Failed to apply a source transaction of %d "+
+			"statements: %v", len(pending), err)
+		atomic.StoreInt32(&h.lastExecError, 1)
+		return fmt.Errorf("apply source transaction: %w", err)
+	}
+	h.logger.Debugf("[MySQL] Applied a source transaction of %d statements", len(pending))
+	return nil
+}
+
+// OnXID marks the end of a source transaction, which is where the buffered
+// statements are applied.
+func (h *MyEventHandler) OnXID(*replication.EventHeader, mysql.Position) error {
+	return h.flush()
+}
+
+// setTargetDB swaps the connection the handler writes through. The health check
+// reconnects from its own goroutine, so the field needs the same lock the
+// statement buffer uses.
+func (h *MyEventHandler) setTargetDB(db *sql.DB) {
+	h.mu.Lock()
+	h.targetDB = db
+	h.mu.Unlock()
+}
+
 func (h *MyEventHandler) OnPosSynced(header *replication.EventHeader, pos mysql.Position, gs mysql.GTIDSet, force bool) error {
+	// A source that never sends XID events — a non-transactional engine, or a
+	// stream that stops mid-transaction — would otherwise leave rows buffered
+	// indefinitely. This is the periodic checkpoint, so drain here too. The
+	// failure is already recorded on the handler, and the guard below keeps the
+	// offset where it is.
+	_ = h.flush()
+
 	if h.positionSaverPath == "" {
 		return nil
 	}

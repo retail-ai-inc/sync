@@ -88,6 +88,16 @@ func securedTable(source, target string, fields ...string) []config.DatabaseMapp
 	}}
 }
 
+// apply feeds a row event through the handler the way canal does: the rows
+// arrive first and are buffered, then the XID that ends the source transaction
+// commits them on the target.
+func apply(h *MyEventHandler, e *canal.RowsEvent) error {
+	if err := h.OnRow(e); err != nil {
+		return err
+	}
+	return h.OnXID(nil, mysql.Position{})
+}
+
 func rows(t *testing.T, db *sql.DB) []string {
 	t.Helper()
 
@@ -115,7 +125,7 @@ func TestOnRowAppliesAnInsert(t *testing.T) {
 	db := sqliteTarget(t, ordersSchema)
 	h := newHandler(t, db, mapTable("orders", "orders"))
 
-	err := h.OnRow(&canal.RowsEvent{
+	err := apply(h, &canal.RowsEvent{
 		Table:  sourceTable("orders", "id", "customer", "email"),
 		Action: canal.InsertAction,
 		Rows:   [][]interface{}{{"1", "Ada", "ada@example.com"}},
@@ -132,7 +142,7 @@ func TestOnRowAppliesEveryRowOfABatch(t *testing.T) {
 	db := sqliteTarget(t, ordersSchema)
 	h := newHandler(t, db, mapTable("orders", "orders"))
 
-	if err := h.OnRow(&canal.RowsEvent{
+	if err := apply(h, &canal.RowsEvent{
 		Table:  sourceTable("orders", "id", "customer", "email"),
 		Action: canal.InsertAction,
 		Rows:   [][]interface{}{{"1", "Ada", "x"}, {"2", "Grace", "y"}},
@@ -148,7 +158,7 @@ func TestOnRowRenamesTheTargetTable(t *testing.T) {
 	db := sqliteTarget(t, `CREATE TABLE orders_archive (id TEXT, customer TEXT, email TEXT)`)
 	h := newHandler(t, db, mapTable("orders", "orders_archive"))
 
-	if err := h.OnRow(&canal.RowsEvent{
+	if err := apply(h, &canal.RowsEvent{
 		Table:  sourceTable("orders", "id", "customer", "email"),
 		Action: canal.InsertAction,
 		Rows:   [][]interface{}{{"1", "Ada", "x"}},
@@ -169,7 +179,7 @@ func TestOnRowSkipsAnUnmappedTable(t *testing.T) {
 	db := sqliteTarget(t, ordersSchema)
 	h := newHandler(t, db, mapTable("customers", "customers"))
 
-	if err := h.OnRow(&canal.RowsEvent{
+	if err := apply(h, &canal.RowsEvent{
 		Table:  sourceTable("orders", "id", "customer", "email"),
 		Action: canal.InsertAction,
 		Rows:   [][]interface{}{{"1", "Ada", "x"}},
@@ -192,7 +202,7 @@ func TestTheMappingLookupIgnoresTheSourceDatabase(t *testing.T) {
 	other := sourceTable("orders", "id", "customer", "email")
 	other.Schema = "a_completely_different_database"
 
-	if err := h.OnRow(&canal.RowsEvent{
+	if err := apply(h, &canal.RowsEvent{
 		Table: other, Action: canal.InsertAction,
 		Rows: [][]interface{}{{"1", "Ada", "x"}},
 	}); err != nil {
@@ -214,7 +224,7 @@ func TestTheFirstMatchingMappingWins(t *testing.T) {
 		{Tables: []config.TableMapping{{SourceTable: "orders", TargetTable: "orders_copy"}}},
 	})
 
-	if err := h.OnRow(&canal.RowsEvent{
+	if err := apply(h, &canal.RowsEvent{
 		Table:  sourceTable("orders", "id", "customer", "email"),
 		Action: canal.InsertAction,
 		Rows:   [][]interface{}{{"1", "Ada", "x"}},
@@ -235,7 +245,7 @@ func TestOnRowAppliesAnUpdate(t *testing.T) {
 	}
 	h := newHandler(t, db, mapTable("orders", "orders"))
 
-	if err := h.OnRow(&canal.RowsEvent{
+	if err := apply(h, &canal.RowsEvent{
 		Table:  sourceTable("orders", "id", "customer", "email"),
 		Action: canal.UpdateAction,
 		Rows: [][]interface{}{
@@ -260,7 +270,7 @@ func TestAnUpdateMatchesOnTheOldPrimaryKey(t *testing.T) {
 	}
 	h := newHandler(t, db, mapTable("orders", "orders"))
 
-	if err := h.OnRow(&canal.RowsEvent{
+	if err := apply(h, &canal.RowsEvent{
 		Table:  sourceTable("orders", "id", "customer", "email"),
 		Action: canal.UpdateAction,
 		Rows:   [][]interface{}{{"1", "Ada", "x"}, {"9", "Ada", "x"}},
@@ -286,7 +296,7 @@ func TestAnOddUpdateBatchPanics(t *testing.T) {
 
 	db := sqliteTarget(t, ordersSchema)
 	h := newHandler(t, db, mapTable("orders", "orders"))
-	_ = h.OnRow(&canal.RowsEvent{
+	_ = apply(h, &canal.RowsEvent{
 		Table:  sourceTable("orders", "id", "customer", "email"),
 		Action: canal.UpdateAction,
 		Rows:   [][]interface{}{{"1", "Ada", "x"}},
@@ -300,7 +310,7 @@ func TestOnRowAppliesADelete(t *testing.T) {
 	}
 	h := newHandler(t, db, mapTable("orders", "orders"))
 
-	if err := h.OnRow(&canal.RowsEvent{
+	if err := apply(h, &canal.RowsEvent{
 		Table:  sourceTable("orders", "id", "customer", "email"),
 		Action: canal.DeleteAction,
 		Rows:   [][]interface{}{{"1", "Ada", "x"}},
@@ -323,7 +333,7 @@ func TestTheDeleteMatchesOnTheKeyAlone(t *testing.T) {
 	}
 	h := newHandler(t, db, mapTable("orders", "orders"))
 
-	if err := h.OnRow(&canal.RowsEvent{
+	if err := apply(h, &canal.RowsEvent{
 		Table:  sourceTable("orders", "id", "customer", "email"),
 		Action: canal.DeleteAction,
 		Rows:   [][]interface{}{{"1", "Ada", "x"}},
@@ -341,7 +351,7 @@ func TestAnUnknownActionIsIgnored(t *testing.T) {
 	db := sqliteTarget(t, ordersSchema)
 	h := newHandler(t, db, mapTable("orders", "orders"))
 
-	if err := h.OnRow(&canal.RowsEvent{
+	if err := apply(h, &canal.RowsEvent{
 		Table:  sourceTable("orders", "id", "customer", "email"),
 		Action: "truncate",
 		Rows:   [][]interface{}{{"1", "Ada", "x"}},
@@ -368,7 +378,7 @@ func TestAnUpdateWithNoPrimaryKeyIsSkipped(t *testing.T) {
 	table := sourceTable("orders", "id", "customer", "email")
 	table.PKColumns = nil
 
-	if err := h.OnRow(&canal.RowsEvent{
+	if err := apply(h, &canal.RowsEvent{
 		Table: table, Action: canal.UpdateAction,
 		Rows: [][]interface{}{{"1", "Ada", "x"}, {"1", "Grace", "y"}},
 	}); err != nil {
@@ -388,7 +398,7 @@ func TestADeleteWithNoPrimaryKeyIsSkipped(t *testing.T) {
 	table := sourceTable("orders", "id", "customer", "email")
 	table.PKColumns = nil
 
-	if err := h.OnRow(&canal.RowsEvent{
+	if err := apply(h, &canal.RowsEvent{
 		Table: table, Action: canal.DeleteAction,
 		Rows: [][]interface{}{{"1", "Ada", "x"}},
 	}); err != nil {
@@ -408,7 +418,7 @@ func TestAnInsertWithNoPrimaryKeyStillRuns(t *testing.T) {
 	table := sourceTable("orders", "id", "customer", "email")
 	table.PKColumns = nil
 
-	if err := h.OnRow(&canal.RowsEvent{
+	if err := apply(h, &canal.RowsEvent{
 		Table: table, Action: canal.InsertAction,
 		Rows: [][]interface{}{{"1", "Ada", "x"}},
 	}); err != nil {
@@ -425,7 +435,7 @@ func TestAnInsertMasksASecuredField(t *testing.T) {
 	db := sqliteTarget(t, ordersSchema)
 	h := newHandler(t, db, securedTable("orders", "orders", "email"))
 
-	if err := h.OnRow(&canal.RowsEvent{
+	if err := apply(h, &canal.RowsEvent{
 		Table:  sourceTable("orders", "id", "customer", "email"),
 		Action: canal.InsertAction,
 		Rows:   [][]interface{}{{"1", "Ada", "ada@example.com"}},
@@ -454,7 +464,7 @@ func TestAnUpdateAlsoMasks(t *testing.T) {
 	}
 	h := newHandler(t, db, securedTable("orders", "orders", "email"))
 
-	if err := h.OnRow(&canal.RowsEvent{
+	if err := apply(h, &canal.RowsEvent{
 		Table:  sourceTable("orders", "id", "customer", "email"),
 		Action: canal.UpdateAction,
 		Rows: [][]interface{}{
@@ -480,7 +490,7 @@ func TestTheDeleteKeyIsNotMasked(t *testing.T) {
 	}
 	h := newHandler(t, db, securedTable("orders", "orders", "id"))
 
-	if err := h.OnRow(&canal.RowsEvent{
+	if err := apply(h, &canal.RowsEvent{
 		Table:  sourceTable("orders", "id", "customer", "email"),
 		Action: canal.DeleteAction,
 		Rows:   [][]interface{}{{"1", "Ada", "x"}},
@@ -505,15 +515,16 @@ func failingEvent() *canal.RowsEvent {
 }
 
 // TestAFailedStatementIsReportedToCanal pins the contract that keeps the offset
-// honest: OnRow returns the failure, which stops canal rather than letting it
-// read on past a row that never landed.
+// honest: the failure reaches canal, which stops rather than reading on past a
+// row that never landed. The statement is buffered by OnRow and rejected when
+// the transaction is applied, so the error surfaces from OnXID.
 func TestAFailedStatementIsReportedToCanal(t *testing.T) {
 	db := sqliteTarget(t, ordersSchema)
 	h := newHandler(t, db, mapTable("orders", "orders"))
 
-	err := h.OnRow(failingEvent())
+	err := apply(h, failingEvent())
 	if err == nil {
-		t.Fatal("OnRow swallowed a statement the target could not apply")
+		t.Fatal("the handler swallowed a statement the target could not apply")
 	}
 	if !strings.Contains(err.Error(), "main.orders") {
 		t.Errorf("error = %v, want the target table named", err)
@@ -530,13 +541,13 @@ func TestTheFirstFailureOfABatchIsReported(t *testing.T) {
 	db := sqliteTarget(t, ordersSchema)
 	h := newHandler(t, db, mapTable("orders", "orders"))
 
-	err := h.OnRow(&canal.RowsEvent{
+	err := apply(h, &canal.RowsEvent{
 		Table:  sourceTable("orders", "id", "missing_column"),
 		Action: canal.InsertAction,
 		Rows:   [][]interface{}{{"1", "x"}, {"2", "y"}},
 	})
 	if err == nil {
-		t.Fatal("OnRow reported nothing for a batch where every row failed")
+		t.Fatal("the handler reported nothing for a batch where every row failed")
 	}
 }
 
@@ -547,11 +558,11 @@ func TestTheErrorFlagIsStickyAcrossEvents(t *testing.T) {
 	db := sqliteTarget(t, ordersSchema)
 	h := newHandler(t, db, mapTable("orders", "orders"))
 
-	if err := h.OnRow(failingEvent()); err == nil {
+	if err := apply(h, failingEvent()); err == nil {
 		t.Fatal("the failing event was not reported")
 	}
 
-	if err := h.OnRow(&canal.RowsEvent{
+	if err := apply(h, &canal.RowsEvent{
 		Table:  sourceTable("orders", "id", "customer", "email"),
 		Action: canal.InsertAction,
 		Rows:   [][]interface{}{{"2", "Ada", "y"}},
@@ -576,7 +587,7 @@ func TestThePositionIsNotWrittenAfterAFailure(t *testing.T) {
 	if err := h.OnPosSynced(nil, mysql.Position{Name: "binlog.1", Pos: 100}, nil, false); err != nil {
 		t.Fatalf("OnPosSynced before any failure: %v", err)
 	}
-	if err := h.OnRow(failingEvent()); err == nil {
+	if err := apply(h, failingEvent()); err == nil {
 		t.Fatal("the failing event was not reported")
 	}
 	if err := h.OnPosSynced(nil, mysql.Position{Name: "binlog.1", Pos: 200}, nil, true); err != nil {

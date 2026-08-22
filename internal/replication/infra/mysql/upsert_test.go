@@ -98,10 +98,10 @@ func TestAReplayedInsertDoesNotLoseTheRow(t *testing.T) {
 		Action: canal.InsertAction,
 		Rows:   [][]interface{}{{"1", "Ada", "ada@example.com"}},
 	}
-	if err := h.OnRow(event); err != nil {
+	if err := apply(h, event); err != nil {
 		t.Fatalf("first insert: %v", err)
 	}
-	if err := h.OnRow(event); err != nil {
+	if err := apply(h, event); err != nil {
 		t.Fatalf("replayed insert: %v", err)
 	}
 
@@ -121,13 +121,13 @@ func TestAReplayedInsertCarriesTheNewerRow(t *testing.T) {
 	h := newHandler(t, db, mapTable("orders", "orders"))
 
 	table := sourceTable("orders", "id", "customer", "email")
-	if err := h.OnRow(&canal.RowsEvent{
+	if err := apply(h, &canal.RowsEvent{
 		Table: table, Action: canal.InsertAction,
 		Rows: [][]interface{}{{"1", "Ada", "old@example.com"}},
 	}); err != nil {
 		t.Fatalf("first insert: %v", err)
 	}
-	if err := h.OnRow(&canal.RowsEvent{
+	if err := apply(h, &canal.RowsEvent{
 		Table: table, Action: canal.InsertAction,
 		Rows: [][]interface{}{{"1", "Ada", "new@example.com"}},
 	}); err != nil {
