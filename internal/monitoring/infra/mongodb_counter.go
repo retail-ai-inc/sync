@@ -70,6 +70,9 @@ func CountAndLogMongoDB(ctx context.Context, sc config.SyncConfig, log *logrus.L
 			}
 
 			queryCounter := NewQueryCounter(log)
+			// -1 used to be stored under the ordinary action, so a failure to
+			// count and a measurement of minus one row were the same row.
+			srcOK, tgtOK := true, true
 
 			// Count source collection
 			srcCount, err = queryCounter.CountMongoDBDocuments(ctx, srcClient, srcDBName, tblMap.SourceTable, countQuery)
@@ -80,7 +83,7 @@ func CountAndLogMongoDB(ctx context.Context, sc config.SyncConfig, log *logrus.L
 					"src_coll":  tblMap.SourceTable,
 					"operation": "source_count",
 				}).Error("Failed to get source collection count")
-				srcCount = -1
+				srcCount, srcOK = -1, false
 			}
 
 			// Count target collection
@@ -92,7 +95,7 @@ func CountAndLogMongoDB(ctx context.Context, sc config.SyncConfig, log *logrus.L
 					"tgt_coll":  tblMap.TargetTable,
 					"operation": "target_count",
 				}).Error("Failed to get target collection count")
-				tgtCount = -1
+				tgtCount, tgtOK = -1, false
 			}
 
 			log.WithFields(logrus.Fields{
@@ -103,11 +106,12 @@ func CountAndLogMongoDB(ctx context.Context, sc config.SyncConfig, log *logrus.L
 				"tgt_db":         tgtDBName,
 				"tgt_coll":       tblMap.TargetTable,
 				"tgt_row_count":  tgtCount,
-				"monitor_action": "row_count_minutely",
-			}).Info("row_count_minutely")
+				"monitor_action": rowCountAction(srcOK, tgtOK),
+			}).Info(rowCountAction(srcOK, tgtOK))
 
 			// Insert into database monitoring_log with sync_task_id
-			storeMonitoringLog(sc.ID, dbType, srcDBName, tblMap.SourceTable, srcCount, tgtDBName, tblMap.TargetTable, tgtCount, "row_count_minutely")
+			storeMonitoringLog(sc.ID, dbType, srcDBName, tblMap.SourceTable, srcCount,
+				tgtDBName, tblMap.TargetTable, tgtCount, rowCountAction(srcOK, tgtOK))
 		}
 	}
 

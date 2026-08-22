@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -56,7 +57,11 @@ func GetTableSchemaHandler(w http.ResponseWriter, r *http.Request) {
 	var schema SchemaResponse
 	var err error
 
-	switch req.SourceType {
+	// Matched without regard to case. It used to be an exact comparison, and the
+	// interface displays these names capitalised — so a caller passing "MongoDB"
+	// or "MySQL", which is what it shows, was told the database type was
+	// unsupported rather than getting a schema.
+	switch strings.ToLower(strings.TrimSpace(req.SourceType)) {
 	case "mongodb":
 		schema, err = getMongoDBSchema(r.Context(), req)
 	case "mysql", "mariadb":

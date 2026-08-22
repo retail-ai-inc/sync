@@ -51,10 +51,12 @@ func TestSyncTablesHandlerIgnoresOtherDays(t *testing.T) {
 	}
 }
 
-// The window is built from UTC calendar days while the rest of the API reports
-// JST. Between 00:00 and 09:00 JST the "today" summary therefore covers the
-// previous JST day, and rows from the current JST morning are excluded.
-func TestTheDailySummaryWindowIsUTCNotJST(t *testing.T) {
+// TestTheDailyWindowIsTheJSTDay covers the nine hours of each JST morning when
+// the two calendars disagree. The window was built from the UTC calendar day
+// while the answer was labelled with the JST date — and everything else this API
+// reports is converted to JST — so during those hours the figures belonged to
+// the day before the label said, and that morning's traffic was left out.
+func TestTheDailyWindowIsTheJSTDay(t *testing.T) {
 	conn := useMonitorDB(t)
 
 	nowUTC := time.Now().UTC()
@@ -63,7 +65,7 @@ func TestTheDailySummaryWindowIsUTCNotJST(t *testing.T) {
 		t.Skip("UTC and JST are on the same calendar day right now")
 	}
 
-	// A row stamped for the current JST day but the next UTC day.
+	// A row stamped for the current JST day, which is the next UTC day.
 	insertMonitoringRow(t, conn, 1, jst.Format("2006-01-02")+" 00:30:00", "orders", 5, 5)
 
 	rec := httptest.NewRecorder()
@@ -71,8 +73,8 @@ func TestTheDailySummaryWindowIsUTCNotJST(t *testing.T) {
 		SyncTablesHandler, map[string]string{"id": "1"})
 
 	body, _ := json.Marshal(decodeEnvelope(t, rec)["data"])
-	if strings.Contains(string(body), "orders") {
-		t.Fatalf("the window appears to use JST now — assert the JST day instead: %s", body)
+	if !strings.Contains(string(body), "orders") {
+		t.Errorf("this JST morning's traffic is missing from today's figures: %s", body)
 	}
 }
 

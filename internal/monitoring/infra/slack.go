@@ -30,6 +30,14 @@ func SendTableComparisonSlackNotification(ctx context.Context, sc config.SyncCon
 	}
 	slackNotifier := slack.NewSlackNotifierFromConfig(cfg, log)
 	if !slackNotifier.IsConfigured() {
+		// Silence used to mean two things at once here: the two sides agreed, or
+		// nobody had configured a webhook. A comparison that found a difference
+		// and could not report it is the one that matters.
+		if srcCount != tgtCount {
+			log.Errorf("[Monitor] Task %d: %s.%s holds %d rows and %s.%s holds %d, "+
+				"and there is no Slack webhook configured to report it with",
+				sc.ID, srcDB, srcTable, srcCount, tgtDB, tgtTable, tgtCount)
+		}
 		return
 	}
 

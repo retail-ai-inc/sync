@@ -232,7 +232,12 @@ func SyncTablesHandler(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	logrus.Infof("[SyncTables] Fetching tables data for task: %s", id)
 
-	now := time.Now().UTC()
+	// The day is the one an operator is looking at, which is JST — everything
+	// else this API reports is converted to it. The window used to be built from
+	// the UTC calendar day while the answer was labelled with the JST date, so
+	// for the nine hours of each JST morning the figures belonged to the day
+	// before the label said.
+	now := time.Now().In(time.FixedZone("JST", 9*60*60))
 
 	stats, err := app.TableProgress(r.Context(), id, now)
 	if err != nil {

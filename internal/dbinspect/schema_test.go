@@ -242,7 +242,7 @@ func TestGetTableSchemaHandlerRejectsAnEmptyBody(t *testing.T) {
 }
 
 func TestGetTableSchemaHandlerRejectsUnsupportedSourceTypes(t *testing.T) {
-	for _, sourceType := range []string{"", "redis", "oracle", "MongoDB", "MySQL"} {
+	for _, sourceType := range []string{"", "redis", "oracle", "cassandra"} {
 		body, _ := json.Marshal(SchemaRequest{SourceType: sourceType, TableName: "t"})
 		req := httptest.NewRequest(http.MethodPost, "/tables/schema", bytes.NewReader(body))
 		rec := httptest.NewRecorder()
@@ -267,18 +267,23 @@ func TestGetTableSchemaHandlerRejectsUnsupportedSourceTypes(t *testing.T) {
 	}
 }
 
-// The source type is matched case-sensitively while the rest of the codebase
-// stores it lower-cased; a caller that sends the display-cased name gets
-// "Unsupported database type" rather than a schema.
-func TestSourceTypeMatchingIsCaseSensitive(t *testing.T) {
-	body, _ := json.Marshal(SchemaRequest{SourceType: "MongoDB", TableName: "t"})
-	req := httptest.NewRequest(http.MethodPost, "/tables/schema", bytes.NewReader(body))
-	rec := httptest.NewRecorder()
+// TestTheSourceTypeIsMatchedWithoutRegardToCase covers the name the interface
+// displays. The comparison was exact while the rest of the tree stores the type
+// lower-cased, so a caller sending "MongoDB" or "MySQL" — which is what it shows
+// — was told the database type was unsupported rather than getting a schema.
+func TestTheSourceTypeIsMatchedWithoutRegardToCase(t *testing.T) {
+	for _, sourceType := range []string{"MongoDB", "MySQL", " postgresql "} {
+		body, _ := json.Marshal(SchemaRequest{SourceType: sourceType, TableName: "t"})
+		req := httptest.NewRequest(http.MethodPost, "/tables/schema", bytes.NewReader(body))
+		rec := httptest.NewRecorder()
 
-	GetTableSchemaHandler(rec, req)
+		GetTableSchemaHandler(rec, req)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d — the source type appears to be normalised now; assert the schema response instead", rec.Code)
+		// Not 400: the type is recognised, so the request gets as far as trying
+		// to connect and fails there instead.
+		if rec.Code == http.StatusBadRequest {
+			t.Errorf("sourceType %q was rejected as unsupported", sourceType)
+		}
 	}
 }
 

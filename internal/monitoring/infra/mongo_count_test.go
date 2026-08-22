@@ -208,36 +208,29 @@ func TestTheComparisonOperatorsAcceptFloatsAndStrings(t *testing.T) {
 	}
 }
 
-// TestAnUnknownOperatorIsDropped records that an operator the builder does not
-// recognise contributes nothing to the filter, so the count silently covers the
-// whole collection instead of the intended slice.
-func TestAnUnknownOperatorIsDropped(t *testing.T) {
-	qc, out := loggingCounter(t)
+// TestAConditionThatCannotBeExpressedIsReported covers a count that silently
+// became a count of something else. A condition the builder did not recognise
+// contributed nothing to the filter, so the number reported as "orders matching
+// X" was the size of the whole collection — and nothing said so.
+func TestAConditionThatCannotBeExpressedIsReported(t *testing.T) {
+	for name, condition := range map[string]domain.CountCondition{
+		"an unknown operator":        {Table: "orders", Field: "name", Operator: "LIKE", Value: "A%"},
+		"no value":                   {Table: "orders", Field: "status", Operator: "=", Value: ""},
+		"an unknown date range":      {Table: "orders", Field: "created_at", Operator: "dateRange", Value: "quarterly"},
+		"a date range with no field": {Table: "orders", Operator: "dateRange", Value: "daily"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			qc, _ := loggingCounter(t)
 
-	got := countedFilter(t, qc, out, "orders", &domain.CountQuery{
-		Conditions: []domain.CountCondition{
-			{Table: "orders", Field: "name", Operator: "LIKE", Value: "A%"},
-		},
-	})
-	if got != "db.orders.countDocuments({})" {
-		t.Fatalf("query = %q; LIKE appears to be handled now, so assert that "+
-			"instead", got)
-	}
-}
-
-// TestAConditionWithNoValueIsDropped records the same silent widening for a
-// condition whose value is empty — the UI can produce one by leaving the field
-// blank.
-func TestAConditionWithNoValueIsDropped(t *testing.T) {
-	qc, out := loggingCounter(t)
-
-	got := countedFilter(t, qc, out, "orders", &domain.CountQuery{
-		Conditions: []domain.CountCondition{
-			{Table: "orders", Field: "status", Operator: "=", Value: ""},
-		},
-	})
-	if got != "db.orders.countDocuments({})" {
-		t.Errorf("query = %q, want an empty filter", got)
+			count, err := qc.CountMongoDBDocuments(context.Background(), deadMongo(t),
+				"shop", "orders", &domain.CountQuery{Conditions: []domain.CountCondition{condition}})
+			if err == nil {
+				t.Fatalf("the condition was dropped and %d was reported", count)
+			}
+			if !strings.Contains(err.Error(), "cannot be expressed") {
+				t.Errorf("err = %v, want it to say the condition could not be used", err)
+			}
+		})
 	}
 }
 
@@ -360,63 +353,25 @@ func TestTheYesterdayRangeFallsBackToJST(t *testing.T) {
 	}
 }
 
-// TestAnUnknownDateRangeIsDropped records the widening again: a range name the
-// builder does not know contributes nothing, so the count covers everything.
-func TestAnUnknownDateRangeIsDropped(t *testing.T) {
-	qc, out := loggingCounter(t)
+// TestTwoConditionsOnOneFieldAreReported covers a range — "total > 10 and
+// total < 100", the obvious thing to want. The filter is a map keyed by field
+// name, so the second condition replaced the first and the count was taken with
+// only half the range, without a word.
+func TestTwoConditionsOnOneFieldAreReported(t *testing.T) {
+	qc, _ := loggingCounter(t)
 
-	got := countedFilter(t, qc, out, "orders", &domain.CountQuery{
-		Conditions: []domain.CountCondition{
-			{Table: "orders", Field: "created_at", Operator: "dateRange", Value: "quarterly"},
-		},
-	})
-	if got != "db.orders.countDocuments({})" {
-		t.Errorf("query = %q, want an empty filter", got)
+	count, err := qc.CountMongoDBDocuments(context.Background(), deadMongo(t),
+		"shop", "orders", &domain.CountQuery{
+			Conditions: []domain.CountCondition{
+				{Table: "orders", Field: "total", Operator: ">", Value: "10"},
+				{Table: "orders", Field: "total", Operator: "<", Value: "100"},
+			},
+		})
+	if err == nil {
+		t.Fatalf("only half the range was applied and %d was reported", count)
 	}
-	if !strings.Contains(out.String(), "Unknown date range type") {
-		t.Error("the unknown range was not warned about")
-	}
-}
-
-// TestADateRangeWithNoFieldFallsThroughToTheComparisonBranch records an
-// unexpected interaction: the dateRange branch requires a field, and without one
-// the condition falls through to the operator switch, where "dateRange" is not a
-// known operator either. The result is an empty filter and a debug line, not the
-// warning the unknown-range case gets.
-func TestADateRangeWithNoFieldFallsThroughToTheComparisonBranch(t *testing.T) {
-	qc, out := loggingCounter(t)
-
-	got := countedFilter(t, qc, out, "orders", &domain.CountQuery{
-		Conditions: []domain.CountCondition{
-			{Table: "orders", Operator: "dateRange", Value: "daily"},
-		},
-	})
-	if got != "db.orders.countDocuments({})" {
-		t.Errorf("query = %q, want an empty filter", got)
-	}
-	if strings.Contains(out.String(), "Unknown date range type") {
-		t.Error("the fieldless range took the date branch")
-	}
-}
-
-// TestTwoConditionsOnOneFieldKeepOnlyTheLast records that the filter is a plain
-// map keyed by field name, so a range and a comparison on the same field cannot
-// coexist — the second condition overwrites the first without a word.
-func TestTwoConditionsOnOneFieldKeepOnlyTheLast(t *testing.T) {
-	qc, out := loggingCounter(t)
-
-	got := countedFilter(t, qc, out, "orders", &domain.CountQuery{
-		Conditions: []domain.CountCondition{
-			{Table: "orders", Field: "total", Operator: ">", Value: "10"},
-			{Table: "orders", Field: "total", Operator: "<", Value: "100"},
-		},
-	})
-	if strings.Contains(got, "$gt") {
-		t.Fatalf("query = %q; both bounds appear to be kept now, so assert that "+
-			"instead", got)
-	}
-	if !strings.Contains(got, "$lt: 100") {
-		t.Errorf("query = %q, want the last condition", got)
+	if !strings.Contains(err.Error(), "second condition") {
+		t.Errorf("err = %v, want it to name the condition it could not combine", err)
 	}
 }
 

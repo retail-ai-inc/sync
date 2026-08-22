@@ -10,10 +10,11 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// TestStartGivesUpOnAnUnreachableSource records the connection retry budget:
-// five attempts with exponential backoff, which cannot be shortened from
-// outside and ignores the context entirely.
-func TestStartGivesUpOnAnUnreachableSource(t *testing.T) {
+// TestStartStopsWhenItsContextIsCancelled covers shutdown while the source is
+// unreachable. The connection retry was five attempts with exponential backoff —
+// thirty seconds of waiting — and it consulted no context at all, so a task told
+// to stop went on sleeping long after the supervisor had given up on it.
+func TestStartStopsWhenItsContextIsCancelled(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.PanicLevel)
 	cfg := sampleConfig()
@@ -21,13 +22,14 @@ func TestStartGivesUpOnAnUnreachableSource(t *testing.T) {
 	s := NewRedisSyncer(cfg, logger)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // already cancelled; the retry loop does not consult it
+	cancel() // already cancelled
 
 	start := time.Now()
-	_ = s.Start(ctx)
+	if err := s.Start(ctx); err == nil {
+		t.Error("Start returned nil for a source it never reached")
+	}
 
-	if elapsed := time.Since(start); elapsed < time.Second {
-		t.Fatalf("Start gave up in %v; the retries appear to honour the context "+
-			"now, so assert that instead", elapsed)
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("Start waited %v after its context was cancelled", elapsed)
 	}
 }

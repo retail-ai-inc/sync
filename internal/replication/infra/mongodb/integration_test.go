@@ -5,6 +5,7 @@ package mongodb
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -208,11 +209,12 @@ func TestIncrementalSyncAppliesInsertUpdateDelete(t *testing.T) {
 	})
 }
 
-// TestSecurityPolicyIsIgnoredForMongoDB demonstrates F-104 end to end: the task
-// declares a masking rule, the syncer accepts it, and the target receives the
-// value in the clear. MySQL and PostgreSQL apply the same configuration; the
-// MongoDB path never calls the security package at all.
-func TestSecurityPolicyIsIgnoredForMongoDB(t *testing.T) {
+// TestSecurityPolicyIsAppliedForMongoDB covers a masking rule end to end. The
+// task declared one, the syncer accepted it, and the target received the value
+// in the clear — MySQL and PostgreSQL applied the same configuration while the
+// MongoDB path never called the security package at all, so what the interface
+// showed and what the replica held were different things.
+func TestSecurityPolicyIsAppliedForMongoDB(t *testing.T) {
 	collection := harness.UniqueName("security")
 	src, tgt := connect(t, harness.MongoSource), connect(t, harness.MongoTarget)
 	ctx := context.Background()
@@ -248,8 +250,14 @@ func TestSecurityPolicyIsIgnoredForMongoDB(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read target: %v", err)
 	}
-	if doc["email"] != email {
-		t.Fatalf("target holds %v; masking now appears to run for MongoDB, "+
-			"so assert the masked value instead", doc["email"])
+	if doc["email"] == email {
+		t.Fatalf("the target holds the address in the clear: %v", doc["email"])
+	}
+	if doc["email"] != strings.Repeat("*", len(email)) {
+		t.Errorf("target holds %v, want it masked", doc["email"])
+	}
+	// The other fields are replicated as they are.
+	if doc["seq"] != int32(1) {
+		t.Errorf("seq = %v, want 1", doc["seq"])
 	}
 }

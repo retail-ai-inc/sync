@@ -67,6 +67,11 @@ func (qc *QueryCounter) CountMongoDBDocuments(ctx context.Context, client *mongo
 	// Build query filter
 	filter := bson.M{}
 	relevantConditions := 0
+	// dropped names the conditions this could not express. A count taken with
+	// some of its conditions missing is a count of something else — usually the
+	// whole collection — and it used to be reported as though it were the
+	// number that was asked for.
+	var dropped []string
 
 	// Get Japan timezone
 	jst, err := time.LoadLocation("Asia/Tokyo")
@@ -82,6 +87,16 @@ func (qc *QueryCounter) CountMongoDBDocuments(ctx context.Context, client *mongo
 		}
 
 		relevantConditions++
+
+		// The filter is a map keyed by field, so a second condition on the same
+		// field replaces the first: "total > 10 AND total < 100" — a range, the
+		// obvious thing to want — used to count with only the second half.
+		if _, already := filter[condition.Field]; already && condition.Field != "" {
+			dropped = append(dropped, fmt.Sprintf(
+				"a second condition on %q, which this cannot combine with the first",
+				condition.Field))
+			continue
+		}
 
 		// Handle different operators
 		if condition.Operator == "dateRange" && condition.Field != "" {
@@ -171,7 +186,8 @@ func (qc *QueryCounter) CountMongoDBDocuments(ctx context.Context, client *mongo
 					collection, condition.Field, startOfMonthUTC.Format("2006-01-02T15:04:05Z"), endOfMonthUTC.Format("2006-01-02T15:04:05Z"))
 
 			default:
-				qc.logger.Warnf("[QueryCounter] Unknown date range type: %s", condition.Value)
+				dropped = append(dropped, fmt.Sprintf("%s: unknown date range %q",
+					condition.Field, condition.Value))
 			}
 		} else if condition.Operator == "=" && condition.Field != "" && condition.Value != "" {
 			// Handle equality operator - try to convert to number first for id fields
@@ -230,12 +246,14 @@ func (qc *QueryCounter) CountMongoDBDocuments(ctx context.Context, client *mongo
 					filter[condition.Field] = bson.M{"$ne": condition.Value}
 				}
 			default:
-				// Handle other operators (like id-based queries)
-				qc.logger.Debugf("[QueryCounter] Unhandled operator: %s for field: %s", condition.Operator, condition.Field)
+				dropped = append(dropped, fmt.Sprintf("%s: unknown operator %q",
+					condition.Field, condition.Operator))
 			}
 		} else {
-			// Handle other operators (like id-based queries)
-			qc.logger.Debugf("[QueryCounter] Unhandled operator: %s for field: %s", condition.Operator, condition.Field)
+			// A dateRange with no field lands here, as does a condition with no
+			// value: neither can be rendered, and neither used to be reported.
+			dropped = append(dropped, fmt.Sprintf("%q on %q with the value %q",
+				condition.Operator, condition.Field, condition.Value))
 		}
 
 		// Log what was actually added to the filter for this condition
@@ -247,6 +265,12 @@ func (qc *QueryCounter) CountMongoDBDocuments(ctx context.Context, client *mongo
 	if relevantConditions == 0 {
 		qc.logger.Warnf("[QueryCounter] No relevant conditions found for %s.%s in query",
 			database, collection)
+	}
+
+	if len(dropped) > 0 {
+		return -1, fmt.Errorf("counting %s.%s: %d of its conditions cannot be "+
+			"expressed (%s), and counting without them would answer a different "+
+			"question", database, collection, len(dropped), strings.Join(dropped, "; "))
 	}
 
 	// Log the complete query after all conditions are processed
