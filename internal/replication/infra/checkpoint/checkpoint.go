@@ -47,6 +47,17 @@ type SQLStore struct {
 	// Schema is the database the table lives in; empty addresses it unqualified.
 	Schema string
 	TaskID int
+	// NumberedPlaceholders spells parameters as $1, $2 rather than ?, which is
+	// what PostgreSQL takes. MySQL and SQLite take the question marks.
+	NumberedPlaceholders bool
+}
+
+// arg renders the nth parameter marker, counting from one.
+func (s *SQLStore) arg(n int) string {
+	if s.NumberedPlaceholders {
+		return "$" + strconv.Itoa(n)
+	}
+	return "?"
 }
 
 func (s *SQLStore) qualified() string {
@@ -78,7 +89,8 @@ func (s *SQLStore) Load(ctx context.Context, key string) (string, error) {
 
 	var payload string
 	err := s.DB.QueryRowContext(ctx,
-		fmt.Sprintf("SELECT payload FROM %s WHERE task_id = ? AND name = ?", s.qualified()),
+		fmt.Sprintf("SELECT payload FROM %s WHERE task_id = %s AND name = %s",
+			s.qualified(), s.arg(1), s.arg(2)),
 		s.TaskID, key).Scan(&payload)
 	if err == sql.ErrNoRows {
 		return "", nil
@@ -101,13 +113,15 @@ func (s *SQLStore) Save(ctx context.Context, key, payload string) error {
 	// Delete and insert rather than an upsert, because the two flavours spell
 	// an upsert differently and this is one row.
 	if _, err := tx.ExecContext(ctx,
-		fmt.Sprintf("DELETE FROM %s WHERE task_id = ? AND name = ?", s.qualified()),
+		fmt.Sprintf("DELETE FROM %s WHERE task_id = %s AND name = %s",
+			s.qualified(), s.arg(1), s.arg(2)),
 		s.TaskID, key); err != nil {
 		_ = tx.Rollback()
 		return fmt.Errorf("write %s: %w", s.qualified(), err)
 	}
 	if _, err := tx.ExecContext(ctx,
-		fmt.Sprintf("INSERT INTO %s (task_id, name, payload) VALUES (?, ?, ?)", s.qualified()),
+		fmt.Sprintf("INSERT INTO %s (task_id, name, payload) VALUES (%s, %s, %s)",
+			s.qualified(), s.arg(1), s.arg(2), s.arg(3)),
 		s.TaskID, key, payload); err != nil {
 		_ = tx.Rollback()
 		return fmt.Errorf("write %s: %w", s.qualified(), err)

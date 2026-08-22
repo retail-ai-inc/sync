@@ -30,6 +30,17 @@ type SQLStore struct {
 	Schema string
 	// Address describes the endpoint without credentials.
 	Address string
+	// NumberedPlaceholders spells parameters as $1, $2 rather than ?, which is
+	// what PostgreSQL takes. MySQL and SQLite take the question marks.
+	NumberedPlaceholders bool
+}
+
+// arg renders the nth parameter marker, counting from one.
+func (s *SQLStore) arg(n int) string {
+	if s.NumberedPlaceholders {
+		return "$" + strconv.Itoa(n)
+	}
+	return "?"
 }
 
 func (s *SQLStore) Endpoint() string { return s.Address }
@@ -102,13 +113,14 @@ func (s *SQLStore) Put(ctx context.Context, c Claim) error {
 	// Delete and insert rather than an upsert, because the two flavours spell
 	// an upsert differently and this is one row.
 	if _, err := tx.ExecContext(ctx,
-		fmt.Sprintf("DELETE FROM %s WHERE task_id = ?", s.qualified()), c.TaskID); err != nil {
+		fmt.Sprintf("DELETE FROM %s WHERE task_id = %s", s.qualified(), s.arg(1)),
+		c.TaskID); err != nil {
 		_ = tx.Rollback()
 		return fmt.Errorf("write %s: %w", s.qualified(), err)
 	}
 	if _, err := tx.ExecContext(ctx, fmt.Sprintf(
-		"INSERT INTO %s (task_id, role, peer, owner, updated_at) VALUES (?, ?, ?, ?, ?)",
-		s.qualified()),
+		"INSERT INTO %s (task_id, role, peer, owner, updated_at) VALUES (%s, %s, %s, %s, %s)",
+		s.qualified(), s.arg(1), s.arg(2), s.arg(3), s.arg(4), s.arg(5)),
 		c.TaskID, string(c.Role), c.Peer, c.Owner, c.UpdatedAt.Format(time.RFC3339)); err != nil {
 		_ = tx.Rollback()
 		return fmt.Errorf("write %s: %w", s.qualified(), err)

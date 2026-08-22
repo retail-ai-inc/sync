@@ -5,8 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"net/url"
-	"os"
-	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -19,8 +17,12 @@ import (
 	"github.com/jackc/pgx/v5/pgproto3"
 	_ "github.com/lib/pq"
 	"github.com/retail-ai-inc/sync/internal/platform/config"
+	"github.com/retail-ai-inc/sync/internal/platform/dsn"
+	"github.com/retail-ai-inc/sync/internal/platform/metrics"
 	"github.com/retail-ai-inc/sync/internal/platform/resilience"
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
+	"github.com/retail-ai-inc/sync/internal/replication/infra/checkpoint"
+	"github.com/retail-ai-inc/sync/internal/replication/infra/directionlock"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/security"
 	"github.com/sirupsen/logrus"
 )
@@ -54,6 +56,11 @@ type PostgreSQLSyncer struct {
 	state replicationState
 
 	lastExecError int32
+
+	// checkpoints is where the replication position is recorded. It writes to
+	// the target database as well as the local file, so a syncer replaced in the
+	// other region can find out where to resume from.
+	checkpoints checkpoint.Store
 }
 
 // NewPostgreSQLSyncer creates a new PostgreSQL synchronizer
@@ -113,6 +120,20 @@ func (s *PostgreSQLSyncer) Start(ctx context.Context) error {
 	}
 	defer s.targetDB.Close()
 
+	// Nothing is read or written until the direction is agreed. A target that
+	// has been promoted, or a source that is itself somebody's target, means the
+	// pair has been reversed under us and carrying on would overwrite the newer
+	// side with the older one.
+	releaseGuard, guardErr := s.claimDirection(ctx)
+	if guardErr != nil {
+		return domain.Unrecoverable("%v", guardErr)
+	}
+	defer releaseGuard()
+
+	s.checkpoints = s.checkpointStore()
+	metrics.SetTaskUp(s.metricLabels(), true)
+	defer metrics.SetTaskUp(s.metricLabels(), false)
+
 	s.repSlot = s.cfg.PGReplicationSlot()
 	s.outputPlugin = s.cfg.PGPlugin()
 	s.publicationNames = s.cfg.PGPublicationNames
@@ -137,13 +158,12 @@ func (s *PostgreSQLSyncer) Start(ctx context.Context) error {
 		return fmt.Errorf("prepare the replication slot: %w", err)
 	}
 
-	if s.cfg.PGPositionPath != "" {
-		lsnFromFile, errLoad := s.loadPosition(s.cfg.PGPositionPath)
-		if errLoad == nil && lsnFromFile > 0 {
-			s.logger.Infof("[PostgreSQL] Loaded last LSN from file: %X", lsnFromFile)
-			s.currentLsn = lsnFromFile
-			s.state.lastWrittenLSN = lsnFromFile
-		}
+	if stored, errLoad := s.loadStoredLSN(ctx); errLoad != nil {
+		return fmt.Errorf("read the stored replication position: %w", errLoad)
+	} else if stored > 0 {
+		s.logger.Infof("[PostgreSQL] Resuming from LSN %X", stored)
+		s.currentLsn = stored
+		s.state.lastWrittenLSN = stored
 	}
 
 	if err := s.prepareTargetSchema(ctx); err != nil {
@@ -650,12 +670,12 @@ func (s *PostgreSQLSyncer) startLogicalReplication(ctx context.Context) error {
 					if atomic.LoadInt32(&s.lastExecError) == 0 {
 						s.state.lastWrittenLSN = s.state.currentTxLSN
 						s.logger.Debugf("[PostgreSQL] Commit => LSN %s saved", s.state.lastWrittenLSN)
-						if s.cfg.PGPositionPath != "" {
-							if fErr := s.writeWALPosition(s.state.lastWrittenLSN); fErr != nil {
-								s.logger.Errorf("[PostgreSQL] writeWALPosition fail: %v", fErr)
-							}
+						if fErr := s.recordLSN(ctx, s.state.lastWrittenLSN); fErr != nil {
+							s.logger.Errorf("[PostgreSQL] Could not record the position: %v", fErr)
 						}
+						metrics.Applied(s.metricLabels(), 1)
 					} else {
+						metrics.Failed(s.metricLabels(), 1)
 						s.logger.Warn("[PostgreSQL] Commit => skip writing LSN because lastExecError != 0")
 					}
 				}
@@ -1050,68 +1070,6 @@ func (s *PostgreSQLSyncer) replicateQuery(db *sql.DB, query, opType, tableName s
 	return err
 }
 
-// loadPosition loads position from file
-func (s *PostgreSQLSyncer) loadPosition(path string) (pglogrepl.LSN, error) {
-	s.logger.Debugf("[PostgreSQL] Loading LSN from file: %s", path)
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		s.logger.Warnf("[PostgreSQL] Failed to read position file: %v", err)
-		return 0, err
-	}
-
-	str := strings.TrimSpace(string(data))
-	if len(str) < 3 {
-		s.logger.Warnf("[PostgreSQL] Position file content too short: '%s'", str)
-		return 0, fmt.Errorf("empty position file")
-	}
-
-	lsn, err := parseLSNFromString(str)
-	if err != nil {
-		s.logger.Warnf("[PostgreSQL] Failed to parse LSN from string '%s': %v", str, err)
-		return 0, err
-	}
-
-	s.logger.Debugf("[PostgreSQL] Successfully parsed LSN: %s (%X)", str, lsn)
-	return lsn, nil
-}
-
-// writeWALPosition writes WAL position to file
-func (s *PostgreSQLSyncer) writeWALPosition(lsn pglogrepl.LSN) error {
-	path := s.cfg.PGPositionPath
-	if path == "" {
-		return nil
-	}
-
-	if lsn <= 0 {
-		s.logger.Warn("[PostgreSQL] Attempting to write invalid LSN (zero or negative)")
-		return fmt.Errorf("invalid LSN value: %d", lsn)
-	}
-
-	lsnStr := lsn.String()
-	if lsnStr == "" || !strings.Contains(lsnStr, "/") {
-		s.logger.Warn("[PostgreSQL] LSN.String() returned invalid format")
-		return fmt.Errorf("LSN string format invalid: %s", lsnStr)
-	}
-
-	s.logger.Debugf("[PostgreSQL] Writing LSN to file: %s => %s", path, lsnStr)
-
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		s.logger.Errorf("[PostgreSQL] Failed to create directory for position file: %v", err)
-		return err
-	}
-
-	if err := os.WriteFile(path, []byte(lsnStr), 0644); err != nil {
-		s.logger.Errorf("[PostgreSQL] Failed to write position to file: %v", err)
-		return err
-	}
-
-	s.logger.Debugf("[PostgreSQL] Successfully wrote LSN position to file")
-	return nil
-}
-
-// parseLSNFromString parses LSN from string
 func parseLSNFromString(lsnStr string) (pglogrepl.LSN, error) {
 	lsnStr = strings.TrimSpace(lsnStr)
 	if lsnStr == "" {
@@ -1149,4 +1107,128 @@ func hexStrToUint32(s string) (uint32, error) {
 		return 0, err
 	}
 	return uint32(val), nil
+}
+
+// claimDirection records which way this task replicates, on both databases, and
+// keeps the claims refreshed for as long as it runs.
+//
+// It opens a second connection to the source through database/sql, because the
+// two the replication path holds are a pgx connection and a replication
+// connection, and neither takes ordinary queries the way the claim store does.
+func (s *PostgreSQLSyncer) claimDirection(ctx context.Context) (func(), error) {
+	sourceDB, err := sql.Open("postgres", s.cfg.SourceConnection)
+	if err != nil {
+		return nil, fmt.Errorf("open the source to claim the replication direction: %w", err)
+	}
+
+	guard := &directionlock.Guard{
+		TaskID: s.cfg.ID,
+		Source: &directionlock.SQLStore{
+			DB:                   sourceDB,
+			Address:              dsn.Endpoint("postgresql", s.cfg.SourceConnection),
+			NumberedPlaceholders: true,
+		},
+		Target: &directionlock.SQLStore{
+			DB:                   s.targetDB,
+			Address:              dsn.Endpoint("postgresql", s.cfg.TargetConnection),
+			NumberedPlaceholders: true,
+		},
+	}
+
+	if err := guard.Acquire(ctx); err != nil {
+		_ = sourceDB.Close()
+		return nil, err
+	}
+
+	heartbeatCtx, stop := context.WithCancel(ctx)
+	go guard.KeepAlive(heartbeatCtx, func(err error) {
+		s.logger.Warnf("[PostgreSQL] Could not refresh the replication direction claim: %v", err)
+	})
+
+	return func() {
+		stop()
+		_ = sourceDB.Close()
+	}, nil
+}
+
+// checkpointStore is where this task records its replication position.
+//
+// It writes to the target database as well as the configured file. The file
+// alone was the problem: the syncer runs beside the source, so the outage this
+// setup exists to survive takes the record of what has been applied with it, and
+// a replacement started in the other region has no way to find out where to
+// resume from.
+func (s *PostgreSQLSyncer) checkpointStore() checkpoint.Store {
+	stores := []checkpoint.Store{
+		&checkpoint.SQLStore{
+			DB:                   s.targetDB,
+			TaskID:               s.cfg.ID,
+			NumberedPlaceholders: true,
+		},
+	}
+	if s.cfg.PGPositionPath != "" {
+		stores = append(stores, &checkpoint.FileStore{Path: s.cfg.PGPositionPath})
+	}
+	return &checkpoint.Layered{
+		Stores:  stores,
+		OnError: func(err error) { s.logger.Warnf("[PostgreSQL] Checkpoint store: %v", err) },
+	}
+}
+
+// walCheckpoint is what the position store holds.
+type walCheckpoint struct {
+	LSN string `json:"lsn"`
+	// Source names the server the position belongs to, without credentials. An
+	// LSN means nothing on another server: read there it addresses unrelated WAL,
+	// and the read succeeds.
+	Source string `json:"source,omitempty"`
+}
+
+// loadStoredLSN reports the position to resume from, or zero when there is none.
+func (s *PostgreSQLSyncer) loadStoredLSN(ctx context.Context) (pglogrepl.LSN, error) {
+	payload, err := s.checkpoints.Load(ctx, "")
+	if err != nil {
+		return 0, err
+	}
+	if payload == "" {
+		return 0, nil
+	}
+
+	// A file written by an older build holds the LSN as plain text rather than a
+	// document, so both forms are read.
+	var cp walCheckpoint
+	if found, decodeErr := checkpoint.Decode(payload, &cp); decodeErr != nil || !found {
+		return parseLSNFromString(strings.TrimSpace(payload))
+	}
+
+	if want := dsn.Endpoint("postgresql", s.cfg.SourceConnection); cp.Source != "" && cp.Source != want {
+		s.logger.Warnf("[PostgreSQL] Ignoring a position recorded against %s: this task "+
+			"reads %s, and an LSN means nothing on another server. The copy will be "+
+			"made again.", cp.Source, want)
+		return 0, nil
+	}
+	return parseLSNFromString(cp.LSN)
+}
+
+// recordLSN stores the position everything before it has been applied at.
+func (s *PostgreSQLSyncer) recordLSN(ctx context.Context, lsn pglogrepl.LSN) error {
+	payload, err := checkpoint.Encode(walCheckpoint{
+		LSN:    lsn.String(),
+		Source: dsn.Endpoint("postgresql", s.cfg.SourceConnection),
+	})
+	if err != nil {
+		return err
+	}
+	return s.checkpoints.Save(ctx, "", payload)
+}
+
+// metricLabels identify this task in the metrics. The endpoints are named
+// without their credentials, because the exposition is scraped and stored.
+func (s *PostgreSQLSyncer) metricLabels() metrics.Labels {
+	return metrics.Labels{
+		"task":   strconv.Itoa(s.cfg.ID),
+		"engine": "postgresql",
+		"source": dsn.Endpoint("postgresql", s.cfg.SourceConnection),
+		"target": dsn.Endpoint("postgresql", s.cfg.TargetConnection),
+	}
 }

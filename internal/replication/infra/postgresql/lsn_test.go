@@ -1,6 +1,7 @@
 package postgresql
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/jackc/pglogrepl"
 	"github.com/retail-ai-inc/sync/internal/platform/config"
+	"github.com/retail-ai-inc/sync/internal/replication/infra/checkpoint"
 )
 
 func TestHexStrToUint32(t *testing.T) {
@@ -102,136 +104,122 @@ func TestAnLSNSurvivesTheRoundTrip(t *testing.T) {
 	}
 }
 
-func TestLoadPositionReadsAStoredLSN(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "pos")
+// fileBacked returns a syncer whose position is recorded in one file, which is
+// what the layered store falls back to when no target is configured.
+func fileBacked(t *testing.T, source string) (*PostgreSQLSyncer, string) {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "nested", "pos")
+	s := newSyncer(t, config.SyncConfig{
+		PGPositionPath:   path,
+		SourceConnection: source,
+	})
+	s.checkpoints = &checkpoint.FileStore{Path: path}
+	return s, path
+}
+
+func TestTheRecordedPositionIsReadBack(t *testing.T) {
+	s, _ := fileBacked(t, "postgres://u:p@tokyo:5432/shop")
+	want := pglogrepl.LSN(uint64(7)<<32 + 0x1234)
+
+	if err := s.recordLSN(context.Background(), want); err != nil {
+		t.Fatalf("recordLSN: %v", err)
+	}
+
+	got, err := s.loadStoredLSN(context.Background())
+	if err != nil {
+		t.Fatalf("loadStoredLSN: %v", err)
+	}
+	if got != want {
+		t.Errorf("read back %s, recorded %s", got, want)
+	}
+}
+
+func TestNoRecordedPositionIsZero(t *testing.T) {
+	s, _ := fileBacked(t, "postgres://u:p@tokyo:5432/shop")
+
+	got, err := s.loadStoredLSN(context.Background())
+	if err != nil {
+		t.Fatalf("loadStoredLSN: %v", err)
+	}
+	if got != 0 {
+		t.Errorf("lsn = %s with nothing recorded", got)
+	}
+}
+
+// TestAPlainTextPositionFileIsStillRead keeps an existing deployment resuming.
+// Older builds wrote the LSN as bare text rather than a document, and refusing
+// it would re-copy every table on upgrade.
+func TestAPlainTextPositionFileIsStillRead(t *testing.T) {
+	s, path := fileBacked(t, "postgres://u:p@tokyo:5432/shop")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
 	if err := os.WriteFile(path, []byte("2/16B3748\n"), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 
-	lsn, err := newSyncer(t, config.SyncConfig{}).loadPosition(path)
+	got, err := s.loadStoredLSN(context.Background())
 	if err != nil {
-		t.Fatalf("loadPosition: %v", err)
+		t.Fatalf("loadStoredLSN: %v", err)
 	}
-	if want := pglogrepl.LSN(uint64(2)<<32 + 0x16B3748); lsn != want {
-		t.Errorf("lsn = %s, want %s", lsn, want)
-	}
-}
-
-func TestLoadPositionReportsAMissingFile(t *testing.T) {
-	_, err := newSyncer(t, config.SyncConfig{}).loadPosition(
-		filepath.Join(t.TempDir(), "absent"))
-	if err == nil {
-		t.Fatal("loadPosition on a missing file returned no error")
+	if want := pglogrepl.LSN(uint64(2)<<32 + 0x16B3748); got != want {
+		t.Errorf("lsn = %s, want %s", got, want)
 	}
 }
 
-// TestAShortPositionFileIsRejectedByLength records the length guard: anything
-// under three characters is refused before parsing, so the shortest legal LSN
-// text — "0/0" — is exactly at the limit and "1/2" is accepted while a
-// two-character file is not, whatever it contains.
-func TestAShortPositionFileIsRejectedByLength(t *testing.T) {
-	dir := t.TempDir()
-	s := newSyncer(t, config.SyncConfig{})
-
-	for _, content := range []string{"", "0", "/0", "  "} {
-		path := filepath.Join(dir, "pos")
-		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-			t.Fatalf("write: %v", err)
-		}
-		if _, err := s.loadPosition(path); err == nil {
-			t.Errorf("loadPosition(%q) returned no error", content)
-		}
+func TestAMalformedPositionIsReported(t *testing.T) {
+	s, path := fileBacked(t, "postgres://u:p@tokyo:5432/shop")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
 	}
-
-	path := filepath.Join(dir, "pos")
-	if err := os.WriteFile(path, []byte("0/0"), 0o644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	if _, err := s.loadPosition(path); err != nil {
-		t.Errorf("loadPosition(\"0/0\"): %v", err)
-	}
-}
-
-func TestLoadPositionRejectsAMalformedLSN(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "pos")
 	if err := os.WriteFile(path, []byte("not-an-lsn"), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 
-	if _, err := newSyncer(t, config.SyncConfig{}).loadPosition(path); err == nil {
-		t.Fatal("loadPosition on a malformed file returned no error")
+	if _, err := s.loadStoredLSN(context.Background()); err == nil {
+		t.Error("a malformed position was accepted")
 	}
 }
 
-func TestWriteWALPositionCreatesTheDirectory(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "nested", "deeper", "pos")
-	s := newSyncer(t, config.SyncConfig{PGPositionPath: path})
+// TestAPositionFromAnotherSourceIsIgnored is the guard that matters most here.
+// An LSN means nothing on another server: read there it addresses unrelated WAL
+// and the read succeeds, so the task resumes from somewhere arbitrary with
+// nothing to show for it.
+func TestAPositionFromAnotherSourceIsIgnored(t *testing.T) {
+	s, _ := fileBacked(t, "postgres://u:p@tokyo:5432/shop")
+	if err := s.recordLSN(context.Background(), pglogrepl.LSN(uint64(7)<<32)); err != nil {
+		t.Fatalf("recordLSN: %v", err)
+	}
 
-	if err := s.writeWALPosition(pglogrepl.LSN(uint64(2)<<32 + 0x16B3748)); err != nil {
-		t.Fatalf("writeWALPosition: %v", err)
+	// The same task, repointed at a different server.
+	s.cfg.SourceConnection = "postgres://u:p@osaka:5432/shop"
+	got, err := s.loadStoredLSN(context.Background())
+	if err != nil {
+		t.Fatalf("loadStoredLSN: %v", err)
+	}
+	if got != 0 {
+		t.Errorf("lsn = %s; a position from another server was accepted", got)
+	}
+}
+
+// TestTheRecordedPositionCarriesNoCredentials pins what is written into a
+// database somebody will read.
+func TestTheRecordedPositionCarriesNoCredentials(t *testing.T) {
+	s, path := fileBacked(t, "postgres://u:hunter2@tokyo:5432/shop")
+	if err := s.recordLSN(context.Background(), pglogrepl.LSN(1)); err != nil {
+		t.Fatalf("recordLSN: %v", err)
 	}
 
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read back: %v", err)
 	}
-	if got := strings.TrimSpace(string(data)); got != "2/16B3748" {
-		t.Errorf("file = %q", got)
+	if strings.Contains(string(data), "hunter2") {
+		t.Errorf("the recorded position carries the password: %s", data)
 	}
-}
-
-// TestWriteWALPositionWithNoConfiguredPathIsANoOp records that an unset
-// pg_position_path turns the writer off silently: the call reports success and
-// nothing is stored, so a PostgreSQL task with no configured path restarts from
-// whatever the slot offers rather than from its last committed LSN.
-func TestWriteWALPositionWithNoConfiguredPathIsANoOp(t *testing.T) {
-	if err := newSyncer(t, config.SyncConfig{}).writeWALPosition(42); err != nil {
-		t.Fatalf("writeWALPosition with no path: %v — an unset path appears to be "+
-			"reported now, so assert that instead", err)
-	}
-}
-
-func TestWriteWALPositionRejectsAZeroLSN(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "pos")
-	s := newSyncer(t, config.SyncConfig{PGPositionPath: path})
-
-	if err := s.writeWALPosition(0); err == nil {
-		t.Fatal("writeWALPosition(0) returned no error")
-	}
-	if _, err := os.Stat(path); err == nil {
-		t.Error("a file was written for a zero LSN")
-	}
-}
-
-func TestWriteWALPositionReportsAnUnwritablePath(t *testing.T) {
-	// A path whose parent is a regular file cannot be created.
-	blocker := filepath.Join(t.TempDir(), "file")
-	if err := os.WriteFile(blocker, nil, 0o644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	s := newSyncer(t, config.SyncConfig{PGPositionPath: filepath.Join(blocker, "pos")})
-
-	if err := s.writeWALPosition(42); err == nil {
-		t.Fatal("writeWALPosition to an unwritable path returned no error")
-	}
-}
-
-// TestTheWrittenPositionIsReadBack closes the loop between the two halves, which
-// is the only thing that makes a restart resume where the stream stopped.
-func TestTheWrittenPositionIsReadBack(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "pos")
-	s := newSyncer(t, config.SyncConfig{PGPositionPath: path})
-	want := pglogrepl.LSN(uint64(7)<<32 + 0x1234)
-
-	if err := s.writeWALPosition(want); err != nil {
-		t.Fatalf("writeWALPosition: %v", err)
-	}
-	got, err := s.loadPosition(path)
-	if err != nil {
-		t.Fatalf("loadPosition: %v", err)
-	}
-	if got != want {
-		t.Errorf("read back %s, wrote %s", got, want)
+	if !strings.Contains(string(data), "tokyo:5432/shop") {
+		t.Errorf("the recorded position does not name the source: %s", data)
 	}
 }
 
