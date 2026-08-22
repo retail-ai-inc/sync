@@ -51,6 +51,9 @@ type MongoDBSyncer struct {
 	globalConfig *config.Config
 	// checkpoints is where the resume tokens and start times are recorded.
 	checkpoints checkpoint.Store
+	// connectErr is why the constructor could not reach one side, kept so Start
+	// can report it rather than the caller having to notice a nil syncer.
+	connectErr error
 	// faults carries the first reason a watcher gave up, so Start can report it
 	// rather than blocking on collections that have all stopped. It holds one
 	// value: the first reason is the one worth acting on and the rest follow
@@ -58,50 +61,28 @@ type MongoDBSyncer struct {
 	faults chan error
 }
 
+// NewMongoDBSyncer builds the syncer for one task.
+//
+// It never returns nil. It used to, for a connection string the driver would
+// not parse — and the caller then called Start on that nil pointer, which
+// dereferences it. The panic happened in the goroutine one task runs in, where
+// nothing recovers it, so one mistyped URI took down every other task and the
+// API with it. A syncer that could not connect is returned carrying the reason
+// instead, and Start reports it.
 func NewMongoDBSyncer(cfg config.SyncConfig, globalConfig *config.Config, logger *logrus.Logger) *MongoDBSyncer {
-	var err error
-	var sourceClient *mongo.Client
+	ctx := context.Background()
 
-	// First attempt to connect to source without retry to check for immediate failures
-	sourceClient, err = mongo.Connect(context.Background(), options.Client().ApplyURI(cfg.SourceConnection))
-	if err != nil {
-		// Check if it's a URI parsing error, if so, don't retry
-		if strings.Contains(err.Error(), "scheme must be") || strings.Contains(err.Error(), "error parsing uri") {
-			logger.Errorf("[MongoDB] Invalid source connection URI: %v", err)
-			return nil
-		}
-		// For other errors, retry with exponential backoff
-		err = resilience.Retry(5, 2*time.Second, 2.0, func() error {
-			var connErr error
-			sourceClient, connErr = mongo.Connect(context.Background(), options.Client().ApplyURI(cfg.SourceConnection))
-			return connErr
-		})
-		if err != nil {
-			logger.Errorf("[MongoDB] Failed to connect to source after retries: %v", err)
-			return nil
-		}
+	sourceClient, sourceErr := connectMongo(ctx, cfg.SourceConnection)
+	if sourceErr != nil {
+		logger.Errorf("[MongoDB] Could not connect to the source: %v", sourceErr)
 	}
-
-	var targetClient *mongo.Client
-
-	// First attempt to connect to target without retry to check for immediate failures
-	targetClient, err = mongo.Connect(context.Background(), options.Client().ApplyURI(cfg.TargetConnection))
-	if err != nil {
-		// Check if it's a URI parsing error, if so, don't retry
-		if strings.Contains(err.Error(), "scheme must be") || strings.Contains(err.Error(), "error parsing uri") {
-			logger.Errorf("[MongoDB] Invalid target connection URI: %v", err)
-			return nil
-		}
-		// For other errors, retry with exponential backoff
-		err = resilience.Retry(5, 2*time.Second, 2.0, func() error {
-			var connErr error
-			targetClient, connErr = mongo.Connect(context.Background(), options.Client().ApplyURI(cfg.TargetConnection))
-			return connErr
-		})
-		if err != nil {
-			logger.Errorf("[MongoDB] Failed to connect to target after retries: %v", err)
-			return nil
-		}
+	targetClient, targetErr := connectMongo(ctx, cfg.TargetConnection)
+	if targetErr != nil {
+		logger.Errorf("[MongoDB] Could not connect to the target: %v", targetErr)
+	}
+	connectErr := sourceErr
+	if connectErr == nil {
+		connectErr = targetErr
 	}
 
 	resumeMap := make(map[string]bson.Raw)
@@ -138,6 +119,7 @@ func NewMongoDBSyncer(cfg config.SyncConfig, globalConfig *config.Config, logger
 	return &MongoDBSyncer{
 		sourceClient:     sourceClient,
 		targetClient:     targetClient,
+		connectErr:       connectErr,
 		cfg:              cfg,
 		logger:           logger.WithField("sync_task_id", cfg.ID),
 		resumeTokens:     resumeMap,
@@ -159,13 +141,58 @@ func NewMongoDBSyncer(cfg config.SyncConfig, globalConfig *config.Config, logger
 	}
 }
 
+// connectMongo dials one side, retrying while the failure looks like something
+// a later attempt could survive. A URI the driver rejects is not: it is
+// returned immediately so the caller can say so.
+func connectMongo(ctx context.Context, uri string) (*mongo.Client, error) {
+	var client *mongo.Client
+
+	err := resilience.Retry(ctx, 5, 2*time.Second, 2.0, func() error {
+		var connErr error
+		client, connErr = mongo.Connect(ctx, options.Client().ApplyURI(uri))
+		if isURIError(connErr) {
+			return permanentURI{connErr}
+		}
+		return connErr
+	})
+	if err != nil {
+		return nil, err
+	}
+	return client, nil
+}
+
+// isURIError reports whether the driver refused the connection string itself.
+func isURIError(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := err.Error()
+	return strings.Contains(text, "scheme must be") ||
+		strings.Contains(text, "error parsing uri") ||
+		strings.Contains(text, "invalid connection string")
+}
+
+// permanentURI stops Retry: no amount of waiting makes a malformed URI parse.
+type permanentURI struct{ error }
+
+func (p permanentURI) Unwrap() error   { return p.error }
+func (p permanentURI) Permanent() bool { return true }
+
 // Start replicates until the context is cancelled, or until it cannot carry on.
 //
 // The returned error is what the supervisor decides on: nil or a transient
 // failure means try again, an ErrUnrecoverable means stop and tell somebody.
 func (s *MongoDBSyncer) Start(ctx context.Context) error {
 	if s.sourceClient == nil || s.targetClient == nil {
+		if isURIError(s.connectErr) {
+			// No later attempt will parse it either; somebody has to fix the
+			// configuration.
+			return domain.Unrecoverable("connect to MongoDB: %v", s.connectErr)
+		}
 		// The constructor could not reach one of them, which a later attempt may.
+		if s.connectErr != nil {
+			return fmt.Errorf("connect to the source and target: %w", s.connectErr)
+		}
 		return fmt.Errorf("connect to the source and target")
 	}
 	s.logger.Info("[MongoDB] Starting synchronization...")

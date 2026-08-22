@@ -60,41 +60,31 @@ func TestCheckMongoConnectionHonoursACancelledContext(t *testing.T) {
 	}
 }
 
-// TestRetryIgnoresTheContext records a defect this test suite found.
-//
-// Retry takes no context. It sleeps between attempts whatever the caller's
-// context says, so a cancelled or expired context cannot stop it. The two
-// reconnect helpers call it with five attempts, a two-second base and a doubling
-// factor: 2 + 4 + 8 + 16 = 30 seconds of sleeping, plus whatever each attempt
-// itself costs. ReopenMongoConnection against an unreachable server therefore
-// runs for about a minute and cannot be interrupted — during shutdown included.
-//
-// This test uses a millisecond base so it costs nothing; the arithmetic above is
-// what production pays.
-func TestRetryIgnoresTheContext(t *testing.T) {
+// TestTheReconnectBudgetIsBounded covers what shutdown depends on. The
+// reconnect helpers call Retry with five attempts, a two-second base and a
+// doubling factor: 2 + 4 + 8 + 16 = 30 seconds of waiting on top of whatever
+// each attempt itself costs. Retry took no context, so none of that waiting
+// could be interrupted — including by the process shutting down, which gives a
+// task ten seconds. The context now stops it.
+func TestTheReconnectBudgetIsBounded(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // already cancelled
 
 	attempts := 0
 	start := time.Now()
-	err := Retry(4, time.Millisecond, 2.0, func() error {
+	err := Retry(ctx, 4, time.Minute, 2.0, func() error {
 		attempts++
-		if ctx.Err() != nil {
-			// The work function can see the cancellation; Retry cannot.
-			return errors.New("context cancelled")
-		}
-		return nil
+		return errors.New("source is down")
 	})
 
 	if err == nil {
 		t.Fatal("Retry succeeded")
 	}
-	if attempts != 4 {
-		t.Fatalf("Retry made %d attempts despite a cancelled context, want 4 — it "+
-			"appears to take a context now, so assert that instead", attempts)
+	if attempts > 1 {
+		t.Errorf("Retry made %d attempts against a cancelled context, want 1", attempts)
 	}
-	if elapsed := time.Since(start); elapsed < time.Millisecond {
-		t.Errorf("Retry did not sleep between attempts (%v)", elapsed)
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("Retry waited %v after its context was cancelled", elapsed)
 	}
 }
 

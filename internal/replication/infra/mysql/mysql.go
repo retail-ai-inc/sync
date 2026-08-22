@@ -99,7 +99,7 @@ func (s *MySQLSyncer) Start(ctx context.Context) error {
 	}
 
 	var c *canal.Canal
-	err := resilience.Retry(5, 2*time.Second, 2.0, func() error {
+	err := resilience.Retry(ctx, 5, 2*time.Second, 2.0, func() error {
 		var e error
 		c, e = canal.NewCanal(cfg)
 		return e
@@ -113,7 +113,7 @@ func (s *MySQLSyncer) Start(ctx context.Context) error {
 	}
 
 	var targetDB *sql.DB
-	err = resilience.Retry(5, 2*time.Second, 2.0, func() error {
+	err = resilience.Retry(ctx, 5, 2*time.Second, 2.0, func() error {
 		var connErr error
 		targetDB, connErr = sql.Open("mysql", s.cfg.TargetConnection)
 		if connErr != nil {

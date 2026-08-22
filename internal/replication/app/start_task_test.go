@@ -2,11 +2,14 @@ package app
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"testing"
 	"time"
 
 	"github.com/retail-ai-inc/sync/internal/platform/config"
+	"github.com/retail-ai-inc/sync/internal/replication/domain"
 	"github.com/sirupsen/logrus"
 )
 
@@ -55,22 +58,23 @@ func TestThreeOfFourConstructorsNeverFail(t *testing.T) {
 	}
 }
 
-// TestAMalformedMongoURIYieldsANilSyncer records a defect this test suite found.
+// TestAMalformedMongoURIIsReportedNotPanicked covers what one typo in one
+// task's connection string used to cost.
 //
-// NewMongoDBSyncer answers a connection string the driver cannot parse by
-// logging and returning nil — no retries, no error. The process entry point
-// then writes
+// NewMongoDBSyncer answered a connection string the driver cannot parse by
+// logging and returning nil — no retries, no error. The process entry point then
+// wrote
 //
 //	replicationapp.NewMongoDBSyncer(sc, cfg, log).Start(ctx)
 //
 // with no nil check, in a goroutine. Start has a pointer receiver and its first
-// statement reads s.sourceClient, so a nil syncer dereferences nil and panics.
-// The panic is unrecovered and in a goroutine, so it takes the whole process
+// statement reads s.sourceClient, so a nil syncer dereferenced nil and panicked.
+// The panic was unrecovered and in a goroutine, so it took the whole process
 // down: every other replication task and the API server with it.
 //
-// One task configured with a typo in its connection string is therefore enough
-// to stop the service from starting.
-func TestAMalformedMongoURIYieldsANilSyncer(t *testing.T) {
+// The syncer now comes back carrying the reason, and Start reports it as
+// unrecoverable, because no later attempt will parse it either.
+func TestAMalformedMongoURIIsReportedNotPanicked(t *testing.T) {
 	cfg := config.SyncConfig{
 		ID:               1,
 		Type:             "mongodb",
@@ -78,38 +82,45 @@ func TestAMalformedMongoURIYieldsANilSyncer(t *testing.T) {
 		TargetConnection: "not-a-uri",
 	}
 
-	got := NewMongoDBSyncer(cfg, nil, quietLogger())
-	if got != nil {
-		t.Fatalf("NewMongoDBSyncer returned %T for an unparseable URI; it appears to "+
-			"report the failure now, so assert that instead", got)
+	syncer := NewMongoDBSyncer(cfg, nil, quietLogger())
+	if syncer == nil {
+		t.Fatal("NewMongoDBSyncer returned nil, which the caller dereferences")
 	}
 
-	// What the entry point does with that nil.
-	done := make(chan interface{}, 1)
+	done := make(chan error, 1)
 	go func() {
-		defer func() { done <- recover() }()
-		got.Start(context.Background())
+		defer func() {
+			if r := recover(); r != nil {
+				done <- fmt.Errorf("Start panicked: %v", r)
+			}
+		}()
+		done <- syncer.Start(context.Background())
 	}()
 
 	select {
-	case r := <-done:
-		if r == nil {
-			t.Fatal("Start on a nil syncer returned without panicking; a nil receiver " +
-				"appears to be handled now, so assert that instead")
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Start returned nil for a syncer that never connected")
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("Start on a nil syncer neither returned nor panicked")
+		if !errors.Is(err, domain.ErrUnrecoverable) {
+			t.Errorf("Start returned %v; a URI the driver will not parse is not "+
+				"something a restart fixes", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("Start neither returned nor panicked")
 	}
 }
 
-// TestAnEmptyMongoURIAlsoYieldsNil records the same path for a task whose
+// TestAnEmptyMongoURIIsAlsoReported covers the same path for a task whose
 // connection string was never filled in, which is what a configuration document
 // that failed to parse leaves behind.
-func TestAnEmptyMongoURIAlsoYieldsNil(t *testing.T) {
-	got := NewMongoDBSyncer(config.SyncConfig{ID: 1, Type: "mongodb"}, nil, quietLogger())
+func TestAnEmptyMongoURIIsAlsoReported(t *testing.T) {
+	syncer := NewMongoDBSyncer(config.SyncConfig{ID: 1, Type: "mongodb"}, nil, quietLogger())
 
-	if got != nil {
-		t.Fatalf("NewMongoDBSyncer returned %T for an empty URI; assert the new "+
-			"behaviour instead", got)
+	if syncer == nil {
+		t.Fatal("NewMongoDBSyncer returned nil, which the caller dereferences")
+	}
+	if err := syncer.Start(context.Background()); err == nil {
+		t.Error("Start returned nil for a task with no connection string")
 	}
 }

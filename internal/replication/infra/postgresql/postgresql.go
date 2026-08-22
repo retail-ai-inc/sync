@@ -82,7 +82,7 @@ func (s *PostgreSQLSyncer) Start(ctx context.Context) error {
 	s.logger.Info("[PostgreSQL] Starting synchronization...")
 
 	// Connect normal
-	err = resilience.Retry(5, 2*time.Second, 2.0, func() error {
+	err = resilience.Retry(ctx, 5, 2*time.Second, 2.0, func() error {
 		var connErr error
 		s.sourceConnNormal, connErr = pgx.Connect(ctx, s.cfg.SourceConnection)
 		return connErr
@@ -97,7 +97,7 @@ func (s *PostgreSQLSyncer) Start(ctx context.Context) error {
 	if err != nil {
 		return domain.Unrecoverable("build the replication DSN: %v", err)
 	}
-	err = resilience.Retry(5, 2*time.Second, 2.0, func() error {
+	err = resilience.Retry(ctx, 5, 2*time.Second, 2.0, func() error {
 		var connErr error
 		s.sourceConnRepl, connErr = pgconn.Connect(ctx, replDSN)
 		return connErr
@@ -112,7 +112,7 @@ func (s *PostgreSQLSyncer) Start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("open the target: %w", err)
 	}
-	err = resilience.Retry(5, 2*time.Second, 2.0, func() error {
+	err = resilience.Retry(ctx, 5, 2*time.Second, 2.0, func() error {
 		return s.targetDB.PingContext(ctx)
 	})
 	if err != nil {

@@ -104,7 +104,7 @@ func (r *RedisSyncer) Start(ctx context.Context) error {
 	r.logger.Info("[Redis] Starting synchronization...")
 
 	var err error
-	err = resilience.Retry(5, 2*time.Second, 2.0, func() error {
+	err = resilience.Retry(ctx, 5, 2*time.Second, 2.0, func() error {
 		var connErr error
 		r.source, connErr = intRedis.GetRedisClient(r.cfg.SourceConnection)
 		return connErr
@@ -112,7 +112,7 @@ func (r *RedisSyncer) Start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("connect to the source: %w", err)
 	}
-	err = resilience.Retry(5, 2*time.Second, 2.0, func() error {
+	err = resilience.Retry(ctx, 5, 2*time.Second, 2.0, func() error {
 		var connErr error
 		r.target, connErr = intRedis.GetRedisClient(r.cfg.TargetConnection)
 		return connErr

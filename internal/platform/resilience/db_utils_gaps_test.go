@@ -42,23 +42,19 @@ func TestReopenSQLConnection(t *testing.T) {
 	}
 }
 
-// ReopenSQLConnection routes every failure through Retry(5, 2s, 2.0) with no
-// error classification, so a permanent misconfiguration — an unregistered
-// driver, a malformed DSN — is retried five times over 62 seconds (2+4+8+16+32)
-// before the error surfaces. This test only proves the classification is
-// absent; the timing is covered by TestRetrySleepsAfterTheFinalFailure.
-func TestReopenSQLConnectionDoesNotClassifyErrors(t *testing.T) {
-	attempts := 0
-	err := Retry(2, time.Millisecond, 1.0, func() error {
-		attempts++
-		_, openErr := sql.Open("no-such-driver", "whatever")
-		return openErr
-	})
+// ReopenSQLConnection used to route every failure through Retry(5, 2s, 2.0)
+// with no classification at all, so a misconfiguration that no attempt could
+// survive — an unregistered driver, a malformed DSN — was retried five times
+// over sixty-two seconds before the error surfaced. It is now reported at once.
+func TestAnUnusableDriverIsReportedWithoutRetrying(t *testing.T) {
+	start := time.Now()
+
+	db, err := ReopenSQLConnection(t.Context(), quietLogger(), "whatever", "no-such-driver")
 
 	if err == nil {
-		t.Fatal("an unregistered driver did not produce an error")
+		t.Fatalf("an unregistered driver produced no error (db=%v)", db)
 	}
-	if attempts != 2 {
-		t.Fatalf("a permanent error was attempted %d times, want 2 — Retry appears to classify errors now", attempts)
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Errorf("took %v to report an unregistered driver; it is still being retried", elapsed)
 	}
 }

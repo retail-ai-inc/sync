@@ -46,41 +46,61 @@ func TestIsConnectionError(t *testing.T) {
 	}
 }
 
-// The classifier is a substring scan over the error text, so errors that are
-// permanent get retried. "connection" matches a malformed DSN, "EOF" matches a
-// truncated JSON document — neither is transient, and both cost three attempts
-// and seven seconds of backoff before the original error is returned.
-func TestPermanentErrorsAreClassifiedAsTransient(t *testing.T) {
+// A failure that no amount of waiting can fix must not be retried: the backoff
+// is spent for nothing and the message somebody needs to read is buried under
+// three identical warnings. The old classifier scanned the error text for
+// "connection" and "EOF", so a malformed connection string and a truncated
+// configuration document both looked transient.
+func TestAFailureWaitingCannotFixIsNotRetried(t *testing.T) {
 	permanent := []error{
 		errors.New(`invalid connection string: missing "@"`),
 		errors.New("unexpected EOF while parsing config JSON"),
 		errors.New("error parsing uri: scheme must be mongodb:// — bad connection uri"),
-		errors.New("unexpected EOF"),
+		errors.New("syntax error near 'SELCT'"),
+		errors.New("Access denied for user 'root'"),
 	}
 
 	for _, err := range permanent {
-		if !IsConnectionError(err) {
-			t.Fatalf("IsConnectionError(%q) = false — the classifier appears to have been narrowed; assert the new classification instead", err)
+		if IsConnectionError(err) {
+			t.Errorf("IsConnectionError(%q) = true, want false", err)
 		}
 	}
 }
 
-// Conversely, several errors that really are transient do not match any of the
-// substrings, so they are returned to the caller on the first attempt with no
-// retry at all.
-func TestTransientErrorsAreClassifiedAsPermanent(t *testing.T) {
+// These are what the drivers say while a replica set elects a new primary or a
+// managed instance restarts for maintenance — the moments this tool exists to
+// survive. None of them matched the old substring list, so each was given up on
+// at the first attempt.
+func TestTheFailuresOfAFailoverAreRetried(t *testing.T) {
 	transient := []error{
 		errors.New("server selection error: context deadline exceeded"),
 		errors.New("no reachable servers"),
 		errors.New("topology is closed"),
 		errors.New("database is locked"),
 		errors.New("Error 1213: Deadlock found when trying to get lock"),
+		errors.New("connection() error occurred during connection handshake"),
+		errors.New("socket was unexpectedly closed"),
+		errors.New("client is disconnected"),
+		errors.New("not primary; the current primary is host:27017"),
+		errors.New("Lost connection to MySQL server during query"),
 	}
 
 	for _, err := range transient {
-		if IsConnectionError(err) {
-			t.Fatalf("IsConnectionError(%q) = true — the classifier appears to have been widened; assert the new classification instead", err)
+		if !IsConnectionError(err) {
+			t.Errorf("IsConnectionError(%q) = false, want true", err)
 		}
+	}
+}
+
+// A cancelled context is this process deciding to stop. Retrying through it is
+// how a task asked to shut down kept trying to reach a database it was told to
+// let go of.
+func TestACancelledContextIsNotAConnectionFailure(t *testing.T) {
+	if IsConnectionError(context.Canceled) {
+		t.Error("IsConnectionError(context.Canceled) = true, want false")
+	}
+	if IsConnectionError(fmt.Errorf("write row: %w", context.Canceled)) {
+		t.Error("a wrapped cancellation was read as a connection failure")
 	}
 }
 
@@ -171,13 +191,13 @@ func TestRetryMongoOperationDelegatesToRetryDBOperation(t *testing.T) {
 	}
 }
 
-// The backoff sleep runs after every failed attempt including the last, so a
-// call that exhausts its three attempts spends 1s + 2s + 4s = 7s in
-// time.After. The final four seconds buy nothing: the loop is over and the
-// original error is returned regardless. During a failover — exactly when
-// every operation is failing — each retried call blocks its goroutine for
-// seven seconds instead of three.
-func TestTheFinalBackoffSleepIsWasted(t *testing.T) {
+// The backoff used to sleep after every failed attempt including the last, so a
+// call that exhausted its three attempts spent 1s + 2s + 4s = 7s waiting. The
+// final four seconds bought nothing — the loop was over and the same error came
+// back regardless — and during a failover, when every operation is failing,
+// each retried call held its goroutine for more than twice as long as it needed
+// to.
+func TestTheLastAttemptDoesNotWaitBeforeReporting(t *testing.T) {
 	calls := 0
 	start := time.Now()
 
@@ -194,7 +214,8 @@ func TestTheFinalBackoffSleepIsWasted(t *testing.T) {
 	if calls != 3 {
 		t.Errorf("fn called %d times, want 3", calls)
 	}
-	if elapsed < 6500*time.Millisecond {
-		t.Fatalf("took %v, expected ~7s — the trailing sleep appears to have been removed; assert the new timing instead", elapsed)
+	// 1s + 2s between the three attempts, and nothing after the third.
+	if elapsed > 5*time.Second {
+		t.Errorf("took %v, want about 3s — the trailing sleep is still there", elapsed)
 	}
 }
