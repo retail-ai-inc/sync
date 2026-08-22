@@ -3,6 +3,7 @@ package infra
 import (
 	"database/sql"
 	"github.com/retail-ai-inc/sync/internal/platform/sqlite"
+	"github.com/retail-ai-inc/sync/internal/platform/sqlite/sqlitetest"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -22,39 +23,22 @@ func useTempTaskDB(t *testing.T) *sql.DB {
 	path := filepath.Join(t.TempDir(), "sync.db")
 	t.Setenv("SYNC_DB_PATH", path)
 
-	db, err := sql.Open("sqlite3", path)
+	// Through the real opener, which carries the whole schema and creates it
+	// only when it is missing — rather than a copy kept here that can drift from
+	// it, and that a background goroutine racing to the same path turns into
+	// "table already exists".
+	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
 		t.Fatalf("open temp sqlite: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-
-	const schema = `
-CREATE TABLE sync_tasks (
-    id               INTEGER PRIMARY KEY AUTOINCREMENT,
-    enable           INTEGER NOT NULL DEFAULT 1,
-    last_update_time DATETIME,
-    last_run_time    DATETIME,
-    config_json      TEXT NOT NULL
-);
-CREATE TABLE monitoring_log (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    sync_task_id  INTEGER NOT NULL,
-    logged_at     DATETIME NOT NULL,
-    src_table     TEXT,
-    tgt_table     TEXT,
-    src_row_count INTEGER,
-    tgt_row_count INTEGER
-);`
-	if _, err := db.Exec(schema); err != nil {
-		t.Fatalf("create schema: %v", err)
-	}
 	return db
 }
 
 // emptyTaskDB points SYNC_DB_PATH at a file with no tables at all.
 func emptyTaskDB(t *testing.T) {
 	t.Helper()
-	tablelessDB(t)
+	sqlitetest.Tableless(t)
 }
 
 // unopenableDB points SYNC_DB_PATH at a path whose parent is a regular file, so
@@ -87,9 +71,13 @@ func insertTask(t *testing.T, db *sql.DB, enable int, cfg string) int64 {
 func insertMonitoringRow(t *testing.T, db *sql.DB, taskID int, loggedAt, table string, src, tgt int64) {
 	t.Helper()
 
+	// db_type is NOT NULL in the real schema, which the fixtures' own copies used
+	// to leave off — so these rows could never have been written by the monitor
+	// that writes them in production.
 	if _, err := db.Exec(
-		`INSERT INTO monitoring_log (sync_task_id, logged_at, src_table, tgt_table, src_row_count, tgt_row_count)
-		 VALUES (?, ?, ?, ?, ?, ?)`, taskID, loggedAt, table, table, src, tgt); err != nil {
+		`INSERT INTO monitoring_log
+		   (sync_task_id, logged_at, db_type, src_table, tgt_table, src_row_count, tgt_row_count)
+		 VALUES (?, ?, 'MONGODB', ?, ?, ?, ?)`, taskID, loggedAt, table, table, src, tgt); err != nil {
 		t.Fatalf("insert monitoring row: %v", err)
 	}
 }
@@ -130,44 +118,3 @@ func stageOf(err error) string {
 func contains(haystack, needle string) bool { return strings.Contains(haystack, needle) }
 
 func itoa(id int64) string { return strconv.FormatInt(id, 10) }
-
-// tablelessDB points SYNC_DB_PATH at a database whose tables have been removed,
-// which is the state a migration that did not finish — or a file restored from
-// the wrong backup — leaves behind.
-//
-// Pointing at an empty file no longer produces one: opening the control database
-// creates its schema, so the tables have to be dropped after that has happened.
-func tablelessDB(t *testing.T) {
-	t.Helper()
-
-	path := filepath.Join(t.TempDir(), "empty.db")
-	t.Setenv("SYNC_DB_PATH", path)
-
-	// Opening it is what creates the schema.
-	db, err := sqlite.OpenSQLiteDB()
-	if err != nil {
-		t.Fatalf("open the control database: %v", err)
-	}
-	defer db.Close()
-
-	rows, err := db.Query(
-		`SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'`)
-	if err != nil {
-		t.Fatalf("list tables: %v", err)
-	}
-	var names []string
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			t.Fatalf("scan: %v", err)
-		}
-		names = append(names, name)
-	}
-	rows.Close()
-
-	for _, name := range names {
-		if _, err := db.Exec(`DROP TABLE IF EXISTS "` + name + `"`); err != nil {
-			t.Fatalf("drop %s: %v", name, err)
-		}
-	}
-}

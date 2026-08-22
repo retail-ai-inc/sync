@@ -1,6 +1,7 @@
 package backuphttp
 
 import (
+	"github.com/retail-ai-inc/sync/internal/platform/sqlite/sqlitetest"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -34,7 +35,7 @@ func TestBackupListHandlerReturnsTheTaskTable(t *testing.T) {
 }
 
 func TestBackupListHandlerReportsAMissingTable(t *testing.T) {
-	tablelessDB(t)
+	sqlitetest.Tableless(t)
 
 	rec := httptest.NewRecorder()
 	BackupListHandler(rec, httptest.NewRequest(http.MethodGet, "/backup", nil))

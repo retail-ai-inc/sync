@@ -531,24 +531,7 @@ func (s *MongoDBSyncer) claimDirection(ctx context.Context, sourceDBName, target
 		},
 	}
 
-	if err := guard.Acquire(ctx); err != nil {
-		return nil, err
-	}
-
-	heartbeatCtx, stop := context.WithCancel(ctx)
-	go guard.KeepAlive(heartbeatCtx, func(err error) {
-		s.logger.Warnf("[MongoDB] Could not refresh the replication direction claim: %v", err)
-	})
-	return func() {
-		stop()
-		// Give the release its own deadline: the task's context is already
-		// cancelled by the time this runs.
-		releaseCtx, cancelRelease := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancelRelease()
-		if err := guard.Release(releaseCtx); err != nil {
-			s.logger.Warnf("[MongoDB] Could not release the replication direction claim: %v", err)
-		}
-	}, nil
+	return directionlock.Hold(ctx, guard, s.logger, "MongoDB")
 }
 
 // discoveryInterval is how often a task with no configured collections looks
@@ -596,17 +579,7 @@ func (s *MongoDBSyncer) warnAboutUnlistedCollections(ctx context.Context, source
 		metrics.SetUnreplicated(s.metricLabels(""), float64(len(warned)))
 	}
 
-	scan()
-	ticker := time.NewTicker(unlistedScanEvery)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			scan()
-		}
-	}
+	discovery.Poll(ctx, unlistedScanEvery, scan)
 }
 
 // configuration loader inserts a mapping with an empty table list for a task
@@ -657,16 +630,5 @@ func (s *MongoDBSyncer) discoverAndWatch(ctx context.Context, sourceDBName, targ
 		}
 	}
 
-	scan()
-
-	ticker := time.NewTicker(discoveryInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			scan()
-		}
-	}
+	discovery.Poll(ctx, discoveryInterval, scan)
 }

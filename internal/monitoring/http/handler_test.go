@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"github.com/retail-ai-inc/sync/internal/platform/metrics"
 	"github.com/retail-ai-inc/sync/internal/platform/sqlite"
+	"github.com/retail-ai-inc/sync/internal/platform/sqlite/sqlitetest"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -26,58 +27,15 @@ func useMonitorDB(t *testing.T) *sql.DB {
 	path := filepath.Join(t.TempDir(), "sync.db")
 	t.Setenv("SYNC_DB_PATH", path)
 
-	conn, err := sql.Open("sqlite3", path)
+	// Through the real opener, which carries the whole schema and creates it
+	// only when it is missing — rather than a copy kept here that can drift from
+	// it, and that a background goroutine racing to the same path turns into
+	// "table already exists".
+	conn, err := sqlite.OpenSQLiteDB()
 	if err != nil {
 		t.Fatalf("open temp sqlite: %v", err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
-
-	const schema = `
-CREATE TABLE sync_tasks (
-    id               INTEGER PRIMARY KEY AUTOINCREMENT,
-    enable           INTEGER NOT NULL DEFAULT 1,
-    last_update_time DATETIME,
-    last_run_time    DATETIME,
-    config_json      TEXT NOT NULL
-);
-CREATE TABLE monitoring_log (
-    id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    logged_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
-    db_type        TEXT NOT NULL,
-    src_db         TEXT,
-    src_table      TEXT,
-    src_row_count  INTEGER,
-    tgt_db         TEXT,
-    tgt_table      TEXT,
-    tgt_row_count  INTEGER,
-    monitor_action TEXT,
-    sync_task_id   INTEGER
-);
-CREATE TABLE sync_log (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    log_time     DATETIME DEFAULT CURRENT_TIMESTAMP,
-    level        TEXT,
-    message      TEXT,
-    sync_task_id INTEGER
-);
-CREATE TABLE changestream_statistics (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    task_id         INTEGER NOT NULL,
-    collection_name VARCHAR(255) NOT NULL,
-    received        INTEGER DEFAULT 0,
-    executed        INTEGER DEFAULT 0,
-    pending         INTEGER DEFAULT 0,
-    errors          INTEGER DEFAULT 0,
-    inserted        INTEGER DEFAULT 0,
-    updated         INTEGER DEFAULT 0,
-    deleted         INTEGER DEFAULT 0,
-    last_updated    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(task_id, collection_name)
-);`
-	if _, err := conn.Exec(schema); err != nil {
-		t.Fatalf("create schema: %v", err)
-	}
 	return conn
 }
 
@@ -364,7 +322,7 @@ func TestSyncLogsHandlerSearches(t *testing.T) {
 }
 
 func TestSyncLogsHandlerReportsAMissingTable(t *testing.T) {
-	tablelessDB(t)
+	sqlitetest.Tableless(t)
 
 	rec := httptest.NewRecorder()
 	serveWithURLParams(rec, httptest.NewRequest(http.MethodGet, "/sync/{id}/logs", nil),
@@ -428,53 +386,12 @@ func TestChangeStreamsStatusHandlerOnAnEmptyTable(t *testing.T) {
 }
 
 func TestChangeStreamsStatusHandlerReportsAMissingTable(t *testing.T) {
-	tablelessDB(t)
+	sqlitetest.Tableless(t)
 
 	rec := httptest.NewRecorder()
 	ChangeStreamsStatusHandler(rec, httptest.NewRequest(http.MethodGet, "/changestreams/status", nil))
 
 	if resp := decodeEnvelope(t, rec); resp["success"] != false {
 		t.Errorf("success = %v, want false", resp["success"])
-	}
-}
-
-// tablelessDB points SYNC_DB_PATH at a database whose tables have been removed,
-// which is the state a migration that did not finish — or a file restored from
-// the wrong backup — leaves behind.
-//
-// Pointing at an empty file no longer produces one: opening the control database
-// creates its schema, so the tables have to be dropped after that has happened.
-// The schema is applied once per file, so later opens leave them dropped.
-func tablelessDB(t *testing.T) {
-	t.Helper()
-
-	path := filepath.Join(t.TempDir(), "empty.db")
-	t.Setenv("SYNC_DB_PATH", path)
-
-	db, err := sqlite.OpenSQLiteDB()
-	if err != nil {
-		t.Fatalf("open the control database: %v", err)
-	}
-	defer db.Close()
-
-	rows, err := db.Query(
-		`SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'`)
-	if err != nil {
-		t.Fatalf("list tables: %v", err)
-	}
-	var names []string
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			t.Fatalf("scan: %v", err)
-		}
-		names = append(names, name)
-	}
-	rows.Close()
-
-	for _, name := range names {
-		if _, err := db.Exec(`DROP TABLE IF EXISTS "` + name + `"`); err != nil {
-			t.Fatalf("drop %s: %v", name, err)
-		}
 	}
 }

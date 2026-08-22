@@ -1425,25 +1425,15 @@ func (s *MySQLSyncer) claimDirection(ctx context.Context, targetDB *sql.DB) (fun
 		},
 	}
 
-	if err := guard.Acquire(ctx); err != nil {
+	release, err := directionlock.Hold(ctx, guard, s.logger, "MySQL")
+	if err != nil {
 		_ = sourceDB.Close()
 		return nil, err
 	}
-
-	heartbeatCtx, stop := context.WithCancel(ctx)
-	go guard.KeepAlive(heartbeatCtx, func(err error) {
-		s.logger.Warnf("[MySQL] Could not refresh the replication direction claim: %v", err)
-	})
-
+	// The connection opened for the claim is this function's own, so it closes
+	// with the claim rather than living as long as the syncer.
 	return func() {
-		stop()
-		// Give the release its own deadline: the task's context is already
-		// cancelled by the time this runs.
-		releaseCtx, cancelRelease := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancelRelease()
-		if err := guard.Release(releaseCtx); err != nil {
-			s.logger.Warnf("[MySQL] Could not release the replication direction claim: %v", err)
-		}
+		release()
 		_ = sourceDB.Close()
 	}, nil
 }
@@ -1520,17 +1510,7 @@ func (s *MySQLSyncer) warnAboutUnlistedTables(ctx context.Context, sourceDBName 
 		metrics.SetUnreplicated(s.metricLabels(), float64(len(warned)))
 	}
 
-	scan()
-	ticker := time.NewTicker(unlistedScanEvery)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			scan()
-		}
-	}
+	discovery.Poll(ctx, unlistedScanEvery, scan)
 }
 
 // resolveMappings reports the tables to copy, discovering them from the source

@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"database/sql"
+	"github.com/retail-ai-inc/sync/internal/platform/sqlite"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -29,9 +30,8 @@ func scratchDir(t *testing.T) string {
 	return dir
 }
 
-// Fixtures shared by this package's handler tests. They are duplicated per
-// package rather than shared through an importable helper package, because a
-// non-test package holding test code compiles into every build.
+// Fixtures shared by this package's handler tests. The schema itself comes from
+// the opener rather than from a copy kept here: see internal/platform/sqlite.
 
 // useTempTaskDB points the package at a throwaway SQLite file carrying the
 // sync_tasks and backup_tasks schema, so the list and mutate handlers can be
@@ -44,31 +44,19 @@ func useTempTaskDB(t *testing.T) *sql.DB {
 	path := filepath.Join(scratchDir(t), "sync.db")
 	t.Setenv("SYNC_DB_PATH", path)
 
-	db, err := sql.Open("sqlite3", path)
+	// Through the real opener, which carries the whole schema and creates it
+	// only when it is missing.
+	//
+	// The copies these fixtures used to keep were plain CREATE TABLE, and a
+	// background goroutine outliving an earlier test — a submitted backup run,
+	// say — opens whatever SYNC_DB_PATH now names and builds the schema there
+	// first. The fixture then failed with "table users already exists", rarely,
+	// and only under a loaded parallel suite.
+	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
 		t.Fatalf("open temp sqlite: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-
-	const schema = `
-CREATE TABLE sync_tasks (
-    id               INTEGER PRIMARY KEY AUTOINCREMENT,
-    enable           INTEGER NOT NULL DEFAULT 1,
-    last_update_time DATETIME,
-    last_run_time    DATETIME,
-    config_json      TEXT NOT NULL
-);
-CREATE TABLE backup_tasks (
-    id               INTEGER PRIMARY KEY AUTOINCREMENT,
-    enable           INTEGER NOT NULL DEFAULT 1,
-    last_update_time DATETIME,
-    last_backup_time DATETIME,
-    next_backup_time DATETIME,
-    config_json      TEXT NOT NULL
-);`
-	if _, err := db.Exec(schema); err != nil {
-		t.Fatalf("create schema: %v", err)
-	}
 	return db
 }
 
@@ -92,59 +80,20 @@ func useMonitorDB(t *testing.T) *sql.DB {
 	path := filepath.Join(scratchDir(t), "sync.db")
 	t.Setenv("SYNC_DB_PATH", path)
 
-	conn, err := sql.Open("sqlite3", path)
+	// Through the real opener, which carries the whole schema and creates it
+	// only when it is missing.
+	//
+	// The copies these fixtures used to keep were plain CREATE TABLE, and a
+	// background goroutine outliving an earlier test — a submitted backup run,
+	// say — opens whatever SYNC_DB_PATH now names and builds the schema there
+	// first. The fixture then failed with "table users already exists", rarely,
+	// and only under a loaded parallel suite.
+	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
 		t.Fatalf("open temp sqlite: %v", err)
 	}
-	t.Cleanup(func() { _ = conn.Close() })
-
-	const schema = `
-CREATE TABLE sync_tasks (
-    id               INTEGER PRIMARY KEY AUTOINCREMENT,
-    enable           INTEGER NOT NULL DEFAULT 1,
-    last_update_time DATETIME,
-    last_run_time    DATETIME,
-    config_json      TEXT NOT NULL
-);
-CREATE TABLE monitoring_log (
-    id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    logged_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
-    db_type        TEXT NOT NULL,
-    src_db         TEXT,
-    src_table      TEXT,
-    src_row_count  INTEGER,
-    tgt_db         TEXT,
-    tgt_table      TEXT,
-    tgt_row_count  INTEGER,
-    monitor_action TEXT,
-    sync_task_id   INTEGER
-);
-CREATE TABLE sync_log (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    log_time     DATETIME DEFAULT CURRENT_TIMESTAMP,
-    level        TEXT,
-    message      TEXT,
-    sync_task_id INTEGER
-);
-CREATE TABLE changestream_statistics (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    task_id         INTEGER NOT NULL,
-    collection_name VARCHAR(255) NOT NULL,
-    received        INTEGER DEFAULT 0,
-    executed        INTEGER DEFAULT 0,
-    pending         INTEGER DEFAULT 0,
-    errors          INTEGER DEFAULT 0,
-    inserted        INTEGER DEFAULT 0,
-    updated         INTEGER DEFAULT 0,
-    deleted         INTEGER DEFAULT 0,
-    last_updated    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(task_id, collection_name)
-);`
-	if _, err := conn.Exec(schema); err != nil {
-		t.Fatalf("create schema: %v", err)
-	}
-	return conn
+	t.Cleanup(func() { _ = db.Close() })
+	return db
 }
 
 // isolateCrontab empties PATH so the `crontab` command cannot be found. The
@@ -168,36 +117,19 @@ func useTempDB(t *testing.T) *sql.DB {
 	path := filepath.Join(scratchDir(t), "sync.db")
 	t.Setenv("SYNC_DB_PATH", path)
 
-	db, err := sql.Open("sqlite3", path)
+	// Through the real opener, which carries the whole schema and creates it
+	// only when it is missing.
+	//
+	// The copies these fixtures used to keep were plain CREATE TABLE, and a
+	// background goroutine outliving an earlier test — a submitted backup run,
+	// say — opens whatever SYNC_DB_PATH now names and builds the schema there
+	// first. The fixture then failed with "table users already exists", rarely,
+	// and only under a loaded parallel suite.
+	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
 		t.Fatalf("open temp sqlite: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-
-	const schema = `
-CREATE TABLE users (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    username   TEXT NOT NULL UNIQUE,
-    password   TEXT NOT NULL,
-    name       TEXT NOT NULL,
-    avatar     TEXT,
-    userId     TEXT,
-    email      TEXT,
-    access     TEXT NOT NULL,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    status     TEXT DEFAULT 'active'
-);
-CREATE TABLE auth_configs (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    provider    TEXT NOT NULL UNIQUE,
-    config_json TEXT NOT NULL,
-    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
-    enabled     BOOLEAN DEFAULT false
-);`
-	if _, err := db.Exec(schema); err != nil {
-		t.Fatalf("create schema: %v", err)
-	}
 	return db
 }
 

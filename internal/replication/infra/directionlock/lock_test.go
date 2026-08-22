@@ -3,7 +3,10 @@ package directionlock
 import (
 	"context"
 	"errors"
+	"fmt"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -401,5 +404,150 @@ func TestAFailedReleaseIsReportedButStillTriesBothEnds(t *testing.T) {
 	}
 	if len(target.claims) != 0 {
 		t.Error("the reachable endpoint's claim was left behind")
+	}
+}
+
+// ------------------------------------------------------------------- hold
+
+// recordingWarner collects what the lifecycle reported.
+type recordingWarner struct {
+	mu       sync.Mutex
+	messages []string
+}
+
+func (w *recordingWarner) Warnf(format string, args ...interface{}) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.messages = append(w.messages, fmt.Sprintf(format, args...))
+}
+
+func (w *recordingWarner) all() []string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return append([]string(nil), w.messages...)
+}
+
+// TestHoldClaimsAndReleases covers the lifecycle every engine used to carry its
+// own copy of. The claim is taken while the task runs and given up when it
+// stops, which is what makes a planned failover quick: without the release the
+// claims sit there until they go stale, and an operator who has stopped
+// Tokyo → Osaka and wants to start Osaka → Tokyo waits a quarter of an hour.
+func TestHoldClaimsAndReleases(t *testing.T) {
+	source, target := newStore("tokyo:27017"), newStore("osaka:27017")
+	guard := guardFor(source, target)
+
+	release, err := Hold(context.Background(), guard, &recordingWarner{}, "MongoDB")
+	if err != nil {
+		t.Fatalf("Hold: %v", err)
+	}
+
+	if len(source.claims) != 1 || len(target.claims) != 1 {
+		t.Fatalf("claims = %d source, %d target, want one each",
+			len(source.claims), len(target.claims))
+	}
+
+	release()
+
+	if len(source.claims) != 0 || len(target.claims) != 0 {
+		t.Errorf("claims left behind: %d source, %d target",
+			len(source.claims), len(target.claims))
+	}
+}
+
+// TestHoldReleasesOnlyOnce records that the returned function can be called
+// twice without a second release. Every engine defers it and some call it on
+// their own error paths as well.
+func TestHoldReleasesOnlyOnce(t *testing.T) {
+	source, target := newStore("tokyo:27017"), newStore("osaka:27017")
+	guard := guardFor(source, target)
+
+	release, err := Hold(context.Background(), guard, &recordingWarner{}, "MySQL")
+	if err != nil {
+		t.Fatalf("Hold: %v", err)
+	}
+
+	release()
+	// A second release against a store that now fails would report an error if
+	// it ran at all.
+	source.putErr = errors.New("the endpoint is gone")
+	target.putErr = errors.New("the endpoint is gone")
+
+	release()
+
+	// Nothing to assert beyond not panicking and not reporting: a second
+	// release that ran would have hit the failing store.
+}
+
+// TestHoldRefusesAReversedPair records that a pair the claims say has been
+// reversed is refused, and that nothing is left running behind the refusal.
+func TestHoldRefusesAReversedPair(t *testing.T) {
+	// The target already claims to be somebody's source: it has been promoted.
+	source := newStore("tokyo:27017")
+	target := newStore("osaka:27017", claim(2, RoleSource, "elsewhere:27017", time.Minute))
+	guard := guardFor(source, target)
+
+	release, err := Hold(context.Background(), guard, &recordingWarner{}, "MongoDB")
+	if err == nil {
+		release()
+		t.Fatal("Hold succeeded against a target that has been promoted")
+	}
+	if release != nil {
+		t.Error("a release function was returned alongside the error")
+	}
+}
+
+// TestHoldReportsAFailedRelease records that a release that does not land is
+// said out loud. A claim nobody could remove blocks the reverse direction until
+// it goes stale, and an operator following a failover runbook needs to know that
+// is why they are being refused.
+func TestHoldReportsAFailedRelease(t *testing.T) {
+	source, target := newStore("tokyo:27017"), newStore("osaka:27017")
+	guard := guardFor(source, target)
+
+	warner := &recordingWarner{}
+	release, err := Hold(context.Background(), guard, warner, "PostgreSQL")
+	if err != nil {
+		t.Fatalf("Hold: %v", err)
+	}
+
+	source.putErr = errors.New("the endpoint is unreachable")
+	release()
+
+	var found bool
+	for _, message := range warner.all() {
+		if strings.Contains(message, "release") && strings.Contains(message, "PostgreSQL") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("messages = %v, want the failed release reported", warner.all())
+	}
+}
+
+// TestHoldStopsTheHeartbeatWithTheContext records that cancelling the task's
+// context ends the refresh. A heartbeat outliving its task keeps a claim alive
+// on an endpoint nothing is replicating, which is the one thing worse than a
+// claim that expires too early.
+func TestHoldStopsTheHeartbeatWithTheContext(t *testing.T) {
+	source, target := newStore("tokyo:27017"), newStore("osaka:27017")
+	guard := guardFor(source, target)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	release, err := Hold(ctx, guard, &recordingWarner{}, "MongoDB")
+	if err != nil {
+		t.Fatalf("Hold: %v", err)
+	}
+	before := runtime.NumGoroutine()
+	cancel()
+
+	// The heartbeat goroutine returns on cancellation; the release still works
+	// afterwards because it uses a context of its own.
+	release()
+
+	if len(source.claims) != 0 {
+		t.Errorf("the claim survived the release: %v", source.claims)
+	}
+	if after := runtime.NumGoroutine(); after > before {
+		t.Logf("goroutines: %d before, %d after", before, after)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql/driver"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"strings"
@@ -80,8 +81,21 @@ var transientPhrases = []string{
 	"not master",
 	"not primary",
 	"node is recovering",
+	"primary stepped down",
 	"interruptedatshutdown",
+	"interrupted at shutdown",
 	"shutdown in progress",
+	// A change stream's cursor is gone but the stream can be reopened from its
+	// resume token, and the pool phrases are a cluster under load rather than a
+	// cluster that is wrong.
+	"cursor not found",
+	"server selection timeout",
+	"connection pool exhausted",
+	"pool is closed",
+	"write concern timeout",
+	"read concern timeout",
+	"host unreachable",
+	"unable to target",
 	"temporarily unavailable",
 	"try again",
 	"eof",
@@ -121,9 +135,56 @@ func IsConnectionError(err error) bool {
 	if mongo.IsNetworkError(err) || mongo.IsTimeout(err) {
 		return true
 	}
+	if mongoServerRetries(err) {
+		return true
+	}
 
 	for _, phrase := range transientPhrases {
 		if strings.Contains(text, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
+// retryableMongoCodes are the server errors a replica set returns while it is
+// changing primary or shutting a node down. They are worth another attempt by
+// definition: the cluster is telling the client where it stands, not that the
+// request was wrong.
+var retryableMongoCodes = []int{
+	11600, // InterruptedAtShutdown
+	11602, // InterruptedDueToReplStateChange
+	10107, // NotWritablePrimary
+	13435, // NotPrimaryNoSecondaryOk
+	13436, // NotPrimaryOrSecondary
+	189,   // PrimarySteppedDown
+	91,    // ShutdownInProgress
+	7,     // HostNotFound
+	6,     // HostUnreachable
+	89,    // NetworkTimeout
+	9001,  // SocketException
+	262,   // ExceededTimeLimit
+}
+
+// mongoServerRetries reports whether MongoDB named one of those codes.
+//
+// By the driver's own accounting where it can be, and by the message text
+// otherwise: a wrapped error that has lost its type still carries the number,
+// and this used to be the only check either classifier made on the codes.
+func mongoServerRetries(err error) bool {
+	var server mongo.ServerError
+	if errors.As(err, &server) {
+		for _, code := range retryableMongoCodes {
+			if server.HasErrorCode(code) {
+				return true
+			}
+		}
+		return false
+	}
+
+	text := err.Error()
+	for _, code := range retryableMongoCodes {
+		if strings.Contains(text, fmt.Sprintf("error code %d", code)) {
 			return true
 		}
 	}

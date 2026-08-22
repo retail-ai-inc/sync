@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sync"
 	"time"
 )
 
@@ -253,4 +254,53 @@ func (g *Guard) Release(ctx context.Context) error {
 		}
 	}
 	return firstErr
+}
+
+// releaseTimeout bounds the release. It needs a deadline of its own because the
+// task's context is already cancelled by the time the release runs — passing
+// that one in would abandon every claim on the way out.
+const releaseTimeout = 5 * time.Second
+
+// Warner is the part of a logger this package uses. Taking an interface rather
+// than logrus keeps the lock free of a logging dependency, and lets a test see
+// what was reported.
+type Warner interface {
+	Warnf(format string, args ...interface{})
+}
+
+// Hold acquires the claims, keeps them refreshed for as long as the context
+// lives, and returns the function that gives them up.
+//
+// Every engine did this itself, in fourteen identical lines each, and the parts
+// that are easy to get wrong were the parts being copied: the heartbeat has to
+// stop before the release, and the release needs a deadline that is not the
+// cancelled one. A syncer that skipped either would leave a claim behind and
+// refuse to start in the other direction until it went stale — a quarter of an
+// hour of a failover runbook spent waiting for a timeout.
+//
+// The returned function is safe to call more than once.
+func Hold(ctx context.Context, guard *Guard, log Warner, engine string) (release func(), err error) {
+	if err := guard.Acquire(ctx); err != nil {
+		return nil, err
+	}
+
+	heartbeatCtx, stop := context.WithCancel(ctx)
+	go guard.KeepAlive(heartbeatCtx, func(err error) {
+		if log != nil {
+			log.Warnf("[%s] Could not refresh the replication direction claim: %v", engine, err)
+		}
+	})
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			stop()
+
+			releaseCtx, cancel := context.WithTimeout(context.Background(), releaseTimeout)
+			defer cancel()
+			if err := guard.Release(releaseCtx); err != nil && log != nil {
+				log.Warnf("[%s] Could not release the replication direction claim: %v", engine, err)
+			}
+		})
+	}, nil
 }

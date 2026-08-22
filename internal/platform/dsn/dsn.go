@@ -40,15 +40,7 @@ func extractMySQLDatabase(dsn string) string {
 
 func extractPostgresDatabase(dsn string) string {
 	//DSN: postgres://user:pass@localhost:5432/mydb?sslmode=disable
-	u, err := url.Parse(dsn)
-	if err != nil {
-		return ""
-	}
-	path := u.Path
-	if len(path) > 1 {
-		return path[1:]
-	}
-	return ""
+	return databaseFromURLPath(dsn)
 }
 
 // extractMongoDatabase reports the database a MongoDB URI addresses, for both
@@ -79,14 +71,20 @@ func extractMongoDatabase(dsn string) string {
 }
 
 func extractRedisDatabase(dsn string) string {
-	// DSN: redis://:pass@localhost:6379/0
+	// DSN: redis://:pass@localhost:6379/0 — the database is an index here, but
+	// it sits in the same place.
+	return databaseFromURLPath(dsn)
+}
+
+// databaseFromURLPath reads the single path element of a URL-shaped DSN, which
+// is where PostgreSQL puts the database name and Redis the database index.
+func databaseFromURLPath(dsn string) string {
 	u, err := url.Parse(dsn)
 	if err != nil {
 		return ""
 	}
-	path := u.Path
-	if len(path) > 1 {
-		return path[1:]
+	if len(u.Path) > 1 {
+		return u.Path[1:]
 	}
 	return ""
 }

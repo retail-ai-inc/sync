@@ -32,71 +32,34 @@ func TestConnectionHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var tables []string
+	var (
+		tables []string
+		err    error
+	)
 
 	switch req.DbType {
 	case "mysql", "mariadb":
 		// DSN: user:password@tcp(host:port)/database?parseTime=true&loc=Local
-		dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?parseTime=true&loc=Local",
-			req.User, req.Password, req.Host, req.Port, req.Database)
-		db, err := sql.Open("mysql", dsn)
+		tables, err = sqlTables(
+			"mysql",
+			fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?parseTime=true&loc=Local",
+				req.User, req.Password, req.Host, req.Port, req.Database),
+			"SHOW TABLES")
 		if err != nil {
-			http.Error(w, fmt.Sprintf("Error opening connection: %v", err), http.StatusInternalServerError)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
-		}
-		defer db.Close()
-
-		if err = db.Ping(); err != nil {
-			http.Error(w, fmt.Sprintf("Ping failed: %v", err), http.StatusInternalServerError)
-			return
-		}
-
-		rows, err := db.Query("SHOW TABLES")
-		if err != nil {
-			http.Error(w, fmt.Sprintf("Query failed: %v", err), http.StatusInternalServerError)
-			return
-		}
-		defer rows.Close()
-
-		for rows.Next() {
-			var table string
-			if err := rows.Scan(&table); err != nil {
-				http.Error(w, fmt.Sprintf("Scan failed: %v", err), http.StatusInternalServerError)
-				return
-			}
-			tables = append(tables, table)
 		}
 
 	case "postgresql":
 		// DSN: postgres://user:password@host:port/database?sslmode=disable
-		dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable",
-			req.User, req.Password, req.Host, req.Port, req.Database)
-		db, err := sql.Open("postgres", dsn)
+		tables, err = sqlTables(
+			"postgres",
+			fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable",
+				req.User, req.Password, req.Host, req.Port, req.Database),
+			"SELECT tablename FROM pg_tables WHERE schemaname='public'")
 		if err != nil {
-			http.Error(w, fmt.Sprintf("Error opening connection: %v", err), http.StatusInternalServerError)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
-		}
-		defer db.Close()
-
-		if err = db.Ping(); err != nil {
-			http.Error(w, fmt.Sprintf("Ping failed: %v", err), http.StatusInternalServerError)
-			return
-		}
-
-		rows, err := db.Query("SELECT tablename FROM pg_tables WHERE schemaname='public'")
-		if err != nil {
-			http.Error(w, fmt.Sprintf("Query failed: %v", err), http.StatusInternalServerError)
-			return
-		}
-		defer rows.Close()
-
-		for rows.Next() {
-			var table string
-			if err := rows.Scan(&table); err != nil {
-				http.Error(w, fmt.Sprintf("Scan failed: %v", err), http.StatusInternalServerError)
-				return
-			}
-			tables = append(tables, table)
 		}
 
 	case "mongodb":
@@ -183,4 +146,43 @@ func TestConnectionHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// sqlTables opens one connection, checks it answers, and reads a single column
+// of names out of it.
+//
+// The MySQL and PostgreSQL branches of the probe were the same twenty-five
+// lines twice over, differing in the driver, the DSN and one query. Keeping the
+// ping is the part that matters: sql.Open does not dial, so without it the probe
+// answers "connected" for an address nobody is listening on and an operator
+// saves a task that cannot replicate.
+func sqlTables(driver, dsn, query string) ([]string, error) {
+	db, err := sql.Open(driver, dsn)
+	if err != nil {
+		return nil, fmt.Errorf("Error opening connection: %v", err)
+	}
+	defer db.Close()
+
+	if err := db.Ping(); err != nil {
+		return nil, fmt.Errorf("Ping failed: %v", err)
+	}
+
+	rows, err := db.Query(query)
+	if err != nil {
+		return nil, fmt.Errorf("Query failed: %v", err)
+	}
+	defer rows.Close()
+
+	var tables []string
+	for rows.Next() {
+		var table string
+		if err := rows.Scan(&table); err != nil {
+			return nil, fmt.Errorf("Scan failed: %v", err)
+		}
+		tables = append(tables, table)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("Query failed: %v", err)
+	}
+	return tables, nil
 }

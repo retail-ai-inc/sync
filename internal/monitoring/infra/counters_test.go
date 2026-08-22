@@ -202,7 +202,7 @@ func TestTheMongoDBCounterReportsAnInvalidURI(t *testing.T) {
 		SourceConnection: "not-a-uri",
 	}, logger)
 
-	if !strings.Contains(out.String(), "Fail to connect to source") {
+	if !strings.Contains(out.String(), "Failed to connect to source") {
 		t.Errorf("output = %q, want a connect failure", out.String())
 	}
 }

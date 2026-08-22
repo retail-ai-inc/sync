@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/retail-ai-inc/sync/internal/backup/infra/transfer"
 )
@@ -782,4 +783,67 @@ func linkRealBinary(t *testing.T, dir, name string) {
 		}
 	}
 	t.Skipf("%s is not installed", name)
+}
+
+// TestABackupWithNoBucketSkipsTheUpload covers what a job with a local-only
+// destination does. Three of the four export paths ran gsutil regardless,
+// against a destination of "/<name>.zip" — which fails, so the backup was
+// reported as failed although the dump had been taken, and the dump was then
+// deleted with the temporary directory. All four go through one function now,
+// and it does not upload when there is nowhere to upload to.
+func TestABackupWithNoBucketSkipsTheUpload(t *testing.T) {
+	t.Run("mongodb", func(t *testing.T) {
+		binDir := stubPATH(t)
+		stubBin(t, binDir, "mongoexport", mongoexportStubBody, 0)
+		stubBin(t, binDir, "zip", zipStubBody, 0)
+		// Fails if it is reached at all, which is what the defect did.
+		stubBin(t, binDir, "gsutil", "", 1)
+
+		e := newExecutor()
+		if err := e.executeExternalMongoExportSimple(context.Background(),
+			"mongodb://tokyo:27017/app", "app", "orders", t.TempDir(),
+			mongoBackupConfig("")); err != nil {
+			t.Fatalf("executeExternalMongoExportSimple: %v", err)
+		}
+		stubWasNotInvoked(t, binDir, "gsutil")
+	})
+
+	t.Run("mysql", func(t *testing.T) {
+		binDir := stubPATH(t)
+		stubBin(t, binDir, "mysqldump", "echo '-- dump'", 0)
+		stubBin(t, binDir, "zip", zipStubBody, 0)
+		stubBin(t, binDir, "gsutil", "", 1)
+
+		e := newExecutor()
+		if err := e.executeExternalMySQLBackupSimple(context.Background(),
+			"tokyo:3306", "app", "orders", t.TempDir(),
+			mysqlBackupConfig("sql", "", "")); err != nil {
+			t.Fatalf("executeExternalMySQLBackupSimple: %v", err)
+		}
+		stubWasNotInvoked(t, binDir, "gsutil")
+	})
+}
+
+// TestTheUploadedObjectKeepsItsName pins the name a backup takes in the bucket.
+// It is what an operator looks for when restoring, and what any retention rule
+// on the bucket matches on, so folding the four upload paths into one must not
+// have changed it.
+func TestTheUploadedObjectKeepsItsName(t *testing.T) {
+	binDir := stubPATH(t)
+	stubBin(t, binDir, "mysqldump", "echo '-- dump'", 0)
+	stubBin(t, binDir, "zip", zipStubBody, 0)
+	stubBin(t, binDir, "gsutil", "", 0)
+
+	e := newExecutor()
+	if err := e.executeExternalMySQLBackupSimple(context.Background(),
+		"tokyo:3306", "app", "orders_202608", t.TempDir(),
+		mysqlBackupConfig("sql", "", "gs://bucket/backups")); err != nil {
+		t.Fatalf("executeExternalMySQLBackupSimple: %v", err)
+	}
+
+	yesterday := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
+	want := "gs://bucket/backups/orders" + ZIPFilenameSeparator + yesterday + ".zip"
+	if got := stubArgs(t, binDir, "gsutil"); got[2] != want {
+		t.Errorf("uploaded to %q, want %q", got[2], want)
+	}
 }

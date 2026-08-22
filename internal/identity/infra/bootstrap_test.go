@@ -2,6 +2,7 @@ package infra
 
 import (
 	"errors"
+	"github.com/retail-ai-inc/sync/internal/platform/sqlite/sqlitetest"
 	"path/filepath"
 	"testing"
 
@@ -121,7 +122,7 @@ func TestEnsureAdminReportsAnEmptyDirectoryWithNoPassword(t *testing.T) {
 // schema is reported rather than read past.
 func TestEnsureAdminReportsAMissingUsersTable(t *testing.T) {
 	cheapPasswordHashing(t)
-	tablelessDB(t)
+	sqlitetest.Tableless(t)
 	t.Setenv("SYNC_ADMIN_PASSWORD", "a-first-password")
 
 	if _, err := EnsureAdmin(); err == nil {

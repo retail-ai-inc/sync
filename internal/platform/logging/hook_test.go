@@ -2,7 +2,7 @@ package logging
 
 import (
 	"database/sql"
-	"github.com/retail-ai-inc/sync/internal/platform/sqlite"
+	"github.com/retail-ai-inc/sync/internal/platform/sqlite/sqlitetest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -114,7 +114,7 @@ func TestAFailureIsReportedOnceAndNotOncePerLine(t *testing.T) {
 	t.Run("no tables", func(t *testing.T) {
 		hook := NewSQLiteHook()
 		t.Cleanup(func() { _ = hook.Close() })
-		tablelessDB(t)
+		sqlitetest.Tableless(t)
 
 		if err := hook.Fire(entry); err == nil {
 			t.Error("Fire = nil for a database with no sync_log table")
@@ -164,46 +164,5 @@ func TestTheConnectionIsReusedAcrossLines(t *testing.T) {
 	}
 	if count != 5 {
 		t.Errorf("%d rows were written, want 5", count)
-	}
-}
-
-// tablelessDB points SYNC_DB_PATH at a database whose tables have been removed,
-// which is the state a migration that did not finish — or a file restored from
-// the wrong backup — leaves behind.
-//
-// Pointing at an empty file no longer produces one: opening the control database
-// creates its schema, so the tables have to be dropped after that has happened.
-// The schema is applied once per file, so later opens leave them dropped.
-func tablelessDB(t *testing.T) {
-	t.Helper()
-
-	path := filepath.Join(t.TempDir(), "empty.db")
-	t.Setenv("SYNC_DB_PATH", path)
-
-	db, err := sqlite.OpenSQLiteDB()
-	if err != nil {
-		t.Fatalf("open the control database: %v", err)
-	}
-	defer db.Close()
-
-	rows, err := db.Query(
-		`SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'`)
-	if err != nil {
-		t.Fatalf("list tables: %v", err)
-	}
-	var names []string
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			t.Fatalf("scan: %v", err)
-		}
-		names = append(names, name)
-	}
-	rows.Close()
-
-	for _, name := range names {
-		if _, err := db.Exec(`DROP TABLE IF EXISTS "` + name + `"`); err != nil {
-			t.Fatalf("drop %s: %v", name, err)
-		}
 	}
 }

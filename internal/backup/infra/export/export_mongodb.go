@@ -13,7 +13,6 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
-	"github.com/retail-ai-inc/sync/internal/backup/infra/transfer"
 	"github.com/sirupsen/logrus"
 )
 
@@ -60,36 +59,16 @@ func (e *BackupExecutor) executeExternalMongoExportSimple(ctx context.Context, c
 
 	e.logMemoryUsage("AFTER_EXTERNAL_EXPORT")
 
-	// Step 2: External zip command
-	logrus.Infof("[BackupExecutor] 🗜️ Step 2: External zip compression")
-	if err := transfer.Zip(ctx, tempDir, outputPath, zipPath); err != nil {
-		return fmt.Errorf("external zip failed: %w", err)
-	}
-
-	e.logMemoryUsage("AFTER_EXTERNAL_ZIP")
-
-	// Step 3: External GCS upload
-	zipFileName := fmt.Sprintf("%s%s%s.zip", baseCollectionName, ZIPFilenameSeparator, dateStr)
-	gcsPath := fmt.Sprintf("%s/%s", config.Destination.GCSPath, zipFileName)
-	logrus.Infof("[BackupExecutor] ☁️ Step 3: External GCS upload")
-	if err := transfer.UploadGCS(ctx, zipPath, gcsPath); err != nil {
-		return fmt.Errorf("external GCS upload failed: %w", err)
+	// The MongoDB paths compress regardless of the job's compressionType, which
+	// is what they have always done.
+	if _, err := e.compressAndUpload(ctx, tempDir, outputPath, zipPath, true, config); err != nil {
+		return err
 	}
 
 	e.logMemoryUsage("EXTERNAL_FULL_COMPLETE")
 
-	// Clean up temporary files
-	if err := os.Remove(outputPath); err != nil {
-		logrus.Warnf("[BackupExecutor] Failed to remove JSON file %s: %v", outputPath, err)
-	} else {
-		logrus.Debugf("[BackupExecutor] 🗑️  Cleaned up JSON file: %s", outputPath)
-	}
-
-	if err := os.Remove(zipPath); err != nil {
-		logrus.Warnf("[BackupExecutor] Failed to remove ZIP file %s: %v", zipPath, err)
-	} else {
-		logrus.Debugf("[BackupExecutor] 🗑️  Cleaned up ZIP file: %s", zipPath)
-	}
+	removeTemp("JSON file", outputPath)
+	removeTemp("ZIP file", zipPath)
 
 	logrus.Infof("[BackupExecutor] ✅ COMPLETE external backup workflow completed for collection: %s", collection)
 
@@ -280,43 +259,14 @@ func (e *BackupExecutor) exportMongoDBMergedTables(ctx context.Context, connStr,
 
 	e.logMemoryUsage("AFTER_MERGE")
 
-	// Step 2: External zip command
-	logrus.Infof("[BackupExecutor] 🗜️ Step 2: External zip compression")
-	if err := transfer.Zip(ctx, tempDir, mergedJsonPath, zipPath); err != nil {
-		return fmt.Errorf("external zip failed: %w", err)
-	}
-
-	e.logMemoryUsage("AFTER_EXTERNAL_ZIP")
-
-	// Step 3: External GCS upload, when there is somewhere to upload to.
-	//
-	// The single-collection path has always checked; this one did not, so it
-	// ran gsutil cp with a destination of "/<name>.zip" and failed the whole
-	// backup. A job configured without a bucket therefore worked while its
-	// pattern matched one collection and started failing the day it matched
-	// two — which for a monthly naming scheme is the first of the month.
-	if config.Destination.GCSPath != "" {
-		gcsPath := fmt.Sprintf("%s/%s", config.Destination.GCSPath, zipFileName)
-		logrus.Infof("[BackupExecutor] ☁️ Step 3: External GCS upload")
-		if err := transfer.UploadGCS(ctx, zipPath, gcsPath); err != nil {
-			return fmt.Errorf("external GCS upload failed: %w", err)
-		}
+	if _, err := e.compressAndUpload(ctx, tempDir, mergedJsonPath, zipPath, true, config); err != nil {
+		return err
 	}
 
 	e.logMemoryUsage("MERGED_TABLES_COMPLETE")
 
-	// Clean up temporary files
-	if err := os.Remove(mergedJsonPath); err != nil {
-		logrus.Warnf("[BackupExecutor] Failed to remove merged file %s: %v", mergedJsonPath, err)
-	} else {
-		logrus.Debugf("[BackupExecutor] 🗑️  Cleaned up merged file: %s", mergedJsonPath)
-	}
-
-	if err := os.Remove(zipPath); err != nil {
-		logrus.Warnf("[BackupExecutor] Failed to remove ZIP file %s: %v", zipPath, err)
-	} else {
-		logrus.Debugf("[BackupExecutor] 🗑️  Cleaned up ZIP file: %s", zipPath)
-	}
+	removeTemp("merged file", mergedJsonPath)
+	removeTemp("ZIP file", zipPath)
 
 	logrus.Infof("[BackupExecutor] ✅ Multi-table merge backup completed successfully for %d tables", len(tables))
 	return nil

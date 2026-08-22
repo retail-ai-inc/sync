@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/retail-ai-inc/sync/internal/platform/resilience"
 	"strings"
 	"time"
 
@@ -236,101 +237,17 @@ func (s *MongoDBSyncer) watchChangesWithRetry(ctx context.Context, sourceColl, t
 	}
 }
 
-// isRecoverableError determines if a MongoDB error is recoverable and should trigger a retry
+// isRecoverableError reports whether a change stream failure is worth
+// reconnecting through.
+//
+// It used to carry its own list of twenty-eight driver phrases, alongside the
+// one in the resilience package that says the same thing for every other engine.
+// Two lists meant two places to add a message the driver started using, and only
+// one of them ever got updated: a phrase learned from a MySQL failover did
+// nothing for MongoDB and the other way round. The MongoDB-specific vocabulary
+// is still asserted, against the shared classifier.
 func isRecoverableError(err error) bool {
-	if err == nil {
-		return false
-	}
-
-	// The driver's own judgement first. It knows which of its errors are network
-	// failures and which are timeouts without anybody having to guess at the
-	// wording, and the wording changes between driver releases: the list below
-	// missed "connection() error occurred during connection handshake", "socket
-	// was unexpectedly closed" and "client is disconnected", which are among the
-	// commonest things it says while a replica set elects a new primary. A
-	// watcher that read those as fatal gave up on the stream instead of
-	// reconnecting to it.
-	if mongo.IsNetworkError(err) || mongo.IsTimeout(err) {
-		return true
-	}
-
-	// A cancelled context is this process stopping, not the cluster failing.
-	if errors.Is(err, context.Canceled) {
-		return false
-	}
-
-	errStr := strings.ToLower(err.Error())
-
-	// Network-related errors that are typically recoverable
-	recoverablePatterns := []string{
-		"server selection timeout",
-		"server selection error",
-		"connection refused",
-		"connection handshake",
-		"socket was unexpectedly closed",
-		"client is disconnected",
-		"network timeout",
-		"no reachable servers",
-		"connection pool exhausted",
-		"pool is closed",
-		"write concern timeout",
-		"read concern timeout",
-		"cursor not found",
-		"interrupted at shutdown",
-		"interruptedatshutdown",
-		"shutdown in progress",
-		"host unreachable",
-		"connection reset",
-		"connection closed",
-		"broken pipe",
-		"i/o timeout",
-		"context deadline exceeded",
-		"not master",
-		"not primary",
-		"node is recovering",
-		"primary stepped down",
-		"unable to target",
-		"eof",
-	}
-
-	for _, pattern := range recoverablePatterns {
-		if strings.Contains(errStr, pattern) {
-			return true
-		}
-	}
-
-	// Check for specific MongoDB error codes that are recoverable
-	for _, code := range []int{
-		11600, // InterruptedAtShutdown
-		11602, // InterruptedDueToReplStateChange
-		10107, // NotWritablePrimary
-		13435, // NotPrimaryNoSecondaryOk
-		13436, // NotPrimaryOrSecondary
-		189,   // PrimarySteppedDown
-		91,    // ShutdownInProgress
-		7,     // HostNotFound
-		6,     // HostUnreachable
-		89,    // NetworkTimeout
-		9001,  // SocketException
-		262,   // ExceededTimeLimit
-	} {
-		if hasServerCode(err, code) {
-			return true
-		}
-	}
-
-	return false
-}
-
-// hasServerCode reports whether the server returned a particular error code,
-// by the driver's own accounting rather than by looking for the number in the
-// message text.
-func hasServerCode(err error, code int) bool {
-	var server mongo.ServerError
-	if errors.As(err, &server) {
-		return server.HasErrorCode(code)
-	}
-	return strings.Contains(err.Error(), fmt.Sprintf("error code %d", code))
+	return resilience.IsConnectionError(err)
 }
 
 // positionLost reports whether an error says the change stream cannot be

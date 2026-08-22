@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"github.com/retail-ai-inc/sync/internal/platform/sqlite"
+	"github.com/retail-ai-inc/sync/internal/platform/sqlite/sqlitetest"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -45,7 +46,7 @@ func useTempDB(t *testing.T) *sql.DB {
 func emptyIdentityDB(t *testing.T) {
 	t.Helper()
 	isolateCrontab(t)
-	tablelessDB(t)
+	sqlitetest.Tableless(t)
 }
 
 // unopenableDB points SYNC_DB_PATH at a path whose parent is a regular file.
@@ -103,45 +104,4 @@ func envelope(t *testing.T, rec *httptest.ResponseRecorder) map[string]interface
 func cheapPasswordHashing(t *testing.T) {
 	t.Helper()
 	t.Setenv("SYNC_PASSWORD_ITERATIONS", "1")
-}
-
-// tablelessDB points SYNC_DB_PATH at a database whose tables have been removed,
-// which is the state a migration that did not finish — or a file restored from
-// the wrong backup — leaves behind.
-//
-// Pointing at an empty file no longer produces one: opening the control database
-// creates its schema, so the tables have to be dropped after that has happened.
-func tablelessDB(t *testing.T) {
-	t.Helper()
-
-	path := filepath.Join(t.TempDir(), "empty.db")
-	t.Setenv("SYNC_DB_PATH", path)
-
-	// Opening it is what creates the schema.
-	db, err := sqlite.OpenSQLiteDB()
-	if err != nil {
-		t.Fatalf("open the control database: %v", err)
-	}
-	defer db.Close()
-
-	rows, err := db.Query(
-		`SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'`)
-	if err != nil {
-		t.Fatalf("list tables: %v", err)
-	}
-	var names []string
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			t.Fatalf("scan: %v", err)
-		}
-		names = append(names, name)
-	}
-	rows.Close()
-
-	for _, name := range names {
-		if _, err := db.Exec(`DROP TABLE IF EXISTS "` + name + `"`); err != nil {
-			t.Fatalf("drop %s: %v", name, err)
-		}
-	}
 }

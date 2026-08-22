@@ -145,8 +145,12 @@ func execute(taskID string, id int) {
 
 	if err := executor.Execute(ctx, id); err != nil {
 		logrus.Errorf("[BackupExecutor] Failed to execute backup task %d: %v", id, err)
-		AdvanceRun(taskID, domain.RunFailed, "Backup execution failed", err)
+		// Durable first, then the in-memory register. A caller polling the
+		// status endpoint reads the register, so advancing it first would let it
+		// see "failed" at a moment when nothing on disk says so yet — and if the
+		// process went down in that window, nothing ever would.
 		recordOutcome(id, domain.RunFailed, err.Error())
+		AdvanceRun(taskID, domain.RunFailed, "Backup execution failed", err)
 		return
 	}
 
@@ -156,8 +160,8 @@ func execute(taskID string, id int) {
 		// Continue execution, don't interrupt response
 	}
 
-	AdvanceRun(taskID, domain.RunCompleted, "Backup executed successfully", nil)
 	recordOutcome(id, domain.RunCompleted, "")
+	AdvanceRun(taskID, domain.RunCompleted, "Backup executed successfully", nil)
 	logrus.Debugf("[BackupExecutor] Background backup task %s completed successfully", taskID)
 }
 

@@ -573,8 +573,9 @@ func TestARowThatWillNotScanIsReported(t *testing.T) {
 	day := now.Format("2006-01-02")
 
 	if _, err := db.Exec(
-		`INSERT INTO monitoring_log (sync_task_id, logged_at, src_table, tgt_table, src_row_count, tgt_row_count)
-		 VALUES (1, ?, 'orders', 'orders', 'x', 'y')`, day+" 01:00:00"); err != nil {
+		`INSERT INTO monitoring_log
+		   (sync_task_id, logged_at, db_type, src_table, tgt_table, src_row_count, tgt_row_count)
+		 VALUES (1, ?, 'MONGODB', 'orders', 'orders', 'x', 'y')`, day+" 01:00:00"); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
 

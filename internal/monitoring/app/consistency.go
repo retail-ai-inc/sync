@@ -230,20 +230,7 @@ type tablePair struct{ source, target string }
 // sqlTablePairs reports the tables to compare, discovering them when the task
 // lists none — which is the same rule replication itself follows.
 func sqlTablePairs(ctx context.Context, task config.SyncConfig, source *sql.DB, sourceDB string, log *logrus.Logger) []tablePair {
-	var pairs []tablePair
-	for _, mapping := range task.Mappings {
-		for _, table := range mapping.Tables {
-			if table.SourceTable == "" {
-				continue
-			}
-			target := table.TargetTable
-			if target == "" {
-				target = table.SourceTable
-			}
-			pairs = append(pairs, tablePair{source: table.SourceTable, target: target})
-		}
-	}
-	if len(pairs) > 0 {
+	if pairs := configuredPairs(task); len(pairs) > 0 {
 		return pairs
 	}
 
@@ -252,10 +239,7 @@ func sqlTablePairs(ctx context.Context, task config.SyncConfig, source *sql.DB, 
 		log.Errorf("[Verify] Task %d: %v", task.ID, err)
 		return nil
 	}
-	for _, table := range tables {
-		pairs = append(pairs, tablePair{source: table, target: table})
-	}
-	return pairs
+	return samePairs(tables)
 }
 
 // primaryKey reports the columns a table's rows are identified by, in order.
@@ -358,6 +342,25 @@ func checkMongoTask(ctx context.Context, task config.SyncConfig, n notifier, log
 // mongoCollectionPairs reports the collections to compare, discovering them when
 // the task lists none.
 func mongoCollectionPairs(ctx context.Context, task config.SyncConfig, sourceDB *mongo.Database, log *logrus.Logger) []tablePair {
+	if pairs := configuredPairs(task); len(pairs) > 0 {
+		return pairs
+	}
+
+	names, err := discovery.MongoCollections(ctx, sourceDB)
+	if err != nil {
+		log.Errorf("[Verify] Task %d: %v", task.ID, err)
+		return nil
+	}
+	return samePairs(names)
+}
+
+// configuredPairs reports the pairs the task names, which is nothing when it
+// names none — that is the signal to go and discover them.
+//
+// A mapping with no target named copies into a table of the same name, which is
+// what the task form produces when the two sides match. Both engines used to
+// carry their own copy of this loop, and of the one below.
+func configuredPairs(task config.SyncConfig) []tablePair {
 	var pairs []tablePair
 	for _, mapping := range task.Mappings {
 		for _, table := range mapping.Tables {
@@ -371,15 +374,13 @@ func mongoCollectionPairs(ctx context.Context, task config.SyncConfig, sourceDB 
 			pairs = append(pairs, tablePair{source: table.SourceTable, target: target})
 		}
 	}
-	if len(pairs) > 0 {
-		return pairs
-	}
+	return pairs
+}
 
-	names, err := discovery.MongoCollections(ctx, sourceDB)
-	if err != nil {
-		log.Errorf("[Verify] Task %d: %v", task.ID, err)
-		return nil
-	}
+// samePairs pairs each discovered name with itself, which is what a task that
+// lists no tables replicates into.
+func samePairs(names []string) []tablePair {
+	pairs := make([]tablePair, 0, len(names))
 	for _, name := range names {
 		pairs = append(pairs, tablePair{source: name, target: name})
 	}

@@ -2,6 +2,7 @@ package replicationhttp
 
 import (
 	"encoding/json"
+	"github.com/retail-ai-inc/sync/internal/platform/sqlite/sqlitetest"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,9 +12,20 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
+// jstDay names a calendar day in Tokyo, which is the day the handler's window
+// is built from.
+//
+// The UTC day is a different day for the first nine hours of every JST morning,
+// so seeding "today" from the UTC clock made these tests fail every night
+// between midnight and nine — the same nine hours the handler itself used to get
+// wrong. See TestTheDailyWindowIsTheJSTDay.
+func jstDay(offset int) string {
+	return time.Now().In(time.FixedZone("JST", 9*60*60)).AddDate(0, 0, offset).Format("2006-01-02")
+}
+
 func TestSyncTablesHandlerSummarisesToday(t *testing.T) {
 	conn := useMonitorDB(t)
-	today := time.Now().UTC().Format("2006-01-02")
+	today := jstDay(0)
 	insertMonitoringRow(t, conn, 1, today+" 01:00:00", "orders", 100, 100)
 	insertMonitoringRow(t, conn, 1, today+" 02:00:00", "orders", 180, 175)
 
@@ -37,7 +49,7 @@ func TestSyncTablesHandlerSummarisesToday(t *testing.T) {
 
 func TestSyncTablesHandlerIgnoresOtherDays(t *testing.T) {
 	conn := useMonitorDB(t)
-	yesterday := time.Now().UTC().AddDate(0, 0, -1).Format("2006-01-02")
+	yesterday := jstDay(-1)
 	insertMonitoringRow(t, conn, 1, yesterday+" 12:00:00", "orders", 999, 999)
 
 	rec := httptest.NewRecorder()
@@ -78,7 +90,7 @@ func TestTheDailyWindowIsTheJSTDay(t *testing.T) {
 }
 
 func TestSyncTablesHandlerReportsAMissingTable(t *testing.T) {
-	tablelessDB(t)
+	sqlitetest.Tableless(t)
 
 	rec := httptest.NewRecorder()
 	serveWithURLParams(rec, httptest.NewRequest(http.MethodGet, "/sync/{id}/tables", nil),

@@ -14,6 +14,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -116,4 +117,28 @@ func Added(known map[string]bool, current []string) []string {
 		}
 	}
 	return added
+}
+
+// Poll runs scan straight away and then once per interval until the context is
+// cancelled.
+//
+// Three copies of this loop existed, one per thing a syncer rescans. Running
+// the first scan before the ticker is the part worth having in one place: a
+// loop that only ever runs on the tick does nothing at all for the length of
+// the interval, which for the newly-created-table scan means a table added
+// just before the syncer started is not replicated for a minute and nothing
+// says so.
+func Poll(ctx context.Context, interval time.Duration, scan func()) {
+	scan()
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			scan()
+		}
+	}
 }

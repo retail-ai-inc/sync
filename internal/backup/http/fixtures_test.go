@@ -3,6 +3,7 @@ package backuphttp
 import (
 	"database/sql"
 	"encoding/json"
+	"github.com/retail-ai-inc/sync/internal/platform/sqlite"
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
@@ -31,31 +32,15 @@ func useTempTaskDB(t *testing.T) *sql.DB {
 	path := filepath.Join(t.TempDir(), "sync.db")
 	t.Setenv("SYNC_DB_PATH", path)
 
-	db, err := sql.Open("sqlite3", path)
+	// Through the real opener, which carries the whole schema and creates it
+	// only when it is missing — rather than a copy kept here that can drift from
+	// it, and that a background goroutine racing to the same path turns into
+	// "table already exists".
+	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
 		t.Fatalf("open temp sqlite: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-
-	const schema = `
-CREATE TABLE sync_tasks (
-    id               INTEGER PRIMARY KEY AUTOINCREMENT,
-    enable           INTEGER NOT NULL DEFAULT 1,
-    last_update_time DATETIME,
-    last_run_time    DATETIME,
-    config_json      TEXT NOT NULL
-);
-CREATE TABLE backup_tasks (
-    id               INTEGER PRIMARY KEY AUTOINCREMENT,
-    enable           INTEGER NOT NULL DEFAULT 1,
-    last_update_time DATETIME,
-    last_backup_time DATETIME,
-    next_backup_time DATETIME,
-    config_json      TEXT NOT NULL
-);`
-	if _, err := db.Exec(schema); err != nil {
-		t.Fatalf("create schema: %v", err)
-	}
 	return db
 }
 

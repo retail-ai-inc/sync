@@ -37,6 +37,14 @@ func call(t *testing.T, method, path, body, token string) *httptest.ResponseReco
 func withUsers(t *testing.T) (adminToken, guestToken string) {
 	t.Helper()
 
+	// The production work factor costs most of a second per login, and signing
+	// in is the first thing most of these tests do. Worse than slow: the seeded
+	// rows hold plain passwords, so the first successful login rehashes them and
+	// writes the hash back — through a pool that holds one connection and a
+	// busy timeout of five seconds. Under a parallel suite that is a race
+	// against the timeout, and losing it looks like a rejected password.
+	t.Setenv("SYNC_PASSWORD_ITERATIONS", "1")
+
 	db := useTempDB(t)
 	insertUser(t, db, "admin", "adminpw", "Admin", domain.AccessAdmin)
 	insertUser(t, db, "guest", "guestpw", "Guest", domain.AccessGuest)

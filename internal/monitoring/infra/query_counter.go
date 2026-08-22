@@ -98,96 +98,19 @@ func (qc *QueryCounter) CountMongoDBDocuments(ctx context.Context, client *mongo
 			continue
 		}
 
-		// Handle different operators
 		if condition.Operator == "dateRange" && condition.Field != "" {
-			switch strings.ToLower(condition.Value) {
-			case "daily", "today":
-				// Create date range using JST timezone
-				now := time.Now().In(jst)
-				startOfDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, jst)
-				endOfDay := time.Date(now.Year(), now.Month(), now.Day(), 23, 59, 59, 999999999, jst)
-
-				// Convert to UTC for MongoDB query
-				startOfDayUTC := startOfDay.UTC()
-				endOfDayUTC := endOfDay.UTC()
-
-				filter[condition.Field] = bson.M{
-					"$gte": startOfDayUTC,
-					"$lte": endOfDayUTC,
-				}
-
-				// Log equivalent MongoDB query for debugging
-				qc.logger.Debugf("[QueryCounter] MongoDB query: db.%s.countDocuments({%s: {$gte: ISODate(\"%s\"), $lte: ISODate(\"%s\")}})",
-					collection, condition.Field, startOfDayUTC.Format("2006-01-02T15:04:05Z"), endOfDayUTC.Format("2006-01-02T15:04:05Z"))
-
-			case "yesterday":
-				// Use custom yesterday range if provided, otherwise calculate
-				var startOfYesterday, endOfYesterday time.Time
-				if qc.customYesterdayStart != nil && qc.customYesterdayEnd != nil {
-					startOfYesterday = *qc.customYesterdayStart
-					endOfYesterday = *qc.customYesterdayEnd
-				} else {
-					// Fallback to calculated yesterday in JST
-					now := time.Now().In(jst)
-					yesterday := now.AddDate(0, 0, -1)
-					startOfYesterday = time.Date(yesterday.Year(), yesterday.Month(), yesterday.Day(), 0, 0, 0, 0, jst)
-					endOfYesterday = time.Date(yesterday.Year(), yesterday.Month(), yesterday.Day(), 23, 59, 59, 999999999, jst)
-				}
-
-				// Convert to UTC for MongoDB query
-				startOfYesterdayUTC := startOfYesterday.UTC()
-				endOfYesterdayUTC := endOfYesterday.UTC()
-
-				filter[condition.Field] = bson.M{
-					"$gte": startOfYesterdayUTC,
-					"$lte": endOfYesterdayUTC,
-				}
-
-				// Log equivalent MongoDB query for debugging
-				qc.logger.Debugf("[QueryCounter] MongoDB query (yesterday): db.%s.countDocuments({%s: {$gte: ISODate(\"%s\"), $lte: ISODate(\"%s\")}})",
-					collection, condition.Field, startOfYesterdayUTC.Format("2006-01-02T15:04:05Z"), endOfYesterdayUTC.Format("2006-01-02T15:04:05Z"))
-
-			case "weekly":
-				now := time.Now().In(jst)
-				// Get first day of week (Sunday as week start)
-				startOfWeek := now.AddDate(0, 0, -int(now.Weekday()))
-				startOfWeek = time.Date(startOfWeek.Year(), startOfWeek.Month(), startOfWeek.Day(), 0, 0, 0, 0, jst)
-				endOfWeek := time.Date(now.Year(), now.Month(), now.Day(), 23, 59, 59, 999999999, jst)
-
-				// Convert to UTC
-				startOfWeekUTC := startOfWeek.UTC()
-				endOfWeekUTC := endOfWeek.UTC()
-
-				filter[condition.Field] = bson.M{
-					"$gte": startOfWeekUTC,
-					"$lte": endOfWeekUTC,
-				}
-
-				// Log equivalent MongoDB query for debugging
-				qc.logger.Debugf("[QueryCounter] MongoDB query: db.%s.countDocuments({%s: {$gte: ISODate(\"%s\"), $lte: ISODate(\"%s\")}})",
-					collection, condition.Field, startOfWeekUTC.Format("2006-01-02T15:04:05Z"), endOfWeekUTC.Format("2006-01-02T15:04:05Z"))
-
-			case "monthly":
-				now := time.Now().In(jst)
-				startOfMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, jst)
-				endOfMonth := time.Date(now.Year(), now.Month(), now.Day(), 23, 59, 59, 999999999, jst)
-
-				// Convert to UTC
-				startOfMonthUTC := startOfMonth.UTC()
-				endOfMonthUTC := endOfMonth.UTC()
-
-				filter[condition.Field] = bson.M{
-					"$gte": startOfMonthUTC,
-					"$lte": endOfMonthUTC,
-				}
-
-				// Log equivalent MongoDB query for debugging
-				qc.logger.Debugf("[QueryCounter] MongoDB query: db.%s.countDocuments({%s: {$gte: ISODate(\"%s\"), $lte: ISODate(\"%s\")}})",
-					collection, condition.Field, startOfMonthUTC.Format("2006-01-02T15:04:05Z"), endOfMonthUTC.Format("2006-01-02T15:04:05Z"))
-
-			default:
+			start, finish, known := qc.namedRange(condition.Value, jst)
+			if !known {
 				dropped = append(dropped, fmt.Sprintf("%s: unknown date range %q",
 					condition.Field, condition.Value))
+			} else {
+				// MongoDB stores instants in UTC, so the window is converted
+				// rather than compared in the local zone.
+				filter[condition.Field] = bson.M{"$gte": start.UTC(), "$lte": finish.UTC()}
+				qc.logger.Debugf(
+					"[QueryCounter] MongoDB query: db.%s.countDocuments({%s: {$gte: ISODate(\"%s\"), $lte: ISODate(\"%s\")}})",
+					collection, condition.Field,
+					start.UTC().Format("2006-01-02T15:04:05Z"), finish.UTC().Format("2006-01-02T15:04:05Z"))
 			}
 		} else if condition.Operator == "=" && condition.Field != "" && condition.Value != "" {
 			// A value that looks like a number is matched as a number *or* as the
@@ -198,50 +121,9 @@ func (qc *QueryCounter) CountMongoDBDocuments(ctx context.Context, client *mongo
 			filter[condition.Field] = equalityFilter(condition.Value)
 			qc.logger.Debugf("[QueryCounter] Equality on %s matches %v", condition.Field, filter[condition.Field])
 		} else if condition.Field != "" && condition.Value != "" {
-			// Handle comparison operators (>, <, >=, <=)
-			switch condition.Operator {
-			case ">":
-				// Try to convert value to number for numeric comparison (int first, then float)
-				if intValue, err := strconv.ParseInt(condition.Value, 10, 64); err == nil {
-					filter[condition.Field] = bson.M{"$gt": intValue}
-				} else if floatValue, err := strconv.ParseFloat(condition.Value, 64); err == nil {
-					filter[condition.Field] = bson.M{"$gt": floatValue}
-				} else {
-					filter[condition.Field] = bson.M{"$gt": condition.Value}
-				}
-			case ">=":
-				if intValue, err := strconv.ParseInt(condition.Value, 10, 64); err == nil {
-					filter[condition.Field] = bson.M{"$gte": intValue}
-				} else if floatValue, err := strconv.ParseFloat(condition.Value, 64); err == nil {
-					filter[condition.Field] = bson.M{"$gte": floatValue}
-				} else {
-					filter[condition.Field] = bson.M{"$gte": condition.Value}
-				}
-			case "<":
-				if intValue, err := strconv.ParseInt(condition.Value, 10, 64); err == nil {
-					filter[condition.Field] = bson.M{"$lt": intValue}
-				} else if floatValue, err := strconv.ParseFloat(condition.Value, 64); err == nil {
-					filter[condition.Field] = bson.M{"$lt": floatValue}
-				} else {
-					filter[condition.Field] = bson.M{"$lt": condition.Value}
-				}
-			case "<=":
-				if intValue, err := strconv.ParseInt(condition.Value, 10, 64); err == nil {
-					filter[condition.Field] = bson.M{"$lte": intValue}
-				} else if floatValue, err := strconv.ParseFloat(condition.Value, 64); err == nil {
-					filter[condition.Field] = bson.M{"$lte": floatValue}
-				} else {
-					filter[condition.Field] = bson.M{"$lte": condition.Value}
-				}
-			case "!=", "<>":
-				if intValue, err := strconv.ParseInt(condition.Value, 10, 64); err == nil {
-					filter[condition.Field] = bson.M{"$ne": intValue}
-				} else if floatValue, err := strconv.ParseFloat(condition.Value, 64); err == nil {
-					filter[condition.Field] = bson.M{"$ne": floatValue}
-				} else {
-					filter[condition.Field] = bson.M{"$ne": condition.Value}
-				}
-			default:
+			if operator, known := mongoComparisons[condition.Operator]; known {
+				filter[condition.Field] = bson.M{operator: comparableValue(condition.Value)}
+			} else {
 				dropped = append(dropped, fmt.Sprintf("%s: unknown operator %q",
 					condition.Field, condition.Operator))
 			}
@@ -378,4 +260,82 @@ func (qc *QueryCounter) formatValue(value interface{}) string {
 	default:
 		return fmt.Sprintf("%v", v)
 	}
+}
+
+// mongoComparisons maps the operators a count query is written with onto the
+// ones MongoDB understands.
+//
+// Each of these used to be its own case, and each case carried its own copy of
+// the same three-step conversion below — five copies of a ladder that has to
+// stay identical, because a condition that reads a value differently from its
+// neighbour counts a different set of documents.
+var mongoComparisons = map[string]string{
+	">":  "$gt",
+	">=": "$gte",
+	"<":  "$lt",
+	"<=": "$lte",
+	"!=": "$ne",
+	"<>": "$ne",
+}
+
+// comparableValue reads a condition's value as the narrowest type it fits: an
+// integer, then a floating-point number, then the string as it was written.
+//
+// The order matters. MongoDB compares a number against a number and a string
+// against a string, so a threshold written as "1000" against a numeric field has
+// to be sent as a number or it matches nothing — and a value that is not a
+// number at all has to be sent as it stands rather than dropped.
+func comparableValue(value string) interface{} {
+	if whole, err := strconv.ParseInt(value, 10, 64); err == nil {
+		return whole
+	}
+	if fractional, err := strconv.ParseFloat(value, 64); err == nil {
+		return fractional
+	}
+	return value
+}
+
+// namedRange reports the window a named date range covers, in the given zone.
+//
+// The four ranges each used to compute their own bounds, convert them, set the
+// filter and log the query — four copies of the same twenty lines, which is how
+// "weekly" and "monthly" came to end at the end of today rather than at the end
+// of the period while "daily" ended at the end of its day. The bounds are here;
+// what is done with them is in one place at the call site.
+//
+// A range is inclusive at both ends: the last nanosecond of the last day is part
+// of it, because a document written at 23:59:59 belongs to that day.
+func (qc *QueryCounter) namedRange(name string, zone *time.Location) (start, end time.Time, known bool) {
+	now := time.Now().In(zone)
+	dayStart := func(t time.Time) time.Time {
+		return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, zone)
+	}
+	dayEnd := func(t time.Time) time.Time {
+		return time.Date(t.Year(), t.Month(), t.Day(), 23, 59, 59, 999999999, zone)
+	}
+
+	switch strings.ToLower(name) {
+	case "daily", "today":
+		return dayStart(now), dayEnd(now), true
+
+	case "yesterday":
+		// The daily summary computes the window once, for every task, so that
+		// two tasks compared in the same run cover the same day even if the run
+		// crosses midnight.
+		if qc.customYesterdayStart != nil && qc.customYesterdayEnd != nil {
+			return *qc.customYesterdayStart, *qc.customYesterdayEnd, true
+		}
+		yesterday := now.AddDate(0, 0, -1)
+		return dayStart(yesterday), dayEnd(yesterday), true
+
+	case "weekly":
+		// Week starting Sunday, ending today: this is "this week so far", not a
+		// whole week. Recorded as-is; which one the dashboard wants is T-198.
+		return dayStart(now.AddDate(0, 0, -int(now.Weekday()))), dayEnd(now), true
+
+	case "monthly":
+		// "This month so far", for the same reason.
+		return time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, zone), dayEnd(now), true
+	}
+	return time.Time{}, time.Time{}, false
 }

@@ -3,10 +3,9 @@ package backuphttp
 import (
 	"database/sql"
 	"encoding/json"
-	"github.com/retail-ai-inc/sync/internal/platform/sqlite"
+	"github.com/retail-ai-inc/sync/internal/platform/sqlite/sqlitetest"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -46,7 +45,7 @@ func backupConfig(t *testing.T, conn *sql.DB, id int) map[string]interface{} {
 func emptyTaskDB(t *testing.T) {
 	t.Helper()
 	isolateCrontab(t)
-	tablelessDB(t)
+	sqlitetest.Tableless(t)
 }
 
 func TestBackupRunHandlerRejectsAnUnknownTask(t *testing.T) {
@@ -332,46 +331,5 @@ func TestTheStoredNextBackupTimeFollowsTheSchedule(t *testing.T) {
 	// A five-minute schedule puts the next run minutes away, not a day.
 	if d := time.Until(next); d > 10*time.Minute {
 		t.Errorf("next_backup_time is %v away for a five-minute schedule", d)
-	}
-}
-
-// tablelessDB points SYNC_DB_PATH at a database whose tables have been removed,
-// which is the state a migration that did not finish — or a file restored from
-// the wrong backup — leaves behind.
-//
-// Pointing at an empty file no longer produces one: opening the control database
-// creates its schema, so the tables have to be dropped after that has happened.
-// The schema is applied once per file, so later opens leave them dropped.
-func tablelessDB(t *testing.T) {
-	t.Helper()
-
-	path := filepath.Join(t.TempDir(), "empty.db")
-	t.Setenv("SYNC_DB_PATH", path)
-
-	db, err := sqlite.OpenSQLiteDB()
-	if err != nil {
-		t.Fatalf("open the control database: %v", err)
-	}
-	defer db.Close()
-
-	rows, err := db.Query(
-		`SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'`)
-	if err != nil {
-		t.Fatalf("list tables: %v", err)
-	}
-	var names []string
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			t.Fatalf("scan: %v", err)
-		}
-		names = append(names, name)
-	}
-	rows.Close()
-
-	for _, name := range names {
-		if _, err := db.Exec(`DROP TABLE IF EXISTS "` + name + `"`); err != nil {
-			t.Fatalf("drop %s: %v", name, err)
-		}
 	}
 }

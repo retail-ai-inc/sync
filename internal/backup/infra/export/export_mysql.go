@@ -12,7 +12,6 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
-	"github.com/retail-ai-inc/sync/internal/backup/infra/transfer"
 	"github.com/sirupsen/logrus"
 )
 
@@ -81,36 +80,9 @@ func (e *BackupExecutor) executeExternalMySQLBackupSimple(ctx context.Context, c
 
 	e.logMemoryUsage("AFTER_MYSQL_EXPORT")
 
-	// Step 2: External zip command, unless compression is explicitly disabled
-	uploadPath := zipPath
-	uploadName := fmt.Sprintf("%s%s%s.zip", baseTableName, ZIPFilenameSeparator, dateStr)
-	skipCompression := isCompressionDisabled(config.CompressionType)
-
-	if skipCompression {
-		uploadPath = outputPath
-		uploadName = filepath.Base(outputPath)
-		logrus.Infof("[BackupExecutor] ⏭️  Step 2: Compression disabled, uploading %s as-is", uploadName)
-	} else {
-		logrus.Infof("[BackupExecutor] 🗜️ Step 2: External zip compression")
-		if err := transfer.Zip(ctx, tempDir, outputPath, zipPath); err != nil {
-			return fmt.Errorf("external zip failed: %w", err)
-		}
-		e.logMemoryUsage("AFTER_ZIP")
-	}
-
-	// Step 3: External GCS upload, when there is somewhere to upload to.
-	//
-	// Neither MySQL path used to check. A job with no bucket configured ran
-	// gsutil cp against a destination of "/<name>.sql", which fails, so the
-	// backup was reported as failed although the dump had been taken — and the
-	// dump was then deleted with the temporary directory. The MongoDB
-	// single-collection path has always checked; this is the same rule.
-	if config.Destination.GCSPath != "" {
-		gcsPath := fmt.Sprintf("%s/%s", config.Destination.GCSPath, uploadName)
-		logrus.Infof("[BackupExecutor] ☁️ Step 3: External GCS upload")
-		if err := transfer.UploadGCS(ctx, uploadPath, gcsPath); err != nil {
-			return fmt.Errorf("external GCS upload failed: %w", err)
-		}
+	if _, err := e.compressAndUpload(ctx, tempDir, outputPath, zipPath,
+		!isCompressionDisabled(config.CompressionType), config); err != nil {
+		return err
 	}
 
 	e.logMemoryUsage("MYSQL_BACKUP_COMPLETE")
@@ -477,31 +449,10 @@ func (e *BackupExecutor) exportMySQLMergedTables(ctx context.Context, connection
 
 	e.logMemoryUsage("AFTER_MYSQL_MERGE")
 
-	// Step 2: External zip command, unless compression is explicitly disabled
-	uploadPath := zipPath
-	uploadName := zipFileName
 	skipCompression := isCompressionDisabled(config.CompressionType)
-
-	if skipCompression {
-		uploadPath = mergedFilePath
-		uploadName = fileName
-		logrus.Infof("[BackupExecutor] ⏭️  Step 2: Compression disabled, uploading %s as-is", uploadName)
-	} else {
-		logrus.Infof("[BackupExecutor] 🗜️ Step 2: External zip compression")
-		if err := transfer.Zip(ctx, tempDir, mergedFilePath, zipPath); err != nil {
-			return fmt.Errorf("external zip failed: %w", err)
-		}
-		e.logMemoryUsage("AFTER_ZIP")
-	}
-
-	// Step 3: External GCS upload, when there is somewhere to upload to — see
-	// executeExternalMySQLBackupSimple.
-	if config.Destination.GCSPath != "" {
-		gcsPath := fmt.Sprintf("%s/%s", config.Destination.GCSPath, uploadName)
-		logrus.Infof("[BackupExecutor] ☁️ Step 3: External GCS upload")
-		if err := transfer.UploadGCS(ctx, uploadPath, gcsPath); err != nil {
-			return fmt.Errorf("external GCS upload failed: %w", err)
-		}
+	if _, err := e.compressAndUpload(ctx, tempDir, mergedFilePath, zipPath,
+		!skipCompression, config); err != nil {
+		return err
 	}
 
 	e.logMemoryUsage("MYSQL_MERGED_COMPLETE")

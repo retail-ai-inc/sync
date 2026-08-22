@@ -21,25 +21,11 @@ import (
 
 // CountAndLogMongoDB obtains document counts for MongoDB collections
 func CountAndLogMongoDB(ctx context.Context, sc config.SyncConfig, log *logrus.Logger) {
-	srcClient, err := mongo.Connect(ctx, options.Client().ApplyURI(sc.SourceConnection))
-	if err != nil {
-		log.WithError(err).WithField("db_type", "MONGODB").
-			Error("[Monitor] Fail to connect to source")
+	srcClient, tgtClient, disconnect, ok := connectBothMongo(ctx, sc, log, "")
+	if !ok {
 		return
 	}
-	defer func() {
-		_ = srcClient.Disconnect(ctx)
-	}()
-
-	tgtClient, err := mongo.Connect(ctx, options.Client().ApplyURI(sc.TargetConnection))
-	if err != nil {
-		log.WithError(err).WithField("db_type", "MONGODB").
-			Error("[Monitor] Fail to connect to target")
-		return
-	}
-	defer func() {
-		_ = tgtClient.Disconnect(ctx)
-	}()
+	defer disconnect()
 
 	dbType := strings.ToUpper(sc.Type)
 	srcDBName := dsn.GetDatabaseName(sc.Type, sc.SourceConnection)
@@ -261,25 +247,11 @@ func getMongoDBActiveChangeStreams(ctx context.Context, client *mongo.Client) ([
 
 // LogYesterdayMongoDBVolume logs yesterday's MongoDB data volume for dateRange tables
 func LogYesterdayMongoDBVolume(ctx context.Context, sc config.SyncConfig, log *logrus.Logger, yesterdayStart, yesterdayEnd time.Time) {
-	srcClient, err := mongo.Connect(ctx, options.Client().ApplyURI(sc.SourceConnection))
-	if err != nil {
-		log.WithError(err).WithField("db_type", "MONGODB").
-			Error("[Monitor] Failed to connect to source for daily summary")
+	srcClient, tgtClient, disconnect, ok := connectBothMongo(ctx, sc, log, " for daily summary")
+	if !ok {
 		return
 	}
-	defer func() {
-		_ = srcClient.Disconnect(ctx)
-	}()
-
-	tgtClient, err := mongo.Connect(ctx, options.Client().ApplyURI(sc.TargetConnection))
-	if err != nil {
-		log.WithError(err).WithField("db_type", "MONGODB").
-			Error("[Monitor] Failed to connect to target for daily summary")
-		return
-	}
-	defer func() {
-		_ = tgtClient.Disconnect(ctx)
-	}()
+	defer disconnect()
 
 	dbType := strings.ToUpper(sc.Type)
 	srcDBName := dsn.GetDatabaseName(sc.Type, sc.SourceConnection)
@@ -417,4 +389,35 @@ func LogYesterdayMongoDBVolume(ctx context.Context, sc config.SyncConfig, log *l
 				srcCount, tgtCount, yesterdayStart, log)
 		}
 	}
+}
+
+// connectBothMongo opens the task's two MongoDB connections and returns the
+// function that closes them.
+//
+// ok is false when either side could not be reached, and the reason has already
+// been logged: a comparison with one end missing has nothing to say, and
+// answering with a count of zero for the unreachable side would read as a
+// database that has lost everything.
+func connectBothMongo(
+	ctx context.Context, sc config.SyncConfig, log *logrus.Logger, purpose string,
+) (source, target *mongo.Client, disconnect func(), ok bool) {
+	source, err := mongo.Connect(ctx, options.Client().ApplyURI(sc.SourceConnection))
+	if err != nil {
+		log.WithError(err).WithField("db_type", "MONGODB").
+			Errorf("[Monitor] Failed to connect to source%s", purpose)
+		return nil, nil, nil, false
+	}
+
+	target, err = mongo.Connect(ctx, options.Client().ApplyURI(sc.TargetConnection))
+	if err != nil {
+		_ = source.Disconnect(ctx)
+		log.WithError(err).WithField("db_type", "MONGODB").
+			Errorf("[Monitor] Failed to connect to target%s", purpose)
+		return nil, nil, nil, false
+	}
+
+	return source, target, func() {
+		_ = source.Disconnect(ctx)
+		_ = target.Disconnect(ctx)
+	}, true
 }
