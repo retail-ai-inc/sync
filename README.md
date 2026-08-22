@@ -81,13 +81,21 @@ Create standalone databases outside of your production database servers with the
 ### 1.Start with docker (For End Users)
 
 ```bash
-docker run -d -p 8080:8080 zhangyongguang/sync:latest
+docker run -d -p 8080:8080 \
+  -e SYNC_ADMIN_PASSWORD='choose-one' \
+  -v sync-state:/mnt/state \
+  zhangyongguang/sync:latest
 ```
 
 **Access the Web UI**:
 - URL: [http://localhost:8080](http://localhost:8080)
 - Username: `admin`
-- Password: `admin`
+- Password: whatever `SYNC_ADMIN_PASSWORD` was set to on first start
+
+The control database is created at `/mnt/state/sync.db` on first start, so the
+volume is what carries the tasks across a restart. The image no longer ships a
+database, and there is no default password: see
+[The first sign-in](#the-first-sign-in).
 
 ### 2.Development Setup (For Developers)
 
@@ -104,13 +112,13 @@ go run cmd/sync/main.go
 
 # 4. Build the Docker image
 docker build -t sync .
-docker run -d -p 8080:8080 sync
+docker run -d -p 8080:8080 -e SYNC_ADMIN_PASSWORD='choose-one' -v sync-state:/mnt/state sync
 ```
 
 **Access the Web UI**:
 - URL: [http://localhost:8080](http://localhost:8080)
 - Username: `admin`
-- Password: `admin`
+- Password: whatever `SYNC_ADMIN_PASSWORD` was set to on first start
 
 ## Real-Time Synchronization
 

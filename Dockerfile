@@ -52,8 +52,12 @@ WORKDIR /app
 # Copy the executable
 COPY --from=builder /app/sync .
 
-# Copy the configuration file
-COPY --from=builder /app/sync.db /mnt/state/sync.db
+# The control database is created by the program on first start, not shipped in
+# the image. It used to be copied in from the repository, which meant every
+# image carried one published admin password and whoever had committed the file
+# last also shipped their sync tasks. /mnt/state is where a volume belongs: the
+# directory has to survive a restart or the tasks are gone with it.
+RUN mkdir -p /mnt/state
 
 ENV SYNC_DB_PATH=/mnt/state/sync.db
 

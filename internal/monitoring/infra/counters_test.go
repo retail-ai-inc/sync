@@ -126,8 +126,36 @@ func TestTheRedisCounterReportsAnUnparseableDSN(t *testing.T) {
 		SourceConnection: "not a redis url",
 	}, logger)
 
-	if !strings.Contains(out.String(), "Fail to parse source Redis DSN") {
-		t.Errorf("output = %q, want a parse failure", out.String())
+	if !strings.Contains(out.String(), "source Redis") {
+		t.Errorf("output = %q, want the source reported", out.String())
+	}
+	if !strings.Contains(out.String(), "failed to parse redis DSN") {
+		t.Errorf("output = %q, want the parse failure carried", out.String())
+	}
+}
+
+// TestTheRedisCounterAcceptsAClusterDSN records that a DSN naming more than one
+// host is read as a cluster rather than refused.
+//
+// It used to go through go-redis's ParseURL, which takes a single host: the
+// Tokyo and Osaka clusters both have several, so the comparison never ran at
+// all — one parse error per interval in the log and no row written. Reaching a
+// connect failure here rather than a parse failure is what says the DSN was
+// understood; nothing is listening on these ports.
+func TestTheRedisCounterAcceptsAClusterDSN(t *testing.T) {
+	logger, out := captureLog()
+
+	CountAndLogRedis(briefCtx(t), config.SyncConfig{
+		Type:             "redis",
+		SourceConnection: "redis://127.0.0.1:1,127.0.0.1:2,127.0.0.1:3/0",
+		TargetConnection: "redis://127.0.0.1:4,127.0.0.1:5,127.0.0.1:6/0",
+	}, logger)
+
+	if strings.Contains(out.String(), "failed to parse redis DSN") {
+		t.Errorf("output = %q, want a cluster DSN to be understood", out.String())
+	}
+	if !strings.Contains(out.String(), "Fail to connect to source Redis") {
+		t.Errorf("output = %q, want the unreachable cluster reported", out.String())
 	}
 }
 

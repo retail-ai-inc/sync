@@ -5,8 +5,11 @@ import (
 	// "github.com/sirupsen/logrus"
 	"context"
 
+	"sync"
+
 	goredis "github.com/redis/go-redis/v9"
 	"github.com/retail-ai-inc/sync/internal/platform/config"
+	dbconnredis "github.com/retail-ai-inc/sync/internal/platform/dbconn/redis"
 	"github.com/retail-ai-inc/sync/internal/platform/dsn"
 	"github.com/sirupsen/logrus"
 )
@@ -14,47 +17,38 @@ import (
 func CountAndLogRedis(ctx context.Context, sc config.SyncConfig, log *logrus.Logger) {
 	dbType := strings.ToUpper(sc.Type)
 
-	srcOptions, err := goredis.ParseURL(sc.SourceConnection)
+	// Through the shared opener, which reads a DSN naming more than one host as
+	// a cluster. This used to be ParseURL and NewClient: go-redis's ParseURL
+	// takes a single host, so a cluster DSN either failed to parse — and the
+	// comparison was skipped with one line in the log — or was silently reduced
+	// to its first node.
+	srcClient, err := dbconnredis.GetRedisClient(sc.SourceConnection)
 	if err != nil {
-		log.WithError(err).WithField("db_type", dbType).
-			Error("[Monitor] Fail to parse source Redis DSN")
-		return
-	}
-	srcClient := goredis.NewClient(srcOptions)
-	defer srcClient.Close()
-
-	if err := srcClient.Ping(ctx).Err(); err != nil {
 		log.WithError(err).WithField("db_type", dbType).
 			Error("[Monitor] Fail to connect to source Redis")
 		return
 	}
+	defer srcClient.Close()
 
-	tgtOptions, err := goredis.ParseURL(sc.TargetConnection)
+	tgtClient, err := dbconnredis.GetRedisClient(sc.TargetConnection)
 	if err != nil {
-		log.WithError(err).WithField("db_type", dbType).
-			Error("[Monitor] Fail to parse target Redis DSN")
-		return
-	}
-	tgtClient := goredis.NewClient(tgtOptions)
-	defer tgtClient.Close()
-
-	if err := tgtClient.Ping(ctx).Err(); err != nil {
 		log.WithError(err).WithField("db_type", dbType).
 			Error("[Monitor] Fail to connect to target Redis")
 		return
 	}
+	defer tgtClient.Close()
 
 	srcDBName := dsn.GetDatabaseName(sc.Type, sc.SourceConnection)
 	tgtDBName := dsn.GetDatabaseName(sc.Type, sc.TargetConnection)
 
-	srcCount, srcErr := srcClient.DBSize(ctx).Result()
+	srcCount, srcErr := keyCount(ctx, srcClient)
 	if srcErr != nil {
 		log.WithError(srcErr).WithField("db_type", dbType).
 			Error("Failed to get source DB size")
 		srcCount = -1
 	}
 
-	tgtCount, tgtErr := tgtClient.DBSize(ctx).Result()
+	tgtCount, tgtErr := keyCount(ctx, tgtClient)
 	if tgtErr != nil {
 		log.WithError(tgtErr).WithField("db_type", dbType).
 			Error("Failed to get target DB size")
@@ -89,3 +83,38 @@ func CountAndLogRedis(ctx context.Context, sc config.SyncConfig, log *logrus.Log
 // 	}
 // 	return cnt
 // }
+
+// keyCount reports how many keys an instance holds.
+//
+// DBSize asked of a cluster node answers for that node alone, so comparing one
+// node of the source against one node of the target says nothing about whether
+// the copy is complete — and a three-master pair would have reported roughly a
+// third of each side while looking like a healthy match. A cluster is summed
+// across its masters; a single instance answers for itself.
+func keyCount(ctx context.Context, client goredis.UniversalClient) (int64, error) {
+	cluster, isCluster := client.(*goredis.ClusterClient)
+	if !isCluster {
+		return client.DBSize(ctx).Result()
+	}
+
+	var (
+		mu    sync.Mutex
+		total int64
+	)
+	// ForEachMaster visits the masters concurrently, so the running total needs
+	// the lock even though each node is asked once.
+	err := cluster.ForEachMaster(ctx, func(ctx context.Context, node *goredis.Client) error {
+		size, err := node.DBSize(ctx).Result()
+		if err != nil {
+			return err
+		}
+		mu.Lock()
+		total += size
+		mu.Unlock()
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return total, nil
+}
