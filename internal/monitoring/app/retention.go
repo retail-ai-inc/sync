@@ -62,7 +62,7 @@ func StartMonitoringRetention(ctx context.Context, log *logrus.Logger) {
 	}
 
 	log.Infof("[Monitor] Keeping %d days of monitoring history", days)
-	go func() {
+	watch(func() {
 		// Once at startup: a deployment that has been running without this for
 		// months should not wait a day for the first sweep.
 		sweepMonitoringLog(ctx, log, days)
@@ -77,7 +77,7 @@ func StartMonitoringRetention(ctx context.Context, log *logrus.Logger) {
 				sweepMonitoringLog(ctx, log, days)
 			}
 		}
-	}()
+	})
 }
 
 // sweepMonitoringLog removes rows older than the window and reports how many.

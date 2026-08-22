@@ -243,48 +243,12 @@ func TestProcessValueNestedBSON(t *testing.T) {
 	}
 }
 
-// TestProcessValueNestedObjectStopsAtOneLevel records that only a single level
-// of nesting is honoured. processNestedObject strips the parent prefix and then
-// looks the remainder up as a literal map key, so "profile.contact.phone"
-// searches for a key named "contact.phone" and finds nothing. Deeply nested PII
-// is therefore silently left in the clear.
-func TestProcessValueNestedObjectStopsAtOneLevel(t *testing.T) {
-	cfg := enabled(FieldSecurityConfig{Field: "profile.contact.phone", SecurityType: "masked"})
-
-	value := map[string]interface{}{
-		"contact": map[string]interface{}{"phone": "090-1234-5678"},
-	}
-
-	got, ok := ProcessValue(value, "profile", cfg).(map[string]interface{})
-	if !ok {
-		t.Fatalf("nested processing did not return a map")
-	}
-	contact, ok := got["contact"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("contact is not a map: %#v", got["contact"])
-	}
-	if contact["phone"] != "090-1234-5678" {
-		t.Errorf("profile.contact.phone = %v; two-level nesting now works, so "+
-			"assert the masked value instead", contact["phone"])
-	}
-}
-
-// TestProcessNestedFieldValueNeverEngages records that this exported helper
-// cannot do anything when reached through ProcessValue. ProcessValue only
-// delegates here once the value has failed both the map[string]interface{} and
-// bson.M checks, and the first thing this function does is require one of those
-// two types — so it always takes the "not object type" path and returns the
-// value untouched. processNestedObjectValue, its only caller, is unreachable
-// for the same reason.
-func TestProcessNestedFieldValueNeverEngages(t *testing.T) {
-	cfg := enabled(FieldSecurityConfig{Field: "profile.email", SecurityType: "masked"})
-
-	// A non-object value: the only kind that reaches this function.
-	if got := ProcessNestedFieldValue("john@example.com", "profile.email", cfg); got != "john@example.com" {
-		t.Errorf("ProcessNestedFieldValue = %v; it now processes scalars, so "+
-			"assert the new behaviour instead", got)
-	}
-}
+// The nested paths are covered in nested_test.go, against one implementation.
+// There used to be four overlapping ones — ProcessNestedFieldValue,
+// processNestedObjectValue, getNestedValue and processNestedFieldSafe — of which
+// two had no callers and the third could not be reached, because ProcessValue
+// only handed it values that were not documents while its first act was to
+// require one.
 
 func TestFindTableSecurityFromMappings(t *testing.T) {
 	mappings := []config.DatabaseMapping{{

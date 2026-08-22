@@ -270,6 +270,10 @@ func (s *supervisor) stopAll() {
 		s.monitorCancel()
 		s.monitorCancel = nil
 	}
+	// Cancelling only asks. Every monitor writes to the control database, so
+	// returning before they have noticed leaves goroutines opening SQLite after
+	// the process believes it has stopped.
+	app.WaitForWatchers()
 }
 
 // applyMonitoring brings the process-wide watchers into line with the settings.

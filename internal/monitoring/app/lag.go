@@ -52,7 +52,7 @@ func lagThreshold() float64 {
 // metrics either. For a disaster-recovery copy that is the number that matters
 // — how much would be lost if the source went away right now.
 func StartLagAlerting(ctx context.Context, cfg *config.Config, log *logrus.Logger) {
-	go func() {
+	watch(func() {
 		var n notifier
 		if cfg != nil {
 			n = slack.NewSlackNotifierFromConfig(cfg, log)
@@ -69,7 +69,7 @@ func StartLagAlerting(ctx context.Context, cfg *config.Config, log *logrus.Logge
 				checkLag(ctx, n, log, lastAlert, time.Now())
 			}
 		}
-	}()
+	})
 }
 
 // notifier is the part of the Slack client this needs, so the check can be

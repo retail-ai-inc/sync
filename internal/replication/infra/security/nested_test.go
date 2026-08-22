@@ -1,224 +1,147 @@
 package security
 
 import (
-	"reflect"
+	"strings"
 	"testing"
 
 	"go.mongodb.org/mongo-driver/bson"
 )
 
-// maskConfig returns a table configuration that masks one field path.
-func maskConfig(path, securityType string) TableSecurity {
-	return TableSecurity{
-		SecurityEnabled: true,
-		FieldSecurity:   []FieldSecurityConfig{{Field: path, SecurityType: securityType}},
-	}
-}
+// A field's path may name something several levels down, and the rule has to
+// reach it. It used to reach exactly one: the parent prefix was stripped and the
+// remainder looked up as a literal key, so "profile.contact.phone" went looking
+// for a key called "contact.phone", did not find one, and left the phone number
+// in the clear on the target.
 
-// TestProcessNestedFieldValueRejectsANonObject records that a value which is
-// not an object is returned untouched, with a warning. The masking rule is
-// therefore silently skipped for a field whose type changed.
-func TestProcessNestedFieldValueRejectsANonObject(t *testing.T) {
-	for _, tt := range []struct {
-		name  string
-		value interface{}
-	}{
-		{"string", "a string"},
-		{"number", 42},
-		{"nil", nil},
-		{"slice", []interface{}{1}},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			got := ProcessNestedFieldValue(tt.value, "profile.email",
-				maskConfig("profile.email", "masked"))
+func TestARuleReachesAsDeepAsItsPathNames(t *testing.T) {
+	cfg := enabled(FieldSecurityConfig{Field: "profile.contact.phone", SecurityType: "masked"})
 
-			// reflect.DeepEqual, because a slice is not comparable with ==.
-			if !reflect.DeepEqual(got, tt.value) {
-				t.Errorf("ProcessNestedFieldValue(%v) = %v, want the value untouched",
-					tt.value, got)
-			}
-		})
-	}
-}
-
-func TestProcessNestedFieldValueAcceptsBSON(t *testing.T) {
-	got := ProcessNestedFieldValue(
-		bson.M{"profile": bson.M{"email": "alice@example.test"}},
-		"profile.email",
-		maskConfig("profile.email", "masked"))
-
-	nested, ok := got.(map[string]interface{})
-	if !ok {
-		t.Fatalf("ProcessNestedFieldValue returned %T, want a map", got)
-	}
-	profile, ok := nested["profile"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("profile is %T, want a map", nested["profile"])
-	}
-	if profile["email"] == "alice@example.test" {
-		t.Error("the email was not masked")
-	}
-}
-
-func TestProcessNestedFieldValueMasksTheNamedPath(t *testing.T) {
-	got := ProcessNestedFieldValue(
-		map[string]interface{}{
-			"profile": map[string]interface{}{"email": "alice@example.test", "name": "Alice"},
-		},
-		"profile.email",
-		maskConfig("profile.email", "masked"))
-
-	nested := got.(map[string]interface{})
-	profile := nested["profile"].(map[string]interface{})
-
-	if profile["email"] == "alice@example.test" {
-		t.Error("the email was not masked")
-	}
-	if profile["name"] != "Alice" {
-		t.Errorf("name = %v; a field outside the path was touched", profile["name"])
-	}
-}
-
-// TestTheOriginalIsCopiedNotMutated records that the outer map is copied before
-// the path is processed, so the document handed in keeps its value. The copy is
-// shallow, though — see the test below.
-func TestTheOriginalIsCopiedNotMutated(t *testing.T) {
-	original := map[string]interface{}{
-		"profile": map[string]interface{}{"email": "alice@example.test"},
-	}
-
-	ProcessNestedFieldValue(original, "profile.email", maskConfig("profile.email", "masked"))
-
-	profile := original["profile"].(map[string]interface{})
-	if profile["email"] == "alice@example.test" {
-		t.Fatal("the caller's document survived unchanged; the copy appears to be " +
-			"deep now, so assert that instead")
-	}
-}
-
-// TestTheCopyIsShallowSoNestedMapsAreShared records the consequence: the copy
-// only duplicates the top level, so the nested map the mask writes into is the
-// caller's own. A caller that reads the document afterwards sees the masked
-// value where it expected the original.
-func TestTheCopyIsShallowSoNestedMapsAreShared(t *testing.T) {
-	inner := map[string]interface{}{"email": "alice@example.test"}
-	original := map[string]interface{}{"profile": inner}
-
-	ProcessNestedFieldValue(original, "profile.email", maskConfig("profile.email", "masked"))
-
-	if inner["email"] == "alice@example.test" {
-		t.Fatal("the nested map was not shared; the copy appears to be deep now")
-	}
-}
-
-func TestProcessNestedFieldValueIgnoresAnUnconfiguredPath(t *testing.T) {
-	value := map[string]interface{}{
-		"profile": map[string]interface{}{"email": "alice@example.test"},
-	}
-
-	got := ProcessNestedFieldValue(value, "profile.email", maskConfig("other.path", "masked"))
-
-	nested := got.(map[string]interface{})
-	profile := nested["profile"].(map[string]interface{})
-	if profile["email"] != "alice@example.test" {
-		t.Error("an unconfigured path was masked")
-	}
-}
-
-// TestASinglePathSegmentIsRejected records that a configured field with no dot in
-// it is refused here, because this function exists for nested paths. A field
-// configured as "email" is handled by ProcessValue instead.
-func TestASinglePathSegmentIsRejected(t *testing.T) {
-	value := map[string]interface{}{"email": "alice@example.test"}
-
-	got := ProcessNestedFieldValue(value, "email", maskConfig("email", "masked"))
-
-	if nested, ok := got.(map[string]interface{}); ok {
-		if nested["email"] != "alice@example.test" {
-			t.Error("a single-segment path was processed")
-		}
-	}
-}
-
-func TestADeepPathIsNavigated(t *testing.T) {
-	got := ProcessNestedFieldValue(
-		map[string]interface{}{
-			"a": map[string]interface{}{
-				"b": map[string]interface{}{
-					"c": map[string]interface{}{"secret": "value"},
-				},
+	document := map[string]interface{}{
+		"profile": map[string]interface{}{
+			"name": "Ada",
+			"contact": map[string]interface{}{
+				"phone": "555-0100",
+				"email": "ada@example.com",
 			},
 		},
-		"a.b.c.secret",
-		maskConfig("a.b.c.secret", "masked"))
+	}
 
-	nested := got.(map[string]interface{})
-	a := nested["a"].(map[string]interface{})
-	b := a["b"].(map[string]interface{})
-	c := b["c"].(map[string]interface{})
-	if c["secret"] == "value" {
-		t.Error("the deep path was not masked")
+	processed, ok := ProcessValue(document, "", cfg).(map[string]interface{})
+	if !ok {
+		t.Fatalf("ProcessValue returned %T, want a document", ProcessValue(document, "", cfg))
+	}
+
+	profile := processed["profile"].(map[string]interface{})
+	contact := profile["contact"].(map[string]interface{})
+
+	if contact["phone"] == "555-0100" {
+		t.Errorf("phone = %v, want it masked", contact["phone"])
+	}
+	if contact["phone"] != strings.Repeat("*", len("555-0100")) {
+		t.Errorf("phone = %v", contact["phone"])
+	}
+	// Its neighbours are untouched.
+	if contact["email"] != "ada@example.com" {
+		t.Errorf("email = %v, want it left alone", contact["email"])
+	}
+	if profile["name"] != "Ada" {
+		t.Errorf("name = %v, want it left alone", profile["name"])
 	}
 }
 
-// TestABrokenPathIsLoggedAndLeftAlone records that a path segment that is not an
-// object stops the walk with an error line and no change. The document goes to
-// the target with the value unmasked, and nothing in the response says so.
-func TestABrokenPathIsLoggedAndLeftAlone(t *testing.T) {
-	value := map[string]interface{}{"profile": "not an object"}
+// TestOneLevelStillWorks is the case that did work, kept so the rewrite is not
+// trading one depth for another.
+func TestOneLevelStillWorks(t *testing.T) {
+	cfg := enabled(FieldSecurityConfig{Field: "profile.email", SecurityType: "masked"})
 
-	got := ProcessNestedFieldValue(value, "profile.email.deep", maskConfig("profile.email.deep", "masked"))
+	processed := ProcessValue(map[string]interface{}{
+		"profile": map[string]interface{}{"email": "ada@example.com", "name": "Ada"},
+	}, "", cfg).(map[string]interface{})
 
-	nested := got.(map[string]interface{})
-	if nested["profile"] != "not an object" {
-		t.Errorf("profile = %v, want it untouched", nested["profile"])
+	profile := processed["profile"].(map[string]interface{})
+	if profile["email"] == "ada@example.com" {
+		t.Errorf("email = %v, want it masked", profile["email"])
+	}
+	if profile["name"] != "Ada" {
+		t.Errorf("name = %v, want it left alone", profile["name"])
 	}
 }
 
-// TestAMissingFinalFieldIsLoggedAndLeftAlone records the same for a path whose
-// last segment is absent.
-func TestAMissingFinalFieldIsLoggedAndLeftAlone(t *testing.T) {
-	value := map[string]interface{}{
-		"profile": map[string]interface{}{"name": "Alice"},
+// TestABSONDocumentIsHandledLikeAMap covers what the MongoDB driver produces.
+func TestABSONDocumentIsHandledLikeAMap(t *testing.T) {
+	cfg := enabled(FieldSecurityConfig{Field: "profile.contact.phone", SecurityType: "masked"})
+
+	processed, ok := ProcessValue(bson.M{
+		"profile": bson.M{"contact": bson.M{"phone": "555-0100"}},
+	}, "", cfg).(map[string]interface{})
+	if !ok {
+		t.Fatal("a bson.M was not processed as a document")
 	}
 
-	got := ProcessNestedFieldValue(value, "profile.email", maskConfig("profile.email", "masked"))
-
-	nested := got.(map[string]interface{})
-	profile := nested["profile"].(map[string]interface{})
-	if _, exists := profile["email"]; exists {
-		t.Error("a missing field was created")
-	}
-	if profile["name"] != "Alice" {
-		t.Errorf("name = %v", profile["name"])
-	}
-}
-
-// TestAnIntermediateBSONMapIsConvertedInPlace records that a bson.M encountered
-// while walking is replaced with a map[string]interface{} in the document, so
-// the type the syncer writes to the target changes as a side effect of masking.
-func TestAnIntermediateBSONMapIsConvertedInPlace(t *testing.T) {
-	value := map[string]interface{}{
-		"a": bson.M{"b": bson.M{"secret": "value"}},
-	}
-
-	got := ProcessNestedFieldValue(value, "a.b.secret", maskConfig("a.b.secret", "masked"))
-
-	nested := got.(map[string]interface{})
-	if _, isBSON := nested["a"].(bson.M); isBSON {
-		t.Fatal("the intermediate bson.M survived; the conversion appears to be gone, " +
-			"so assert that instead")
-	}
-	a := nested["a"].(map[string]interface{})
-	b := a["b"].(map[string]interface{})
-	if b["secret"] == "value" {
-		t.Error("the deep path was not masked")
+	profile := processed["profile"].(map[string]interface{})
+	contact := profile["contact"].(map[string]interface{})
+	if contact["phone"] == "555-0100" {
+		t.Errorf("phone = %v, want it masked", contact["phone"])
 	}
 }
 
-func TestProcessNestedObjectValueIsANoOpOnDegenerateInput(t *testing.T) {
-	// A nil map, and a path with fewer than two segments, both return at once.
-	processNestedObjectValue(nil, []string{"a", "b"}, "masked")
-	processNestedObjectValue(map[string]interface{}{"a": 1}, []string{"a"}, "masked")
-	processNestedObjectValue(map[string]interface{}{"a": 1}, nil, "masked")
+// TestTheCallersDocumentIsNotTouched covers a row a syncer read from the source:
+// it has to keep the value it read, at every level, not just the top one.
+func TestTheCallersDocumentIsNotTouched(t *testing.T) {
+	cfg := enabled(FieldSecurityConfig{Field: "profile.contact.phone", SecurityType: "masked"})
+
+	contact := map[string]interface{}{"phone": "555-0100"}
+	profile := map[string]interface{}{"contact": contact}
+	document := map[string]interface{}{"profile": profile}
+
+	ProcessValue(document, "", cfg)
+
+	if contact["phone"] != "555-0100" {
+		t.Errorf("the caller's nested map now reads %v", contact["phone"])
+	}
+}
+
+// TestAPathThroughSomethingThatIsNotADocumentIsRefused covers a configuration
+// that does not match the data: it leaves the value alone rather than guessing.
+func TestAPathThroughSomethingThatIsNotADocumentIsRefused(t *testing.T) {
+	cfg := enabled(FieldSecurityConfig{Field: "profile.contact.phone", SecurityType: "masked"})
+
+	processed := ProcessValue(map[string]interface{}{
+		"profile": map[string]interface{}{"contact": "not a document"},
+	}, "", cfg).(map[string]interface{})
+
+	profile := processed["profile"].(map[string]interface{})
+	if profile["contact"] != "not a document" {
+		t.Errorf("contact = %v, want it left alone", profile["contact"])
+	}
+}
+
+// TestAFieldThatIsNotThereIsNotInvented covers a rule naming something the
+// document does not carry.
+func TestAFieldThatIsNotThereIsNotInvented(t *testing.T) {
+	cfg := enabled(FieldSecurityConfig{Field: "profile.contact.phone", SecurityType: "masked"})
+
+	processed := ProcessValue(map[string]interface{}{
+		"profile": map[string]interface{}{"name": "Ada"},
+	}, "", cfg).(map[string]interface{})
+
+	profile := processed["profile"].(map[string]interface{})
+	if _, invented := profile["contact"]; invented {
+		t.Errorf("a contact was added: %v", profile)
+	}
+}
+
+// TestARuleInsideANamedDocumentIsApplied covers the other entry point: the
+// syncer passes a field's own name as the prefix when it hands over a subtree.
+func TestARuleInsideANamedDocumentIsApplied(t *testing.T) {
+	cfg := enabled(FieldSecurityConfig{Field: "profile.contact.phone", SecurityType: "masked"})
+
+	processed := ProcessValue(map[string]interface{}{
+		"contact": map[string]interface{}{"phone": "555-0100"},
+	}, "profile", cfg).(map[string]interface{})
+
+	contact := processed["contact"].(map[string]interface{})
+	if contact["phone"] == "555-0100" {
+		t.Errorf("phone = %v, want it masked", contact["phone"])
+	}
 }

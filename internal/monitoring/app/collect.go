@@ -20,7 +20,7 @@ func StartRowCountMonitoring(ctx context.Context, cfg *config.Config, log *logru
 	ticker := time.NewTicker(interval)
 
 	// Start daily summary at 00:05 JST
-	go func() {
+	watch(func() {
 		for {
 			select {
 			case <-ctx.Done():
@@ -55,9 +55,9 @@ func StartRowCountMonitoring(ctx context.Context, cfg *config.Config, log *logru
 				}
 			}
 		}
-	}()
+	})
 
-	go func() {
+	watch(func() {
 		defer ticker.Stop()
 
 		measure := func() {
@@ -82,7 +82,7 @@ func StartRowCountMonitoring(ctx context.Context, cfg *config.Config, log *logru
 				measure()
 			}
 		}
-	}()
+	})
 }
 
 func countAndLogTables(ctx context.Context, sc config.SyncConfig, log *logrus.Logger) {

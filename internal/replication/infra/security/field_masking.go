@@ -139,22 +139,10 @@ func ProcessValue(value interface{}, fieldName string, config TableSecurity) int
 
 	logging.Log.Debugf("[Security] Security processing: field=%s", fieldName)
 
-	// First check if it's a nested object
-	if nested, ok := value.(map[string]interface{}); ok {
-		logging.Log.Debugf("[Security] Found nested object: %s", fieldName)
-		return processNestedObject(nested, fieldName, config)
-	}
-	// Check bson.M type
-	if bsonM, ok := value.(bson.M); ok {
-		logging.Log.Debugf("[Security] Found bson.M object: %s", fieldName)
-		nested := map[string]interface{}(bsonM)
-		return processNestedObject(nested, fieldName, config)
-	}
-
-	// Check if it's a nested field path (contains dot)
-	if strings.Contains(fieldName, ".") {
-		logging.Log.Debugf("[Security] Nested path requires special handling: %s", fieldName)
-		return ProcessNestedFieldValue(value, fieldName, config)
+	// A document: every configured field whose path starts with this one is
+	// applied inside it, to whatever depth it names.
+	if document, ok := asDocument(value); ok {
+		return processDocument(document, fieldName, config)
 	}
 
 	// For regular fields, use original processing logic
@@ -265,161 +253,106 @@ func maskValue(value interface{}) interface{} {
 	}
 }
 
-// Add new function to process nested objects
-func processNestedObject(nested map[string]interface{}, parentField string, config TableSecurity) interface{} {
-	logging.Log.Debugf("[Security] Processing nested object fields: parent=%s", parentField)
-	result := make(map[string]interface{})
+// A field's path may name something several levels down — "profile.contact.phone"
+// — and the rule has to reach it.
+//
+// It used to reach exactly one level. processNestedObject stripped the parent
+// prefix and looked the remainder up as a literal key, so "profile.contact.phone"
+// went looking for a key called "contact.phone", did not find one, and left the
+// value in the clear. Beside it sat three more attempts at the same job —
+// ProcessNestedFieldValue, processNestedObjectValue, getNestedValue,
+// processNestedFieldSafe — of which two had no callers at all and the third
+// could not be reached, because ProcessValue only handed it values that were not
+// documents while its first act was to require one. That was about 190 lines,
+// none of which ran.
 
-	// Copy all fields
-	for k, v := range nested {
-		result[k] = v
+// asDocument reports the map behind a value, whichever of the two shapes the
+// drivers produce it in.
+func asDocument(value interface{}) (map[string]interface{}, bool) {
+	switch typed := value.(type) {
+	case map[string]interface{}:
+		return typed, true
+	case bson.M:
+		return map[string]interface{}(typed), true
+	}
+	return nil, false
+}
+
+// processDocument applies the security rules that name fields inside a document,
+// returning a copy. prefix is the path of the document itself, empty for the
+// top level.
+func processDocument(document map[string]interface{}, prefix string, config TableSecurity) map[string]interface{} {
+	result := make(map[string]interface{}, len(document))
+	for key, value := range document {
+		result[key] = value
 	}
 
-	// Check each security field configuration
 	for _, fc := range config.FieldSecurity {
-		// Check if it's a field of current nested object
-		if strings.HasPrefix(fc.Field, parentField+".") {
-			// Get sub-field name
-			subField := strings.TrimPrefix(fc.Field, parentField+".")
-			if subField == "" {
-				continue
-			}
-
-			logging.Log.Debugf("[Security] Found nested field to process: %s.%s, type=%s",
-				parentField, subField, fc.SecurityType)
-
-			// If sub-field exists in nested object
-			if value, exists := result[subField]; exists {
-				// Create temporary config for sub-field processing
-				tempConfig := TableSecurity{
-					SecurityEnabled: true,
-					FieldSecurity: []FieldSecurityConfig{
-						{
-							Field:        subField,
-							SecurityType: fc.SecurityType,
-						},
-					},
-				}
-
-				// Process sub-field value
-				logging.Log.Debugf("[Security] Processing sub-field: %s.%s = %v", parentField, subField, value)
-				processed := ProcessValue(value, subField, tempConfig)
-				result[subField] = processed
-				logging.Log.Debugf("[Security] Sub-field processing complete: %s.%s = %v", parentField, subField, processed)
-			}
+		path, inside := pathWithin(fc.Field, prefix)
+		if !inside {
+			continue
 		}
+		applyAtPath(result, path, fc, config)
 	}
-
 	return result
 }
 
-// Add new method to specifically handle nested field values (for MongoDB and other document databases)
-func ProcessNestedFieldValue(value interface{}, fieldPath string, config TableSecurity) interface{} {
-	// Only process nested object types
-	nested, ok := value.(map[string]interface{})
-	if !ok {
-		// Try to process bson.M type
-		bsonM, ok := value.(bson.M)
-		if ok {
-			// Convert bson.M to map[string]interface{}
-			nested = map[string]interface{}(bsonM)
-		} else {
-			logging.Log.Warnf("[Security] Nested processing failed: value is not object type field=%s type=%T", fieldPath, value)
-			return value
-		}
+// pathWithin reports the part of a configured field path that lies inside a
+// document at the given prefix.
+func pathWithin(field, prefix string) (path []string, inside bool) {
+	if prefix == "" {
+		return strings.Split(field, "."), true
 	}
-
-	logging.Log.Debugf("[Security] Processing nested object field: %s", fieldPath)
-
-	// Find matching nested field configuration
-	for _, fc := range config.FieldSecurity {
-		if fc.Field == fieldPath {
-			// Find matching nested path configuration
-			paths := strings.Split(fieldPath, ".")
-			if len(paths) < 2 {
-				logging.Log.Warnf("[Security] Invalid nested path: %s", fieldPath)
-				return value
-			}
-
-			// Create copy of processed nested object
-			result := make(map[string]interface{})
-			for k, v := range nested {
-				result[k] = v
-			}
-
-			// Process nested path
-			processNestedObjectValue(result, paths, fc.SecurityType)
-			return result
-		}
+	rest, found := strings.CutPrefix(field, prefix+".")
+	if !found || rest == "" {
+		return nil, false
 	}
-
-	return value
+	return strings.Split(rest, "."), true
 }
 
-// Process specific path value in nested object
-func processNestedObjectValue(obj map[string]interface{}, paths []string, securityType string) {
-	if len(paths) < 2 || obj == nil {
+// applyAtPath walks a copy of the document to the named field and replaces it.
+//
+// Each level it descends through is copied too, so the caller's document is
+// never written to — the row a syncer read from the source has to keep the value
+// it read.
+func applyAtPath(document map[string]interface{}, path []string, fc FieldSecurityConfig, config TableSecurity) {
+	if len(path) == 0 {
 		return
 	}
 
-	current := obj
-	// Navigate to second-to-last level of nested path
-	for i := 0; i < len(paths)-2; i++ {
-		path := paths[i]
-		next, ok := current[path].(map[string]interface{})
-		if !ok {
-			// Try bson.M type
-			bsonM, ok := current[path].(bson.M)
-			if ok {
-				next = map[string]interface{}(bsonM)
-				current[path] = next
-			} else {
-				logging.Log.Errorf("[Security] Failed to navigate nested path: %s is not an object", strings.Join(paths[:i+1], "."))
-				return
-			}
-		}
-		current = next
+	key := path[0]
+	value, present := document[key]
+	if !present {
+		return
 	}
 
-	// Get field names of second-to-last and last levels
-	parentField := paths[len(paths)-2]
-	lastField := paths[len(paths)-1]
+	if len(path) == 1 {
+		document[key] = applyRule(value, key, fc, config)
+		return
+	}
 
-	// Get parent object
-	parent, ok := current[parentField].(map[string]interface{})
+	child, ok := asDocument(value)
 	if !ok {
-		// Try bson.M type
-		bsonM, ok := current[parentField].(bson.M)
-		if ok {
-			parent = map[string]interface{}(bsonM)
-			current[parentField] = parent
-		} else {
-			logging.Log.Errorf("[Security] Failed to get parent object: %s is not an object", strings.Join(paths[:len(paths)-1], "."))
-			return
-		}
+		logging.Log.Warnf("[Security] %q names a field inside %q, which is a %T "+
+			"rather than a document, so it cannot be processed", fc.Field, key, value)
+		return
 	}
 
-	// Get final value to process
-	if finalValue, exists := parent[lastField]; exists {
-		// Create temporary security config for final value
-		tempConfig := TableSecurity{
-			SecurityEnabled: true,
-			FieldSecurity: []FieldSecurityConfig{
-				{
-					Field:        lastField,
-					SecurityType: securityType,
-				},
-			},
-		}
-
-		// Process value and update
-		logging.Log.Debugf("[Security] Nested processing: path=%s, original value=%v", strings.Join(paths, "."), finalValue)
-		processed := ProcessValue(finalValue, lastField, tempConfig)
-		parent[lastField] = processed
-		logging.Log.Debugf("[Security] Nested processing complete: path=%s, processed=%v", strings.Join(paths, "."), processed)
-	} else {
-		logging.Log.Warnf("[Security] Final field in nested path does not exist: %s", strings.Join(paths, "."))
+	copied := make(map[string]interface{}, len(child))
+	for k, v := range child {
+		copied[k] = v
 	}
+	applyAtPath(copied, path[1:], fc, config)
+	document[key] = copied
+}
+
+// applyRule applies one field's rule to one value, reusing the top-level
+// processing so a nested field and a plain one are treated identically.
+func applyRule(value interface{}, key string, fc FieldSecurityConfig, config TableSecurity) interface{} {
+	return ProcessValue(value, key, TableSecurity{
+		SecurityEnabled: config.SecurityEnabled,
+		FieldSecurity:   []FieldSecurityConfig{{Field: key, SecurityType: fc.SecurityType}},
+	})
 }
 
 func FindTableSecurityFromMappings(tableName string, mappings []config.DatabaseMapping) TableSecurity {

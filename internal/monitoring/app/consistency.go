@@ -72,7 +72,7 @@ func StartConsistencyChecks(ctx context.Context, cfg *config.Config, log *logrus
 		return
 	}
 
-	go func() {
+	watch(func() {
 		var notifier notifier
 		if cfg != nil {
 			notifier = slack.NewSlackNotifierFromConfig(cfg, log)
@@ -88,7 +88,7 @@ func StartConsistencyChecks(ctx context.Context, cfg *config.Config, log *logrus
 				runConsistencyChecks(ctx, cfg, notifier, log)
 			}
 		}
-	}()
+	})
 }
 
 // runConsistencyChecks compares every task's tables once.
