@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -142,7 +143,7 @@ func TestUpdateJobCarriesTheStoredStatusOver(t *testing.T) {
 	db := useTempJobDB(t)
 	id := insertJob(t, db, 1, `{"name":"before","status":"paused"}`)
 
-	if err := UpdateJob(itoa(id), domain.Request{Name: "after"}); err != nil {
+	if err := UpdateJob(itoa(id), withName(completeRequest(), "after")); err != nil {
 		t.Fatalf("UpdateJob: %v", err)
 	}
 
@@ -159,7 +160,7 @@ func TestUpdateJobCarriesTheStoredNameOverWhenOmitted(t *testing.T) {
 	db := useTempJobDB(t)
 	id := insertJob(t, db, 1, `{"name":"nightly","status":"enabled"}`)
 
-	if err := UpdateJob(itoa(id), domain.Request{Schedule: "0 4 * * *"}); err != nil {
+	if err := UpdateJob(itoa(id), withSchedule(completeRequest(), "0 4 * * *")); err != nil {
 		t.Fatalf("UpdateJob: %v", err)
 	}
 
@@ -175,7 +176,7 @@ func TestTheTwoUpdatePathsDisagreeAboutOmittedNames(t *testing.T) {
 	db := useTempJobDB(t)
 	id := insertJob(t, db, 1, `{"name":"nightly"}`)
 
-	if err := UpdateJob(itoa(id), domain.Request{}); err != nil {
+	if err := UpdateJob(itoa(id), completeRequest()); err != nil {
 		t.Fatalf("UpdateJob: %v", err)
 	}
 	if !contains(readConfig(t, db, id), `"name":"nightly"`) {
@@ -188,7 +189,7 @@ func TestUpdateJobGeneratesANameWhenThereIsNone(t *testing.T) {
 	db := useTempJobDB(t)
 	id := insertJob(t, db, 1, `{"schedule":"0 3 * * *"}`)
 
-	if err := UpdateJob(itoa(id), domain.Request{}); err != nil {
+	if err := UpdateJob(itoa(id), completeRequest()); err != nil {
 		t.Fatalf("UpdateJob: %v", err)
 	}
 	if !contains(readConfig(t, db, id), `"name":"Backup Task `+itoa(id)+`"`) {
@@ -200,7 +201,7 @@ func TestUpdateJobToleratesACorruptStoredConfig(t *testing.T) {
 	db := useTempJobDB(t)
 	id := insertJob(t, db, 0, `{"name":`)
 
-	if err := UpdateJob(itoa(id), domain.Request{Name: "after"}); err != nil {
+	if err := UpdateJob(itoa(id), withName(completeRequest(), "after")); err != nil {
 		t.Fatalf("UpdateJob: %v", err)
 	}
 	// With nothing readable in the old document the status falls back to the
@@ -213,7 +214,7 @@ func TestUpdateJobToleratesACorruptStoredConfig(t *testing.T) {
 func TestUpdateJobOnAnUnknownID(t *testing.T) {
 	useTempJobDB(t)
 
-	if err := UpdateJob("999", domain.Request{}); err == nil {
+	if err := UpdateJob("999", completeRequest()); err == nil {
 		t.Error("UpdateJob on an unknown id returned no error")
 	}
 }
@@ -225,7 +226,7 @@ func TestAStoredStatusThatIsNotAStringDoesNotKillTheUpdate(t *testing.T) {
 	db := useTempJobDB(t)
 	id := insertJob(t, db, 1, `{"name":"n","status":1}`)
 
-	if err := UpdateJob(itoa(id), domain.Request{Name: "after"}); err != nil {
+	if err := UpdateJob(itoa(id), withName(completeRequest(), "after")); err != nil {
 		t.Fatalf("UpdateJob: %v", err)
 	}
 	if got := readConfig(t, db, id); !strings.Contains(got, `"status":"enabled"`) {
@@ -312,4 +313,60 @@ func TestSyncCrontabSwallowsEveryFailure(t *testing.T) {
 		useTempJobDB(t) // isolateCrontab has emptied PATH
 		SyncCrontab(context.Background(), "test")
 	})
+}
+
+// completeRequest is a request that describes a whole job, which is what an
+// update takes: the endpoint replaces the stored configuration, so a request
+// that leaves fields out is refused rather than emptying them.
+func completeRequest() domain.Request {
+	return domain.Request{
+		SourceType:  "mongodb",
+		Database:    map[string]interface{}{"url": "127.0.0.1:27017", "database": "shop"},
+		Destination: map[string]interface{}{"gcsPath": "gs://bucket/x"},
+		Schedule:    "0 3 * * *",
+	}
+}
+
+// withName and withSchedule build on completeRequest without repeating it.
+func withName(req domain.Request, name string) domain.Request {
+	req.Name = name
+	return req
+}
+
+func withSchedule(req domain.Request, schedule string) domain.Request {
+	req.Schedule = schedule
+	return req
+}
+
+// TestAnUpdateThatLeavesFieldsOutIsRefused covers a client that means to change
+// one thing and sends one thing. An update replaces the stored configuration, so
+// that used to empty the database connection, the destination, the format and
+// the compression — and the job then backed up nothing, at its next scheduled
+// run, with nobody watching.
+func TestAnUpdateThatLeavesFieldsOutIsRefused(t *testing.T) {
+	db := useTempJobDB(t)
+	id := insertJob(t, db, 1, `{"name":"nightly","sourceType":"mongodb",`+
+		`"database":{"url":"h","database":"shop"},"destination":{"gcsPath":"gs://b"},`+
+		`"schedule":"0 3 * * *"}`)
+
+	before := readConfig(t, db, id)
+
+	err := UpdateJob(itoa(id), domain.Request{Schedule: "0 4 * * *"})
+	if err == nil {
+		t.Fatal("a request carrying only the schedule was accepted")
+	}
+	var missing *domain.MissingFieldsError
+	if !errors.As(err, &missing) {
+		t.Fatalf("err = %v, want it to name the fields", err)
+	}
+	for _, want := range []string{"sourceType", "database", "destination"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %v, want it to name %q", err, want)
+		}
+	}
+
+	// And nothing was written.
+	if after := readConfig(t, db, id); after != before {
+		t.Errorf("the stored configuration changed to %s", after)
+	}
 }

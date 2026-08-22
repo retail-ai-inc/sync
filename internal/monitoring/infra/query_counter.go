@@ -190,17 +190,13 @@ func (qc *QueryCounter) CountMongoDBDocuments(ctx context.Context, client *mongo
 					condition.Field, condition.Value))
 			}
 		} else if condition.Operator == "=" && condition.Field != "" && condition.Value != "" {
-			// Handle equality operator - try to convert to number first for id fields
-			if intValue, err := strconv.ParseInt(condition.Value, 10, 64); err == nil {
-				filter[condition.Field] = intValue
-				qc.logger.Debugf("[QueryCounter] Converted equality value '%s' to int64: %d", condition.Value, intValue)
-			} else if floatValue, err := strconv.ParseFloat(condition.Value, 64); err == nil {
-				filter[condition.Field] = floatValue
-				qc.logger.Debugf("[QueryCounter] Converted equality value '%s' to float64: %f", condition.Value, floatValue)
-			} else {
-				filter[condition.Field] = condition.Value
-				qc.logger.Debugf("[QueryCounter] Using string value for equality: '%s'", condition.Value)
-			}
+			// A value that looks like a number is matched as a number *or* as the
+			// string it was written as. It used to be converted and the string
+			// dropped, so a field stored as text — an order id, a postcode —
+			// matched nothing and the collection counted zero, which reads as a
+			// replica that has lost everything.
+			filter[condition.Field] = equalityFilter(condition.Value)
+			qc.logger.Debugf("[QueryCounter] Equality on %s matches %v", condition.Field, filter[condition.Field])
 		} else if condition.Field != "" && condition.Value != "" {
 			// Handle comparison operators (>, <, >=, <=)
 			switch condition.Operator {
@@ -292,6 +288,21 @@ func (qc *QueryCounter) CountMongoDBDocuments(ctx context.Context, client *mongo
 	}
 
 	return count, nil
+}
+
+// equalityFilter matches a value however the collection stores it.
+//
+// Nothing here knows whether a given field holds 123 or "123", and guessing
+// wrong makes the count zero. Matching both costs one more index probe and
+// cannot be wrong.
+func equalityFilter(value string) interface{} {
+	if intValue, err := strconv.ParseInt(value, 10, 64); err == nil {
+		return bson.M{"$in": bson.A{intValue, value}}
+	}
+	if floatValue, err := strconv.ParseFloat(value, 64); err == nil {
+		return bson.M{"$in": bson.A{floatValue, value}}
+	}
+	return value
 }
 
 // buildReadableQueryString builds a human-readable MongoDB query string using ISODate format

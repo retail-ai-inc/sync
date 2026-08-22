@@ -213,6 +213,40 @@ func SaveGoogleUser(email, name string) (string, string, error) {
 	return username, access, nil
 }
 
+// PageOfUsers reads one page of the directory, and how many users there are.
+//
+// The paging is done by the database. It used to read every row and slice the
+// result in memory, with no upper bound on the page size — so ?pageSize=1000000
+// loaded the whole table through a connection pool that holds exactly one
+// connection, which every other part of the process is also waiting on.
+func PageOfUsers(offset, limit int) (users []map[string]interface{}, total int, err error) {
+	db, err := sqlite.OpenSQLiteDB()
+	if err != nil {
+		return nil, 0, err
+	}
+	defer db.Close()
+
+	if err := db.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	rows, err := db.Query(`
+SELECT id, username, password, name, avatar, userId, email, access, status
+FROM users
+ORDER BY id
+LIMIT ? OFFSET ?`, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	users, err = scanUsers(rows)
+	if err != nil {
+		return nil, 0, err
+	}
+	return users, total, nil
+}
+
 // GetAllUsers gets all user information
 func GetAllUsers() ([]map[string]interface{}, error) {
 	db, err := sqlite.OpenSQLiteDB()
@@ -223,12 +257,19 @@ func GetAllUsers() ([]map[string]interface{}, error) {
 
 	rows, err := db.Query(`
 SELECT id, username, password, name, avatar, userId, email, access, status
-FROM users`)
+FROM users
+ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
+	return scanUsers(rows)
+}
+
+// scanUsers reads user rows, filling in the columns older records may leave
+// NULL.
+func scanUsers(rows *sql.Rows) ([]map[string]interface{}, error) {
 	var users []map[string]interface{}
 	for rows.Next() {
 		var id int
@@ -236,51 +277,27 @@ FROM users`)
 		var status sql.NullString                // Status can be NULL (for old records)
 		var avatar, userId, email sql.NullString // Use sql.NullString for fields that can be NULL
 
-		err = rows.Scan(&id, &username, &password, &name, &avatar, &userId, &email, &access, &status)
-		if err != nil {
+		if err := rows.Scan(&id, &username, &password, &name, &avatar, &userId, &email, &access, &status); err != nil {
 			return nil, err
 		}
 
-		// Create user map with proper NULL handling
-		user := map[string]interface{}{
+		users = append(users, map[string]interface{}{
 			"id":       id,
 			"username": username,
 			"password": password,
 			"name":     name,
 			"access":   access,
-		}
-
-		// Handle potentially NULL fields
-		if avatar.Valid {
-			user["avatar"] = avatar.String
-		} else {
-			user["avatar"] = ""
-		}
-
-		if userId.Valid {
-			user["userId"] = userId.String
-		} else {
-			user["userId"] = ""
-		}
-
-		if email.Valid {
-			user["email"] = email.String
-		} else {
-			user["email"] = ""
-		}
-
-		// Process status field
-		if status.Valid {
-			user["status"] = status.String
-		} else {
-			user["status"] = "active" // Default status is active
-		}
-
-		users = append(users, user)
+			"avatar":   nullOrEmpty(avatar),
+			"userId":   nullOrEmpty(userId),
+			"email":    nullOrEmpty(email),
+			"status":   nullOr(status, "active"),
+		})
 	}
-
-	return users, nil
+	return users, rows.Err()
 }
+
+// nullOrEmpty reads a nullable column, answering the empty string for NULL.
+func nullOrEmpty(s sql.NullString) string { return nullOr(s, "") }
 
 // Initialize user table when starting service
 

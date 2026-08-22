@@ -18,6 +18,7 @@ import (
 	"github.com/retail-ai-inc/sync/internal/identity/app"
 	"github.com/retail-ai-inc/sync/internal/identity/domain"
 	"github.com/retail-ai-inc/sync/internal/identity/infra"
+	"github.com/retail-ai-inc/sync/internal/platform/httpx"
 )
 
 // AuthLoginHandler  POST /api/login
@@ -180,7 +181,12 @@ func UpdateAdminPasswordHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !domain.ValidateAdminToken(domain.ExtractTokenFromHeader(authHeader)) {
+	// The account the token names, not the literal "admin" row. It used to
+	// change that row whoever asked, so a second administrator could not use the
+	// endpoint at all — and once the admin row was gone it could never succeed
+	// again.
+	valid, username, access := app.ValidateUserToken(domain.ExtractTokenFromHeader(authHeader))
+	if !valid || access != domain.AccessAdmin {
 		writeFailure(w, http.StatusUnauthorized, "401", "Invalid token")
 		return
 	}
@@ -194,7 +200,7 @@ func UpdateAdminPasswordHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	switch err := app.ChangePassword("admin", req.OldPassword, req.NewPassword); {
+	switch err := app.ChangePassword(username, req.OldPassword, req.NewPassword); {
 	case err == nil:
 		writeSuccessEnvelope(w)
 	case errors.Is(err, app.ErrPasswordLookup):
@@ -374,29 +380,30 @@ func UpdateOAuthConfigHandler(w http.ResponseWriter, r *http.Request) {
 
 // GetUsersHandler GET /api/users
 func GetUsersHandler(w http.ResponseWriter, r *http.Request) {
-	current := 1
-	pageSize := 10
-
-	if currentStr := r.URL.Query().Get("current"); currentStr != "" {
-		if val, err := strconv.Atoi(currentStr); err == nil && val > 0 {
-			current = val
-		}
+	// A parameter that is not a page is refused rather than replaced with a
+	// default: asking for page "abc" and being served page 1 without a word is
+	// how a caller ends up reading the wrong rows and not knowing it.
+	current, err := pageParam(r, "current", 1)
+	if err != nil {
+		httpx.ErrorJSONStatus(w, http.StatusBadRequest, "invalid paging", err)
+		return
 	}
-	if pageSizeStr := r.URL.Query().Get("pageSize"); pageSizeStr != "" {
-		if val, err := strconv.Atoi(pageSizeStr); err == nil && val > 0 {
-			pageSize = val
-		}
+	pageSize, err := pageParam(r, "pageSize", 10)
+	if err != nil {
+		httpx.ErrorJSONStatus(w, http.StatusBadRequest, "invalid paging", err)
+		return
 	}
 
 	page, total, err := app.ListUsers(current, pageSize)
+	if errors.Is(err, app.ErrBadPage) {
+		httpx.ErrorJSONStatus(w, http.StatusBadRequest, "invalid paging", err)
+		return
+	}
 	if err != nil {
-		resp := map[string]interface{}{
-			"success": false,
-			"data":    []interface{}{},
-			"message": "Failed to get user list",
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(resp)
+		// A directory that could not be read used to answer 200 with an empty
+		// list, so a front end that checks the status shows an empty user table
+		// rather than a failure.
+		httpx.ErrorJSON(w, "Failed to get user list", err)
 		return
 	}
 
@@ -407,6 +414,20 @@ func GetUsersHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// pageParam reads one paging parameter, refusing anything that is not a
+// positive number.
+func pageParam(r *http.Request, name string, fallback int) (int, error) {
+	raw := r.URL.Query().Get(name)
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < 1 {
+		return 0, fmt.Errorf("%s=%q is not a page", name, raw)
+	}
+	return value, nil
 }
 
 // writeRejection answers with the {success:false,message} shape at HTTP 200,

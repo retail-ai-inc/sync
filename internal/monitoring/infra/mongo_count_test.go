@@ -113,18 +113,24 @@ func TestAConditionForAnotherTableIsIgnored(t *testing.T) {
 	}
 }
 
-func TestTheEqualityOperatorPicksATypeForTheValue(t *testing.T) {
+// TestTheEqualityOperatorMatchesEitherRepresentation covers a value that looks
+// like a number. It used to be converted and the string dropped, and MongoDB
+// does not match a numeric filter against a text field — so an order id stored
+// as text counted zero rows, which reads as a replica that has lost everything.
+// Nothing here knows which way a given collection stores it, so both are matched.
+func TestTheEqualityOperatorMatchesEitherRepresentation(t *testing.T) {
 	qc, out := loggingCounter(t)
 
 	tests := []struct {
 		value string
 		want  string
 	}{
-		{"42", "status: 42"},
-		{"4.5", "status: 4.5"},
+		{"42", "status: {$in: [42 42]}"},
+		{"4.5", "status: {$in: [4.5 4.5]}"},
 		{"active", `status: "active"`},
-		{"-1", "status: -1"},
-		{"0042", "status: 42"}, // a zero-padded id loses its padding
+		{"-1", "status: {$in: [-1 -1]}"},
+		// A zero-padded id keeps its padding in the string half of the match.
+		{"0042", "status: {$in: [42 0042]}"},
 	}
 
 	for _, tc := range tests {
@@ -141,11 +147,9 @@ func TestTheEqualityOperatorPicksATypeForTheValue(t *testing.T) {
 	}
 }
 
-// TestANumericStringIdIsQueriedAsANumber records a real mismatch risk: any value
-// that parses as a number is sent to MongoDB as a number, and MongoDB does not
-// match a numeric filter against a string field. An id column stored as a string
-// therefore counts zero rows.
-func TestANumericStringIdIsQueriedAsANumber(t *testing.T) {
+// TestANumericStringIdIsStillMatched is the case that mattered: an id column
+// stored as text. The value was sent as a number and MongoDB matched nothing.
+func TestANumericStringIdIsStillMatched(t *testing.T) {
 	qc, out := loggingCounter(t)
 
 	got := countedFilter(t, qc, out, "orders", &domain.CountQuery{
@@ -153,9 +157,8 @@ func TestANumericStringIdIsQueriedAsANumber(t *testing.T) {
 			{Table: "orders", Field: "order_id", Operator: "=", Value: "1001"},
 		},
 	})
-	if strings.Contains(got, `"1001"`) {
-		t.Fatalf("query = %q; the value appears to be kept as a string now, so "+
-			"assert that instead", got)
+	if !strings.Contains(got, "1001 1001") {
+		t.Errorf("query = %q, want both the number and the string matched", got)
 	}
 }
 

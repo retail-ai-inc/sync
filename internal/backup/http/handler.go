@@ -107,8 +107,15 @@ func BackupUpdateHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var incomplete *domain.MissingFieldsError
 	switch err := app.UpdateJob(id, req); {
 	case err == nil:
+	case errors.As(err, &incomplete):
+		// The caller's mistake, not this program's, and it is worth a status
+		// that says so: the alternative was storing a job stripped of
+		// everything the request did not mention.
+		httpx.ErrorJSONStatus(w, http.StatusBadRequest, "incomplete request", err)
+		return
 	case errors.Is(err, infra.ErrNoSuchJob):
 		httpx.ErrorJSON(w, "no record found", errors.New("no rows affected"))
 		return

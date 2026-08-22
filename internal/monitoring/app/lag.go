@@ -67,6 +67,7 @@ func StartLagAlerting(ctx context.Context, cfg *config.Config, log *logrus.Logge
 				return
 			case <-ticker.C:
 				checkLag(ctx, n, log, lastAlert, time.Now())
+				checkDeadLetters(ctx, n, log, lastAlert, time.Now())
 			}
 		}
 	})
@@ -77,6 +78,46 @@ func StartLagAlerting(ctx context.Context, cfg *config.Config, log *logrus.Logge
 type notifier interface {
 	IsConfigured() bool
 	SendNotification(ctx context.Context, message string, opts *slack.SlackNotificationOptions) error
+}
+
+// checkDeadLetters reports the tasks holding changes the target never accepted.
+//
+// A dead-lettered operation is a hole in the replica: the source has it and the
+// target does not, and the only thing that will ever close it is the retry loop
+// succeeding. It existed as a file on the syncer's own disk and a counter nobody
+// watched — so the copy that exists to be switched to could be missing rows and
+// the first anybody heard of it was after the switch.
+func checkDeadLetters(ctx context.Context, n notifier, log *logrus.Logger, lastAlert map[string]time.Time, now time.Time) []string {
+	var alerted []string
+	for _, sample := range metrics.Default.Snapshot(metrics.DeadLettered) {
+		if sample.Value < 1 {
+			continue
+		}
+		key := "dead-letter:" + sample.Labels.Key()
+		if at, seen := lastAlert[key]; seen && now.Sub(at) < lagAlertCooldown {
+			continue
+		}
+		lastAlert[key] = now
+		alerted = append(alerted, key)
+
+		message := fmt.Sprintf(
+			"\u26a0\ufe0f %.0f change(s) could not be applied to the target\n\nTask: %s\nEngine: %s\nCollection: %s\nSource: %s\nTarget: %s\n\nThe source has them and the target does not. They are held for retry; until that succeeds the replica is missing them.",
+			sample.Value, sample.Labels["task"], sample.Labels["engine"],
+			sample.Labels["collection"], sample.Labels["source"], sample.Labels["target"])
+
+		log.Error(message)
+		if n == nil || !n.IsConfigured() {
+			continue
+		}
+		if err := n.SendNotification(ctx, message, &slack.SlackNotificationOptions{
+			AlertType: slack.SlackAlertDanger,
+			Trigger:   "dead-lettered-changes",
+		}); err != nil {
+			log.Warnf("[Monitor] Could not send the dead letter alert: %v", err)
+		}
+	}
+	sort.Strings(alerted)
+	return alerted
 }
 
 // checkLag reports the tasks that are further behind than the threshold, and

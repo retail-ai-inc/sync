@@ -34,22 +34,38 @@ func ReadOAuthConfig(provider string) (map[string]interface{}, error) {
 // recognises it as "leave the stored one alone".
 const maskedSecret = "********"
 
-// withoutClientSecret copies a provider configuration with its client secret
-// removed.
+// publicOAuthFields are the fields the read endpoint answers with.
 //
-// The read endpoint has to stay reachable without a token, because the sign-in
-// page needs the client id before anybody has one. Answering with the secret
-// as well handed the whole OAuth credential to any unauthenticated caller. The
-// write path takes the secret and stores it; nothing needs it back.
+// A list of what may go out, not a list of what may not. The endpoint is
+// reachable without a token — the sign-in page needs the client id before
+// anybody has one — so a field added to the stored document later must not
+// start being served to unauthenticated callers because nobody remembered to
+// add it to a deny-list.
+var publicOAuthFields = []string{
+	domain.FieldClientID,
+	domain.FieldRedirectURI,
+	domain.FieldEnabled,
+}
+
+// withoutClientSecret copies out the fields a sign-in page needs.
+//
+// The client secret is the one that matters: answering with it handed the whole
+// OAuth credential to any unauthenticated caller. It is still reported, as a
+// fixed placeholder, because the administrative form shows whether one is set
+// and the write path reads that placeholder back as "leave the stored one
+// alone".
 func withoutClientSecret(config map[string]interface{}) map[string]interface{} {
 	if config == nil {
 		return nil
 	}
-	safe := make(map[string]interface{}, len(config))
-	for k, v := range config {
-		safe[k] = v
+
+	safe := make(map[string]interface{}, len(publicOAuthFields)+1)
+	for _, field := range publicOAuthFields {
+		if value, present := config[field]; present {
+			safe[field] = value
+		}
 	}
-	if secret, ok := safe[domain.FieldClientSecret].(string); ok && secret != "" {
+	if secret, ok := config[domain.FieldClientSecret].(string); ok && secret != "" {
 		safe[domain.FieldClientSecret] = maskedSecret
 	}
 	return safe

@@ -24,45 +24,18 @@ func GenerateRandomPassword() string {
 	return "google_" + base64.RawURLEncoding.EncodeToString(buf)
 }
 
-// PageOfUsers returns the requested page of a user list with the columns the
-// directory endpoint exposes. An out-of-range page is empty rather than an
-// error, which is what the endpoint has always answered.
+// PublicUsers renders user rows with the columns the directory endpoint
+// exposes, leaving out the password, the numeric id and the login name.
 //
-// Two things it no longer does. It used to compute a negative lower bound for a
-// page number of zero or less and slice with it, which panics — the only guard
-// was a check several layers above, in the HTTP handler, and this function is
-// exported. And it used to redact by deleting from the caller's own maps, so the
-// rows handed in came back stripped — and only the rows on the requested page,
-// which means whether a row still carried its password depended on which page it
-// fell on. The answer is built from scratch and the caller's rows are untouched.
-func PageOfUsers(users []map[string]interface{}, current, pageSize int) []map[string]interface{} {
-	if current < 1 {
-		current = 1
-	}
-	if pageSize < 0 {
-		pageSize = 0
-	}
-
-	total := len(users)
-	start := (current - 1) * pageSize
-	end := start + pageSize
-
-	if start >= total {
-		start, end = 0, 0
-	}
-	if end > total {
-		end = total
-	}
-
-	var page []map[string]interface{}
-	if start < end {
-		page = users[start:end]
-	} else {
-		page = []map[string]interface{}{}
-	}
-
-	var out []map[string]interface{}
-	for _, user := range page {
+// It builds fresh rows. Redaction used to be done by deleting from the caller's
+// own maps, so the rows handed in came back stripped — and only the rows on the
+// requested page, which meant whether a row still carried its password depended
+// on which page somebody asked for. Paging itself has moved to the database:
+// this used to slice in memory and computed a negative lower bound for a page
+// number of zero or less, which panics.
+func PublicUsers(users []map[string]interface{}) []map[string]interface{} {
+	out := make([]map[string]interface{}, 0, len(users))
+	for _, user := range users {
 		out = append(out, map[string]interface{}{
 			"userId": user["userId"],
 			"name":   user["name"],

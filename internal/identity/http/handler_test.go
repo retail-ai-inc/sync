@@ -334,50 +334,92 @@ func TestGetUsersHandlerReturnsThePage(t *testing.T) {
 	}
 }
 
-// TestGetUsersHandlerRefusesANonPositivePage records that the endpoint's own
-// parsing is what keeps the pagination arithmetic away from a negative index: a
-// page number that is not greater than zero falls back to one rather than
-// reaching the domain function, which would panic (T-130).
-func TestGetUsersHandlerRefusesANonPositivePage(t *testing.T) {
+// TestGetUsersHandlerRefusesAPageThatIsNotOne covers a parameter that is not a
+// page. It used to be replaced with the default without a word, so a caller
+// asking for page "abc" was served page 1 and had no way to tell — and the
+// endpoint's own parsing was also the only thing keeping the arithmetic away
+// from a negative index, which panicked.
+func TestGetUsersHandlerRefusesAPageThatIsNotOne(t *testing.T) {
 	db := useTempDB(t)
 	insertUser(t, db, "a", "secret", "User", domain.AccessGuest)
 
-	for _, query := range []string{"?current=0", "?current=-1", "?current=abc", "?pageSize=0", "?pageSize=-5"} {
+	for _, query := range []string{
+		"?current=0", "?current=-1", "?current=abc", "?pageSize=0", "?pageSize=-5",
+	} {
 		t.Run(query, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, "/users"+query, nil)
 			rec := httptest.NewRecorder()
 			GetUsersHandler(rec, req)
 
-			if rec.Code != http.StatusOK {
-				t.Fatalf("status = %d for %q (body: %q)", rec.Code, query, rec.Body.String())
-			}
-			if envelope(t, rec)["success"] != true {
-				t.Errorf("success is not true for %q", query)
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("status = %d for %q, want 400 (body: %q)", rec.Code, query, rec.Body.String())
 			}
 		})
 	}
 }
 
-// TestGetUsersHandlerAnswersHTTP200ForAStoreFailure records that a failure to
-// read the directory is reported inside the body with an empty list, at HTTP
-// 200. A caller that only checks the status shows an empty user table.
-func TestGetUsersHandlerAnswersHTTP200ForAStoreFailure(t *testing.T) {
+// TestGetUsersHandlerBoundsThePageSize covers a page size with no upper bound.
+// ?pageSize=1000000 was accepted and the whole table read through a connection
+// pool that holds exactly one connection — which replication's checkpoint writes
+// are also queued on.
+func TestGetUsersHandlerBoundsThePageSize(t *testing.T) {
+	db := useTempDB(t)
+	insertUser(t, db, "a", "secret", "User", domain.AccessGuest)
+
+	req := httptest.NewRequest(http.MethodGet, "/users?pageSize=1000000", nil)
+	rec := httptest.NewRecorder()
+	GetUsersHandler(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d for an unbounded page size, want 400", rec.Code)
+	}
+}
+
+// TestGetUsersHandlerPagesInTheDatabase covers the paging itself, which used to
+// read every row and slice the result in memory.
+func TestGetUsersHandlerPagesInTheDatabase(t *testing.T) {
+	db := useTempDB(t)
+	for _, name := range []string{"a", "b", "c", "d", "e"} {
+		insertUser(t, db, name, "secret", "User "+name, domain.AccessGuest)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/users?current=2&pageSize=2", nil)
+	rec := httptest.NewRecorder()
+	GetUsersHandler(rec, req)
+
+	resp := envelope(t, rec)
+	if resp["success"] != true {
+		t.Fatalf("body: %s", rec.Body.String())
+	}
+	data, _ := resp["data"].([]interface{})
+	if len(data) != 2 {
+		t.Errorf("the second page holds %d users, want 2", len(data))
+	}
+	if total, _ := resp["total"].(float64); total != 5 {
+		t.Errorf("total = %v, want 5", resp["total"])
+	}
+}
+
+// TestGetUsersHandlerReportsAStoreFailureByStatus covers a directory that could
+// not be read. It used to be reported inside the body with an empty list at HTTP
+// 200, so a front end that checks the status showed an empty user table rather
+// than a failure.
+func TestGetUsersHandlerReportsAStoreFailureByStatus(t *testing.T) {
 	emptyIdentityDB(t)
 
 	req := httptest.NewRequest(http.MethodGet, "/users", nil)
 	rec := httptest.NewRecorder()
 	GetUsersHandler(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d; the failure appears to be reported by status now, so "+
-			"assert that instead", rec.Code)
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", rec.Code)
 	}
 	resp := envelope(t, rec)
 	if resp["success"] != false {
 		t.Errorf("success = %v, want false", resp["success"])
 	}
-	if resp["message"] != "Failed to get user list" {
-		t.Errorf("message = %v", resp["message"])
+	if resp["error"] != "Failed to get user list" {
+		t.Errorf("error = %v", resp["error"])
 	}
 }
 
@@ -706,5 +748,50 @@ func TestEveryGoogleFailureAnswersHTTP200WithTheGuestShape(t *testing.T) {
 	resp := envelope(t, rec)
 	if resp["currentAuthority"] != domain.AccessGuest || resp["type"] != "google" {
 		t.Errorf("resp = %v", resp)
+	}
+}
+
+// TestTheAdminPasswordEndpointFollowsTheToken covers an endpoint that used to
+// change the literal "admin" row whoever asked. A second administrator could not
+// use it at all, and once that row was removed it could never succeed again.
+func TestTheAdminPasswordEndpointFollowsTheToken(t *testing.T) {
+	db := useTempDB(t)
+	insertUser(t, db, "admin", "secret", "Admin", domain.AccessAdmin)
+	insertUser(t, db, "second", "other", "Second", domain.AccessAdmin)
+
+	req := httptest.NewRequest(http.MethodPut, "/updateAdminPassword",
+		strings.NewReader(`{"oldPassword":"other","newPassword":"newsecret"}`))
+	req.Header.Set("Authorization", "Bearer "+domain.GenerateUserToken("second", domain.AccessAdmin))
+	rec := httptest.NewRecorder()
+
+	UpdateAdminPasswordHandler(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d (body: %q)", rec.Code, rec.Body.String())
+	}
+	if ok, _, err := infra.ValidateUser("second", "newsecret"); err != nil || !ok {
+		t.Errorf("the second administrator's password was not changed (%v, %v)", ok, err)
+	}
+	// And the admin row is untouched.
+	if ok, _, err := infra.ValidateUser("admin", "secret"); err != nil || !ok {
+		t.Errorf("somebody else's password was changed (%v, %v)", ok, err)
+	}
+}
+
+// TestTheAdminPasswordEndpointNeedsAnAdmin is the other half: it is still an
+// administrative endpoint.
+func TestTheAdminPasswordEndpointNeedsAnAdmin(t *testing.T) {
+	db := useTempDB(t)
+	insertUser(t, db, "guest", "secret", "Guest", domain.AccessGuest)
+
+	req := httptest.NewRequest(http.MethodPut, "/updateAdminPassword",
+		strings.NewReader(`{"oldPassword":"secret","newPassword":"newsecret"}`))
+	req.Header.Set("Authorization", "Bearer "+domain.GenerateUserToken("guest", domain.AccessGuest))
+	rec := httptest.NewRecorder()
+
+	UpdateAdminPasswordHandler(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d for a guest, want 401", rec.Code)
 	}
 }

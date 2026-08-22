@@ -298,3 +298,52 @@ func TestAdminAuthorisationReadsTheAccessLevelNotTheUsername(t *testing.T) {
 			"two appear to disagree in the other direction now")
 	}
 }
+
+// TestOnlyTheSignInFieldsAreServed covers an endpoint any unauthenticated
+// caller can reach. It used to answer with the whole stored document, client
+// secret included; the secret is masked now, and the rest is an allow-list — so
+// a field added to the document later does not start being served to the world
+// because nobody remembered to add it to a deny-list.
+func TestOnlyTheSignInFieldsAreServed(t *testing.T) {
+	useTempDB(t)
+
+	if err := WriteOAuthConfig("google", map[string]interface{}{
+		"clientId":     "cid",
+		"clientSecret": "very-secret",
+		"redirectUri":  "https://example/callback",
+		"enabled":      true,
+	}); err != nil {
+		t.Fatalf("WriteOAuthConfig: %v", err)
+	}
+
+	got, err := ReadOAuthConfig("google")
+	if err != nil {
+		t.Fatalf("ReadOAuthConfig: %v", err)
+	}
+
+	if got["clientId"] != "cid" {
+		t.Errorf("clientId = %v, want it served", got["clientId"])
+	}
+	if got["clientSecret"] == "very-secret" {
+		t.Fatal("the client secret was served to an unauthenticated caller")
+	}
+
+	// Anything the document grows later stays in until it is listed.
+	if err := WriteOAuthConfig("google", map[string]interface{}{
+		"clientId":       "cid",
+		"clientSecret":   "very-secret",
+		"redirectUri":    "https://example/callback",
+		"enabled":        true,
+		"internalApiKey": "should-not-leak",
+	}); err != nil {
+		t.Fatalf("WriteOAuthConfig: %v", err)
+	}
+
+	got, err = ReadOAuthConfig("google")
+	if err != nil {
+		t.Fatalf("ReadOAuthConfig: %v", err)
+	}
+	if _, leaked := got["internalApiKey"]; leaked {
+		t.Errorf("an unlisted field was served: %v", got)
+	}
+}

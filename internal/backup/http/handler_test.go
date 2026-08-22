@@ -154,7 +154,7 @@ func TestBackupUpdateHandlerDerivesStatusFromEnable(t *testing.T) {
 	insertBackupTask(t, conn, 1, `{"name":"nightly"}`)
 
 	rec := httptest.NewRecorder()
-	serveWithURLParams(rec, httptest.NewRequest(http.MethodPut, "/backup/{id}", strings.NewReader(`{"name":"n"}`)),
+	serveWithURLParams(rec, httptest.NewRequest(http.MethodPut, "/backup/{id}", strings.NewReader(`{"name":"n","sourceType":"mongodb","database":{"url":"h","database":"shop"},"destination":{"gcsPath":"gs://b"},"schedule":"0 3 * * *"}`)),
 		BackupUpdateHandler, map[string]string{"id": "1"})
 	if resp := decodeEnvelope(t, rec); resp["success"] != true {
 		t.Fatalf("body: %s", rec.Body.String())
@@ -170,7 +170,7 @@ func TestBackupUpdateHandlerKeepsTheStoredNameWhenOmitted(t *testing.T) {
 	insertBackupTask(t, conn, 1, `{"name":"keep me","status":"enabled"}`)
 
 	rec := httptest.NewRecorder()
-	serveWithURLParams(rec, httptest.NewRequest(http.MethodPut, "/backup/{id}", strings.NewReader(`{"sourceType":"mysql"}`)),
+	serveWithURLParams(rec, httptest.NewRequest(http.MethodPut, "/backup/{id}", strings.NewReader(`{"sourceType":"mysql","database":{"url":"h","database":"shop"},"destination":{"gcsPath":"gs://b"},"schedule":"0 3 * * *"}`)),
 		BackupUpdateHandler, map[string]string{"id": "1"})
 	if resp := decodeEnvelope(t, rec); resp["success"] != true {
 		t.Fatalf("body: %s", rec.Body.String())
@@ -186,7 +186,7 @@ func TestBackupUpdateHandlerGeneratesANameWhenThereIsNone(t *testing.T) {
 	insertBackupTask(t, conn, 1, `{"status":"enabled"}`)
 
 	rec := httptest.NewRecorder()
-	serveWithURLParams(rec, httptest.NewRequest(http.MethodPut, "/backup/{id}", strings.NewReader(`{}`)),
+	serveWithURLParams(rec, httptest.NewRequest(http.MethodPut, "/backup/{id}", strings.NewReader(`{"sourceType":"mongodb","database":{"url":"h","database":"shop"},"destination":{"gcsPath":"gs://b"},"schedule":"0 3 * * *"}`)),
 		BackupUpdateHandler, map[string]string{"id": "1"})
 	if resp := decodeEnvelope(t, rec); resp["success"] != true {
 		t.Fatalf("body: %s", rec.Body.String())
@@ -214,7 +214,7 @@ func TestBackupUpdateHandlerRejectsAnUnknownTask(t *testing.T) {
 	useTempTaskDB(t)
 
 	rec := httptest.NewRecorder()
-	serveWithURLParams(rec, httptest.NewRequest(http.MethodPut, "/backup/{id}", strings.NewReader(`{"name":"n"}`)),
+	serveWithURLParams(rec, httptest.NewRequest(http.MethodPut, "/backup/{id}", strings.NewReader(`{"name":"n","sourceType":"mongodb","database":{"url":"h","database":"shop"},"destination":{"gcsPath":"gs://b"},"schedule":"0 3 * * *"}`)),
 		BackupUpdateHandler, map[string]string{"id": "999"})
 
 	resp := decodeEnvelope(t, rec)
@@ -231,7 +231,7 @@ func TestBackupUpdateHandlerToleratesACorruptStoredConfig(t *testing.T) {
 	insertBackupTask(t, conn, 1, `{not json`)
 
 	rec := httptest.NewRecorder()
-	serveWithURLParams(rec, httptest.NewRequest(http.MethodPut, "/backup/{id}", strings.NewReader(`{"name":"n"}`)),
+	serveWithURLParams(rec, httptest.NewRequest(http.MethodPut, "/backup/{id}", strings.NewReader(`{"name":"n","sourceType":"mongodb","database":{"url":"h","database":"shop"},"destination":{"gcsPath":"gs://b"},"schedule":"0 3 * * *"}`)),
 		BackupUpdateHandler, map[string]string{"id": "1"})
 
 	if resp := decodeEnvelope(t, rec); resp["success"] != true {
@@ -242,11 +242,14 @@ func TestBackupUpdateHandlerToleratesACorruptStoredConfig(t *testing.T) {
 	}
 }
 
-// The update is a full replacement, not a merge: only name and status are read
-// back from the stored config. A client that PUTs a partial body — changing
-// just the schedule, say — silently blanks the database connection, the
-// destination, the format and everything else, and the backup stops working.
-func TestAPartialUpdateWipesTheRestOfTheConfig(t *testing.T) {
+// TestAPartialUpdateIsRefused covers a client that means to change one thing
+// and sends one thing. The update is a full replacement — which is what PUT
+// means — so only the name and the status were read back from the stored
+// configuration and everything else was blanked: the database connection, the
+// destination, the format, the compression. The job then backed up nothing, at
+// its next scheduled run, with nobody watching. It is answered with a 400
+// naming what is missing, and nothing is written.
+func TestAPartialUpdateIsRefused(t *testing.T) {
 	conn := useTempTaskDB(t)
 	insertBackupTask(t, conn, 1, `{
 		"name":"nightly","sourceType":"mongodb","status":"enabled",
@@ -260,21 +263,20 @@ func TestAPartialUpdateWipesTheRestOfTheConfig(t *testing.T) {
 	serveWithURLParams(rec, httptest.NewRequest(http.MethodPut, "/backup/{id}",
 		strings.NewReader(`{"schedule":"0 4 * * *"}`)),
 		BackupUpdateHandler, map[string]string{"id": "1"})
-	if resp := decodeEnvelope(t, rec); resp["success"] != true {
-		t.Fatalf("body: %s", rec.Body.String())
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 (body: %s)", rec.Code, rec.Body.String())
+	}
+	for _, want := range []string{"sourceType", "database", "destination"} {
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Errorf("body does not name %q: %s", want, rec.Body.String())
+		}
 	}
 
+	// The stored job is untouched.
 	cfg := backupConfig(t, conn, 1)
-	if cfg["schedule"] != "0 4 * * *" {
-		t.Fatalf("schedule = %v, want the new value", cfg["schedule"])
-	}
-	if cfg["sourceType"] != "" || cfg["database"] != nil || cfg["destination"] != nil ||
-		cfg["format"] != "" || cfg["compressionType"] != "" || cfg["regexPattern"] != "" {
-		t.Fatalf("the untouched fields survived — the update appears to merge now; assert the merge instead: %#v", cfg)
-	}
-	// name and status are the only two that are carried over.
-	if cfg["name"] != "nightly" || cfg["status"] != "enabled" {
-		t.Errorf("name/status = %v/%v, want them preserved", cfg["name"], cfg["status"])
+	if cfg["sourceType"] != "mongodb" || cfg["database"] == nil || cfg["destination"] == nil {
+		t.Errorf("the stored configuration was changed: %#v", cfg)
 	}
 }
 
@@ -293,7 +295,7 @@ func TestAStoredValueOfTheWrongTypeIsAnswered(t *testing.T) {
 
 			rec := httptest.NewRecorder()
 			serveWithURLParams(rec,
-				httptest.NewRequest(http.MethodPut, "/backup/{id}", strings.NewReader(`{}`)),
+				httptest.NewRequest(http.MethodPut, "/backup/{id}", strings.NewReader(`{"sourceType":"mongodb","database":{"url":"h","database":"shop"},"destination":{"gcsPath":"gs://b"},"schedule":"0 3 * * *"}`)),
 				BackupUpdateHandler, map[string]string{"id": "1"})
 
 			if rec.Code == 0 {
@@ -315,7 +317,8 @@ func TestTheStoredNextBackupTimeFollowsTheSchedule(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	serveWithURLParams(rec, httptest.NewRequest(http.MethodPut, "/backup/{id}",
-		strings.NewReader(`{"name":"n","schedule":"*/5 * * * *"}`)),
+		strings.NewReader(`{"name":"n","schedule":"*/5 * * * *","sourceType":"mongodb",`+
+			`"database":{"url":"h","database":"shop"},"destination":{"gcsPath":"gs://b"}}`)),
 		BackupUpdateHandler, map[string]string{"id": "1"})
 	if resp := decodeEnvelope(t, rec); resp["success"] != true {
 		t.Fatalf("body: %s", rec.Body.String())

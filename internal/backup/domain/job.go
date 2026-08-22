@@ -3,6 +3,7 @@ package domain
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -47,12 +48,53 @@ type Request struct {
 	RegexPattern       string                 `json:"regexPattern"`
 }
 
+// MissingFieldsError names what a request left out. The endpoints answer with
+// it rather than storing a job stripped of everything the caller did not
+// mention.
+type MissingFieldsError struct{ Fields []string }
+
+func (e *MissingFieldsError) Error() string {
+	return "the request leaves out " + strings.Join(e.Fields, ", ") +
+		"; an update replaces the whole configuration, so every field has to be sent"
+}
+
+// Complete reports the fields a request needs to describe a job, and what it is
+// missing.
+//
+// An update replaces the stored configuration, so a client that means to change
+// only the schedule and sends only the schedule used to have its database
+// connection, its destination, its format and its compression emptied — with the
+// job then failing at its next run, or backing up nothing at all. Saying so is
+// the difference between a mistake the caller can see and one they find out
+// about when they need the backup.
+func (r Request) Complete() error {
+	var missing []string
+
+	if strings.TrimSpace(r.SourceType) == "" {
+		missing = append(missing, "sourceType")
+	}
+	if len(r.Database) == 0 {
+		missing = append(missing, "database")
+	}
+	if len(r.Destination) == 0 {
+		missing = append(missing, "destination")
+	}
+	if strings.TrimSpace(r.Schedule) == "" {
+		missing = append(missing, "schedule")
+	}
+
+	if len(missing) > 0 {
+		return &MissingFieldsError{Fields: missing}
+	}
+	return nil
+}
+
 // ConfigFrom builds the stored configuration from a request and a status.
 //
-// Every field comes from the request, so a request that omits a field stores
-// the zero value for it and the previously stored value is lost — an update is
-// a replacement, not a merge (T-111). Making it a merge is a behaviour change
-// and belongs to #59.
+// Every field comes from the request: an update replaces the configuration
+// rather than merging into it, which is what PUT means. What is not acceptable
+// is doing that silently — see Complete, which is what stops a request that
+// left fields out from quietly emptying them.
 func ConfigFrom(req Request, status string) Config {
 	return Config{
 		Name:               req.Name,
