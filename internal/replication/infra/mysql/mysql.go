@@ -27,6 +27,16 @@ import (
 type MySQLSyncer struct {
 	cfg    config.SyncConfig
 	logger logrus.FieldLogger
+	// dialect is the flavour the target speaks; the zero value is MySQL.
+	dialect dialect
+}
+
+// flavour reports the dialect to render statements in, defaulting to MySQL.
+func (s *MySQLSyncer) flavour() dialect {
+	if s.dialect == "" {
+		return dialectMySQL
+	}
+	return s.dialect
 }
 
 func NewMySQLSyncer(cfg config.SyncConfig, logger *logrus.Logger) *MySQLSyncer {
@@ -363,13 +373,9 @@ func (s *MySQLSyncer) batchInsert(
 		s.logger.Debugf("[MySQL] Row data after processing: %v", rows)
 	}
 
-	insertSQL := fmt.Sprintf("INSERT INTO %s.%s (%s) VALUES", dbName, tableName, strings.Join(cols, ", "))
-	singleRowPlaceholder := fmt.Sprintf("(%s)", strings.Join(makeQuestionMarks(len(cols)), ","))
-	var allPlaceholder []string
-	for range rows {
-		allPlaceholder = append(allPlaceholder, singleRowPlaceholder)
-	}
-	insertSQL = insertSQL + " " + strings.Join(allPlaceholder, ", ")
+	// The snapshot is idempotent for the same reason the change stream is: a
+	// copy that is interrupted and resumed re-reads rows it already wrote.
+	insertSQL := upsertStatement(s.flavour(), dbName, tableName, cols, len(rows))
 
 	var args []interface{}
 	for _, rowData := range rows {
@@ -382,6 +388,52 @@ func (s *MySQLSyncer) batchInsert(
 	ra, _ := res.RowsAffected()
 	s.logger.Infof("[MySQL][BULK-INSERT] table=%s.%s insertedRows=%d", dbName, tableName, ra)
 	return nil
+}
+
+// dialect names the SQL flavour the write side speaks.
+//
+// Production targets are MySQL. The unit suite drives the handler against
+// SQLite, which spells an idempotent insert differently, so the statement
+// builders take the flavour rather than assuming one.
+type dialect string
+
+const (
+	dialectMySQL  dialect = "mysql"
+	dialectSQLite dialect = "sqlite"
+)
+
+// upsertStatement renders an idempotent multi-row insert for d.
+//
+// Replication is at-least-once: the binlog position is persisted periodically,
+// so a restart replays whatever came after the last write. A plain INSERT turns
+// that replay into a duplicate-key error, and a duplicate-key error is not a
+// connection failure, so RetryDBOperation gives up on it immediately and the
+// row is dropped. Every insert this syncer emits therefore has to be an upsert.
+func upsertStatement(d dialect, dbName, table string, cols []string, rowCount int) string {
+	if rowCount < 1 {
+		rowCount = 1
+	}
+
+	placeholder := "(" + strings.Join(makeQuestionMarks(len(cols)), ",") + ")"
+	values := make([]string, rowCount)
+	for i := range values {
+		values[i] = placeholder
+	}
+
+	if d == dialectSQLite {
+		// SQLite's ON CONFLICT clause needs a conflict target, which the binlog
+		// does not always give us, so use the form that needs none.
+		return fmt.Sprintf("INSERT OR REPLACE INTO %s.%s (%s) VALUES %s",
+			dbName, table, strings.Join(cols, ", "), strings.Join(values, ", "))
+	}
+
+	assignments := make([]string, len(cols))
+	for i, c := range cols {
+		assignments[i] = fmt.Sprintf("%s = VALUES(%s)", c, c)
+	}
+	return fmt.Sprintf("INSERT INTO %s.%s (%s) VALUES %s ON DUPLICATE KEY UPDATE %s",
+		dbName, table, strings.Join(cols, ", "), strings.Join(values, ", "),
+		strings.Join(assignments, ", "))
 }
 
 func makeQuestionMarks(n int) []string {
@@ -470,6 +522,17 @@ type MyEventHandler struct {
 	canal             *canal.Canal
 	lastExecError     int32
 	TargetConnection  string
+	// dialect is the flavour the target speaks. The zero value is MySQL, so a
+	// handler built without naming one behaves as production does.
+	dialect dialect
+}
+
+// flavour reports the dialect to render statements in, defaulting to MySQL.
+func (h *MyEventHandler) flavour() dialect {
+	if h.dialect == "" {
+		return dialectMySQL
+	}
+	return h.dialect
 }
 
 func (h *MyEventHandler) OnRow(e *canal.RowsEvent) error {
@@ -536,15 +599,7 @@ func (h *MyEventHandler) handleDML(
 	var query string
 	switch opType {
 	case "INSERT":
-		placeholders := make([]string, len(cols))
-		for i := range placeholders {
-			placeholders[i] = "?"
-		}
-		query = fmt.Sprintf("INSERT INTO %s.%s (%s) VALUES (%s)",
-			tgtDB, tgtTable,
-			strings.Join(cols, ", "),
-			strings.Join(placeholders, ", "),
-		)
+		query = upsertStatement(h.flavour(), tgtDB, tgtTable, cols, 1)
 		h.logger.Debugf("[MySQL][INSERT] table=%s.%s query=%s", tgtDB, tgtTable, query)
 
 		var processedValues []interface{}

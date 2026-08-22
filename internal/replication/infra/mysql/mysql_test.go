@@ -11,12 +11,15 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+// newSyncer builds a syncer that writes SQLite, which is what the hermetic
+// suite has to drive it against. Production leaves the dialect unset and gets
+// MySQL; upsertStatement is covered in both flavours by its own table test.
 func newSyncer(t *testing.T) *MySQLSyncer {
 	t.Helper()
 
 	logger := logrus.New()
 	logger.SetLevel(logrus.PanicLevel)
-	return &MySQLSyncer{logger: logger}
+	return &MySQLSyncer{logger: logger, dialect: dialectSQLite}
 }
 
 func TestParseAddr(t *testing.T) {

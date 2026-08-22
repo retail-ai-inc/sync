@@ -53,6 +53,7 @@ func newHandler(t *testing.T, db *sql.DB, mappings []config.DatabaseMapping) *My
 		mappings:         mappings,
 		logger:           logger,
 		TargetConnection: targetDSN,
+		dialect:          dialectSQLite,
 	}
 }
 
