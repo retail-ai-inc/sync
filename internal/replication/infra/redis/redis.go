@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -314,28 +313,115 @@ func (r *RedisSyncer) copyFullKey(ctx context.Context, key string) error {
 
 // ------------------------------------------------------ keyspace watching
 
+// masterRediscoveryInterval is how often the set of cluster masters is looked
+// up again.
+//
+// A subscription is to one node. After a failover or a resharding the node that
+// publishes a given key's events is a different one, and go-redis reconnects a
+// dropped subscription to the same address — which by then serves a replica, or
+// nothing. The subscription stays open and silent, so the events for that slot
+// range simply stop arriving, with no error anywhere. The periodic full
+// comparison eventually corrects the data, which is why this is a recovery-point
+// problem rather than a data-loss one: seconds become an hour.
+const masterRediscoveryInterval = 30 * time.Second
+
 func (r *RedisSyncer) watchKeyspaceChanges(ctx context.Context) {
 	pattern := fmt.Sprintf("__keyspace@%s__:*", r.sourceDatabase())
 
-	// A cluster publishes keyspace events on the node that owns the key, so a
-	// single subscription would only ever see one node's share of them.
-	if cluster, ok := r.source.(*goredis.ClusterClient); ok {
-		var wg sync.WaitGroup
-		err := cluster.ForEachMaster(ctx, func(ctx context.Context, node *goredis.Client) error {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				r.subscribeKeyspace(ctx, node, pattern)
-			}()
-			return nil
-		})
-		if err != nil {
-			r.logger.Errorf("[Redis] Could not subscribe to every master: %v", err)
-		}
-		wg.Wait()
+	cluster, isCluster := r.source.(*goredis.ClusterClient)
+	if !isCluster {
+		r.subscribeKeyspace(ctx, r.source, pattern)
 		return
 	}
-	r.subscribeKeyspace(ctx, r.source, pattern)
+
+	// A cluster publishes keyspace events on the node that owns the key, so
+	// every master needs its own subscription — and the set of masters changes.
+	running := map[string]context.CancelFunc{}
+	defer func() {
+		for _, stop := range running {
+			stop()
+		}
+	}()
+
+	start := func(nodeCtx context.Context, addr string) {
+		client := r.nodeClient(cluster, addr)
+		go func() {
+			defer client.Close()
+			r.subscribeKeyspace(nodeCtx, client, pattern)
+		}()
+	}
+
+	ticker := time.NewTicker(masterRediscoveryInterval)
+	defer ticker.Stop()
+
+	for {
+		masters, err := clusterMasters(ctx, cluster)
+		if err != nil {
+			r.logger.Errorf("[Redis] Could not list the cluster masters: %v", err)
+		} else {
+			r.reconcileSubscriptions(ctx, running, masters, start)
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+// clusterMasters reports the addresses of the nodes currently serving writes.
+func clusterMasters(ctx context.Context, cluster *goredis.ClusterClient) ([]string, error) {
+	var addresses []string
+	err := cluster.ForEachMaster(ctx, func(_ context.Context, node *goredis.Client) error {
+		addresses = append(addresses, node.Options().Addr)
+		return nil
+	})
+	return addresses, err
+}
+
+// reconcileSubscriptions starts a watcher for each address that has none and
+// stops the ones whose address is no longer serving writes.
+func (r *RedisSyncer) reconcileSubscriptions(ctx context.Context, running map[string]context.CancelFunc, want []string, start func(context.Context, string)) {
+	wanted := make(map[string]bool, len(want))
+	for _, addr := range want {
+		wanted[addr] = true
+	}
+
+	for addr, stop := range running {
+		if wanted[addr] {
+			continue
+		}
+		r.logger.Infof("[Redis] %s no longer serves writes; stopping its keyspace subscription", addr)
+		stop()
+		delete(running, addr)
+	}
+
+	for _, addr := range want {
+		if _, already := running[addr]; already {
+			continue
+		}
+		r.logger.Infof("[Redis] Subscribing to keyspace events on %s", addr)
+		nodeCtx, stop := context.WithCancel(ctx)
+		running[addr] = stop
+		start(nodeCtx, addr)
+	}
+}
+
+// nodeClient opens a connection to one cluster node, carrying the cluster's own
+// credentials and transport settings.
+//
+// A client of its own rather than the one ForEachMaster lends out: that one
+// belongs to the cluster client, which closes it when the topology changes —
+// underneath a subscription that is meant to outlive the lookup.
+func (r *RedisSyncer) nodeClient(cluster *goredis.ClusterClient, addr string) *goredis.Client {
+	opts := cluster.Options()
+	return goredis.NewClient(&goredis.Options{
+		Addr:      addr,
+		Username:  opts.Username,
+		Password:  opts.Password,
+		TLSConfig: opts.TLSConfig,
+	})
 }
 
 // subscribeKeyspace consumes one node's keyspace notifications.

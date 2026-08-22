@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"sync"
 	"time"
 
@@ -55,6 +56,53 @@ type FileParseResult struct {
 	LastToken bson.Raw
 }
 
+// defaultBufferLimitBytes is how much unapplied change data may sit on disk
+// before the reader stops taking more.
+//
+// Without a bound the writer keeps going for as long as the target is
+// unreachable, and the first thing to break is the disk — which takes the
+// checkpoint with it, because that is written to the same volume when a file
+// store is configured. Two gigabytes is a compromise: enough to ride out a
+// target restart on a busy collection, small enough to notice on a node.
+const defaultBufferLimitBytes = 2 << 30
+
+// bufferFullPause is how long to wait before looking again once the buffer is
+// full.
+const bufferFullPause = 5 * time.Second
+
+// bufferLimitBytes reports the cap, which SYNC_MONGO_BUFFER_LIMIT_BYTES
+// overrides. A value of zero or less turns the cap off, which is a choice an
+// operator can make and this one will not make for them.
+func bufferLimitBytes() int64 {
+	raw := os.Getenv("SYNC_MONGO_BUFFER_LIMIT_BYTES")
+	if raw == "" {
+		return defaultBufferLimitBytes
+	}
+	limit, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return defaultBufferLimitBytes
+	}
+	return limit
+}
+
+// bufferBytes reports how much unapplied change data is on disk for one
+// collection.
+func bufferBytes(bufferPath string) int64 {
+	entries, err := os.ReadDir(bufferPath)
+	if err != nil {
+		return 0
+	}
+	var total int64
+	for _, entry := range entries {
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		total += info.Size()
+	}
+	return total
+}
+
 func (s *MongoDBSyncer) diskWriter(ctx context.Context, eventChannel <-chan streamEvent, sourceDB, collectionName string) {
 	s.logger.Infof("[MongoDB] Starting disk writer for %s.%s", sourceDB, collectionName)
 	defer s.logger.Infof("[MongoDB] Stopping disk writer for %s.%s", sourceDB, collectionName)
@@ -65,7 +113,32 @@ func (s *MongoDBSyncer) diskWriter(ctx context.Context, eventChannel <-chan stre
 	timer := time.NewTimer(flushInterval)
 	defer timer.Stop()
 
+	limit := bufferLimitBytes()
+
 	for {
+		// Stop taking events while the buffer is over its limit. The channel
+		// then fills, the change stream reader closes the stream rather than
+		// reading further ahead of what can be applied, and the guardian brings
+		// it back once the applier has drained some. The alternative is writing
+		// until the disk is full, which takes the checkpoint with it.
+		if limit > 0 {
+			held := bufferBytes(s.getBufferPath(sourceDB, collectionName))
+			metrics.Default.SetGauge(metrics.BufferBytes, metrics.HelpBufferBytes,
+				s.metricLabels(collectionName), float64(held))
+			if held >= limit {
+				s.logger.Errorf("[MongoDB] %s.%s has %d bytes of change data waiting to "+
+					"be applied, at or over the %d byte limit, so the change stream is "+
+					"being held back. The target is not keeping up.",
+					sourceDB, collectionName, held, limit)
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(bufferFullPause):
+				}
+				continue
+			}
+		}
+
 		select {
 		case <-ctx.Done():
 			if len(buffer) > 0 {

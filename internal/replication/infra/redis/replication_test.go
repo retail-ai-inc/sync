@@ -1012,3 +1012,100 @@ func TestStartRefusesAPromotedTarget(t *testing.T) {
 		t.Error("the initial copy ran despite the refusal")
 	}
 }
+
+// ------------------------------------------- cluster master rediscovery
+
+// TestASubscriptionIsStartedForEachMaster pins the reconciliation: a cluster
+// publishes keyspace events on the node that owns the key, so every master needs
+// its own subscription.
+func TestASubscriptionIsStartedForEachMaster(t *testing.T) {
+	s := newRedisSyncerWithFakes(t, newFakeRedis(t), newFakeRedis(t))
+	running := map[string]context.CancelFunc{}
+	var started []string
+
+	s.reconcileSubscriptions(context.Background(), running,
+		[]string{"a:6379", "b:6379"},
+		func(_ context.Context, addr string) { started = append(started, addr) })
+
+	if len(started) != 2 || len(running) != 2 {
+		t.Errorf("started %v, tracking %d", started, len(running))
+	}
+}
+
+// TestAnExistingSubscriptionIsNotRestarted keeps the common tick cheap: nothing
+// changed, so nothing happens.
+func TestAnExistingSubscriptionIsNotRestarted(t *testing.T) {
+	s := newRedisSyncerWithFakes(t, newFakeRedis(t), newFakeRedis(t))
+	running := map[string]context.CancelFunc{}
+	var started []string
+	record := func(_ context.Context, addr string) { started = append(started, addr) }
+
+	s.reconcileSubscriptions(context.Background(), running, []string{"a:6379"}, record)
+	s.reconcileSubscriptions(context.Background(), running, []string{"a:6379"}, record)
+
+	if len(started) != 1 {
+		t.Errorf("started %v, want one subscription", started)
+	}
+}
+
+// TestAFailedOverMasterIsReplaced is the fix. go-redis reconnects a dropped
+// subscription to the same address, which after a failover serves a replica or
+// nothing: the subscription stays open and silent, and the events for that slot
+// range simply stop arriving with no error anywhere.
+func TestAFailedOverMasterIsReplaced(t *testing.T) {
+	s := newRedisSyncerWithFakes(t, newFakeRedis(t), newFakeRedis(t))
+	running := map[string]context.CancelFunc{}
+
+	stopped := make(chan string, 4)
+	start := func(ctx context.Context, addr string) {
+		go func() {
+			<-ctx.Done()
+			stopped <- addr
+		}()
+	}
+
+	s.reconcileSubscriptions(context.Background(), running, []string{"a:6379", "b:6379"}, start)
+	// b has been replaced by c.
+	s.reconcileSubscriptions(context.Background(), running, []string{"a:6379", "c:6379"}, start)
+
+	if _, ok := running["b:6379"]; ok {
+		t.Error("the replaced master is still tracked")
+	}
+	if _, ok := running["c:6379"]; !ok {
+		t.Error("the new master has no subscription")
+	}
+	select {
+	case addr := <-stopped:
+		if addr != "b:6379" {
+			t.Errorf("stopped %q, want the replaced master", addr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("the replaced master's subscription was not cancelled")
+	}
+}
+
+// TestEveryMasterLeavingStopsEverySubscription covers the whole cluster becoming
+// unreachable: nothing is left running on an address that no longer serves.
+func TestEveryMasterLeavingStopsEverySubscription(t *testing.T) {
+	s := newRedisSyncerWithFakes(t, newFakeRedis(t), newFakeRedis(t))
+	running := map[string]context.CancelFunc{}
+	start := func(context.Context, string) {}
+
+	s.reconcileSubscriptions(context.Background(), running, []string{"a:6379", "b:6379"}, start)
+	s.reconcileSubscriptions(context.Background(), running, nil, start)
+
+	if len(running) != 0 {
+		t.Errorf("%d subscriptions are still tracked", len(running))
+	}
+}
+
+// TestTheRediscoveryIntervalIsShorterThanTheReconciliation records the ordering
+// that makes the recovery point tolerable: a failover is noticed in seconds,
+// long before the hourly full comparison would have papered over it.
+func TestTheRediscoveryIntervalIsShorterThanTheReconciliation(t *testing.T) {
+	if masterRediscoveryInterval >= defaultReconcileInterval {
+		t.Errorf("masters are rediscovered every %v but the keyspace is compared "+
+			"every %v, so a failover would be corrected by the comparison rather "+
+			"than by resubscribing", masterRediscoveryInterval, defaultReconcileInterval)
+	}
+}

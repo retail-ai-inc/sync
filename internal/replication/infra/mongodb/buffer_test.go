@@ -461,3 +461,115 @@ func TestBufferPathsCollideOnUnderscore(t *testing.T) {
 		t.Errorf("resume token paths %q and %q no longer collide", a, b)
 	}
 }
+
+// ------------------------------------------------------------ buffer limit
+
+func TestTheBufferLimitDefaultsAndCanBeOverridden(t *testing.T) {
+	if got := bufferLimitBytes(); got != defaultBufferLimitBytes {
+		t.Errorf("limit = %d, want the default", got)
+	}
+
+	t.Setenv("SYNC_MONGO_BUFFER_LIMIT_BYTES", "1048576")
+	if got := bufferLimitBytes(); got != 1<<20 {
+		t.Errorf("limit = %d, want 1 MiB", got)
+	}
+
+	// An unreadable value falls back rather than turning the cap off by
+	// accident, because a mistyped number must not remove the bound.
+	t.Setenv("SYNC_MONGO_BUFFER_LIMIT_BYTES", "one gigabyte")
+	if got := bufferLimitBytes(); got != defaultBufferLimitBytes {
+		t.Errorf("limit = %d for an unreadable value, want the default", got)
+	}
+
+	// Turning it off is a choice an operator may make deliberately.
+	t.Setenv("SYNC_MONGO_BUFFER_LIMIT_BYTES", "0")
+	if got := bufferLimitBytes(); got != 0 {
+		t.Errorf("limit = %d, want it turned off", got)
+	}
+}
+
+func TestTheBufferSizeIsTheSumOfItsFiles(t *testing.T) {
+	s := newBufferSyncer(t)
+	dir := s.getBufferPath("shop", "orders")
+	writeBufferFiles(t, dir, 100, 250, 400)
+
+	if got := bufferBytes(dir); got != 750 {
+		t.Errorf("bufferBytes = %d, want 750", got)
+	}
+}
+
+func TestAnAbsentBufferHoldsNothing(t *testing.T) {
+	s := newBufferSyncer(t)
+
+	if got := bufferBytes(s.getBufferPath("shop", "orders")); got != 0 {
+		t.Errorf("bufferBytes = %d for a directory that does not exist", got)
+	}
+}
+
+// TestAFullBufferHoldsTheReaderBack is the backpressure. Without a bound the
+// writer keeps going for as long as the target is unreachable, and the first
+// thing to break is the disk — which takes the checkpoint with it when a file
+// store is configured.
+func TestAFullBufferHoldsTheReaderBack(t *testing.T) {
+	s := newBufferSyncer(t)
+	s.cfg = config.SyncConfig{MongoDBResumeTokenPath: t.TempDir()}
+	t.Setenv("SYNC_MONGO_BUFFER_LIMIT_BYTES", "500")
+	writeBufferFiles(t, s.getBufferPath("shop", "orders"), 600)
+
+	// A buffered event that must not be taken while the limit is exceeded.
+	ch := make(chan streamEvent, 1)
+	ch <- streamEvent{RawData: insertEventRaw(t, "1")}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	s.diskWriter(ctx, ch, "shop", "orders")
+
+	if len(ch) != 1 {
+		t.Error("the writer took an event while the buffer was over its limit")
+	}
+	files, err := os.ReadDir(s.getBufferPath("shop", "orders"))
+	if err != nil {
+		t.Fatalf("read buffer dir: %v", err)
+	}
+	if len(files) != 1 {
+		t.Errorf("%d buffer files, want only the one that was already there", len(files))
+	}
+}
+
+// TestADrainedBufferLetsTheReaderResume is the other half: the hold is released
+// once the applier has caught up.
+func TestADrainedBufferLetsTheReaderResume(t *testing.T) {
+	s := newBufferSyncer(t)
+	s.cfg = config.SyncConfig{MongoDBResumeTokenPath: t.TempDir()}
+	t.Setenv("SYNC_MONGO_BUFFER_LIMIT_BYTES", "10000")
+
+	ch := make(chan streamEvent, 1)
+	ch <- streamEvent{RawData: insertEventRaw(t, "1")}
+	close(ch)
+
+	s.diskWriter(context.Background(), ch, "shop", "orders")
+
+	files, err := os.ReadDir(s.getBufferPath("shop", "orders"))
+	if err != nil {
+		t.Fatalf("read buffer dir: %v", err)
+	}
+	if len(files) != 1 {
+		t.Errorf("%d buffer files, want the event written", len(files))
+	}
+}
+
+// insertEventRaw is one change stream document, as the buffer stores them.
+func insertEventRaw(t *testing.T, id string) bson.Raw {
+	t.Helper()
+
+	raw, err := bson.Marshal(bson.M{
+		"_id":           bson.M{"_data": "82" + id},
+		"operationType": "insert",
+		"documentKey":   bson.M{"_id": id},
+		"fullDocument":  bson.M{"_id": id},
+	})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	return raw
+}

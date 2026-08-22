@@ -338,3 +338,13 @@ func SetTaskBlocked(labels Labels, blocked bool) {
 	}
 	Default.SetGauge(TaskBlocked, helpBlocked, labels, value)
 }
+
+// Buffer metrics. Change data waiting on local disk is the one thing that grows
+// when the target cannot keep up, and it is invisible until the volume fills.
+const (
+	// BufferBytes is how much unapplied change data is on disk.
+	BufferBytes = "sync_buffer_bytes"
+
+	// HelpBufferBytes describes it for a scrape.
+	HelpBufferBytes = "Bytes of change data on local disk waiting to be applied to the target"
+)
