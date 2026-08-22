@@ -414,17 +414,18 @@ func TestBuildMongoDBConnectionString(t *testing.T) {
 	}{
 		{
 			"with credentials", "localhost:27017", "root", "root",
-			"mongodb://root:root@localhost:27017/?authSource=admin&directConnection=true",
+			"mongodb://root:root@localhost:27017/?authSource=admin&journal=true&w=majority",
 		},
 		{
 			"without credentials", "localhost:27017", "", "",
-			"mongodb://localhost:27017/?directConnection=true",
+			"mongodb://localhost:27017/?journal=true&w=majority",
 		},
 		{
-			// Same asymmetry as the syncer DSN builder: a user without a
-			// password is dropped and the connection becomes anonymous.
+			// A user with no password is kept now: dropping it made the
+			// connection anonymous and the failure surfaced later as an
+			// authentication error that did not mention the discarded user.
 			"user without password", "localhost:27017", "root", "",
-			"mongodb://localhost:27017/?directConnection=true",
+			"mongodb://root@localhost:27017/?authSource=admin&journal=true&w=majority",
 		},
 	}
 
@@ -437,17 +438,29 @@ func TestBuildMongoDBConnectionString(t *testing.T) {
 	}
 }
 
-// TestBuildMongoDBConnectionStringForcesDirectConnection mirrors T-007 for the
-// backup path: every connection string pins the driver to a single node, so a
-// backup taken against a replica set stops working after an election.
-func TestBuildMongoDBConnectionStringForcesDirectConnection(t *testing.T) {
+// TestTheBackupNoLongerPinsOneNode is the counterpart to T-007 for the backup
+// path. Pinning the driver to a single node meant a backup taken against a
+// replica set read from whichever node it happened to reach, and failed
+// outright once that node stopped serving.
+func TestTheBackupNoLongerPinsOneNode(t *testing.T) {
 	for _, conn := range []string{
 		buildMongoDBConnectionString("localhost:27017", "root", "root"),
 		buildMongoDBConnectionString("localhost:27017", "", ""),
+		buildMongoDBConnectionString("a:27017,b:27017", "", ""),
 	} {
-		if !regexp.MustCompile(`directConnection=true`).MatchString(conn) {
-			t.Errorf("connection string %q no longer forces directConnection; "+
-				"assert the new behaviour instead", conn)
+		if regexp.MustCompile(`directConnection`).MatchString(conn) {
+			t.Errorf("connection string %q still pins one node", conn)
 		}
+	}
+}
+
+// TestTheBackupAcceptsASeedList covers the shape a replica set is named with,
+// which the hand-built string happened to pass through and which now goes
+// through the shared builder.
+func TestTheBackupAcceptsASeedList(t *testing.T) {
+	got := buildMongoDBConnectionString("a:27017,b:27017,c:27017", "root", "root")
+
+	if !regexp.MustCompile(`a:27017,b:27017,c:27017`).MatchString(got) {
+		t.Errorf("connection string = %q, want the whole seed list", got)
 	}
 }

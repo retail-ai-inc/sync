@@ -63,33 +63,27 @@ func TestGetDatabaseNameMissingDatabase(t *testing.T) {
 	}
 }
 
-// TestExtractMySQLDatabaseSplitsOnFirstSlash records a defect rather than
-// desired behaviour: the extractor takes the substring after the *first*
-// slash, so any slash appearing earlier in the DSN — most plausibly inside a
-// password — yields a wrong database name. A ConnectionEndpoint value object
-// that never round-trips through a DSN string would remove the failure mode.
-func TestExtractMySQLDatabaseSplitsOnFirstSlash(t *testing.T) {
-	const dsn = "root:pa/ss@tcp(localhost:3306)/source_db"
-
-	got := extractMySQLDatabase(dsn)
-	if got == "source_db" {
-		t.Fatalf("extractMySQLDatabase(%q) = %q; the defect this test documents "+
-			"appears to be fixed — assert the correct value instead", dsn, got)
-	}
-	if want := "ss@tcp(localhost:3306)/source_db"; got != want {
-		t.Errorf("extractMySQLDatabase(%q) = %q, want %q", dsn, got, want)
+// TestASlashInThePasswordDoesNotMoveTheDatabase covers what splitting the DSN
+// on its first slash used to do: it returned part of the credentials as the
+// database name, and the syncer then addressed a database that does not exist.
+func TestASlashInThePasswordDoesNotMoveTheDatabase(t *testing.T) {
+	for _, dsn := range []string{
+		"root:pa/ss@tcp(localhost:3306)/source_db",
+		"root:p@s/s@tcp(localhost:3306)/source_db?charset=utf8",
+	} {
+		if got := extractMySQLDatabase(dsn); got != "source_db" {
+			t.Errorf("extractMySQLDatabase(%q) = %q, want source_db", dsn, got)
+		}
 	}
 }
 
-// TestExtractMongoDatabaseRejectsSRVScheme documents that `mongodb+srv://`
-// URIs yield no database name, since the extractor matches on the literal
-// `mongodb://` prefix. Relevant to F-034: cluster targets need either an SRV
-// URI or a replicaSet parameter, and neither is understood today.
-func TestExtractMongoDatabaseRejectsSRVScheme(t *testing.T) {
-	const dsn = "mongodb+srv://root:root@cluster.example.com/source_db"
+// TestTheSRVSchemeIsUnderstood matters because a cluster names its seed list
+// through DNS, and the database name is what every table mapping is addressed
+// under.
+func TestTheSRVSchemeIsUnderstood(t *testing.T) {
+	const dsn = "mongodb+srv://root:root@cluster.example.com/source_db?w=majority"
 
-	if got := extractMongoDatabase(dsn); got != "" {
-		t.Errorf("extractMongoDatabase(%q) = %q; SRV support may have landed, "+
-			"in which case assert the database name instead", dsn, got)
+	if got := extractMongoDatabase(dsn); got != "source_db" {
+		t.Errorf("extractMongoDatabase(%q) = %q, want source_db", dsn, got)
 	}
 }

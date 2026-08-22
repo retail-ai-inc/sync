@@ -3,6 +3,8 @@ package dsn
 import (
 	"net/url"
 	"strings"
+
+	mysqldriver "github.com/go-sql-driver/mysql"
 )
 
 func GetDatabaseName(dbType, dsn string) string {
@@ -20,18 +22,20 @@ func GetDatabaseName(dbType, dsn string) string {
 	}
 }
 
+// extractMySQLDatabase reports the database a MySQL DSN addresses.
+//
+// The driver's own parser is used rather than splitting on the first slash: a
+// slash is legal inside a password, and splitting on it silently returned part
+// of the credentials as the database name.
 func extractMySQLDatabase(dsn string) string {
-	// dsn: user:pass@tcp(localhost:3306)/mydb?charset=utf8
-	slashIndex := strings.Index(dsn, "/")
-	if slashIndex == -1 {
+	if dsn == "" {
 		return ""
 	}
-	remainder := dsn[slashIndex+1:]
-	questionIndex := strings.Index(remainder, "?")
-	if questionIndex != -1 {
-		return remainder[:questionIndex]
+	cfg, err := mysqldriver.ParseDSN(dsn)
+	if err != nil {
+		return ""
 	}
-	return remainder
+	return cfg.DBName
 }
 
 func extractPostgresDatabase(dsn string) string {
@@ -47,21 +51,29 @@ func extractPostgresDatabase(dsn string) string {
 	return ""
 }
 
+// extractMongoDatabase reports the database a MongoDB URI addresses, for both
+// the plain scheme and mongodb+srv, which is how a cluster names its seed list.
 func extractMongoDatabase(dsn string) string {
-	// DSN: mongodb://host:port/mydb?xxx=yyy
-	const prefix = "mongodb://"
-	if !strings.HasPrefix(strings.ToLower(dsn), prefix) {
+	lower := strings.ToLower(dsn)
+	var prefix string
+	switch {
+	case strings.HasPrefix(lower, "mongodb+srv://"):
+		prefix = "mongodb+srv://"
+	case strings.HasPrefix(lower, "mongodb://"):
+		prefix = "mongodb://"
+	default:
 		return ""
 	}
+
 	withoutPrefix := dsn[len(prefix):]
 	slashIndex := strings.Index(withoutPrefix, "/")
 	if slashIndex == -1 {
 		return ""
 	}
 	remainder := withoutPrefix[slashIndex+1:]
-	questIndex := strings.Index(remainder, "?")
-	if questIndex != -1 {
-		return remainder[:questIndex]
+	questionIndex := strings.Index(remainder, "?")
+	if questionIndex != -1 {
+		return remainder[:questionIndex]
 	}
 	return remainder
 }

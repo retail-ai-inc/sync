@@ -2,9 +2,11 @@ package mysql
 
 import (
 	"context"
+	"crypto/tls"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -59,6 +61,7 @@ func (s *MySQLSyncer) Start(ctx context.Context) {
 	}
 	cfg.Addr = s.parseAddr(s.cfg.SourceConnection)
 	cfg.User, cfg.Password = s.parseUserPassword(s.cfg.SourceConnection)
+	cfg.TLSConfig = s.sourceTLS()
 	cfg.Dump.ExecutionPath = s.cfg.DumpExecutionPath
 
 	var includeTables []string
@@ -688,6 +691,32 @@ func (s *MySQLSyncer) parseAddr(dsn string) string {
 		return ""
 	}
 	return cfg.Addr
+}
+
+// sourceTLS reports the TLS settings the binlog connection should use.
+//
+// canal opens its own connection rather than going through database/sql, so the
+// tls parameter in the DSN does not reach it: without this the row events would
+// cross the region in the clear even when every other connection is encrypted.
+// A DSN asking for "preferred" gets no TLS here, because canal has no way to
+// negotiate and fall back — asking for it unconditionally would break a server
+// that has no certificate.
+func (s *MySQLSyncer) sourceTLS() *tls.Config {
+	cfg, err := mysqldriver.ParseDSN(s.cfg.SourceConnection)
+	if err != nil {
+		return nil
+	}
+	switch strings.ToLower(cfg.TLSConfig) {
+	case "true":
+		host, _, splitErr := net.SplitHostPort(cfg.Addr)
+		if splitErr != nil {
+			host = cfg.Addr
+		}
+		return &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12}
+	case "skip-verify":
+		return &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}
+	}
+	return nil
 }
 
 // parseUserPassword recovers the credentials canal should authenticate with.

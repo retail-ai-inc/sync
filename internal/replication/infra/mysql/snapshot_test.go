@@ -2,6 +2,7 @@ package mysql
 
 import (
 	"context"
+	"crypto/tls"
 	"database/sql"
 	"os"
 	"path/filepath"
@@ -148,5 +149,51 @@ func TestAnUnwritableCheckpointPathIsReported(t *testing.T) {
 
 	if err := writeCheckpoint(filepath.Join(blocker, "pos.json"), binlogCheckpoint{}); err == nil {
 		t.Error("writing under a regular file returned no error")
+	}
+}
+
+// -------------------------------------------------------------- source TLS
+
+// TestTheBinlogConnectionFollowsTheDSN covers the connection database/sql never
+// sees: canal dials the source itself, so the DSN's tls parameter has to be
+// translated for it or the row events cross the region in the clear.
+func TestTheBinlogConnectionFollowsTheDSN(t *testing.T) {
+	s := newSyncer(t)
+
+	tests := []struct {
+		name       string
+		dsn        string
+		wantTLS    bool
+		wantServer string
+		wantSkip   bool
+	}{
+		{"required", "u:p@tcp(db.example.net:3306)/shop?tls=true", true, "db.example.net", false},
+		{"skip verify", "u:p@tcp(db.example.net:3306)/shop?tls=skip-verify", true, "", true},
+		{"preferred cannot negotiate here", "u:p@tcp(db:3306)/shop?tls=preferred", false, "", false},
+		{"none", "u:p@tcp(db:3306)/shop", false, "", false},
+		{"unparseable", "not a dsn", false, "", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s.cfg.SourceConnection = tt.dsn
+			got := s.sourceTLS()
+
+			if (got != nil) != tt.wantTLS {
+				t.Fatalf("sourceTLS() = %v, want TLS: %v", got, tt.wantTLS)
+			}
+			if got == nil {
+				return
+			}
+			if got.ServerName != tt.wantServer {
+				t.Errorf("ServerName = %q, want %q", got.ServerName, tt.wantServer)
+			}
+			if got.InsecureSkipVerify != tt.wantSkip {
+				t.Errorf("InsecureSkipVerify = %v, want %v", got.InsecureSkipVerify, tt.wantSkip)
+			}
+			if got.MinVersion != tls.VersionTLS12 {
+				t.Errorf("MinVersion = %x, want TLS 1.2", got.MinVersion)
+			}
+		})
 	}
 }

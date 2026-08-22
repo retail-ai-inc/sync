@@ -12,6 +12,7 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/lib/pq"
 	"github.com/redis/go-redis/v9"
+	"github.com/retail-ai-inc/sync/internal/platform/dsn"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
@@ -99,12 +100,17 @@ func TestConnectionHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 	case "mongodb":
-		var uri string
-		if req.User != "" && req.Password != "" {
-			uri = fmt.Sprintf("mongodb://%s:%s@%s:%s/?directConnection=true", req.User, req.Password, req.Host, req.Port)
-		} else {
-			uri = fmt.Sprintf("mongodb://%s:%s/?directConnection=true", req.Host, req.Port)
-		}
+		// The probe builds its URI the same way a task does, so what it
+		// reports is what the task will get. Building it here separately is
+		// how the probe kept forcing directConnection after the syncer had
+		// stopped.
+		uri := dsn.BuildDSNByType("mongodb", map[string]string{
+			"user":     req.User,
+			"password": req.Password,
+			"host":     req.Host,
+			"port":     req.Port,
+			"database": req.Database,
+		})
 
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()

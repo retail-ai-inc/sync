@@ -1,27 +1,25 @@
 package export
 
 import (
-	"fmt"
 	"strings"
 
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/retail-ai-inc/sync/internal/platform/dsn"
 )
 
-// buildMongoDBConnectionString Build MongoDB connection string with authentication
+// buildMongoDBConnectionString builds the URI mongodump reads through.
+//
+// It goes through the shared builder so a backup addresses a cluster the same
+// way replication does. It used to force directConnection, which pins the
+// driver to one node: against a replica set the backup would then read from
+// whichever node it happened to reach, and fail outright once that node was no
+// longer serving.
 func buildMongoDBConnectionString(url, username, password string) string {
-	// Ensure localhost is preserved and not replaced
-	// if strings.Contains(url, "localhost") {
-	// 	logrus.Infof("[BackupExecutor] Using localhost MongoDB connection: %s", url)
-	// }
-
-	var connStr string
-	if username != "" && password != "" {
-		connStr = fmt.Sprintf("mongodb://%s:%s@%s/?authSource=admin&directConnection=true", username, password, url)
-	} else {
-		connStr = fmt.Sprintf("mongodb://%s/?directConnection=true", url)
-	}
-
-	return connStr
+	return dsn.BuildDSNByType("mongodb", map[string]string{
+		"user":     username,
+		"password": password,
+		"host":     url,
+	})
 }
 
 // parseMySQLConnectionURL parses MySQL connection URL into components

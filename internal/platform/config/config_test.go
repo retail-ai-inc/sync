@@ -153,7 +153,7 @@ func TestLoadSyncTasks(t *testing.T) {
 	}
 
 	// Connection maps are turned into DSNs during load, not at use time.
-	if want := "mongodb://root:root@tokyo:27017/source_db?directConnection=true&authSource=admin"; sc.SourceConnection != want {
+	if want := "mongodb://root:root@tokyo:27017/source_db?authSource=admin&journal=true&w=majority"; sc.SourceConnection != want {
 		t.Errorf("SourceConnection =\n  %q\nwant\n  %q", sc.SourceConnection, want)
 	}
 	if !strings.Contains(sc.TargetConnection, "osaka:27017/target_db") {
