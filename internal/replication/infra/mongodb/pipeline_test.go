@@ -92,9 +92,17 @@ func TestConvertRawBSONToWriteModel(t *testing.T) {
 		doc  bson.M
 		want interface{}
 	}{
+		// An insert is replicated as an upsert, not an insert: the stream
+		// resumes from the cluster time the snapshot pinned, so the inserts
+		// made while the copy was running arrive again for documents the copy
+		// already wrote.
 		{"insert", bson.M{
 			"operationType": "insert",
 			"fullDocument":  bson.M{"_id": "1"},
+		}, &mongo.ReplaceOneModel{}},
+		{"insert with no identifiable document", bson.M{
+			"operationType": "insert",
+			"fullDocument":  bson.M{"customer": "Ada"},
 		}, &mongo.InsertOneModel{}},
 		{"update", bson.M{
 			"operationType": "update",

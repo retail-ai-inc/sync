@@ -203,11 +203,29 @@ func (s *MongoDBSyncer) syncDatabase(ctx context.Context, mapping config.Databas
 			s.logger.Infof("[MongoDB] Index copying is disabled for %s -> %s (syncIndexes=false)", tableMap.SourceTable, tableMap.TargetTable)
 		}
 
-		// Perform initial sync if target has no data
-		err := s.doInitialSync(ctx, srcColl, tgtColl, sourceDBName, targetDBName)
-		if err != nil {
-			s.logger.Errorf("[MongoDB] doInitialSync failed => %v", err)
-			continue
+		// The copy runs only when no checkpoint says a previous run got past
+		// it. Its starting cluster time is pinned first and stored only once
+		// the copy has finished, so a copy that is interrupted is redone rather
+		// than resumed from a point it never reached.
+		if !s.snapshotDone(sourceDBName, tableMap.SourceTable) {
+			startAt, err := s.clusterTime(ctx)
+			if err != nil {
+				s.logger.Errorf("[MongoDB] Cannot pin the snapshot's start point for "+
+					"%s.%s, so the copy would lose every write made while it ran: %v",
+					sourceDBName, tableMap.SourceTable, err)
+				continue
+			}
+			s.logger.Infof("[MongoDB] Snapshot for %s.%s pinned at cluster time %d.%d",
+				sourceDBName, tableMap.SourceTable, startAt.T, startAt.I)
+
+			if err := s.doInitialSync(ctx, srcColl, tgtColl, sourceDBName, targetDBName); err != nil {
+				s.logger.Errorf("[MongoDB] doInitialSync failed => %v", err)
+				continue
+			}
+			s.saveStartTime(sourceDBName, tableMap.SourceTable, startAt)
+		} else {
+			s.logger.Infof("[MongoDB] %s.%s has a checkpoint => skipping the initial copy",
+				sourceDBName, tableMap.SourceTable)
 		}
 
 		// Start watching changes

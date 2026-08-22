@@ -28,9 +28,27 @@ func (s *MongoDBSyncer) convertRawBSONToWriteModel(rawData bson.Raw, sourceDB, c
 	// For now, we'll just handle insert as an example.
 	switch opType {
 	case "insert":
-		if fullDoc, ok := event["fullDocument"]; ok {
+		// An upsert rather than an insert: the stream resumes from the cluster
+		// time the snapshot pinned, so the inserts made while the copy was
+		// running arrive again for documents the copy already wrote. A plain
+		// insert would fail on every one of them.
+		fullDoc, ok := event["fullDocument"]
+		if !ok {
+			return nil
+		}
+		id := idOf(fullDoc)
+		if id == nil {
+			if dk, ok := event["documentKey"].(bson.M); ok {
+				id = dk["_id"]
+			}
+		}
+		if id == nil {
 			return mongo.NewInsertOneModel().SetDocument(fullDoc)
 		}
+		return mongo.NewReplaceOneModel().
+			SetFilter(bson.M{"_id": id}).
+			SetReplacement(fullDoc).
+			SetUpsert(true)
 	case "update", "replace":
 		var docID interface{}
 		if dk, ok := event["documentKey"].(bson.M); ok {

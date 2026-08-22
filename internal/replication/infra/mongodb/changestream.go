@@ -49,9 +49,20 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 		}}},
 	}
 	opts := options.ChangeStream().SetFullDocument(options.UpdateLookup)
-	resumeToken := s.loadMongoDBResumeToken(sourceDB, collectionName)
-	if resumeToken != nil {
+	switch resumeToken := s.loadMongoDBResumeToken(sourceDB, collectionName); {
+	case resumeToken != nil:
 		opts.SetResumeAfter(resumeToken)
+	default:
+		// No token yet, so the stream has never delivered an event. The
+		// snapshot pinned the cluster time it read from; starting there
+		// replays the writes made while the copy was running, which the
+		// copy itself could not see. Without it the stream would start
+		// from now and that window would be lost.
+		if startAt := s.loadStartTime(sourceDB, collectionName); !startAt.IsZero() {
+			s.logger.Infof("[MongoDB] Starting the change stream for %s.%s at the "+
+				"snapshot's cluster time %d.%d", sourceDB, collectionName, startAt.T, startAt.I)
+			opts.SetStartAtOperationTime(&startAt)
+		}
 	}
 
 	cs, err := sourceColl.Watch(ctx, pipeline, opts)
@@ -147,7 +158,9 @@ func (s *MongoDBSyncer) watchChangesWithRetry(ctx context.Context, sourceColl, t
 			// Wait for watchChanges to complete or context to be cancelled
 			select {
 			case <-watchDone:
-				// watchChanges has exited, check if it was due to context cancellation
+				// watchChanges has exited; release its context either way.
+				watchCancel()
+				// Check whether it was due to context cancellation.
 				select {
 				case <-ctx.Done():
 					s.logger.Infof("[MongoDB] Guardian loop stopping due to context cancellation for %s.%s", sourceDB, collectionName)

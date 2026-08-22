@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
 func (s *MongoDBSyncer) loadMongoDBResumeToken(db, coll string) bson.Raw {
@@ -86,4 +87,62 @@ func (s *MongoDBSyncer) removeMongoDBResumeToken(db, coll string) {
 func (s *MongoDBSyncer) getResumeTokenPath(db, coll string) string {
 	fileName := fmt.Sprintf("%s_%s.json", db, coll)
 	return filepath.Join(s.cfg.MongoDBResumeTokenPath, fileName)
+}
+
+// startTimePath names the file holding the cluster time a collection's change
+// stream should start from. It sits beside the resume token: the token is what
+// a running stream saves, the start time is what the snapshot pins before it
+// copies a single document.
+func (s *MongoDBSyncer) startTimePath(db, coll string) string {
+	return filepath.Join(s.cfg.MongoDBResumeTokenPath, fmt.Sprintf("%s_%s.start", db, coll))
+}
+
+// saveStartTime records the cluster time the change stream must resume from.
+func (s *MongoDBSyncer) saveStartTime(db, coll string, ts primitive.Timestamp) {
+	if s.cfg.MongoDBResumeTokenPath == "" {
+		return
+	}
+	data, err := json.Marshal(ts)
+	if err != nil {
+		s.logger.Errorf("[MongoDB] marshal start time fail => %v", err)
+		return
+	}
+	if err := os.WriteFile(s.startTimePath(db, coll), data, 0o644); err != nil {
+		s.logger.Errorf("[MongoDB] write start time file => %v", err)
+	}
+}
+
+// loadStartTime reports the recorded start time, or the zero timestamp when
+// there is none.
+func (s *MongoDBSyncer) loadStartTime(db, coll string) primitive.Timestamp {
+	if s.cfg.MongoDBResumeTokenPath == "" {
+		return primitive.Timestamp{}
+	}
+	data, err := os.ReadFile(s.startTimePath(db, coll))
+	if err != nil {
+		return primitive.Timestamp{}
+	}
+	var ts primitive.Timestamp
+	if err := json.Unmarshal(data, &ts); err != nil {
+		s.logger.Errorf("[MongoDB] unmarshal start time fail => %v", err)
+		return primitive.Timestamp{}
+	}
+	return ts
+}
+
+// snapshotDone reports whether the initial copy has already been made.
+//
+// A checkpoint — either a resume token from a running stream or the start time
+// the snapshot pinned — means a previous run got past the copy. A target
+// collection that merely holds documents means no such thing: that is exactly
+// what an interrupted copy leaves behind, and treating it as "done" is why a
+// copy that failed halfway could never be finished.
+func (s *MongoDBSyncer) snapshotDone(db, coll string) bool {
+	if s.cfg.MongoDBResumeTokenPath == "" {
+		return false
+	}
+	if s.loadMongoDBResumeToken(db, coll) != nil {
+		return true
+	}
+	return !s.loadStartTime(db, coll).IsZero()
 }

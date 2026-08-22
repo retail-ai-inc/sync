@@ -22,8 +22,9 @@ import (
 // TestSameDocumentUpdatesConverge exercises F-029. The syncer applies a batch
 // with options.BulkWrite().SetOrdered(false), so MongoDB may execute the
 // operations in any order. When several updates to the same document land in
-// one batch, an older value can be written last and stay there — the stream
-// carries no further event to correct it.
+// one batch, an older value could be written last and stay there — the stream
+// carries no further event to correct it. The batch is now split into runs that
+// hold at most one write per document, so a document's own changes cannot cross.
 //
 // The scenario drives many rapid updates to a single document and then waits
 // for the target to reach the final value. A timeout here means the target
@@ -73,11 +74,10 @@ func TestSameDocumentUpdatesConverge(t *testing.T) {
 	})
 }
 
-// TestWritesDuringInitialSyncAreNotLost exercises F-020. doInitialSync reads
-// the whole collection with Find and only afterwards opens a change stream,
-// and on a first run there is no resume token, so Watch starts from the moment
-// it is called. Anything written between the snapshot read and that call is in
-// neither path.
+// TestWritesDuringInitialSyncAreNotLost exercises F-020. The source's cluster
+// time is read before the copy begins and the change stream starts from it, so
+// a write made while the copy is running is replayed by the stream rather than
+// falling between the two.
 //
 // The source is seeded large enough that the snapshot takes seconds, then a
 // marker is written while it runs. The marker must reach the target.
