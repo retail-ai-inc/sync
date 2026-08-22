@@ -58,6 +58,41 @@ func isMongos(ctx context.Context, client *mongo.Client) (bool, error) {
 	return hello.Msg == "isdbgrid", nil
 }
 
+// shardingAction is what the state of the two sides calls for.
+type shardingAction int
+
+const (
+	// shardingNothingToDo: the source is not sharded, or the target already
+	// matches it.
+	shardingNothingToDo shardingAction = iota
+	// shardingUnavailable: the source is sharded and the target cannot be,
+	// which is worth saying out loud because the copy will not have the
+	// source's capacity.
+	shardingUnavailable
+	// shardingApply: the target should be given the source's key.
+	shardingApply
+)
+
+// planSharding decides what to do from the state of both sides.
+//
+// Separated from the commands so the decision can be checked without a cluster
+// to run them against: the interesting part is which of the four states leads
+// where, not how shardCollection is spelled.
+func planSharding(source *shardKey, targetIsCluster bool, target *shardKey) shardingAction {
+	switch {
+	case source == nil:
+		return shardingNothingToDo
+	case !targetIsCluster:
+		return shardingUnavailable
+	case target != nil:
+		// Already partitioned, by a previous run or by hand. Repartitioning is
+		// not this code's business.
+		return shardingNothingToDo
+	default:
+		return shardingApply
+	}
+}
+
 // matchSharding gives the target collection the source's shard key.
 //
 // A failure is reported and not fatal: replicating into an unsharded collection
@@ -73,24 +108,28 @@ func (s *MongoDBSyncer) matchSharding(ctx context.Context, sourceDB, sourceColl,
 		return
 	}
 	if key == nil {
-		return // the source collection is not sharded
+		return // the source collection is not sharded, which is most of them
 	}
 
-	sharded, err := isMongos(ctx, s.targetClient)
+	clustered, err := isMongos(ctx, s.targetClient)
 	if err != nil {
 		s.logger.Warnf("[MongoDB] Could not tell whether the target is a sharded "+
 			"cluster: %v", err)
 		return
 	}
-	if !sharded {
+	existing, err := collectionShardKey(ctx, s.targetClient, targetNS)
+	if err != nil {
+		s.logger.Debugf("[MongoDB] Could not read the shard key of %s: %v", targetNS, err)
+	}
+
+	switch planSharding(key, clustered, existing) {
+	case shardingNothingToDo:
+		return
+	case shardingUnavailable:
 		s.logger.Warnf("[MongoDB] %s is sharded on %v but the target is not a sharded "+
 			"cluster, so %s will hold the whole collection on one server and will not "+
 			"have the source's capacity.", sourceNS, key.Key, targetNS)
 		return
-	}
-
-	if existing, err := collectionShardKey(ctx, s.targetClient, targetNS); err == nil && existing != nil {
-		return // already partitioned, by a previous run or by hand
 	}
 
 	admin := s.targetClient.Database("admin")

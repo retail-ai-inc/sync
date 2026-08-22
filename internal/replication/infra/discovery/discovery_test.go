@@ -166,3 +166,65 @@ func TestNothingNewIsReportedTwice(t *testing.T) {
 		t.Errorf("added = %v for an empty source, want none", got)
 	}
 }
+
+// TestUnlistedReportsWhatATaskDoesNotCarry covers the gap a named task leaves.
+// The task replicates what it names, which is the point of naming — but a table
+// added at the source afterwards is then absent from the replica, and a failover
+// is a bad time to discover that.
+func TestUnlistedReportsWhatATaskDoesNotCarry(t *testing.T) {
+	listed := map[string]bool{"orders": true, "payments": true}
+	reported := map[string]bool{}
+
+	got := Unlisted(listed, reported, []string{"orders", "payments", "refunds", "ledger"})
+
+	if len(got) != 2 || got[0] != "refunds" || got[1] != "ledger" {
+		t.Errorf("Unlisted = %v, want the two tables the task does not name", got)
+	}
+}
+
+// TestUnlistedReportsEachNameOnce keeps a five-minute scan from logging the same
+// warning for ever, which is how a warning stops being read.
+func TestUnlistedReportsEachNameOnce(t *testing.T) {
+	reported := map[string]bool{}
+	names := []string{"refunds"}
+
+	first := Unlisted(map[string]bool{}, reported, names)
+	second := Unlisted(map[string]bool{}, reported, names)
+
+	if len(first) != 1 {
+		t.Fatalf("the first scan reported %v", first)
+	}
+	if len(second) != 0 {
+		t.Errorf("the second scan reported %v again", second)
+	}
+}
+
+// TestUnlistedIgnoresTheSyncersOwnTables matters because reporting the
+// checkpoint and the direction lock as unreplicated is noise, and noise trains
+// people to ignore the warning that is not.
+func TestUnlistedIgnoresTheSyncersOwnTables(t *testing.T) {
+	got := Unlisted(map[string]bool{}, map[string]bool{},
+		[]string{"_sync_checkpoint", "_sync_direction_lock", "orders"})
+
+	if len(got) != 1 || got[0] != "orders" {
+		t.Errorf("Unlisted = %v, want only the real table", got)
+	}
+}
+
+// TestUnlistedFoldsCase covers a task naming a table in different case from the
+// server, which MySQL allows and which would otherwise report a table the task
+// does carry.
+func TestUnlistedFoldsCase(t *testing.T) {
+	got := Unlisted(map[string]bool{"orders": true}, map[string]bool{},
+		[]string{"Orders", "ORDERS"})
+
+	if len(got) != 0 {
+		t.Errorf("Unlisted = %v, want nothing: the task names that table", got)
+	}
+}
+
+func TestUnlistedOnAnEmptySource(t *testing.T) {
+	if got := Unlisted(map[string]bool{"orders": true}, map[string]bool{}, nil); got != nil {
+		t.Errorf("Unlisted = %v", got)
+	}
+}

@@ -87,6 +87,25 @@ func MongoCollections(ctx context.Context, db *mongo.Database) ([]string, error)
 	return collections, nil
 }
 
+// Unlisted reports the names the source holds that a task does not name, and
+// records them as seen so a name is reported once rather than every scan.
+//
+// Internal tables are excluded: the checkpoint and the direction lock are the
+// syncer's own, and reporting them as unreplicated would be noise that trains
+// people to ignore the warning.
+func Unlisted(listed, reported map[string]bool, current []string) []string {
+	var missing []string
+	for _, name := range current {
+		key := strings.ToLower(name)
+		if listed[key] || reported[key] || IsInternal(name) {
+			continue
+		}
+		reported[key] = true
+		missing = append(missing, name)
+	}
+	return missing
+}
+
 // Added reports the names in current that were not in known, so a caller can
 // act on what has appeared since it last looked.
 func Added(known map[string]bool, current []string) []string {

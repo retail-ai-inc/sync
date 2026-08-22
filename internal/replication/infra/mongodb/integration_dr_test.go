@@ -3,11 +3,13 @@
 package mongodb
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,6 +19,7 @@ import (
 
 	"github.com/retail-ai-inc/sync/internal/platform/config"
 	"github.com/retail-ai-inc/sync/test/harness"
+	"github.com/sirupsen/logrus"
 )
 
 // TestSameDocumentUpdatesConverge exercises F-029. The syncer applies a batch
@@ -441,4 +444,93 @@ func TestFailedWritesReachTheDeadLetterQueue(t *testing.T) {
 	}
 	t.Logf("source holds %d documents, target holds %d: the divergence persists "+
 		"and is visible only in the dead-letter file", srcCount, tgtCount)
+}
+
+// TestAnUnshardedSourceIsLeftAlone covers the ordinary case against a real
+// server: a replica set has no config database to read a shard key from, and
+// nothing should be attempted on the target because of it.
+func TestAnUnshardedSourceIsLeftAlone(t *testing.T) {
+	collection := harness.UniqueName("unsharded")
+	src, tgt := connect(t, harness.MongoSource), connect(t, harness.MongoTarget)
+	ctx := context.Background()
+
+	if _, err := src.Database(sourceDB).Collection(collection).
+		InsertOne(ctx, bson.M{"seq": 1}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	key, err := collectionShardKey(ctx, src, sourceDB+"."+collection)
+	if err != nil {
+		t.Fatalf("collectionShardKey: %v", err)
+	}
+	if key != nil {
+		t.Fatalf("an unsharded collection reported a shard key: %v", key.Key)
+	}
+
+	// And the target is not a sharded cluster, which is what the fixture is.
+	sharded, err := isMongos(ctx, tgt)
+	if err != nil {
+		t.Fatalf("isMongos: %v", err)
+	}
+	if sharded {
+		t.Error("the fixture target reports itself as a sharded cluster")
+	}
+
+	startSyncer(t, syncTask(t, collection))
+	harness.Eventually(t, 30*time.Second, func() error {
+		if n := countIn(t, tgt, targetDB, collection, bson.M{}); n != 1 {
+			return fmt.Errorf("the document has not arrived")
+		}
+		return nil
+	})
+}
+
+// TestACollectionTheTaskDoesNotListIsReported covers the gap a named task
+// leaves. A task that names its collections replicates those and no more, which
+// is the point of naming them — but a collection added at the source afterwards
+// is then missing from the replica, and a failover is a bad time to find out.
+func TestACollectionTheTaskDoesNotListIsReported(t *testing.T) {
+	listed := harness.UniqueName("listed")
+	unlisted := harness.UniqueName("unlisted")
+	src, tgt := connect(t, harness.MongoSource), connect(t, harness.MongoTarget)
+	ctx := context.Background()
+
+	for _, name := range []string{listed, unlisted} {
+		if _, err := src.Database(sourceDB).Collection(name).
+			InsertOne(ctx, bson.M{"seq": 1}); err != nil {
+			t.Fatalf("seed %s: %v", name, err)
+		}
+		t.Cleanup(func() {
+			_ = src.Database(sourceDB).Collection(name).Drop(context.Background())
+			_ = tgt.Database(targetDB).Collection(name).Drop(context.Background())
+		})
+	}
+
+	var recorded bytes.Buffer
+	logger := logrus.New()
+	logger.SetOutput(&recorded)
+	logger.SetLevel(logrus.WarnLevel)
+
+	syncer := NewMongoDBSyncer(syncTask(t, listed), &config.Config{}, logger)
+	if syncer == nil {
+		t.Fatal("NewMongoDBSyncer returned nil")
+	}
+	t.Cleanup(harness.RunSyncer(t, syncer.Start))
+
+	harness.Eventually(t, 30*time.Second, func() error {
+		if n := countIn(t, tgt, targetDB, listed, bson.M{}); n != 1 {
+			return fmt.Errorf("the listed collection has not been copied")
+		}
+		return nil
+	})
+	if n := countIn(t, tgt, targetDB, unlisted, bson.M{}); n > 0 {
+		t.Errorf("the unlisted collection was replicated (%d documents); a named task "+
+			"should replicate only what it names", n)
+	}
+	harness.Eventually(t, 30*time.Second, func() error {
+		if !strings.Contains(recorded.String(), unlisted) {
+			return fmt.Errorf("nothing warned about %s", unlisted)
+		}
+		return nil
+	})
 }

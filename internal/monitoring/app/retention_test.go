@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"database/sql"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -219,4 +220,55 @@ func openEmpty(t *testing.T) *sql.DB {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	return db
+}
+
+// TestAnUnopenableDatabaseIsReportedNotPanicked covers the sweep running before
+// the volume is mounted, or after somebody moved the file.
+func TestAnUnopenableDatabaseIsReportedNotPanicked(t *testing.T) {
+	blocker := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write blocker: %v", err)
+	}
+	t.Setenv("SYNC_DB_PATH", filepath.Join(blocker, "sub", "sync.db"))
+
+	// The sweep reports and returns; it must not stop the process that runs it.
+	sweepMonitoringLog(context.Background(), quiet(), 30)
+}
+
+// TestAMissingTableIsReportedByTheSweep covers a database written by a build
+// that predates the monitoring table.
+func TestAMissingTableIsReportedByTheSweep(t *testing.T) {
+	t.Setenv("SYNC_DB_PATH", filepath.Join(t.TempDir(), "empty.db"))
+
+	sweepMonitoringLog(context.Background(), quiet(), 30)
+}
+
+// TestACancelledSweepStops keeps a shutdown from waiting on a sweep that has a
+// year of rows to remove.
+func TestACancelledSweepStops(t *testing.T) {
+	db := retentionDB(t)
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	at := time.Now().UTC().AddDate(0, 0, -60).Format("2006-01-02 15:04:05")
+	for i := 0; i < retentionBatch*2; i++ {
+		if _, err := tx.Exec(
+			`INSERT INTO monitoring_log (sync_task_id, logged_at, src_table, tgt_table,
+			 src_row_count, tgt_row_count) VALUES (1, ?, 'orders', 'orders', 1, 1)`,
+			at); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if _, err := deleteOlderThan(ctx, db,
+		time.Now().UTC().Format("2006-01-02 15:04:05")); err == nil {
+		t.Error("a cancelled sweep ran to completion")
+	}
 }

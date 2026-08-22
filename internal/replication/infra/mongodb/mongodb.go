@@ -537,7 +537,7 @@ func (s *MongoDBSyncer) warnAboutUnlistedCollections(ctx context.Context, source
 	for _, mapping := range s.cfg.Mappings {
 		for _, table := range mapping.Tables {
 			if table.SourceTable != "" {
-				listed[table.SourceTable] = true
+				listed[strings.ToLower(table.SourceTable)] = true
 			}
 		}
 	}
@@ -550,14 +550,7 @@ func (s *MongoDBSyncer) warnAboutUnlistedCollections(ctx context.Context, source
 				sourceDBName, err)
 			return
 		}
-		var missing []string
-		for _, name := range names {
-			if listed[name] || warned[name] {
-				continue
-			}
-			warned[name] = true
-			missing = append(missing, name)
-		}
+		missing := discovery.Unlisted(listed, warned, names)
 		if len(missing) == 0 {
 			return
 		}

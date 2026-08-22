@@ -1434,15 +1434,7 @@ func (s *MySQLSyncer) warnAboutUnlistedTables(ctx context.Context, sourceDBName 
 			s.logger.Debugf("[MySQL] Could not list the tables in %s: %v", sourceDBName, err)
 			return
 		}
-		var missing []string
-		for _, table := range tables {
-			lower := strings.ToLower(table)
-			if listed[lower] || warned[lower] || discovery.IsInternal(table) {
-				continue
-			}
-			warned[lower] = true
-			missing = append(missing, table)
-		}
+		missing := discovery.Unlisted(listed, warned, tables)
 		if len(missing) == 0 {
 			return
 		}
