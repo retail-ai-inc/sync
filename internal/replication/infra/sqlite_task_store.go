@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/retail-ai-inc/sync/internal/platform/httpx"
+	"github.com/retail-ai-inc/sync/internal/platform/secret"
 	"github.com/retail-ai-inc/sync/internal/platform/sqlite"
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
 	"github.com/sirupsen/logrus"
@@ -77,8 +78,16 @@ ORDER BY id ASC
 		if err := rows.Scan(&id, &enableInt, &lastUpdate, &lastRun, &cfgJSON); err != nil {
 			return nil, faultAt(StageScan, err)
 		}
-		logrus.Debugf("Configuration JSON from database: %s", cfgJSON)
-		tasks = append(tasks, domain.NewSyncTask(id, enableInt, lastUpdate, lastRun, cfgJSON))
+		// The credentials are opened here so the rest of the read path sees a
+		// task the way it was written. They are masked again on the way out of
+		// the API, so a value that cannot be opened is not worth failing the
+		// whole listing for — the task simply shows the sealed form.
+		opened, err := secret.OpenTaskConfig(cfgJSON)
+		if err != nil {
+			logrus.Errorf("Task %d: %v", id, err)
+			opened = cfgJSON
+		}
+		tasks = append(tasks, domain.NewSyncTask(id, enableInt, lastUpdate, lastRun, opened))
 	}
 	if err := rows.Err(); err != nil {
 		return nil, faultAt(StageIterate, err)
@@ -95,10 +104,14 @@ func InsertTask(enable int, now string, config domain.Config) (int64, error) {
 	defer db.Close()
 
 	cfgBytes, _ := json.Marshal(config)
+	stored, err := secret.SealTaskConfig(string(cfgBytes))
+	if err != nil {
+		return 0, faultAt(StageInsert, err)
+	}
 	res, err := db.Exec(`
 INSERT INTO sync_tasks(enable, last_update_time, last_run_time, config_json)
 VALUES(?, ?, ?, ?)
-`, enable, now, "", string(cfgBytes))
+`, enable, now, "", stored)
 	if err != nil {
 		return 0, faultAt(StageInsert, err)
 	}
@@ -115,13 +128,17 @@ func UpdateTask(id string, enable int, now string, config domain.Config) error {
 	defer db.Close()
 
 	cfgBytes, _ := json.Marshal(config)
+	stored, err := secret.SealTaskConfig(string(cfgBytes))
+	if err != nil {
+		return faultAt(StageUpdate, err)
+	}
 	res, err := db.Exec(`
 UPDATE sync_tasks
 SET enable=?,
     last_update_time=?,
     config_json=?
 WHERE id=?
-`, enable, now, string(cfgBytes), id)
+`, enable, now, stored, id)
 	if err != nil {
 		return faultAt(StageUpdate, err)
 	}

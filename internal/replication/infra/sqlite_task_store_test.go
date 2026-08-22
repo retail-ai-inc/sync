@@ -1,9 +1,11 @@
 package infra
 
 import (
+	"strconv"
 	"testing"
 	"time"
 
+	"github.com/retail-ai-inc/sync/internal/platform/secret"
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
 )
 
@@ -635,5 +637,135 @@ func TestFaultCarriesItsStageAndCause(t *testing.T) {
 	}
 	if got := f.Error(); got != StageQuery+": "+ErrNoSuchTask.Error() {
 		t.Errorf("Error = %q", got)
+	}
+}
+
+// ------------------------------------------------------ credentials at rest
+
+// withSealedCredentials configures a key for the duration of one test, so the
+// store encrypts what it writes.
+func withSealedCredentials(t *testing.T) {
+	t.Helper()
+
+	// 32 bytes as hex: "0123456789abcdef0123456789abcdef".
+	t.Setenv("SYNC_CONFIG_KEY",
+		"30313233343536373839616263646566"+"30313233343536373839616263646566")
+	keeper, err := secret.KeeperFromEnv()
+	if err != nil {
+		t.Fatalf("KeeperFromEnv: %v", err)
+	}
+	previous := secret.Default
+	secret.Default = keeper
+	t.Cleanup(func() { secret.Default = previous })
+}
+
+// taskWithCredentials is a task carrying a password on each side.
+func taskWithCredentials() domain.Config {
+	return domain.ConfigFrom(domain.Request{
+		TaskName:   "tokyo-to-osaka",
+		SourceType: "mysql",
+		SourceConn: map[string]string{"host": "tokyo", "user": "repl", "password": "tokyo-secret"},
+		TargetConn: map[string]string{"host": "osaka", "user": "repl", "password": "osaka-secret"},
+	})
+}
+
+// TestTheStoredPasswordsAreNotReadable is the point of sealing them. Masking
+// them on the way out of the API does nothing about the file: anybody who can
+// read it — a backup, a volume snapshot, one `cat` inside the pod — has the
+// credentials for both regions' payment databases.
+func TestTheStoredPasswordsAreNotReadable(t *testing.T) {
+	db := useTempTaskDB(t)
+	withSealedCredentials(t)
+
+	id, err := InsertTask(1, "now", taskWithCredentials())
+	if err != nil {
+		t.Fatalf("InsertTask: %v", err)
+	}
+
+	stored := readConfig(t, db, id)
+	for _, plaintext := range []string{"tokyo-secret", "osaka-secret"} {
+		if contains(stored, plaintext) {
+			t.Errorf("the stored document carries %q in the clear: %s", plaintext, stored)
+		}
+	}
+	// The rest stays readable, so an operator can tell which task is which.
+	for _, kept := range []string{"tokyo", "osaka", "repl", "tokyo-to-osaka"} {
+		if !contains(stored, kept) {
+			t.Errorf("the stored document lost %q: %s", kept, stored)
+		}
+	}
+}
+
+// TestTheCredentialsComeBackOnTheWayOut closes the loop: what the syncer reads
+// has to be what was written.
+func TestTheCredentialsComeBackOnTheWayOut(t *testing.T) {
+	useTempTaskDB(t)
+	withSealedCredentials(t)
+
+	if _, err := InsertTask(1, "now", taskWithCredentials()); err != nil {
+		t.Fatalf("InsertTask: %v", err)
+	}
+
+	tasks, err := ListTasks()
+	if err != nil {
+		t.Fatalf("ListTasks: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("%d tasks, want one", len(tasks))
+	}
+
+	document := tasks[0].ConfigJSON()
+	for _, want := range []string{"tokyo-secret", "osaka-secret"} {
+		if !contains(document, want) {
+			t.Errorf("the read document does not carry %q: %s", want, document)
+		}
+	}
+}
+
+// TestAnUpdateDoesNotSealTwice covers a configuration rewritten by a path that
+// meant to change something else.
+func TestAnUpdateDoesNotSealTwice(t *testing.T) {
+	useTempTaskDB(t)
+	withSealedCredentials(t)
+
+	id, err := InsertTask(1, "now", taskWithCredentials())
+	if err != nil {
+		t.Fatalf("InsertTask: %v", err)
+	}
+
+	updated := taskWithCredentials()
+	updated.TaskName = "renamed"
+	if err := UpdateTask(strconv.FormatInt(id, 10), 1, "later", updated); err != nil {
+		t.Fatalf("UpdateTask: %v", err)
+	}
+
+	tasks, err := ListTasks()
+	if err != nil {
+		t.Fatalf("ListTasks: %v", err)
+	}
+	document := tasks[0].ConfigJSON()
+	if !contains(document, "tokyo-secret") {
+		t.Errorf("the password did not survive the update: %s", document)
+	}
+	if !contains(document, "renamed") {
+		t.Errorf("the change that was made did not land: %s", document)
+	}
+}
+
+// TestWithNoKeyTheStoreBehavesAsItAlwaysDid is the state of a deployment that
+// has not configured one.
+func TestWithNoKeyTheStoreBehavesAsItAlwaysDid(t *testing.T) {
+	db := useTempTaskDB(t)
+	previous := secret.Default
+	secret.Default = nil
+	t.Cleanup(func() { secret.Default = previous })
+
+	id, err := InsertTask(1, "now", taskWithCredentials())
+	if err != nil {
+		t.Fatalf("InsertTask: %v", err)
+	}
+
+	if stored := readConfig(t, db, id); !contains(stored, "tokyo-secret") {
+		t.Errorf("the stored document = %s", stored)
 	}
 }

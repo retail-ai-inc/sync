@@ -15,6 +15,7 @@ import (
 	"github.com/retail-ai-inc/sync/internal/platform/httpapi"
 	"github.com/retail-ai-inc/sync/internal/platform/logging"
 	"github.com/retail-ai-inc/sync/internal/platform/metrics"
+	"github.com/retail-ai-inc/sync/internal/platform/secret"
 	"github.com/retail-ai-inc/sync/internal/platform/webui"
 	"github.com/sirupsen/logrus"
 )
@@ -43,6 +44,13 @@ func main() {
 		<-sigs
 		cancel()
 	}()
+
+	if !secret.Configured() {
+		log.Error("SYNC_CONFIG_KEY is not set, so the database passwords in the " +
+			"configuration store are held in the clear. Anybody who can read the " +
+			"file — a backup, a volume snapshot — has the credentials for both " +
+			"regions.")
+	}
 
 	if identity.SecretIsEphemeral() {
 		log.Error("SYNC_TOKEN_SECRET is not set, so a random signing secret was " +

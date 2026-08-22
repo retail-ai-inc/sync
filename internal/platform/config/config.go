@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/retail-ai-inc/sync/internal/platform/dsn"
+	"github.com/retail-ai-inc/sync/internal/platform/secret"
 	"github.com/retail-ai-inc/sync/internal/platform/sqlite"
 	"github.com/sirupsen/logrus"
 )
@@ -228,6 +229,18 @@ ORDER BY id ASC
 		}
 
 		if js != "" {
+			// The stored credentials are encrypted when a key is configured. A
+			// task whose credentials cannot be opened is skipped rather than
+			// started with a password that is really ciphertext: it would fail
+			// to authenticate with an error naming neither the task nor the
+			// reason.
+			opened, errS := secret.OpenTaskConfig(js)
+			if errS != nil {
+				log.Printf("[ERROR] task %d is not being replicated: %v", id, errS)
+				continue
+			}
+			js = opened
+
 			var extra struct {
 				Type                   string            `json:"type"`
 				TaskName               string            `json:"taskName"`
