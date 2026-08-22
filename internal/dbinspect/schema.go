@@ -100,18 +100,18 @@ func GetTableSchemaHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
-// New function: sort fields by name
+// sortFieldsByName puts the key columns first and orders the rest by name.
+//
+// The comparison used to answer true for both (i,j) and (j,i) when both were
+// primary keys, which is not a strict weak ordering and is not something
+// sort.Slice promises anything about. A composite primary key — the ordinary
+// case in MySQL — therefore came back in no defined order, and those columns
+// were not sorted by name either.
 func sortFieldsByName(schema *SchemaResponse) {
-	// Use sort package to sort Fields by name
-	sort.Slice(schema.Fields, func(i, j int) bool {
-		// Usually put primary key fields (like _id) at the front
-		if schema.Fields[i].IsPrimary {
-			return true
+	sort.SliceStable(schema.Fields, func(i, j int) bool {
+		if schema.Fields[i].IsPrimary != schema.Fields[j].IsPrimary {
+			return schema.Fields[i].IsPrimary
 		}
-		if schema.Fields[j].IsPrimary {
-			return false
-		}
-		// Sort regular fields by name
 		return schema.Fields[i].Name < schema.Fields[j].Name
 	})
 }

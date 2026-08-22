@@ -63,31 +63,50 @@ func TestErrorJSONShape(t *testing.T) {
 	}
 }
 
-// ErrorJSON reports failure in the body but leaves the status line untouched,
-// so every error this helper produces is served as 200 OK. A client that
-// branches on the status code — a load balancer, a probe, a generated SDK —
-// sees a successful request. If this ever starts returning a 4xx/5xx the
-// helper has been fixed; assert the intended status instead.
-func TestErrorJSONStillReturnsHTTP200(t *testing.T) {
+// TestErrorJSONSetsAStatus covers a failure that used to be served as 200 OK.
+// The helper reported the failure in the body and left the status line
+// untouched, so anything that branches on the status — a load balancer, a
+// health probe, a generated client — read it as a successful request.
+func TestErrorJSONSetsAStatus(t *testing.T) {
 	rec := httptest.NewRecorder()
 
 	ErrorJSON(rec, "database is unreachable", errors.New("connection refused"))
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("ErrorJSON now returns %d — it appears to be fixed; assert the intended status instead", rec.Code)
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("ErrorJSON answered %d, want 500", rec.Code)
 	}
 }
 
-// ErrorJSON dereferences its error argument unconditionally, so a caller that
-// reports a failure without one takes down the request goroutine.
-func TestErrorJSONPanicsOnNilError(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Fatal("ErrorJSON no longer panics on a nil error — it appears to be fixed; assert the emitted detail instead")
-		}
-	}()
+// TestErrorJSONStatusCarriesTheGivenStatus covers the failures that are the
+// caller's rather than this program's.
+func TestErrorJSONStatusCarriesTheGivenStatus(t *testing.T) {
+	rec := httptest.NewRecorder()
 
-	ErrorJSON(httptest.NewRecorder(), "something went wrong", nil)
+	ErrorJSONStatus(rec, http.StatusBadRequest, "that is not a range", errors.New("30 fortnights"))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("ErrorJSONStatus answered %d, want 400", rec.Code)
+	}
+}
+
+// TestErrorJSONWithoutAnError covers a caller reporting a failure with nothing
+// to attach. The error used to be dereferenced unconditionally, which took down
+// the request goroutine.
+func TestErrorJSONWithoutAnError(t *testing.T) {
+	rec := httptest.NewRecorder()
+
+	ErrorJSON(rec, "something went wrong", nil)
+
+	var body map[string]interface{}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body["error"] != "something went wrong" {
+		t.Errorf("error = %v", body["error"])
+	}
+	if body["detail"] != "" {
+		t.Errorf("detail = %v, want empty", body["detail"])
+	}
 }
 
 func TestTimeNowStrIsUTCSQLFormat(t *testing.T) {

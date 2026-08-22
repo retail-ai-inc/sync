@@ -8,14 +8,34 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+// ErrorJSON answers a request that failed.
+//
+// It sets a status code. It used to write only the body, so every failure this
+// helper produced was a 200 — and anything that branches on the status rather
+// than on a field of the body (a load balancer, a health probe, a generated
+// client) read a failure as a success.
 func ErrorJSON(w http.ResponseWriter, msg string, err error) {
+	ErrorJSONStatus(w, http.StatusInternalServerError, msg, err)
+}
+
+// ErrorJSONStatus answers with a particular status, for the failures that are
+// the caller's rather than this program's.
+func ErrorJSONStatus(w http.ResponseWriter, status int, msg string, err error) {
+	detail := ""
+	if err != nil {
+		// The error used to be dereferenced unconditionally, so a caller with
+		// nothing to attach crashed the request.
+		detail = err.Error()
+	}
 	logrus.Errorf("%s => %v", msg, err)
-	resp := map[string]interface{}{
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": false,
 		"error":   msg,
-		"detail":  err.Error(),
-	}
-	WriteJSON(w, resp)
+		"detail":  detail,
+	})
 }
 
 func WriteJSON(w http.ResponseWriter, data interface{}) {

@@ -24,6 +24,7 @@ const (
 	RejectInvalidStatus   AccessRejection = "Invalid status, must be active or inactive"
 	RejectNoSuchUser      AccessRejection = "User does not exist"
 	RejectNothingToUpdate AccessRejection = "No fields to update"
+	RejectLastAdmin       AccessRejection = "The last administrator cannot be removed"
 )
 
 // ChangeUserAccess applies an access level and a status to a user. It returns
@@ -50,12 +51,15 @@ func ChangeUserAccess(userID, access, status string) (map[string]interface{}, Ac
 }
 
 // RemoveUser deletes a user. A RejectNoSuchUser rejection means the userId was
-// not in the table; an error means the store failed.
+// not in the table; RejectLastAdmin means removing them would leave nobody who
+// can grant the level again; an error means the store failed.
 func RemoveUser(userID string) (AccessRejection, error) {
 	err := infra.DeleteUser(userID)
 	switch {
 	case err == infra.ErrNoSuchUser:
 		return RejectNoSuchUser, nil
+	case err == infra.ErrLastAdmin:
+		return RejectLastAdmin, nil
 	case err != nil:
 		return "", err
 	}

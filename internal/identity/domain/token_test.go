@@ -248,12 +248,12 @@ func TestExtractTokenFromHeader(t *testing.T) {
 		{"only the first prefix is stripped", "Bearer Bearer abc", "Bearer abc"},
 		{"no prefix returns the whole value", "abc123", "abc123"},
 		{"empty header", "", ""},
-		// The prefix check is case-sensitive and requires the trailing space,
-		// so these forms are treated as the token itself and fail validation
-		// later with no indication that the header was malformed.
-		{"lowercase bearer is not recognised", "bearer abc123", "bearer abc123"},
+		// The scheme used to be matched as the literal "Bearer ", so the forms
+		// below were handed on whole and then failed to verify — which reads to
+		// the caller as a bad token rather than a badly formed header.
+		{"lowercase bearer is recognised", "bearer abc123", "abc123"},
 		{"missing space is not recognised", "Bearerabc123", "Bearerabc123"},
-		{"leading whitespace is not trimmed", " Bearer abc123", " Bearer abc123"},
+		{"leading whitespace is trimmed", " Bearer abc123", "abc123"},
 	}
 
 	for _, tt := range tests {

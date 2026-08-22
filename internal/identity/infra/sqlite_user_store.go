@@ -9,6 +9,7 @@ import (
 	_ "github.com/mattn/go-sqlite3" // SQLite driver
 	"github.com/retail-ai-inc/sync/internal/identity/domain"
 	"github.com/retail-ai-inc/sync/internal/platform/sqlite"
+	"github.com/sirupsen/logrus"
 )
 
 // GetUserByUsername gets user information by username
@@ -82,12 +83,25 @@ func ValidateUser(username, password string) (bool, string, error) {
 		return false, "", err
 	}
 
-	// Check if password matches
-	if user["password"] == password {
-		return true, user["access"].(string), nil
+	stored, _ := user["password"].(string)
+	matches, needsRehash := domain.PasswordMatches(stored, password)
+	if !matches {
+		return false, "", nil
 	}
 
-	return false, "", nil
+	// The row still holds the password as it was typed. Rewriting it here means
+	// no migration step and no password reset: the cleartext leaves the file the
+	// first time each account is used. A failure to rewrite is not a failure to
+	// log in.
+	if needsRehash {
+		if err := UpdateUserPassword(username, password); err != nil {
+			logrus.Warnf("[Identity] The password for %q is stored in the clear and "+
+				"could not be replaced with a hash: %v", username, err)
+		}
+	}
+
+	access, _ := user["access"].(string)
+	return true, access, nil
 }
 
 // GetUserData gets user data for frontend display
@@ -103,16 +117,32 @@ func GetUserData(username string) (map[string]interface{}, error) {
 	return user, nil
 }
 
-// UpdateUserPassword updates user password
+// UpdateUserPassword updates user password.
+//
+// The value written is a hash. It used to be the password as given, so the users
+// table held working credentials for anyone who could read the file — and a
+// username that names no row was reported as a successful change, because
+// RowsAffected was never read.
 func UpdateUserPassword(username, newPassword string) error {
+	hashed, err := domain.HashPassword(newPassword)
+	if err != nil {
+		return err
+	}
+
 	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
 		return err
 	}
 	defer db.Close()
 
-	_, err = db.Exec("UPDATE users SET password = ? WHERE username = ?", newPassword, username)
-	return err
+	res, err := db.Exec("UPDATE users SET password = ? WHERE username = ?", hashed, username)
+	if err != nil {
+		return err
+	}
+	if affected, err := res.RowsAffected(); err == nil && affected == 0 {
+		return ErrNoSuchUser
+	}
+	return nil
 }
 
 // SaveGoogleUser saves or updates Google user information
@@ -153,8 +183,13 @@ func SaveGoogleUser(email, name string) (string, string, error) {
 			return "", "", err
 		}
 	} else {
-		// Create new user with a random password
-		randomPassword := domain.GenerateRandomPassword()
+		// Create new user with a random password. It is hashed like any other:
+		// nobody ever uses it, but a readable one in the table is a readable
+		// credential.
+		randomPassword, err := domain.HashPassword(domain.GenerateRandomPassword())
+		if err != nil {
+			return "", "", err
+		}
 
 		// Generate a default userId
 		defaultUserId := "g_" + fmt.Sprintf("%d", time.Now().Unix())

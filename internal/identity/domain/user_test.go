@@ -11,24 +11,28 @@ import (
 // handler it mirrors.
 func fmtSscan(s string, a ...interface{}) (int, error) { return fmt.Sscan(s, a...) }
 
-// TestGenerateRandomPasswordIsATimestamp records that the "random" password a
-// new Google user is given is the current time to the second, prefixed with
-// "google_". It has no randomness at all: anyone who knows roughly when an
-// account was created can enumerate a few thousand candidates, and two accounts
-// created in the same second get the same password.
-func TestGenerateRandomPasswordIsATimestamp(t *testing.T) {
-	got := GenerateRandomPassword()
+// TestGeneratedPasswordsAreNotGuessable covers the password a new Google user
+// is given. It used to be the current time to the second with a "google_"
+// prefix and no randomness at all — and password login is accepted for Google
+// accounts too, so knowing roughly when an account was created put it within a
+// few hundred guesses, and two accounts created in the same second shared one.
+func TestGeneratedPasswordsAreNotGuessable(t *testing.T) {
+	first := GenerateRandomPassword()
+	second := GenerateRandomPassword()
 
-	if !strings.HasPrefix(got, "google_") {
-		t.Fatalf("GenerateRandomPassword = %q, want a google_ prefix", got)
+	if !strings.HasPrefix(first, "google_") {
+		t.Fatalf("GenerateRandomPassword = %q, want a google_ prefix", first)
 	}
-	stamp := strings.TrimPrefix(got, "google_")
-	if _, err := time.Parse("20060102150405", stamp); err != nil {
-		t.Fatalf("the suffix %q is not a timestamp any more (%v); real randomness "+
-			"appears to have been added, so assert that instead", stamp, err)
+	if first == second {
+		t.Fatal("two passwords generated in the same second are identical")
 	}
-	if len(stamp) != 14 {
-		t.Errorf("the timestamp is %d characters, want 14", len(stamp))
+
+	suffix := strings.TrimPrefix(first, "google_")
+	if _, err := time.Parse("20060102150405", suffix); err == nil {
+		t.Errorf("the password %q is still a timestamp", first)
+	}
+	if len(suffix) < 32 {
+		t.Errorf("the random part is %d characters, which is not much to guess through", len(suffix))
 	}
 }
 
@@ -118,38 +122,23 @@ func TestPageOfUsersDropsSensitiveColumns(t *testing.T) {
 	}
 }
 
-// TestPageOfUsersMutatesTheCallersRows records that the sensitive columns are
-// removed with delete on the caller's own maps, so the slice handed in is
-// modified in place. A caller that reads the password after paginating finds it
-// gone.
-func TestPageOfUsersMutatesTheCallersRows(t *testing.T) {
-	rows := users(1)
-
-	PageOfUsers(rows, 1, 10)
-
-	if _, ok := rows[0]["password"]; ok {
-		t.Fatal("the caller's row kept its password; the function appears to copy now, " +
-			"so assert that instead")
-	}
-	if _, ok := rows[0]["username"]; ok {
-		t.Error("the caller's row kept its username")
-	}
-}
-
-// TestOnlyThePageIsStrippedNotTheWholeTable records the other side of that
-// mutation: rows outside the requested page keep their password, so whether a
-// row is scrubbed depends on which page was asked for.
-func TestOnlyThePageIsStrippedNotTheWholeTable(t *testing.T) {
+// TestTheCallersRowsAreNotTouched covers redaction that reached back into the
+// caller. The sensitive columns were removed with delete on the caller's own
+// maps, so the slice handed in came back stripped — and only the rows on the
+// requested page, which means whether a row still carried its password depended
+// on which page somebody asked for.
+func TestTheCallersRowsAreNotTouched(t *testing.T) {
 	rows := users(25)
 
-	PageOfUsers(rows, 1, 10)
+	page := PageOfUsers(rows, 1, 10)
 
-	if _, ok := rows[0]["password"]; ok {
-		t.Error("a row on the requested page kept its password")
+	for _, key := range []string{"password", "username"} {
+		if _, ok := rows[0]["password"]; !ok {
+			t.Errorf("the caller's row lost its %q", key)
+		}
 	}
-	if _, ok := rows[20]["password"]; !ok {
-		t.Fatal("a row outside the requested page lost its password too; the whole " +
-			"table is scrubbed now, so assert that instead")
+	if _, ok := page[0]["password"]; ok {
+		t.Error("the page exposes the password")
 	}
 }
 
@@ -162,27 +151,27 @@ func TestAZeroPageSizeReturnsNothing(t *testing.T) {
 	}
 }
 
-// TestANonPositivePagePanics records a defect this test suite found.
-//
-// The bounds check only catches a start index past the end of the table. For a
-// page number of zero or below the start index goes negative, the check passes
-// it through, and the slice expression panics with an out-of-range index.
-//
-// The directory endpoint is safe only because its own parsing refuses anything
-// that is not greater than zero, in the HTTP layer, several calls away. This
-// function carries no guard of its own, and the arithmetic is unchanged from
-// when it was inline in the handler.
-func TestANonPositivePagePanics(t *testing.T) {
+// TestANonPositivePageIsTheFirstPage covers a page number of zero or below. The
+// bounds check only caught a start index past the end of the table; a
+// non-positive page made the start index negative, the check passed it through,
+// and the slice expression panicked. The only guard was the directory endpoint's
+// own parsing, in the HTTP layer several calls away, and this function is
+// exported.
+func TestANonPositivePageIsTheFirstPage(t *testing.T) {
+	first := PageOfUsers(users(5), 1, 2)
+
 	for _, page := range []int{0, -1, -100} {
-		t.Run("", func(t *testing.T) {
-			defer func() {
-				if recover() == nil {
-					t.Fatalf("PageOfUsers survived page %d; a guard appears to have "+
-						"been added, so assert the empty page instead", page)
-				}
-			}()
-			PageOfUsers(users(5), page, 10)
-		})
+		got := PageOfUsers(users(5), page, 2)
+		if len(got) != len(first) {
+			t.Errorf("page %d returned %d rows, want the first page's %d", page, len(got), len(first))
+		}
+	}
+}
+
+// TestANegativePageSizeReturnsNothing covers the other half of the arithmetic.
+func TestANegativePageSizeReturnsNothing(t *testing.T) {
+	if got := PageOfUsers(users(5), 1, -10); len(got) != 0 {
+		t.Errorf("PageOfUsers with a negative page size returned %d rows", len(got))
 	}
 }
 

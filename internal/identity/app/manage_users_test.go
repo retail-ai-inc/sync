@@ -255,10 +255,11 @@ func TestRemoveUserOnAnUnknownUser(t *testing.T) {
 	}
 }
 
-// TestTheLastAdminCanBeRemoved records that nothing stops the only
-// administrator from being deleted. Once the row is gone no caller can mint an
-// admin token, and the only way back in is editing the database by hand.
-func TestTheLastAdminCanBeRemoved(t *testing.T) {
+// TestTheLastAdminCannotBeRemoved covers a door that locked behind you. Nothing
+// stopped the only administrator being deleted, and once that row was gone no
+// account left could grant the level — the only way back in was editing the
+// database by hand.
+func TestTheLastAdminCannotBeRemoved(t *testing.T) {
 	db := useTempDB(t)
 	insertUser(t, db, "admin", "secret", "Admin", domain.AccessAdmin)
 	if _, err := db.Exec(`UPDATE users SET userId='uid-admin' WHERE username='admin'`); err != nil {
@@ -269,9 +270,35 @@ func TestTheLastAdminCanBeRemoved(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RemoveUser: %v", err)
 	}
+	if rejection != RejectLastAdmin {
+		t.Errorf("rejection = %q, want %q", rejection, RejectLastAdmin)
+	}
+
+	var left int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM users WHERE access='admin'`).Scan(&left); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if left != 1 {
+		t.Errorf("%d administrators are left", left)
+	}
+}
+
+// TestOneOfTwoAdminsCanBeRemoved is the other half: the guard is about the last
+// one, not about administrators in general.
+func TestOneOfTwoAdminsCanBeRemoved(t *testing.T) {
+	db := useTempDB(t)
+	insertUser(t, db, "admin", "secret", "Admin", domain.AccessAdmin)
+	insertUser(t, db, "second", "secret", "Second", domain.AccessAdmin)
+	if _, err := db.Exec(`UPDATE users SET userId='uid-'||username`); err != nil {
+		t.Fatalf("set userIds: %v", err)
+	}
+
+	rejection, err := RemoveUser("uid-second")
+	if err != nil {
+		t.Fatalf("RemoveUser: %v", err)
+	}
 	if rejection != "" {
-		t.Fatalf("rejection = %q; removing the last admin appears to be refused now, "+
-			"so assert that instead", rejection)
+		t.Errorf("rejection = %q, want the removal to go ahead", rejection)
 	}
 }
 

@@ -5,11 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/retail-ai-inc/sync/internal/platform/httpx"
+	"github.com/retail-ai-inc/sync/internal/platform/metrics"
 	"github.com/retail-ai-inc/sync/internal/platform/sqlite"
 	// "github.com/sirupsen/logrus"
 )
@@ -59,15 +61,47 @@ func SyncMonitorHandler(w http.ResponseWriter, r *http.Request) {
 		status = "Running"
 	}
 
+	// progress, tps and delay used to be the constants 85, 500 and 0.2, so a
+	// task that had never run showed the same healthy figures as one carrying
+	// payments. They come from the counters the syncers keep; a task with no
+	// counters yet reports null rather than a number nobody measured.
+	applied, lag := taskActivity(id)
+
 	httpx.WriteJSON(w, map[string]interface{}{
 		"success": true,
 		"data": map[string]interface{}{
-			"progress": 85,
-			"tps":      500,
-			"delay":    0.2,
-			"status":   status,
+			"applied": applied,
+			"delay":   lag,
+			"status":  status,
 		},
 	})
+}
+
+// taskActivity reports what a task has applied and how far behind it is,
+// reading the metrics the syncers maintain. A nil means nothing has been
+// recorded for it, which is not the same as zero.
+func taskActivity(id string) (applied, lag interface{}) {
+	var total float64
+	var counted bool
+	for _, sample := range metrics.Default.Snapshot(metrics.AppliedTotal) {
+		if sample.Labels["task"] == id {
+			total += sample.Value
+			counted = true
+		}
+	}
+	if counted {
+		applied = total
+	}
+
+	for _, sample := range metrics.Default.Snapshot(metrics.LagSeconds) {
+		if sample.Labels["task"] == id {
+			// The worst of a task's collections is the one that matters.
+			if lag == nil || sample.Value > lag.(float64) {
+				lag = sample.Value
+			}
+		}
+	}
+	return applied, lag
 }
 
 // GET /api/sync/{id}/metrics
@@ -75,7 +109,11 @@ func SyncMetricsHandler(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	rangeStr := r.URL.Query().Get("range")
 
-	sinceTime := parseRangeToSince(rangeStr)
+	sinceTime, err := parseRangeToSince(rangeStr)
+	if err != nil {
+		httpx.ErrorJSONStatus(w, http.StatusBadRequest, "unknown range", err)
+		return
+	}
 
 	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
@@ -174,56 +212,12 @@ LIMIT 1000
 		)
 	}
 
-	if len(rowCountTrend) == 0 && !sinceTime.IsZero() {
-		rows.Close()
-
-		if id == "0" {
-			query = `
-SELECT logged_at, tgt_table, src_row_count, tgt_row_count, sync_task_id
-FROM monitoring_log
-ORDER BY logged_at ASC
-LIMIT 1000
-`
-			rows, err = db.Query(query)
-		} else {
-			query = `
-SELECT logged_at, tgt_table, src_row_count, tgt_row_count, sync_task_id
-FROM monitoring_log
-WHERE sync_task_id=?
-ORDER BY logged_at ASC
-LIMIT 1000
-`
-			rows, err = db.Query(query, id)
-		}
-
-		if err == nil {
-			defer rows.Close()
-			for rows.Next() {
-				var t, tbl string
-				var src, tgt int64
-				var taskID string
-				if err := rows.Scan(&t, &tbl, &src, &tgt, &taskID); err != nil {
-					continue
-				}
-				diff := src - tgt
-				if diff < 0 {
-					diff = -diff
-				}
-
-				tableName := tbl
-				if id == "0" {
-					tableName = "taskID:" + taskID + "_" + tbl
-				}
-
-				jstTime := convertToJST(t)
-
-				rowCountTrend = append(rowCountTrend,
-					map[string]interface{}{"time": jstTime, "table": tableName, "type": "source", "value": src},
-					map[string]interface{}{"time": jstTime, "table": tableName, "type": "target", "value": tgt},
-					map[string]interface{}{"time": jstTime, "table": tableName, "type": "diff", "value": diff},
-				)
-			}
-		}
+	// A window with nothing in it used to be answered by running the query
+	// again without the window and returning the whole history — up to a
+	// thousand rows, with nothing in the response to say the window had been
+	// abandoned. Somebody asking what happened in the last hour got last month.
+	if rowCountTrend == nil {
+		rowCountTrend = []map[string]interface{}{}
 	}
 
 	if err := rows.Err(); err != nil {
@@ -247,7 +241,11 @@ func SyncLogsHandler(w http.ResponseWriter, r *http.Request) {
 	search := r.URL.Query().Get("search")
 	rangeStr := r.URL.Query().Get("range")
 
-	sinceTime := parseRangeToSince(rangeStr)
+	sinceTime, err := parseRangeToSince(rangeStr)
+	if err != nil {
+		httpx.ErrorJSONStatus(w, http.StatusBadRequest, "unknown range", err)
+		return
+	}
 
 	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
@@ -333,35 +331,36 @@ LIMIT 500
 	})
 }
 
-// 1h, 2h, 3h, 6h, 12h, 1d, 2d, 7d，default: -10h
-func parseRangeToSince(rangeStr string) (since time.Time) {
-	if rangeStr == "" {
-		return time.Time{}
+// parseRangeToSince resolves a window like "1h", "12h" or "7d" to the instant it
+// starts at. An empty range means no window at all.
+//
+// A range it cannot read is an error. It used to answer "ten hours ago" — a
+// value not in the set it documents — so a caller asking for "30m" or "24h",
+// both perfectly reasonable things to ask for, silently got ten hours of data
+// and no indication that its request had been ignored.
+func parseRangeToSince(rangeStr string) (since time.Time, err error) {
+	trimmed := strings.TrimSpace(rangeStr)
+	if trimmed == "" {
+		return time.Time{}, nil
 	}
 
 	now := time.Now().UTC()
-	lower := strings.ToLower(rangeStr)
+	lower := strings.ToLower(trimmed)
 
-	switch lower {
-	case "1h":
-		return now.Add(-1 * time.Hour)
-	case "2h":
-		return now.Add(-2 * time.Hour)
-	case "3h":
-		return now.Add(-3 * time.Hour)
-	case "6h":
-		return now.Add(-6 * time.Hour)
-	case "12h":
-		return now.Add(-12 * time.Hour)
-	case "1d":
-		return now.AddDate(0, 0, -1)
-	case "2d":
-		return now.AddDate(0, 0, -2)
-	case "7d":
-		return now.AddDate(0, 0, -7)
-	default:
-		return now.Add(-10 * time.Hour)
+	// Days, which time.ParseDuration does not know.
+	if days, found := strings.CutSuffix(lower, "d"); found {
+		n, convErr := strconv.Atoi(days)
+		if convErr != nil || n < 1 {
+			return time.Time{}, fmt.Errorf("%q is not a range", rangeStr)
+		}
+		return now.AddDate(0, 0, -n), nil
 	}
+
+	span, err := time.ParseDuration(lower)
+	if err != nil || span <= 0 {
+		return time.Time{}, fmt.Errorf("%q is not a range", rangeStr)
+	}
+	return now.Add(-span), nil
 }
 
 // GET /api/changestreams/status

@@ -68,7 +68,10 @@ func TestParseRangeToSince(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.input, func(t *testing.T) {
-			got := parseRangeToSince(tc.input)
+			got, err := parseRangeToSince(tc.input)
+			if err != nil {
+				t.Fatalf("parseRangeToSince(%q): %v", tc.input, err)
+			}
 			want := time.Now().UTC().Add(-tc.back)
 			if delta := got.Sub(want); delta < -2*time.Second || delta > 2*time.Second {
 				t.Errorf("parseRangeToSince(%q) = %v, want ~%v (off by %v)", tc.input, got, want, delta)
@@ -78,8 +81,8 @@ func TestParseRangeToSince(t *testing.T) {
 }
 
 func TestParseRangeToSinceIsCaseInsensitive(t *testing.T) {
-	lower := parseRangeToSince("12h")
-	upper := parseRangeToSince("12H")
+	lower, _ := parseRangeToSince("12h")
+	upper, _ := parseRangeToSince("12H")
 
 	if delta := upper.Sub(lower); delta < -2*time.Second || delta > 2*time.Second {
 		t.Errorf("parseRangeToSince(\"12H\") = %v, parseRangeToSince(\"12h\") = %v", upper, lower)
@@ -87,21 +90,47 @@ func TestParseRangeToSinceIsCaseInsensitive(t *testing.T) {
 }
 
 func TestParseRangeToSinceEmptyIsTheZeroTime(t *testing.T) {
-	if got := parseRangeToSince(""); !got.IsZero() {
+	got, err := parseRangeToSince("")
+	if err != nil {
+		t.Fatalf("parseRangeToSince(\"\"): %v", err)
+	}
+	if !got.IsZero() {
 		t.Errorf("parseRangeToSince(\"\") = %v, want the zero time", got)
 	}
 }
 
-// An unrecognised range is not rejected and does not fall back to a documented
-// default — it silently becomes a ten-hour window, a value that appears
-// nowhere in the accepted set. A caller asking for "30m" or "24h" (neither is
-// in the switch) gets ten hours of data and no indication anything was wrong.
-func TestUnknownRangesSilentlyBecomeTenHours(t *testing.T) {
-	for _, input := range []string{"30m", "24h", "4h", "banana", "-1h", "0"} {
-		got := parseRangeToSince(input)
-		want := time.Now().UTC().Add(-10 * time.Hour)
-		if delta := got.Sub(want); delta < -2*time.Second || delta > 2*time.Second {
-			t.Fatalf("parseRangeToSince(%q) = %v, no longer the undocumented 10h default — it appears to be fixed; assert the new behaviour instead", input, got)
+// TestAnyDurationIsARange covers what a caller is likely to ask for. The switch
+// listed eight spellings and answered anything else with ten hours — a value
+// that appears nowhere in the set it documents — so "30m" and "24h", both
+// perfectly reasonable, silently returned ten hours of data.
+func TestAnyDurationIsARange(t *testing.T) {
+	for input, back := range map[string]time.Duration{
+		"30m":   30 * time.Minute,
+		"24h":   24 * time.Hour,
+		"4h":    4 * time.Hour,
+		"90s":   90 * time.Second,
+		"30d":   30 * 24 * time.Hour,
+		"1h30m": 90 * time.Minute,
+	} {
+		t.Run(input, func(t *testing.T) {
+			got, err := parseRangeToSince(input)
+			if err != nil {
+				t.Fatalf("parseRangeToSince(%q): %v", input, err)
+			}
+			want := time.Now().UTC().Add(-back)
+			if delta := got.Sub(want); delta < -2*time.Second || delta > 2*time.Second {
+				t.Errorf("parseRangeToSince(%q) = %v, want ~%v", input, got, want)
+			}
+		})
+	}
+}
+
+// TestARangeThatIsNotOneIsReported is the other half: something that cannot be
+// read as a window is an error, not ten hours.
+func TestARangeThatIsNotOneIsReported(t *testing.T) {
+	for _, input := range []string{"banana", "-1h", "0", "1 hour", "d", "-3d"} {
+		if got, err := parseRangeToSince(input); err == nil {
+			t.Errorf("parseRangeToSince(%q) = %v, want a refusal", input, got)
 		}
 	}
 }

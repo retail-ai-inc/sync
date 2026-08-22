@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/retail-ai-inc/sync/internal/identity/domain"
+	"github.com/retail-ai-inc/sync/internal/identity/infra"
 )
 
 func TestAuthLoginHandlerIssuesATokenForACorrectPassword(t *testing.T) {
@@ -156,8 +157,12 @@ func TestUpdatePasswordHandlerChangesThePassword(t *testing.T) {
 	if err := db.QueryRow(`SELECT password FROM users WHERE username='alice'`).Scan(&stored); err != nil {
 		t.Fatalf("read password: %v", err)
 	}
-	if stored != "newsecret" {
+	// Stored as a hash, not as it was typed.
+	if stored == "newsecret" || !domain.IsHashed(stored) {
 		t.Errorf("the stored password is %q", stored)
+	}
+	if ok, _, err := infra.ValidateUser("alice", "newsecret"); err != nil || !ok {
+		t.Errorf("the new password does not authenticate (%v, %v)", ok, err)
 	}
 }
 
@@ -262,8 +267,11 @@ func TestUpdateAdminPasswordHandlerChangesThePassword(t *testing.T) {
 	if err := db.QueryRow(`SELECT password FROM users WHERE username='admin'`).Scan(&stored); err != nil {
 		t.Fatalf("read password: %v", err)
 	}
-	if stored != "newsecret" {
+	if stored == "newsecret" || !domain.IsHashed(stored) {
 		t.Errorf("the stored password is %q", stored)
+	}
+	if ok, _, err := infra.ValidateUser("admin", "newsecret"); err != nil || !ok {
+		t.Errorf("the new password does not authenticate (%v, %v)", ok, err)
 	}
 }
 

@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
-	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -185,31 +185,17 @@ func TestSortFieldsByNameHandlesEmptyAndSingle(t *testing.T) {
 	}
 }
 
-// The comparator reports less(i,j) and less(j,i) both true whenever two fields
-// are primary, which is not a strict weak ordering and puts sort.Slice outside
-// its contract. A composite primary key — routine in MySQL — therefore has no
-// defined order, and the fields are not sorted by name either.
-func TestCompositePrimaryKeysHaveNoDefinedOrder(t *testing.T) {
-	less := func(a, b Field) bool {
-		if a.IsPrimary {
-			return true
-		}
-		if b.IsPrimary {
-			return false
-		}
-		return a.Name < b.Name
-	}
-	pk1 := Field{Name: "tenant_id", IsPrimary: true}
-	pk2 := Field{Name: "order_id", IsPrimary: true}
-
-	if !less(pk1, pk2) || !less(pk2, pk1) {
-		t.Fatal("the comparator is now a strict weak ordering — sortFieldsByName appears to be fixed; assert the sorted order instead")
-	}
-
-	// Confirm the consequence: primary fields do not come out sorted by name.
+// TestACompositePrimaryKeyHasADefinedOrder covers the ordinary MySQL case. The
+// comparator answered true for both (i,j) and (j,i) when both fields were
+// primary keys, which is not a strict weak ordering and is not something
+// sort.Slice promises anything about — so a composite key came back in no
+// defined order, and those columns were not sorted by name either.
+func TestACompositePrimaryKeyHasADefinedOrder(t *testing.T) {
 	schema := SchemaResponse{Fields: []Field{
 		{Name: "zz_pk", IsPrimary: true},
+		{Name: "body"},
 		{Name: "aa_pk", IsPrimary: true},
+		{Name: "amount"},
 		{Name: "mm_pk", IsPrimary: true},
 	}}
 	sortFieldsByName(&schema)
@@ -218,8 +204,10 @@ func TestCompositePrimaryKeysHaveNoDefinedOrder(t *testing.T) {
 	for i, f := range schema.Fields {
 		names[i] = f.Name
 	}
-	if sort.StringsAreSorted(names) {
-		t.Fatalf("primary fields came out sorted (%v) — sortFieldsByName appears to be fixed; assert the sorted order instead", names)
+
+	want := []string{"aa_pk", "mm_pk", "zz_pk", "amount", "body"}
+	if strings.Join(names, ",") != strings.Join(want, ",") {
+		t.Errorf("fields = %v, want %v", names, want)
 	}
 }
 

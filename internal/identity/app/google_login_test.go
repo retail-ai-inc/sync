@@ -91,27 +91,16 @@ func TestGoogleLoginReportsEachMissingCredential(t *testing.T) {
 	}
 }
 
-// TestAnEmptyGoogleIdentityCreatesAUserAndIssuesAToken records a defect this
-// test suite found, in the half of the flow that can be exercised without
-// reaching Google.
+// TestAnEmptyGoogleIdentityStillReachesTheStore covers what the store does with
+// the empty identity Google's error responses used to leave behind — a row whose
+// username and email are both empty, found again by the same empty name, and a
+// guest token minted for it.
 //
-// Neither infra.ExchangeGoogleCode nor infra.FetchGoogleUser looks at the HTTP
-// status code. Google answers a bogus authorization code with 400 and an error
-// document; http.PostForm reports no error for that, and the error document
-// decodes cleanly into the token struct, leaving the access token empty. The
-// user-info request then goes out with an empty bearer token, Google answers
-// 401 with another error document, and that decodes cleanly too — leaving the
-// email and the name empty.
-//
-// The flow carries on. SaveGoogleUser inserts a row whose username and email are
-// both the empty string, GetUserByUsername finds it, its status is not
-// "inactive", and a guest token is minted for it. So a caller who posts any
-// string as the code, with no credentials, gets a row in the users table and a
-// token that validates.
-//
-// The steps below are what SaveGoogleUser and the token check do with the empty
-// identity Google's error responses leave behind.
-func TestAnEmptyGoogleIdentityCreatesAUserAndIssuesAToken(t *testing.T) {
+// The way in is closed at the exchange (see internal/identity/infra): a code
+// Google refuses is now a failure rather than an empty identity. This is the
+// second line: it says that if an empty identity ever arrives here again, it is
+// still accepted, so the guard above is the only thing standing in the way.
+func TestAnEmptyGoogleIdentityStillReachesTheStore(t *testing.T) {
 	useTempDB(t)
 
 	username, access, err := infraSaveGoogleUser("", "")
@@ -144,12 +133,6 @@ func TestAnEmptyGoogleIdentityCreatesAUserAndIssuesAToken(t *testing.T) {
 	}
 }
 
-// TestTheGoogleEndpointsAreHardcoded records why the exchange itself has no
-// test: the two URLs are constants in the infrastructure package, so there is no
-// way to point the flow at a stand-in server. Testing it means reaching the real
-// Google, which a test suite must not do.
-func TestTheGoogleEndpointsAreHardcoded(t *testing.T) {
-	// Nothing to call: the point is that no seam exists. If one is added, this
-	// test should be replaced with tests of the exchange against a stand-in.
-	t.Log("infra.googleTokenURL and infra.googleUserInfoURL are unexported constants")
-}
+// The exchange itself is covered in internal/identity/infra, against a stand-in
+// server. The two Google URLs used to be unexported constants, so there was no
+// seam at all and testing the exchange meant reaching the real Google.

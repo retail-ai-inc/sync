@@ -3,6 +3,7 @@ package monitoringhttp
 import (
 	"database/sql"
 	"encoding/json"
+	"github.com/retail-ai-inc/sync/internal/platform/metrics"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -148,10 +149,12 @@ func TestSyncMonitorHandlerOnAnUnknownTask(t *testing.T) {
 	}
 }
 
-// progress, tps and delay are constants compiled into the handler. The
-// monitoring UI shows 85% progress, 500 tps and 0.2s delay for every task in
-// every state, including one that is stopped or has never run.
-func TestMonitorMetricsAreHardcoded(t *testing.T) {
+// TestTheMonitorReportsWhatItKnows covers three numbers that were constants
+// compiled into the handler: 85% progress, 500 tps and 0.2s delay, for every
+// task in every state — including one that was stopped, and one that had never
+// run at all. They now come from the counters the syncers keep, and a task with
+// no counters yet reports nothing rather than a figure nobody measured.
+func TestTheMonitorReportsWhatItKnows(t *testing.T) {
 	conn := useMonitorDB(t)
 	if _, err := conn.Exec(`INSERT INTO sync_tasks (id, enable, config_json) VALUES (1, 0, '{}')`); err != nil {
 		t.Fatalf("seed: %v", err)
@@ -162,12 +165,32 @@ func TestMonitorMetricsAreHardcoded(t *testing.T) {
 		SyncMonitorHandler, map[string]string{"id": "1"})
 
 	data := decodeEnvelope(t, rec)["data"].(map[string]interface{})
-	if data["progress"] != float64(85) || data["tps"] != float64(500) || data["delay"] != 0.2 {
-		t.Fatalf("progress/tps/delay = %v/%v/%v — these appear to be measured now; assert the real values instead",
-			data["progress"], data["tps"], data["delay"])
+	if data["progress"] != nil {
+		t.Errorf("progress = %v; nothing measures it", data["progress"])
+	}
+	if data["applied"] != nil || data["delay"] != nil {
+		t.Errorf("applied/delay = %v/%v for a task that has never run", data["applied"], data["delay"])
 	}
 	if data["status"] != "Stopped" {
 		t.Errorf("status = %v, want Stopped", data["status"])
+	}
+
+	// Once the syncer has recorded something, that is what comes back.
+	labels := metrics.Labels{"task": "1", "engine": "mongodb", "collection": "orders"}
+	t.Cleanup(func() { metrics.Default.Forget(labels) })
+	metrics.Applied(labels, 7)
+	metrics.SetLag(labels, 1.5)
+
+	rec = httptest.NewRecorder()
+	serveWithURLParams(rec, httptest.NewRequest(http.MethodGet, "/sync/{id}/monitor", nil),
+		SyncMonitorHandler, map[string]string{"id": "1"})
+
+	data = decodeEnvelope(t, rec)["data"].(map[string]interface{})
+	if data["applied"] != float64(7) {
+		t.Errorf("applied = %v, want 7", data["applied"])
+	}
+	if data["delay"] != 1.5 {
+		t.Errorf("delay = %v, want 1.5", data["delay"])
 	}
 }
 
@@ -249,27 +272,22 @@ func TestSyncMetricsWithNoRange(t *testing.T) {
 	}
 }
 
-// When the requested window yields nothing, the handler silently re-runs the
-// query with the time filter removed and returns the entire history. A client
-// asking for the last hour and receiving month-old rows has no way to tell:
-// the response carries no indication that the window was abandoned.
-func TestAnEmptyWindowSilentlyReturnsTheWholeHistory(t *testing.T) {
+// TestAnEmptyWindowIsAnEmptyAnswer covers a request for a window with nothing
+// in it. The handler used to re-run the query with the time filter removed and
+// return the entire history — up to a thousand rows — with nothing in the
+// response to say the window had been abandoned, so a client asking what
+// happened in the last hour got last month and could not tell.
+func TestAnEmptyWindowIsAnEmptyAnswer(t *testing.T) {
 	conn := useMonitorDB(t)
-	// Nothing recent; one row far outside any supported range.
+	// Nothing recent; one row far outside the requested window.
 	old := time.Now().UTC().AddDate(0, 0, -40).Format("2006-01-02 15:04:05")
 	insertMonitoringRow(t, conn, 1, old, "orders", 7, 7)
 
 	trend := metricsFor(t, "1", "1h")["rowCountTrend"].([]interface{})
 
-	if len(trend) == 0 {
-		t.Fatal("the fallback appears to have been removed — assert the empty window instead")
+	if len(trend) != 0 {
+		t.Errorf("a one-hour window returned %d points from outside it: %v", len(trend), trend)
 	}
-	for _, p := range trend {
-		if v := p.(map[string]interface{})["value"]; v == float64(7) {
-			return // the 40-day-old row was served for a one-hour request
-		}
-	}
-	t.Fatalf("the out-of-range row was not returned: %v", trend)
 }
 
 func TestSyncLogsHandlerReturnsRows(t *testing.T) {

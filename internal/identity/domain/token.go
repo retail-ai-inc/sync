@@ -133,12 +133,18 @@ func ValidateAdminToken(token string) bool {
 	return ok && username == "admin" && access == AccessAdmin
 }
 
-// ExtractTokenFromHeader extracts token from HTTP request header
+// ExtractTokenFromHeader extracts token from HTTP request header.
+//
+// The scheme is matched without regard to case and without depending on the
+// exact spacing. It used to require the literal "Bearer " — so "bearer abc" and
+// a header with a leading space were handed on whole and then failed to verify,
+// which reads to the caller as a bad token rather than a badly formed header.
 func ExtractTokenFromHeader(authHeader string) string {
-	// Check if header starts with Bearer
-	if strings.HasPrefix(authHeader, "Bearer ") {
-		return strings.TrimPrefix(authHeader, "Bearer ")
+	header := strings.TrimSpace(authHeader)
+
+	if scheme, rest, found := strings.Cut(header, " "); found && strings.EqualFold(scheme, "Bearer") {
+		return strings.TrimSpace(rest)
 	}
 	// If no Bearer prefix, return entire value
-	return authHeader
+	return header
 }

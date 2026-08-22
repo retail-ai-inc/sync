@@ -2,14 +2,21 @@ package infra
 
 import (
 	"database/sql"
+	"errors"
 	"strings"
 
+	"github.com/retail-ai-inc/sync/internal/identity/domain"
 	"github.com/retail-ai-inc/sync/internal/platform/sqlite"
 )
 
 // ErrNoSuchUser is returned when a write names a userId the table does not
 // hold. The handlers answer that with a 200 and success:false, not a 404.
 var ErrNoSuchUser = &Fault{Stage: StageCheck, Err: sql.ErrNoRows}
+
+// ErrLastAdmin is returned when a write would leave the directory with no
+// administrator. There would then be no way to grant the level to anybody, so
+// the only repair is editing the database by hand.
+var ErrLastAdmin = &Fault{Stage: StageCheck, Err: errors.New("the last administrator cannot be removed")}
 
 // ErrNothingToUpdate is returned when a request changes neither the access
 // level nor the status.
@@ -111,12 +118,26 @@ func DeleteUser(userID string) error {
 		}
 	}()
 
-	var exists bool
-	if err = tx.QueryRow("SELECT EXISTS(SELECT 1 FROM users WHERE userId = ?)", userID).Scan(&exists); err != nil {
+	var access string
+	if err = tx.QueryRow("SELECT access FROM users WHERE userId = ?", userID).Scan(&access); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNoSuchUser
+		}
 		return faultAt(StageCheck, err)
 	}
-	if !exists {
-		return ErrNoSuchUser
+
+	// Nothing used to stop the only administrator being removed, and there is no
+	// way back: no account left can grant the level, so the only repair is
+	// editing the database by hand.
+	if access == domain.AccessAdmin {
+		var admins int
+		if err = tx.QueryRow("SELECT COUNT(*) FROM users WHERE access = ?",
+			domain.AccessAdmin).Scan(&admins); err != nil {
+			return faultAt(StageCheck, err)
+		}
+		if admins <= 1 {
+			return ErrLastAdmin
+		}
 	}
 
 	if _, err := tx.Exec("DELETE FROM users WHERE userId = ?", userID); err != nil {

@@ -392,8 +392,10 @@ func TestFailedWritesReachTheDeadLetterQueue(t *testing.T) {
 		t.Fatalf("insert duplicate: %v", err)
 	}
 
-	// Batches are filed under <dead_letter>/<sourceDB>_<collection>/.
-	collectionDir := filepath.Join(statePath, "dead_letter", sourceDB+"_"+collection)
+	// Batches are filed under <dead_letter>/<key>/, where the key escapes the
+	// database and collection names so that two collections cannot share a
+	// directory.
+	collectionDir := filepath.Join(statePath, "dead_letter", collectionKey(sourceDB, collection))
 	harness.Eventually(t, 60*time.Second, func() error {
 		entries, err := os.ReadDir(collectionDir)
 		if err != nil {

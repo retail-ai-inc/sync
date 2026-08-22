@@ -289,15 +289,14 @@ func TestChangePasswordReportsALookupFailure(t *testing.T) {
 	}
 }
 
-// TestUpdatingAnUnknownUsersPasswordIsSilent records that the write itself does
-// not check that it changed a row, so the only thing standing between a caller
-// and a silent no-op is the old-password check above.
-func TestUpdatingAnUnknownUsersPasswordIsSilent(t *testing.T) {
+// TestUpdatingAnUnknownUsersPasswordSaysSo covers a mistyped username. The write
+// did not check that it had changed a row, so the only thing between a caller
+// and a silent no-op was the old-password check above it.
+func TestUpdatingAnUnknownUsersPasswordSaysSo(t *testing.T) {
 	useTempDB(t)
 
-	if err := infraUpdateUserPassword("nobody", "new"); err != nil {
-		t.Fatalf("UpdateUserPassword on an unknown user = %v; the rows affected count "+
-			"appears to be checked now, so assert the error instead", err)
+	if err := infraUpdateUserPassword("nobody", "new"); err == nil {
+		t.Error("UpdateUserPassword on an unknown user reported success")
 	}
 }
 

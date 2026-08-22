@@ -1,23 +1,48 @@
 package domain
 
 import (
-	"time"
+	"crypto/rand"
+	"encoding/base64"
 
 	_ "github.com/mattn/go-sqlite3" // SQLite driver
 )
 
-// GenerateRandomPassword generates a random password for new Google users
+// GenerateRandomPassword generates a password for a new Google user.
+//
+// It used to be "google_" followed by the current time to the second, with no
+// randomness at all — and password login is accepted for Google accounts too, so
+// knowing roughly when an account was created put it within a few hundred
+// guesses. The account holder never sees this value and never uses it; it exists
+// so the column is not empty.
 func GenerateRandomPassword() string {
-	// Simple implementation that generates a timestamp-based password
-	// In production, use a secure random generator
-	return "google_" + time.Now().Format("20060102150405")
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		// A password that cannot be made random must not fall back to one that
+		// is guessable.
+		panic("identity: no random password could be generated: " + err.Error())
+	}
+	return "google_" + base64.RawURLEncoding.EncodeToString(buf)
 }
 
 // PageOfUsers returns the requested page of a user list with the columns the
-// directory endpoint exposes. Sensitive and internal columns (password, the
-// numeric id, the login name) are dropped. An out-of-range page is empty
-// rather than an error, which is what the endpoint has always answered.
+// directory endpoint exposes. An out-of-range page is empty rather than an
+// error, which is what the endpoint has always answered.
+//
+// Two things it no longer does. It used to compute a negative lower bound for a
+// page number of zero or less and slice with it, which panics — the only guard
+// was a check several layers above, in the HTTP handler, and this function is
+// exported. And it used to redact by deleting from the caller's own maps, so the
+// rows handed in came back stripped — and only the rows on the requested page,
+// which means whether a row still carried its password depended on which page it
+// fell on. The answer is built from scratch and the caller's rows are untouched.
 func PageOfUsers(users []map[string]interface{}, current, pageSize int) []map[string]interface{} {
+	if current < 1 {
+		current = 1
+	}
+	if pageSize < 0 {
+		pageSize = 0
+	}
+
 	total := len(users)
 	start := (current - 1) * pageSize
 	end := start + pageSize
@@ -38,10 +63,6 @@ func PageOfUsers(users []map[string]interface{}, current, pageSize int) []map[st
 
 	var out []map[string]interface{}
 	for _, user := range page {
-		delete(user, "password")
-		delete(user, "id")
-		delete(user, "username")
-
 		out = append(out, map[string]interface{}{
 			"userId": user["userId"],
 			"name":   user["name"],

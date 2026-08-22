@@ -2,6 +2,7 @@ package infra
 
 import (
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -19,6 +20,7 @@ func useTempDB(t *testing.T) *sql.DB {
 	t.Helper()
 
 	isolateCrontab(t)
+	cheapPasswordHashing(t)
 
 	path := filepath.Join(t.TempDir(), "sync.db")
 	t.Setenv("SYNC_DB_PATH", path)
@@ -137,16 +139,13 @@ func TestValidateUser(t *testing.T) {
 	})
 }
 
-// TestPasswordsAreStoredInCleartext records that no hashing takes place
-// anywhere in the credential path: UpdateUserPassword writes the value it is
-// given, and ValidateUser compares it to the submitted password with ==. The
-// production database copy in docs/ shows the same, an admin password of
-// sixteen printable characters rather than a hash.
-//
-// The comparison is also not constant time, so it leaks timing information,
-// but that is secondary to the passwords being readable by anyone who can open
-// the file.
-func TestPasswordsAreStoredInCleartext(t *testing.T) {
+// TestPasswordsAreNotStoredInCleartext covers what anybody who can read the
+// control database used to get. No hashing took place anywhere in the credential
+// path — UpdateUserPassword wrote the value it was given and ValidateUser
+// compared it with == — and the production copy shows the same: an admin
+// password of sixteen printable characters. That file holds the connection
+// strings for both regions' payment databases.
+func TestPasswordsAreNotStoredInCleartext(t *testing.T) {
 	db := useTempDB(t)
 	insertUser(t, db, "alice", "initial", "Alice", "admin")
 
@@ -159,20 +158,60 @@ func TestPasswordsAreStoredInCleartext(t *testing.T) {
 		t.Fatalf("read password: %v", err)
 	}
 
-	if stored != "a-brand-new-password" {
-		t.Fatalf("the stored value is %q; hashing may have been introduced, "+
-			"which would be an improvement", stored)
+	if strings.Contains(stored, "a-brand-new-password") {
+		t.Fatalf("the stored value is %q", stored)
+	}
+	if !domain.IsHashed(stored) {
+		t.Errorf("the stored value %q is not a hash", stored)
+	}
+
+	ok, _, err := ValidateUser("alice", "a-brand-new-password")
+	if err != nil || !ok {
+		t.Errorf("the new password does not authenticate (%v, %v)", ok, err)
 	}
 }
 
-func TestUpdateUserPasswordUnknownUserIsSilent(t *testing.T) {
+// TestAPasswordStoredInTheClearIsReplacedOnUse covers the rows that already
+// exist. They go on working, and the first successful login rewrites them as a
+// hash — so the cleartext leaves the file without a migration step or a password
+// reset.
+func TestAPasswordStoredInTheClearIsReplacedOnUse(t *testing.T) {
+	db := useTempDB(t)
+	insertUser(t, db, "alice", "legacy-password", "Alice", "admin")
+
+	ok, access, err := ValidateUser("alice", "legacy-password")
+	if err != nil || !ok {
+		t.Fatalf("a password stored in the clear no longer authenticates (%v, %v)", ok, err)
+	}
+	if access != "admin" {
+		t.Errorf("access = %q, want admin", access)
+	}
+
+	var stored string
+	if err := db.QueryRow("SELECT password FROM users WHERE username = 'alice'").Scan(&stored); err != nil {
+		t.Fatalf("read password: %v", err)
+	}
+	if !domain.IsHashed(stored) {
+		t.Errorf("the stored value is still %q", stored)
+	}
+
+	// And it still authenticates afterwards.
+	if ok, _, err := ValidateUser("alice", "legacy-password"); err != nil || !ok {
+		t.Errorf("the rewritten password does not authenticate (%v, %v)", ok, err)
+	}
+	if ok, _, _ := ValidateUser("alice", "something-else"); ok {
+		t.Error("the wrong password authenticates")
+	}
+}
+
+// TestUpdateUserPasswordOnAnUnknownUserSaysSo covers a mistyped username. The
+// UPDATE affected no rows and reported no error, so the caller believed the
+// password had been changed.
+func TestUpdateUserPasswordOnAnUnknownUserSaysSo(t *testing.T) {
 	useTempDB(t)
 
-	// UPDATE affects no rows and reports no error, so a caller that mistypes a
-	// username believes the password was changed.
-	if err := UpdateUserPassword("nobody", "x"); err != nil {
-		t.Errorf("UpdateUserPassword for a missing user returned %v; if it now "+
-			"reports the miss, assert that instead", err)
+	if err := UpdateUserPassword("nobody", "x"); !errors.Is(err, ErrNoSuchUser) {
+		t.Errorf("UpdateUserPassword for a missing user = %v, want ErrNoSuchUser", err)
 	}
 }
 
@@ -297,30 +336,23 @@ func TestSaveGoogleUserCreatesAndUpdates(t *testing.T) {
 	})
 }
 
-// TestGeneratedGooglePasswordIsPredictable records that domain.GenerateRandomPassword
-// is not random. It returns "google_" followed by the current time formatted to
-// the second, so the credential for an account created by Google sign-in can be
-// reconstructed by anyone who knows roughly when it was created — a few hundred
-// guesses covers a wide window.
-//
-// This matters because ValidateUser accepts password logins for every account,
-// including ones created through Google, so a predictable password is a way
-// into the account without going through Google at all.
-func TestGeneratedGooglePasswordIsPredictable(t *testing.T) {
+// TestAGoogleAccountsPasswordCannotBeGuessed covers a way into an account
+// without going through Google at all. domain.GenerateRandomPassword returned
+// "google_" followed by the current time to the second, with no randomness, and
+// ValidateUser accepts password logins for every account including ones created
+// through Google — so the credential could be reconstructed by anyone who knew
+// roughly when the account was created.
+func TestAGoogleAccountsPasswordCannotBeGuessed(t *testing.T) {
 	got := domain.GenerateRandomPassword()
 
-	if !regexp.MustCompile(`^google_\d{14}$`).MatchString(got) {
-		t.Fatalf("domain.GenerateRandomPassword produced %q; the scheme may have changed, "+
-			"so assert the new one instead", got)
+	if regexp.MustCompile(`^google_\d{14}$`).MatchString(got) {
+		t.Fatalf("domain.GenerateRandomPassword produced %q, which is a timestamp", got)
 	}
-	// Reconstructing it needs nothing but a clock.
-	if want := "google_" + time.Now().Format("20060102150405"); got != want {
-		t.Errorf("domain.GenerateRandomPassword = %q, and the current second gives %q; "+
-			"they normally match", got, want)
+	if want := "google_" + time.Now().Format("20060102150405"); got == want {
+		t.Errorf("domain.GenerateRandomPassword = %q, which the clock alone reproduces", got)
 	}
-	// Two calls inside one second are identical, which is the whole problem.
-	if second := domain.GenerateRandomPassword(); second != got {
-		t.Logf("the two calls straddled a second boundary (%q vs %q)", got, second)
+	if second := domain.GenerateRandomPassword(); second == got {
+		t.Errorf("two calls produced the same password %q", got)
 	}
 }
 
