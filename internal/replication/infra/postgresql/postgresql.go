@@ -79,6 +79,10 @@ func NewPostgreSQLSyncer(cfg config.SyncConfig, logger *logrus.Logger) *PostgreS
 func (s *PostgreSQLSyncer) Start(ctx context.Context) error {
 	var err error
 
+	if err := security.CheckKeyForMappings(s.cfg.Mappings); err != nil {
+		return domain.Unrecoverable("%v", err)
+	}
+
 	s.logger.Info("[PostgreSQL] Starting synchronization...")
 
 	// Connect normal

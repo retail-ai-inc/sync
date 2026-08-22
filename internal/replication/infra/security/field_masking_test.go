@@ -5,6 +5,8 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"encoding/base64"
+	"errors"
+	"os"
 	"strings"
 	"testing"
 
@@ -17,6 +19,19 @@ func enabled(fields ...FieldSecurityConfig) TableSecurity {
 }
 
 // decrypt mirrors encryptAES using the same package-level key, so the tests can
+// TestMain gives the package a field encryption key.
+//
+// There is no fallback key any more — a deployment that asks for encryption and
+// configures none is refused — so the tests that exercise encryption have to
+// supply one, exactly as a deployment does. The tests that cover the refusal
+// clear it for themselves.
+func TestMain(m *testing.M) {
+	if err := os.Setenv("SYNC_FIELD_KEY", "abcdefghijklmnopqrstuvwxyz012345"); err != nil {
+		panic(err)
+	}
+	os.Exit(m.Run())
+}
+
 // assert that ciphertext really carries the plaintext.
 func decrypt(t *testing.T, encoded string) string {
 	t.Helper()
@@ -25,7 +40,7 @@ func decrypt(t *testing.T, encoded string) string {
 	if err != nil {
 		t.Fatalf("ciphertext is not base64: %v", err)
 	}
-	block, err := aes.NewCipher(encryptionKey)
+	block, err := aes.NewCipher(fieldKey())
 	if err != nil {
 		t.Fatalf("new cipher: %v", err)
 	}
@@ -328,20 +343,11 @@ func TestFindTableSecurityFromMappingsSkipsIncompleteEntries(t *testing.T) {
 }
 
 // TestTheKeyComesFromTheEnvironment covers where the AES-256 key is read from.
-// It was a literal in the source — identical in every deployment and committed
-// to a public repository — so anything encrypted with it could be read by anyone
-// who had the source. A deployment can now supply its own.
-//
-// The literal is still the fallback, and deliberately so: changing the key would
-// make values already written to a target undecryptable, mixed in with the ones
-// written after. Using it is reported as an error every time a field is
-// encrypted, and which key an existing target should be re-encrypted under is
-// not this program's decision.
+// It was a literal in this file — in a public repository, identical in every
+// deployment — so anything encrypted under it could be read by anyone who had
+// the source: the configuration said the field was protected and it was not.
+// There is no fallback now.
 func TestTheKeyComesFromTheEnvironment(t *testing.T) {
-	if len(encryptionKey) != 32 {
-		t.Errorf("key length = %d, want 32 for AES-256", len(encryptionKey))
-	}
-
 	for name, given := range map[string]string{
 		"hex":    "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
 		"base64": base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32)),
@@ -350,12 +356,11 @@ func TestTheKeyComesFromTheEnvironment(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Setenv("SYNC_FIELD_KEY", given)
 
-			key := fieldKey()
-			if len(key) != 32 {
+			if key := fieldKey(); len(key) != 32 {
 				t.Fatalf("key length = %d, want 32", len(key))
 			}
-			if string(key) == string(legacyKey) {
-				t.Error("the configured key was ignored")
+			if !KeyConfigured() {
+				t.Error("a usable key was not recognised")
 			}
 		})
 	}
@@ -364,7 +369,7 @@ func TestTheKeyComesFromTheEnvironment(t *testing.T) {
 		t.Setenv("SYNC_FIELD_KEY", "")
 		t.Setenv("SYNC_CONFIG_KEY", "abcdefghijklmnopqrstuvwxyz012345")
 
-		if string(fieldKey()) == string(legacyKey) {
+		if !KeyConfigured() {
 			t.Error("SYNC_CONFIG_KEY was ignored")
 		}
 	})
@@ -374,10 +379,80 @@ func TestTheKeyComesFromTheEnvironment(t *testing.T) {
 
 		defer func() {
 			if recover() == nil {
-				t.Error("an unusable key was accepted; the fields would be sealed " +
-					"with the published key while the operator believed otherwise")
+				t.Error("an unusable key was accepted, so fields would be sealed " +
+					"with something other than the operator's key")
 			}
 		}()
 		fieldKey()
+	})
+}
+
+// TestWithNoKeyNothingIsEncrypted covers the case that used to be answered with
+// the published key. There is nowhere to get one, so encrypting is refused
+// rather than performed with a key everyone has.
+func TestWithNoKeyNothingIsEncrypted(t *testing.T) {
+	t.Setenv("SYNC_FIELD_KEY", "")
+	t.Setenv("SYNC_CONFIG_KEY", "")
+
+	if KeyConfigured() {
+		t.Fatal("a key was found with neither variable set")
+	}
+	if _, err := encryptAES([]byte("secret")); !errors.Is(err, ErrNoFieldKey) {
+		t.Errorf("encryptAES = %v, want ErrNoFieldKey", err)
+	}
+}
+
+// TestATaskThatCannotEncryptIsRefused covers what a syncer does about it. A task
+// naming an encrypted field with no key would replicate that field in whatever
+// form the failed encryption left, while the interface went on reporting it as
+// protected — so it is refused at startup instead.
+func TestATaskThatCannotEncryptIsRefused(t *testing.T) {
+	encrypted := []config.DatabaseMapping{{
+		Tables: []config.TableMapping{{
+			SourceTable:     "users",
+			SecurityEnabled: true,
+			FieldSecurity: []interface{}{
+				map[string]interface{}{"field": "email", "securityType": "encrypted"},
+			},
+		}},
+	}}
+
+	t.Run("with no key", func(t *testing.T) {
+		t.Setenv("SYNC_FIELD_KEY", "")
+		t.Setenv("SYNC_CONFIG_KEY", "")
+
+		err := CheckKeyForMappings(encrypted)
+		if !errors.Is(err, ErrNoFieldKey) {
+			t.Fatalf("CheckKeyForMappings = %v, want ErrNoFieldKey", err)
+		}
+		if !strings.Contains(err.Error(), "users.email") {
+			t.Errorf("err = %v, want it to name the field", err)
+		}
+	})
+
+	t.Run("with a key", func(t *testing.T) {
+		t.Setenv("SYNC_FIELD_KEY", "abcdefghijklmnopqrstuvwxyz012345")
+
+		if err := CheckKeyForMappings(encrypted); err != nil {
+			t.Errorf("CheckKeyForMappings = %v", err)
+		}
+	})
+
+	t.Run("a task that encrypts nothing does not need one", func(t *testing.T) {
+		t.Setenv("SYNC_FIELD_KEY", "")
+		t.Setenv("SYNC_CONFIG_KEY", "")
+
+		masked := []config.DatabaseMapping{{
+			Tables: []config.TableMapping{{
+				SourceTable:     "users",
+				SecurityEnabled: true,
+				FieldSecurity: []interface{}{
+					map[string]interface{}{"field": "name", "securityType": "masked"},
+				},
+			}},
+		}}
+		if err := CheckKeyForMappings(masked); err != nil {
+			t.Errorf("CheckKeyForMappings = %v for a task that only masks", err)
+		}
 	})
 }

@@ -17,6 +17,7 @@ import (
 	"github.com/retail-ai-inc/sync/internal/replication/infra/checkpoint"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/directionlock"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/discovery"
+	"github.com/retail-ai-inc/sync/internal/replication/infra/security"
 	"github.com/sirupsen/logrus"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -195,6 +196,13 @@ func (s *MongoDBSyncer) Start(ctx context.Context) error {
 		}
 		return fmt.Errorf("connect to the source and target")
 	}
+	if err := security.CheckKeyForMappings(s.cfg.Mappings); err != nil {
+		// No key means the field would be replicated in a form anybody can read
+		// while the configuration says it is encrypted. A restart does not fix
+		// that; somebody has to set the key.
+		return domain.Unrecoverable("%v", err)
+	}
+
 	s.logger.Info("[MongoDB] Starting synchronization...")
 
 	s.faults = make(chan error, 1)

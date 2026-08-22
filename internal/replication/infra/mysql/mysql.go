@@ -58,6 +58,10 @@ func NewMySQLSyncer(cfg config.SyncConfig, logger *logrus.Logger) *MySQLSyncer {
 // The returned error is what the supervisor decides on: nil or a transient
 // failure means try again, an ErrUnrecoverable means stop and tell somebody.
 func (s *MySQLSyncer) Start(ctx context.Context) error {
+	if err := security.CheckKeyForMappings(s.cfg.Mappings); err != nil {
+		return domain.Unrecoverable("%v", err)
+	}
+
 	s.logger.Info("[MySQL] Starting synchronization...")
 
 	cfg := canal.NewDefaultConfig()

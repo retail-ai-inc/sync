@@ -131,6 +131,24 @@ Upon restart, the tool resumes from the stored state (resume token for MongoDB, 
 
 ## Operating it
 
+### Field encryption
+
+A table mapping can mark a field `masked` or `encrypted`. Masking is local — the
+value never leaves in readable form. Encryption needs a key, and there is no
+default one: a task that marks a field `encrypted` with neither `SYNC_FIELD_KEY`
+nor `SYNC_CONFIG_KEY` set refuses to start, naming the field.
+
+That is a change. Until recently the key was a literal in this repository, so
+anything encrypted under it could be read by anyone with the source — the
+configuration said the field was protected and it was not. If a target already
+holds values written that way:
+
+1. set `SYNC_FIELD_KEY` to a key of your own;
+2. run the initial copy again for the affected collections — the writes are
+   upserts, so every document is rewritten under the new key;
+3. anything not re-copied stays readable with the old published key, which is
+   still in this repository's history.
+
 ### Where the state lives
 
 Two different kinds of state, with different durability requirements:
@@ -174,6 +192,8 @@ loudly instead of filling the disk.
 | `SYNC_DB_PATH` | Path to the control-plane SQLite file. Defaults to `sync.db` beside the binary. |
 | `SYNC_CONFIG_KEY` | 32-byte key, base64 or hex, that encrypts the database passwords stored in the task configuration. Without it they are stored in clear text and startup says so. |
 | `SYNC_TOKEN_SECRET` | Signing secret for API tokens. Without it a generated one is used, so tokens do not survive a restart. |
+| `SYNC_FIELD_KEY` | 32-byte key, base64 or hex, that encrypts the fields a task marks `encrypted`. `SYNC_CONFIG_KEY` is used when this is unset. A task that marks a field `encrypted` and has neither will not start. |
+| `SYNC_PASSWORD_ITERATIONS` | Work factor for hashing the interface's own passwords. The default costs a noticeable fraction of a second per login; lower it only on slower hardware. |
 | `SYNC_LAG_ALERT_SECONDS` | Replication lag, in seconds, past which a task is reported as alerting. |
 | `SYNC_MONGO_BUFFER_LIMIT_BYTES` | Cap on the MongoDB change buffer directory. |
 | `SYNC_MONGO_FLUSH_INTERVAL` | How long a partly filled batch of MongoDB changes waits before being applied, e.g. `200ms`. Default `500ms`. Lower is a tighter recovery point at the cost of more, smaller writes. |

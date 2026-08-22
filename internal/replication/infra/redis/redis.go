@@ -17,6 +17,7 @@ import (
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/checkpoint"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/directionlock"
+	"github.com/retail-ai-inc/sync/internal/replication/infra/security"
 	"github.com/sirupsen/logrus"
 )
 
@@ -101,6 +102,10 @@ func (r *RedisSyncer) streamMappings() []streamPair {
 // The returned error is what the supervisor decides on: nil or a transient
 // failure means try again, an ErrUnrecoverable means stop and tell somebody.
 func (r *RedisSyncer) Start(ctx context.Context) error {
+	if err := security.CheckKeyForMappings(r.cfg.Mappings); err != nil {
+		return domain.Unrecoverable("%v", err)
+	}
+
 	r.logger.Info("[Redis] Starting synchronization...")
 
 	var err error

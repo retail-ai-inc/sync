@@ -6,11 +6,11 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/retail-ai-inc/sync/internal/platform/config"
@@ -18,27 +18,30 @@ import (
 	"go.mongodb.org/mongo-driver/bson"
 )
 
-// legacyKey is the AES-256 key this has always used when none is configured.
-// It is a literal in a public repository, so anything encrypted under it can be
-// read by anyone who has the source — which is everyone. It is kept only so that
-// values already written to a target under it stay readable; a deployment that
-// means it sets SYNC_FIELD_KEY.
-var legacyKey = []byte("0123456789abcdef0123456789abcdef") // 32 AES-256
+// A field configured as "encrypted" used to be sealed with an AES-256 key that
+// was a literal in this file — in a public repository, identical in every
+// deployment. Anything encrypted under it could be read by anyone who had the
+// source, which is everyone: the configuration said the field was protected and
+// it was not.
+//
+// The key comes from the environment and there is no fallback. A task that
+// declares an encrypted field and has no key refuses to start, rather than
+// writing values to the disaster-recovery copy that anybody can read while the
+// interface reports them as encrypted.
+//
+// Values already written under the published key stay as they are; nothing here
+// decrypts. To move them, set SYNC_FIELD_KEY and run the initial copy again —
+// the writes are upserts, so it rewrites every document under the new key.
 
-// encryptionKey is what fields are actually sealed with.
-var encryptionKey = fieldKey()
-
-// usingLegacyKey says no key was configured, which is worth saying out loud the
-// first time a field is encrypted rather than only in a document somewhere.
-var usingLegacyKey bool
-
-// legacyWarned keeps that warning to one line per process.
-var legacyWarned sync.Once
+// ErrNoFieldKey means a task asks for encryption and no key is configured.
+var ErrNoFieldKey = errors.New(
+	"a table is configured to encrypt a field and neither SYNC_FIELD_KEY nor " +
+		"SYNC_CONFIG_KEY is set, so there is no key to encrypt it with")
 
 // fieldKey reads the field encryption key from the environment.
 //
 // SYNC_FIELD_KEY names it; SYNC_CONFIG_KEY — which seals the stored credentials
-// — is accepted as well so that a deployment that has set one key does not have
+// — is accepted as well so that a deployment which has set one key does not have
 // to invent a second. Either may be given as 64 hex characters, as base64, or as
 // 32 raw bytes.
 func fieldKey() []byte {
@@ -49,14 +52,13 @@ func fieldKey() []byte {
 		}
 		key, err := decodeFieldKey(raw)
 		if err != nil {
-			// Carrying on under the published key while the operator believes
-			// their own key is in use is the worst of the three outcomes.
+			// Carrying on under some other key while the operator believes
+			// theirs is in use is the worst of the outcomes.
 			panic("security: " + name + " is set but cannot be used: " + err.Error())
 		}
 		return key
 	}
-	usingLegacyKey = true
-	return legacyKey
+	return nil
 }
 
 // decodeFieldKey reads a key in either of the forms an operator is likely to
@@ -78,19 +80,10 @@ func decodeFieldKey(raw string) ([]byte, error) {
 		"as base64, or raw; got %d characters", len(raw))
 }
 
-// warnAboutTheLegacyKey says once that the encryption is not protecting anything.
-func warnAboutTheLegacyKey(fieldName string) {
-	if !usingLegacyKey {
-		return
-	}
-	legacyWarned.Do(func() {
-		logging.Log.Errorf("[Security] Field %q is configured as encrypted, but "+
-			"neither SYNC_FIELD_KEY nor SYNC_CONFIG_KEY is set, so it is being "+
-			"sealed with the key built into this program — which is published in "+
-			"its source. Anyone with the source can read those fields on the "+
-			"target. Set SYNC_FIELD_KEY to a key of your own.", fieldName)
-	})
-}
+// KeyConfigured reports whether field encryption can be performed. A task checks
+// it before starting, so a configuration that cannot be honoured is refused
+// rather than quietly producing readable data.
+func KeyConfigured() bool { return len(fieldKey()) == 32 }
 
 // Define field security configuration
 type FieldSecurityConfig struct {
@@ -106,7 +99,12 @@ type TableSecurity struct {
 
 // Encrypt data
 func encryptAES(plaintext []byte) (string, error) {
-	block, err := aes.NewCipher(encryptionKey)
+	key := fieldKey()
+	if len(key) != 32 {
+		return "", ErrNoFieldKey
+	}
+
+	block, err := aes.NewCipher(key)
 	if err != nil {
 		return "", err
 	}
@@ -164,7 +162,6 @@ func ProcessValue(value interface{}, fieldName string, config TableSecurity) int
 			case "masked":
 				processed = maskValue(value)
 			case "encrypted":
-				warnAboutTheLegacyKey(fieldName)
 				switch v := value.(type) {
 				case string:
 					encrypted, err := encryptAES([]byte(v))
@@ -397,4 +394,36 @@ func FindTableSecurityFromMappings(tableName string, mappings []config.DatabaseM
 
 	logging.Log.Debugf("[Security] Table security configuration not found")
 	return result
+}
+
+// CheckKeyForMappings reports whether a task's configuration can be honoured.
+//
+// A task that names an encrypted field and has no key must not start. It would
+// otherwise replicate that field in whatever form the failed encryption left —
+// and the interface would go on reporting the field as protected. Refusing is
+// the only answer that does not quietly disagree with what an operator was told.
+func CheckKeyForMappings(mappings []config.DatabaseMapping) error {
+	for _, mapping := range mappings {
+		for _, table := range mapping.Tables {
+			if !table.SecurityEnabled {
+				continue
+			}
+			for _, raw := range table.FieldSecurity {
+				field, ok := raw.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				kind, _ := field["securityType"].(string)
+				if !strings.EqualFold(strings.TrimSpace(kind), "encrypted") {
+					continue
+				}
+				if !KeyConfigured() {
+					name, _ := field["field"].(string)
+					return fmt.Errorf("%w (%s.%s)", ErrNoFieldKey, table.SourceTable, name)
+				}
+				return nil
+			}
+		}
+	}
+	return nil
 }
