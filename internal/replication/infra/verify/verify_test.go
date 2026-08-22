@@ -905,3 +905,87 @@ func TestAnUnreadableIdKeyIsReported(t *testing.T) {
 		}
 	}
 }
+
+// ------------------------------------------------------- describing a key
+
+// TestAKeyIsDescribedForAPerson covers what an operator actually sees. The
+// encoded forms exist to round-trip, and an alert naming a row as
+// "0e000000105f696400070000" is most of the way to no alert at all.
+func TestAKeyIsDescribedForAPerson(t *testing.T) {
+	if got := DescribeKey(keyOf("42")); got != "42" {
+		t.Errorf("DescribeKey of a single key = %q", got)
+	}
+
+	composite := encodeKey([]sql.NullString{
+		{String: "acct-1", Valid: true}, {String: "2", Valid: true}})
+	if got := DescribeKey(composite); got != "acct-1/2" {
+		t.Errorf("DescribeKey of a composite key = %q", got)
+	}
+
+	withNull := encodeKey([]sql.NullString{{String: "a", Valid: true}, {}})
+	if got := DescribeKey(withNull); got != "a/NULL" {
+		t.Errorf("DescribeKey of a key with a NULL part = %q", got)
+	}
+}
+
+func TestADocumentIdIsDescribedByItsValue(t *testing.T) {
+	id := primitive.NewObjectID()
+	raw, err := bson.Marshal(bson.M{"_id": id})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	row, err := rowFromDocument(raw)
+	if err != nil {
+		t.Fatalf("rowFromDocument: %v", err)
+	}
+
+	if got := DescribeKey(row.Key); got != id.Hex() {
+		t.Errorf("DescribeKey = %q, want the ObjectId's hex %q", got, id.Hex())
+	}
+}
+
+func TestAStringDocumentIdIsDescribedAsItself(t *testing.T) {
+	raw, err := bson.Marshal(bson.M{"_id": "ORD-000042"})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	row, err := rowFromDocument(raw)
+	if err != nil {
+		t.Fatalf("rowFromDocument: %v", err)
+	}
+
+	if got := DescribeKey(row.Key); got != "ORD-000042" {
+		t.Errorf("DescribeKey = %q", got)
+	}
+}
+
+// TestANumericDocumentIdIsDescribed covers the _id a payment ledger keyed by a
+// sequence number would have.
+func TestANumericDocumentIdIsDescribed(t *testing.T) {
+	raw, err := bson.Marshal(bson.M{"_id": 42})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	row, err := rowFromDocument(raw)
+	if err != nil {
+		t.Fatalf("rowFromDocument: %v", err)
+	}
+
+	if got := DescribeKey(row.Key); !strings.Contains(got, "42") {
+		t.Errorf("DescribeKey = %q, want it to name 42", got)
+	}
+}
+
+// TestAnUnreadableKeyIsStillDescribed keeps the alert path from failing on a key
+// it cannot parse: something shortened is better than nothing.
+func TestAnUnreadableKeyIsStillDescribed(t *testing.T) {
+	long := strings.Repeat("z", 40)
+	got := DescribeKey(long)
+
+	if got == "" {
+		t.Error("DescribeKey returned nothing for an unreadable key")
+	}
+	if len(got) > 30 {
+		t.Errorf("DescribeKey = %q, want it shortened", got)
+	}
+}

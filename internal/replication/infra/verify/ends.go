@@ -134,6 +134,24 @@ func idFromKey(key string) (interface{}, error) {
 	return value, nil
 }
 
+// describeID renders an _id the way somebody reading an alert would write it:
+// an ObjectId as its hex, a string as itself, a number as its digits.
+func describeID(id interface{}) string {
+	value, ok := id.(bson.RawValue)
+	if !ok {
+		return fmt.Sprint(id)
+	}
+	if oid, ok := value.ObjectIDOK(); ok {
+		return oid.Hex()
+	}
+	if s, ok := value.StringValueOK(); ok {
+		return s
+	}
+	// Everything else — numbers, dates, subdocuments — has a rendering of its
+	// own already, and it is short enough to put in an alert.
+	return value.String()
+}
+
 // documentDigest hashes a document.
 //
 // The fields are sorted before hashing, because BSON preserves the order they

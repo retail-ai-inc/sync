@@ -155,11 +155,7 @@ func describe(sample []verify.Difference) string {
 	}
 	parts := make([]string, 0, len(sample))
 	for _, d := range sample {
-		key := d.Key
-		if len(key) > 24 {
-			key = key[:24] + "…"
-		}
-		parts = append(parts, fmt.Sprintf("%s %s", d.Kind, key))
+		parts = append(parts, fmt.Sprintf("%s %s", d.Kind, verify.DescribeKey(d.Key)))
 	}
 	if len(parts) == 0 {
 		return "none"

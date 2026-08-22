@@ -317,6 +317,33 @@ func decodeKey(key string) ([]sql.NullString, error) {
 	}
 }
 
+// DescribeKey renders a comparison key for a person to read.
+//
+// The encoded forms are built to round-trip, not to be read: a composite SQL key
+// carries its lengths and a document's _id is the hex of its BSON. Neither tells
+// an operator which row an alert is about, and an alert nobody can act on is
+// most of the way to no alert at all.
+func DescribeKey(key string) string {
+	if values, err := decodeKey(key); err == nil {
+		parts := make([]string, 0, len(values))
+		for _, v := range values {
+			if !v.Valid {
+				parts = append(parts, "NULL")
+				continue
+			}
+			parts = append(parts, v.String)
+		}
+		return strings.Join(parts, "/")
+	}
+	if id, err := idFromKey(key); err == nil {
+		return describeID(id)
+	}
+	if len(key) > 24 {
+		return key[:24] + "…"
+	}
+	return key
+}
+
 // Digest hashes a row's cells.
 //
 // Each cell is written with its length in front, so two rows whose cells run
