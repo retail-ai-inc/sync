@@ -90,6 +90,10 @@ type Result struct {
 	Sample []Difference
 	// Truncated says the sample is not the whole story.
 	Truncated bool
+	// Repaired and RepairFailed count what a repair pass managed. They are zero
+	// when the comparison was only asked to look.
+	Repaired     int64
+	RepairFailed int64
 }
 
 // Identical reports whether the two sides agree about every row.
@@ -115,6 +119,17 @@ func (r Result) Summary() string {
 // Both sides are read in key order and merged, so the whole of neither has to
 // be held in memory: at any moment it holds one chunk from each.
 func Compare(ctx context.Context, source, target Side, chunkSize int) (Result, error) {
+	return CompareAndRepair(ctx, source, target, chunkSize, nil)
+}
+
+// CompareAndRepair walks both sides and hands each difference to fix as it is
+// found.
+//
+// Repairing from the reported sample instead would only ever fix the first
+// hundred: a table a thousand rows apart needed ten passes to converge, and
+// nothing said how far along it was. Fixing during the walk repairs everything
+// in one pass, and the counts say what happened.
+func CompareAndRepair(ctx context.Context, source, target Side, chunkSize int, fix func(Difference) error) (Result, error) {
 	if chunkSize <= 0 {
 		chunkSize = DefaultChunkSize
 	}
@@ -142,21 +157,7 @@ func Compare(ctx context.Context, source, target Side, chunkSize int) (Result, e
 		return nil
 	}
 
-	record := func(key string, kind Kind) {
-		switch kind {
-		case Missing:
-			result.Missing++
-		case Extra:
-			result.Extra++
-		case Differing:
-			result.Differing++
-		}
-		if len(result.Sample) < DefaultReportLimit {
-			result.Sample = append(result.Sample, Difference{Key: key, Kind: kind})
-			return
-		}
-		result.Truncated = true
-	}
+	record := result.recorder(fix)
 
 	for {
 		if err := fill(source, &sourceChunk, &sourceAfter, &sourceDone); err != nil {
@@ -448,26 +449,18 @@ type End interface {
 // This walks each side once and looks the keys up on the other, so only equality
 // of keys matters.
 func CompareByKey(ctx context.Context, source, target End, chunkSize int) (Result, error) {
+	return CompareByKeyAndRepair(ctx, source, target, chunkSize, nil)
+}
+
+// CompareByKeyAndRepair is CompareByKey with a repair applied to each difference
+// as it is found.
+func CompareByKeyAndRepair(ctx context.Context, source, target End, chunkSize int, fix func(Difference) error) (Result, error) {
 	if chunkSize <= 0 {
 		chunkSize = DefaultChunkSize
 	}
 
 	var result Result
-	record := func(key string, kind Kind) {
-		switch kind {
-		case Missing:
-			result.Missing++
-		case Extra:
-			result.Extra++
-		case Differing:
-			result.Differing++
-		}
-		if len(result.Sample) < DefaultReportLimit {
-			result.Sample = append(result.Sample, Difference{Key: key, Kind: kind})
-			return
-		}
-		result.Truncated = true
-	}
+	record := result.recorder(fix)
 
 	// Walk the source: anything the target does not have is missing, anything it
 	// has with a different digest is differing.
@@ -529,4 +522,41 @@ func CompareByKey(ctx context.Context, source, target End, chunkSize int) (Resul
 
 	SortDifferences(result.Sample)
 	return result, nil
+}
+
+// recorder returns the function a comparison calls for each difference it finds.
+//
+// It counts every difference, keeps the first DefaultReportLimit of them for the
+// report, and — when a repair was asked for — fixes each one as it is found
+// rather than from the capped sample afterwards.
+func (r *Result) recorder(fix func(Difference) error) func(string, Kind) {
+	return func(key string, kind Kind) {
+		switch kind {
+		case Missing:
+			r.Missing++
+		case Extra:
+			r.Extra++
+		case Differing:
+			r.Differing++
+		}
+
+		difference := Difference{Key: key, Kind: kind}
+		if len(r.Sample) < DefaultReportLimit {
+			r.Sample = append(r.Sample, difference)
+		} else {
+			r.Truncated = true
+		}
+
+		if fix == nil {
+			return
+		}
+		// A repair that fails is counted and the walk carries on: stopping at
+		// the first failure would leave the rest of the table wrong for the sake
+		// of one row.
+		if err := fix(difference); err != nil {
+			r.RepairFailed++
+			return
+		}
+		r.Repaired++
+	}
 }

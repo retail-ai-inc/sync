@@ -125,6 +125,10 @@ func report(ctx context.Context, n notifier, log *logrus.Logger, task config.Syn
 		log.Infof("[Verify] %s: %s", name, result.Summary())
 		return
 	}
+	if result.Repaired > 0 || result.RepairFailed > 0 {
+		log.Warnf("[Verify] %s: repaired %d of %d differences, %d could not be fixed",
+			name, result.Repaired, result.Total(), result.RepairFailed)
+	}
 
 	message := fmt.Sprintf("⚠️ The replica does not match the source\n\nTask: %d\nTable: %s\n"+
 		"Source: %s\nTarget: %s\n\n%s\n\nFirst differences: %s",
@@ -198,24 +202,29 @@ func checkSQLTask(ctx context.Context, task config.SyncConfig, n notifier, log *
 		sourceSide := &verify.SQLSide{DB: source, Schema: sourceDB, Table: pair.source, Key: key, Columns: columns}
 		targetSide := &verify.SQLSide{DB: target, Schema: targetDB, Table: pair.target, Key: key, Columns: columns}
 
-		result, err := verify.Compare(ctx, sourceSide, targetSide, 0)
+		// Repairing during the walk rather than from the reported sample
+		// afterwards: the sample is capped, so a table a thousand rows apart
+		// used to need ten passes to converge with nothing saying how far along
+		// it was.
+		var fix func(verify.Difference) error
+		if repairEnabled() {
+			repairer := &verify.SQLRepairer{Source: sourceSide, Target: targetSide, Upsert: mysqlUpsert}
+			fix = func(d verify.Difference) error {
+				_, err := repairer.Repair(ctx, []verify.Difference{d})
+				if err != nil {
+					log.Errorf("[Verify] Task %d: could not repair %s of %s: %v",
+						task.ID, d.Key, pair.source, err)
+				}
+				return err
+			}
+		}
+
+		result, err := verify.CompareAndRepair(ctx, sourceSide, targetSide, 0, fix)
 		if err != nil {
 			log.Errorf("[Verify] Task %d: comparing %s: %v", task.ID, pair.source, err)
 			continue
 		}
 		report(ctx, n, log, task, pair.source, result)
-
-		if result.Identical() || !repairEnabled() {
-			continue
-		}
-		repairer := &verify.SQLRepairer{Source: sourceSide, Target: targetSide, Upsert: mysqlUpsert}
-		fixed, err := repairer.Repair(ctx, result.Sample)
-		if err != nil {
-			log.Errorf("[Verify] Task %d: repairing %s stopped after %d rows: %v",
-				task.ID, pair.source, fixed, err)
-			continue
-		}
-		log.Warnf("[Verify] Task %d: repaired %d rows of %s", task.ID, fixed, pair.source)
 	}
 }
 
@@ -331,25 +340,26 @@ func checkMongoTask(ctx context.Context, task config.SyncConfig, n notifier, log
 		sourceColl := sourceDB.Collection(pair.source)
 		targetColl := targetDB.Collection(pair.target)
 
-		result, err := verify.CompareByKey(ctx,
-			&verify.MongoEnd{Coll: sourceColl}, &verify.MongoEnd{Coll: targetColl}, 0)
+		var fix func(verify.Difference) error
+		if repairEnabled() {
+			repairer := &verify.MongoRepairer{Source: sourceColl, Target: targetColl}
+			fix = func(d verify.Difference) error {
+				_, err := repairer.Repair(ctx, []verify.Difference{d})
+				if err != nil {
+					log.Errorf("[Verify] Task %d: could not repair %s of %s: %v",
+						task.ID, d.Key, pair.source, err)
+				}
+				return err
+			}
+		}
+
+		result, err := verify.CompareByKeyAndRepair(ctx,
+			&verify.MongoEnd{Coll: sourceColl}, &verify.MongoEnd{Coll: targetColl}, 0, fix)
 		if err != nil {
 			log.Errorf("[Verify] Task %d: comparing %s: %v", task.ID, pair.source, err)
 			continue
 		}
 		report(ctx, n, log, task, pair.source, result)
-
-		if result.Identical() || !repairEnabled() {
-			continue
-		}
-		repairer := &verify.MongoRepairer{Source: sourceColl, Target: targetColl}
-		fixed, err := repairer.Repair(ctx, result.Sample)
-		if err != nil {
-			log.Errorf("[Verify] Task %d: repairing %s stopped after %d documents: %v",
-				task.ID, pair.source, fixed, err)
-			continue
-		}
-		log.Warnf("[Verify] Task %d: repaired %d documents of %s", task.ID, fixed, pair.source)
 	}
 }
 

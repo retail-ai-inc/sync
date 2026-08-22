@@ -734,3 +734,100 @@ func TestAnUnreadableKeyIsReported(t *testing.T) {
 		}
 	}
 }
+
+// ------------------------------------------------------- repair as it walks
+
+// TestEveryDifferenceIsRepairedNotJustTheSampled is the fix. Repairing from the
+// reported sample only ever fixed the first hundred, so a table a thousand rows
+// apart needed ten passes to converge and nothing said how far along it was.
+func TestEveryDifferenceIsRepairedNotJustTheSampled(t *testing.T) {
+	const differences = DefaultReportLimit + 50
+	pairs := make([][2]string, 0, differences)
+	for i := 0; i < differences; i++ {
+		pairs = append(pairs, [2]string{fmt.Sprintf("%05d", i), "a"})
+	}
+	source := &memorySide{name: "source", rows: rowsOf(pairs...)}
+
+	var fixed []string
+	result, err := CompareAndRepair(context.Background(), source, &memorySide{name: "target"}, 0,
+		func(d Difference) error {
+			fixed = append(fixed, d.Key)
+			return nil
+		})
+	if err != nil {
+		t.Fatalf("CompareAndRepair: %v", err)
+	}
+
+	if len(fixed) != differences {
+		t.Errorf("repaired %d of %d differences", len(fixed), differences)
+	}
+	if result.Repaired != int64(differences) {
+		t.Errorf("Repaired = %d, want %d", result.Repaired, differences)
+	}
+	// The report is still capped, because a hundred lines is what somebody can
+	// read.
+	if len(result.Sample) != DefaultReportLimit || !result.Truncated {
+		t.Errorf("sample holds %d, truncated=%v", len(result.Sample), result.Truncated)
+	}
+}
+
+// TestARepairFailureDoesNotStopTheRest matters because stopping at the first
+// failure would leave the rest of the table wrong for the sake of one row.
+func TestARepairFailureDoesNotStopTheRest(t *testing.T) {
+	source := &memorySide{name: "source", rows: rowsOf(
+		[2]string{"1", "a"}, [2]string{"2", "a"}, [2]string{"3", "a"})}
+
+	attempted := 0
+	result, err := CompareAndRepair(context.Background(), source, &memorySide{name: "target"}, 0,
+		func(d Difference) error {
+			attempted++
+			if d.Key == "2" {
+				return errors.New("read only replica")
+			}
+			return nil
+		})
+	if err != nil {
+		t.Fatalf("CompareAndRepair: %v", err)
+	}
+
+	if attempted != 3 {
+		t.Errorf("%d repairs were attempted, want all three", attempted)
+	}
+	if result.Repaired != 2 || result.RepairFailed != 1 {
+		t.Errorf("repaired %d, failed %d", result.Repaired, result.RepairFailed)
+	}
+}
+
+// TestComparingWithoutRepairingChangesNothing keeps the read-only case honest:
+// the counts stay zero so a report cannot claim a repair that never ran.
+func TestComparingWithoutRepairingChangesNothing(t *testing.T) {
+	source := table(t, "source", [2]string{"1", "a"})
+	target := table(t, "target")
+
+	got := compare(t, source, target, 0)
+
+	if got.Repaired != 0 || got.RepairFailed != 0 {
+		t.Errorf("repaired %d, failed %d for a comparison that was only asked to look",
+			got.Repaired, got.RepairFailed)
+	}
+}
+
+// TestTheOrderingFreeWalkRepairsToo covers the MongoDB path, which uses the
+// other comparison.
+func TestTheOrderingFreeWalkRepairsToo(t *testing.T) {
+	source := &memoryEnd{name: "source", rows: rowsOf(
+		[2]string{"a", "1"}, [2]string{"b", "1"})}
+
+	var fixed []string
+	result, err := CompareByKeyAndRepair(context.Background(), source, &memoryEnd{name: "target"}, 0,
+		func(d Difference) error {
+			fixed = append(fixed, d.Key)
+			return nil
+		})
+	if err != nil {
+		t.Fatalf("CompareByKeyAndRepair: %v", err)
+	}
+	if len(fixed) != 2 || result.Repaired != 2 {
+		t.Errorf("repaired %v (%d)", fixed, result.Repaired)
+	}
+}
