@@ -364,3 +364,19 @@ const (
 	// HelpBufferBytes describes it for a scrape.
 	HelpBufferBytes = "Bytes of change data on local disk waiting to be applied to the target"
 )
+
+// Dead letter metrics. An operation that could not be applied to the target and
+// was set aside is a hole in the replica. It used to exist only as a file on the
+// syncer's local disk, so nobody found out about it until a comparison ran or a
+// switchover went wrong.
+const (
+	// DeadLettered is how many operations are waiting in the dead letter queue.
+	DeadLettered = "sync_dead_lettered_operations"
+
+	helpDeadLettered = "Operations that could not be applied to the target and are held for retry"
+)
+
+// SetDeadLettered records how much this task could not apply.
+func SetDeadLettered(labels Labels, count float64) {
+	Default.SetGauge(DeadLettered, helpDeadLettered, labels, count)
+}

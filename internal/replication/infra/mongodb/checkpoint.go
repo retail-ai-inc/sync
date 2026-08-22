@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 
 	"github.com/retail-ai-inc/sync/internal/replication/infra/checkpoint"
 	"go.mongodb.org/mongo-driver/bson"
@@ -160,5 +161,5 @@ func (s *MongoDBSyncer) snapshotDone(db, coll string) bool {
 // getResumeTokenPath names the file one collection's resume token used to live
 // in. It is kept because the buffer directory is derived from the same setting.
 func (s *MongoDBSyncer) getResumeTokenPath(db, coll string) string {
-	return fmt.Sprintf("%s/%s_%s.json", s.cfg.MongoDBResumeTokenPath, db, coll)
+	return filepath.Join(s.cfg.MongoDBResumeTokenPath, collectionKey(db, coll)+".json")
 }

@@ -38,6 +38,12 @@ type DeadLetterBatch struct {
 	SourceColl    string            `json:"source_coll"`
 }
 
+// deadLetterPath names the directory holding one collection's dead letters.
+func (s *MongoDBSyncer) deadLetterPath(db, coll string) string {
+	adoptOldName(s.deadLetterDir, db, coll)
+	return filepath.Join(s.deadLetterDir, collectionKey(db, coll))
+}
+
 // storeToDeadLetterQueue stores failed operations to dead letter queue
 func (s *MongoDBSyncer) storeToDeadLetterQueue(failedModels []mongo.WriteModel, failedErrors []mongo.BulkWriteError, totalOps, successfulOps int, sourceDB, collectionName string) error {
 	if !s.enableDeadLetterQueue {
@@ -45,18 +51,24 @@ func (s *MongoDBSyncer) storeToDeadLetterQueue(failedModels []mongo.WriteModel, 
 	}
 
 	// Create dead letter directory for this collection
-	collectionDir := filepath.Join(s.deadLetterDir, fmt.Sprintf("%s_%s", sourceDB, collectionName))
+	collectionDir := s.deadLetterPath(sourceDB, collectionName)
 	if err := os.MkdirAll(collectionDir, os.ModePerm); err != nil {
 		return fmt.Errorf("failed to create dead letter collection directory: %w", err)
 	}
 
 	// Convert failed operations to serializable format
 	var failedOps []FailedOperation
+	var unrecorded int
 	for i, model := range failedModels {
 		// Serialize WriteModel to JSON
 		modelBytes, err := s.serializeWriteModel(model)
 		if err != nil {
-			s.logger.Warnf("[MongoDB] Failed to serialize WriteModel: %v", err)
+			// The change cannot be written down, so it cannot be retried later
+			// either. Skipping it quietly left a batch file that looked complete
+			// while holding fewer operations than had failed.
+			s.logger.Errorf("[MongoDB] A change to %s.%s could not be applied and "+
+				"could not be recorded for retry either: %v", sourceDB, collectionName, err)
+			unrecorded++
 			continue
 		}
 
@@ -85,6 +97,11 @@ func (s *MongoDBSyncer) storeToDeadLetterQueue(failedModels []mongo.WriteModel, 
 		}
 
 		failedOps = append(failedOps, failedOp)
+	}
+
+	if unrecorded > 0 {
+		return fmt.Errorf("%d of %d failed changes to %s.%s could not be written "+
+			"down for retry", unrecorded, len(failedModels), sourceDB, collectionName)
 	}
 
 	// Create dead letter batch
@@ -140,7 +157,7 @@ func (s *MongoDBSyncer) storeToDeadLetterQueue(failedModels []mongo.WriteModel, 
 
 // processDeadLetterQueue processes failed operations from dead letter queue
 func (s *MongoDBSyncer) processDeadLetterQueue(ctx context.Context, sourceDB, collectionName, targetDBName, targetCollectionName string) {
-	collectionDir := filepath.Join(s.deadLetterDir, fmt.Sprintf("%s_%s", sourceDB, collectionName))
+	collectionDir := s.deadLetterPath(sourceDB, collectionName)
 
 	if _, err := os.Stat(collectionDir); os.IsNotExist(err) {
 		return // No dead letter queue for this collection
@@ -208,8 +225,19 @@ func (s *MongoDBSyncer) processDeadLetterBatch(ctx context.Context, filePath str
 
 	s.logger.Infof("[MongoDB] Retrying %d operations from dead letter batch %s", len(operationsToRetry), batch.BatchID)
 
-	// Convert back to WriteModels and retry
-	var retryModels []mongo.WriteModel
+	// Convert back to WriteModels and retry.
+	//
+	// The model and the operation it came from are carried together. They used to
+	// be two slices walked with one index, and the model slice skipped whatever
+	// would not deserialise and whatever came back nil — so from the first skip
+	// onward the retry count went on the wrong operation and the wrong one was
+	// recorded as still failing.
+	type attempt struct {
+		op    FailedOperation
+		model mongo.WriteModel
+	}
+
+	var attempts []attempt
 	var stillFailedOps []FailedOperation
 
 	for _, op := range operationsToRetry {
@@ -222,26 +250,26 @@ func (s *MongoDBSyncer) processDeadLetterBatch(ctx context.Context, filePath str
 		}
 
 		// Skip nil models (e.g., when delete operations are ignored)
-		if writeModel != nil {
-			retryModels = append(retryModels, writeModel)
+		if writeModel == nil {
+			continue
 		}
+		attempts = append(attempts, attempt{op: op, model: writeModel})
 	}
 
 	// Execute retry operations
 	successCount := 0
-	for i, model := range retryModels {
-		err := s.executeIndividualOperation(ctx, targetColl, model)
-		if err != nil {
+	for _, a := range attempts {
+		if err := s.executeIndividualOperation(ctx, targetColl, a.model); err != nil {
 			// Increment retry count and keep in failed list
-			operationsToRetry[i].RetryCount++
-			operationsToRetry[i].Error = err.Error()
-			stillFailedOps = append(stillFailedOps, operationsToRetry[i])
+			a.op.RetryCount++
+			a.op.Error = err.Error()
+			stillFailedOps = append(stillFailedOps, a.op)
 			s.logger.Warnf("[MongoDB] Retry failed for operation %s (attempt %d/%d): %v",
-				operationsToRetry[i].ID, operationsToRetry[i].RetryCount, s.maxRetryAttempts, err)
-		} else {
-			successCount++
-			s.logger.Debugf("[MongoDB] Retry succeeded for operation %s", operationsToRetry[i].ID)
+				a.op.ID, a.op.RetryCount, s.maxRetryAttempts, err)
+			continue
 		}
+		successCount++
+		s.logger.Debugf("[MongoDB] Retry succeeded for operation %s", a.op.ID)
 	}
 
 	// Update the batch with remaining failed operations
@@ -276,7 +304,7 @@ func (s *MongoDBSyncer) processDeadLetterBatch(ctx context.Context, filePath str
 
 // getDeadLetterQueueStats returns statistics about the dead letter queue
 func (s *MongoDBSyncer) getDeadLetterQueueStats(sourceDB, collectionName string) (int, int, error) {
-	collectionDir := filepath.Join(s.deadLetterDir, fmt.Sprintf("%s_%s", sourceDB, collectionName))
+	collectionDir := s.deadLetterPath(sourceDB, collectionName)
 
 	if _, err := os.Stat(collectionDir); os.IsNotExist(err) {
 		return 0, 0, nil

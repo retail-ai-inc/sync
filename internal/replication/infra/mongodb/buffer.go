@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -272,7 +273,7 @@ func (s *MongoDBSyncer) processPersistentBuffer(ctx context.Context, sourceDB, c
 		case <-optimizationTicker.C:
 			// Periodically analyze buffer and optimize batch size
 			bufferPath := s.getBufferPath(sourceDB, collectionName)
-			s.estimateOptimalBatchSize(bufferPath)
+			s.reportBatchSizeFit(bufferPath)
 		case <-deadLetterTicker.C:
 			// Periodically retry dead letter queue
 			if s.enableDeadLetterQueue {
@@ -310,7 +311,7 @@ func (s *MongoDBSyncer) processBufferedChanges(ctx context.Context, sourceDB, co
 
 	var processedFiles []string
 	var allWriteModels []mongo.WriteModel
-	var writeSuccess = true
+	var parsedEverySelectedFile = true
 	var newestEvent time.Time
 	var lastToken bson.Raw
 
@@ -320,7 +321,18 @@ func (s *MongoDBSyncer) processBufferedChanges(ctx context.Context, sourceDB, co
 		batchID, len(selectedFiles))
 
 	// Use parallel parsing for better performance
-	allWriteModels, processedFiles, writeSuccess, newestEvent, lastToken = s.parseFilesParallel(ctx, selectedFiles, sourceDB, collectionName, batchID)
+	allWriteModels, processedFiles, parsedEverySelectedFile, newestEvent, lastToken = s.parseFilesParallel(ctx, selectedFiles, sourceDB, collectionName, batchID)
+
+	// A file that cannot be parsed used to stop the whole batch: nothing was
+	// written, nothing was cleaned up, and the collection retried the same
+	// unreadable file for as long as the process ran. The files before it are
+	// perfectly good and are applied; the batch simply stops there.
+	if !parsedEverySelectedFile {
+		s.logger.Errorf("[MongoDB] [BatchID:%s] A buffered file for %s.%s could not be "+
+			"read. The %d file(s) before it are being applied; replication for this "+
+			"collection cannot pass the unreadable one until somebody looks at %s.",
+			batchID, sourceDB, collectionName, len(processedFiles), bufferPath)
+	}
 
 	step2Duration := time.Since(step2StartTime)
 	avgParseTime := time.Duration(0)
@@ -336,8 +348,9 @@ func (s *MongoDBSyncer) processBufferedChanges(ctx context.Context, sourceDB, co
 		batchID, len(allWriteModels), estimatedMemoryMB)
 
 	// === STEP 4: Database Write ===
+	writeSuccess := true
 	var step4Duration time.Duration
-	if writeSuccess && len(allWriteModels) > 0 {
+	if len(allWriteModels) > 0 {
 		step4StartTime := time.Now()
 		s.logger.Debugf("[MongoDB] [BatchID:%s] Starting database bulk write - %d operations to %s.%s",
 			batchID, len(allWriteModels), targetDBName, targetCollectionName)
@@ -407,7 +420,7 @@ func (s *MongoDBSyncer) processBufferedChanges(ctx context.Context, sourceDB, co
 		s.logger.Debugf("[MongoDB] [BatchID:%s] Remaining files: %d", batchID, remainingFiles)
 	} else {
 		s.logger.Errorf("[MongoDB] [BatchID:%s] Batch failed - keeping %d files for retry (total time: %v)",
-			batchID, len(selectedFiles), totalDuration)
+			batchID, len(processedFiles), totalDuration)
 	}
 
 }
@@ -583,6 +596,12 @@ func (s *MongoDBSyncer) parseFileWithTiming(ctx context.Context, filePath string
 	bufferSize := 100 * 1024 * 1024 // 100MB
 	scanner.Buffer(make([]byte, bufferSize), bufferSize)
 	// Set the scanner to use our custom split function.
+	// torn says the file ends with an event that has no separator after it,
+	// which is what a process killed between writing an event and writing its
+	// terminator leaves behind. Such an event was never finished, so an
+	// unreadable one at the end of the file is expected; anywhere else it is
+	// corruption and has to be reported rather than skipped.
+	torn := false
 	scanner.Split(func(data []byte, atEOF bool) (advance int, token []byte, err error) {
 		if atEOF && len(data) == 0 {
 			return 0, nil, nil
@@ -593,6 +612,7 @@ func (s *MongoDBSyncer) parseFileWithTiming(ctx context.Context, filePath string
 		}
 		// If we're at EOF, we have a final, non-terminated event. Return it.
 		if atEOF {
+			torn = true
 			return len(data), data, nil
 		}
 		// Request more data.
@@ -604,9 +624,29 @@ func (s *MongoDBSyncer) parseFileWithTiming(ctx context.Context, filePath string
 	var lastToken bson.Raw
 
 	for scanner.Scan() {
+		// A cancelled batch used to read the file to the end regardless — up to
+		// a hundred megabytes of it — before noticing.
+		if err := ctx.Err(); err != nil {
+			return nil, time.Time{}, nil, err
+		}
+
 		eventData := scanner.Bytes()
 		if len(eventData) == 0 {
 			continue
+		}
+
+		model, err := s.convertRawBSONToWriteModel(eventData, sourceDB, collectionName)
+		if err != nil {
+			if torn && scanner.Err() == nil && isLastToken(file) {
+				// The tail of a file the writer never finished. Whatever was
+				// half-written was not acknowledged upstream either, so the
+				// stream will send it again.
+				s.logger.Warnf("[MongoDB] %s ends with an event that was never "+
+					"finished being written; it will arrive again from the stream: %v",
+					filepath.Base(filePath), err)
+				break
+			}
+			return nil, time.Time{}, nil, fmt.Errorf("%s: %w", filepath.Base(filePath), err)
 		}
 
 		if at, ok := eventClusterTime(bson.Raw(eventData)); ok && at.After(newest) {
@@ -615,7 +655,6 @@ func (s *MongoDBSyncer) parseFileWithTiming(ctx context.Context, filePath string
 		if token, ok := eventResumeToken(bson.Raw(eventData)); ok {
 			lastToken = token
 		}
-		model := s.convertRawBSONToWriteModel(eventData, sourceDB, collectionName)
 		if model != nil {
 			writeModels = append(writeModels, model)
 		}
@@ -629,6 +668,20 @@ func (s *MongoDBSyncer) parseFileWithTiming(ctx context.Context, filePath string
 		filepath.Base(filePath), len(writeModels))
 
 	return writeModels, newest, lastToken, nil
+}
+
+// isLastToken reports whether the scanner has consumed the whole file, which is
+// what makes a torn event the final one rather than one in the middle.
+func isLastToken(file *os.File) bool {
+	at, err := file.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return false
+	}
+	info, err := file.Stat()
+	if err != nil {
+		return false
+	}
+	return at >= info.Size()
 }
 
 // Legacy method for backward compatibility - now deprecated
@@ -648,5 +701,6 @@ func (s *MongoDBSyncer) processFileAsStream(ctx context.Context, filePath string
 }
 
 func (s *MongoDBSyncer) getBufferPath(db, coll string) string {
-	return filepath.Join(s.bufferDir, fmt.Sprintf("%s_%s", db, coll))
+	adoptOldName(s.bufferDir, db, coll)
+	return filepath.Join(s.bufferDir, collectionKey(db, coll))
 }

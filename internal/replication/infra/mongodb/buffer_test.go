@@ -63,7 +63,7 @@ func writeBufferFiles(t *testing.T, dir string, sizes ...int) []string {
 func TestGetBufferAndResumeTokenPaths(t *testing.T) {
 	s := newBufferSyncer(t)
 
-	if got, want := s.getBufferPath("source_db", "users"), filepath.Join(s.bufferDir, "source_db_users"); got != want {
+	if got, want := s.getBufferPath("shop", "users"), filepath.Join(s.bufferDir, "shop_users"); got != want {
 		t.Errorf("getBufferPath = %q, want %q", got, want)
 	}
 	// Collections in different databases must not share a directory.
@@ -148,29 +148,6 @@ func TestBuildSmartBatch(t *testing.T) {
 	})
 }
 
-// TestBuildSmartBatchOvershootsTargetBelowMinimum records that the size limit
-// is conditional on having already selected minFilesPerBatch files. Until then
-// files are added regardless, so a batch of large files can exceed the target
-// several times over — the memory ceiling the target is meant to impose does
-// not hold for the first few files.
-func TestBuildSmartBatchOvershootsTargetBelowMinimum(t *testing.T) {
-	s := newBufferSyncer(t)
-	s.targetBatchSizeBytes = 1000
-	s.minFilesPerBatch = 5
-	dir := s.getBufferPath("db", "coll")
-	writeBufferFiles(t, dir, 900, 900, 900, 900, 900)
-
-	files, size := s.buildSmartBatch(dir)
-
-	if size <= s.targetBatchSizeBytes {
-		t.Fatalf("batch is %d bytes, within the %d target; the minimum-count "+
-			"exemption may have been removed, so assert that instead", size, s.targetBatchSizeBytes)
-	}
-	if len(files) != 5 || size != 4500 {
-		t.Errorf("got %d files / %d bytes, want 5 / 4500 (4.5x the target)", len(files), size)
-	}
-}
-
 func TestCalculateAverageFileSize(t *testing.T) {
 	s := newBufferSyncer(t)
 	dir := s.getBufferPath("db", "coll")
@@ -185,38 +162,61 @@ func TestCalculateAverageFileSize(t *testing.T) {
 	}
 }
 
-// TestEstimateOptimalBatchSizeChangesNothing records that the batch controller
-// does not adapt. estimateOptimalBatchSize is called on a five-minute ticker
-// and computes how many files would fit the target, but only logs the result —
-// it never assigns to any field. updateBatchSizeConfig, which would apply such
-// a change, has no callers at all. The batching parameters are therefore fixed
-// constants set in the constructor.
-func TestEstimateOptimalBatchSizeChangesNothing(t *testing.T) {
+// TestTheBatchLimitsAreFixedAndSaidToBe covers what used to be called adaptive
+// batching. estimateOptimalBatchSize ran on a five-minute ticker and worked out
+// how many files would fit the target — and then only logged it. The pair of
+// functions that would have applied such a change had no callers at all, so the
+// limits were the constants the constructor sets and always had been. The
+// reporting is kept, under a name that says what it does; changing the limits
+// from there would race with the batch builder, which reads them without a lock.
+func TestTheBatchLimitsAreFixedAndSaidToBe(t *testing.T) {
 	s := newBufferSyncer(t)
 	dir := s.getBufferPath("db", "coll")
 	// Files far larger than the target, the case that would demand a change.
 	s.targetBatchSizeBytes = 1000
 	writeBufferFiles(t, dir, 5000, 5000)
 
-	beforeTarget, beforeMax, beforeMin := s.getBatchSizeConfig()
-	s.estimateOptimalBatchSize(dir)
-	afterTarget, afterMax, afterMin := s.getBatchSizeConfig()
+	before := [3]int64{s.targetBatchSizeBytes, int64(s.maxFilesPerBatch), int64(s.minFilesPerBatch)}
+	s.reportBatchSizeFit(dir)
+	after := [3]int64{s.targetBatchSizeBytes, int64(s.maxFilesPerBatch), int64(s.minFilesPerBatch)}
 
-	if beforeTarget != afterTarget || beforeMax != afterMax || beforeMin != afterMin {
-		t.Errorf("the configuration changed from %d/%d/%d to %d/%d/%d; adaptive "+
-			"batching may have been implemented, so assert the new behaviour instead",
-			beforeTarget, beforeMax, beforeMin, afterTarget, afterMax, afterMin)
+	if before != after {
+		t.Errorf("the limits changed from %v to %v; the report is not meant to "+
+			"apply anything", before, after)
 	}
 }
 
-func TestUpdateBatchSizeConfig(t *testing.T) {
-	// The setter works; nothing in the codebase calls it.
+// TestABatchStopsAtItsSizeLimit covers the limit that exists to bound memory.
+// It used to apply only once minFilesPerBatch files had been picked, so the
+// first five went in whatever their size — which is exactly the case it is there
+// for. A batch of five 256 MB files reached four and a half times the target.
+func TestABatchStopsAtItsSizeLimit(t *testing.T) {
 	s := newBufferSyncer(t)
-	s.updateBatchSizeConfig(512*1024*1024, 2000, 10)
+	dir := s.getBufferPath("db", "coll")
+	s.targetBatchSizeBytes = 1000
+	s.minFilesPerBatch = 5
+	writeBufferFiles(t, dir, 800, 800, 800, 800, 800)
 
-	target, max, min := s.getBatchSizeConfig()
-	if target != 512*1024*1024 || max != 2000 || min != 10 {
-		t.Errorf("config = %d/%d/%d, want 536870912/2000/10", target, max, min)
+	files, size := s.buildSmartBatch(dir)
+
+	if len(files) != 1 {
+		t.Errorf("batch holds %d files, want the one that fits", len(files))
+	}
+	if size > s.targetBatchSizeBytes {
+		t.Errorf("batch is %d bytes against a target of %d", size, s.targetBatchSizeBytes)
+	}
+}
+
+// TestASingleOversizedFileIsStillTaken is the other side: refusing a file bigger
+// than the whole target would stop the buffer draining at all.
+func TestASingleOversizedFileIsStillTaken(t *testing.T) {
+	s := newBufferSyncer(t)
+	dir := s.getBufferPath("db", "coll")
+	s.targetBatchSizeBytes = 1000
+	writeBufferFiles(t, dir, 5000)
+
+	if files, _ := s.buildSmartBatch(dir); len(files) != 1 {
+		t.Errorf("batch holds %d files, want the oversized one", len(files))
 	}
 }
 
@@ -369,25 +369,40 @@ func TestIsRecoverableError(t *testing.T) {
 	}
 }
 
-// TestIsRecoverableErrorMissesDriverPhrasings records the fragility of matching
-// on message text: several errors the driver really emits during a primary
-// election or a network blip are not in the list, so the guardian treats them
-// as fatal and gives up on the stream instead of retrying.
-func TestIsRecoverableErrorMissesDriverPhrasings(t *testing.T) {
-	missed := []string{
+// TestWhatTheDriverSaysDuringAnElectionIsRecoverable covers the moments this
+// tool exists to survive. These are what the driver really emits while a replica
+// set elects a new primary or a managed instance restarts, and none of them was
+// in the list — so the guardian read them as fatal and gave up on the change
+// stream instead of reconnecting to it.
+func TestWhatTheDriverSaysDuringAnElectionIsRecoverable(t *testing.T) {
+	for _, msg := range []string{
 		"connection() error occurred during connection handshake",
 		"socket was unexpectedly closed",
 		"client is disconnected",
 		"context deadline exceeded",
 		"EOF",
-	}
-
-	for _, msg := range missed {
+		"server selection error: context deadline exceeded",
+		"(NotWritablePrimary) not primary",
+		"(NotPrimaryOrSecondary) node is recovering",
+		"(ShutdownInProgress) shutdown in progress",
+	} {
 		t.Run(msg, func(t *testing.T) {
-			if isRecoverableError(errors.New(msg)) {
-				t.Skipf("%q is now recognised as recoverable, which is an improvement", msg)
+			if !isRecoverableError(errors.New(msg)) {
+				t.Errorf("isRecoverableError(%q) = false, want true", msg)
 			}
 		})
+	}
+}
+
+// TestShuttingDownIsNotAFailureToRecoverFrom is the other side: a cancelled
+// context is this process stopping, and retrying through it is how a task asked
+// to stop went on reading from a source it had been told to let go of.
+func TestShuttingDownIsNotAFailureToRecoverFrom(t *testing.T) {
+	if isRecoverableError(context.Canceled) {
+		t.Error("isRecoverableError(context.Canceled) = true, want false")
+	}
+	if isRecoverableError(fmt.Errorf("watch orders: %w", context.Canceled)) {
+		t.Error("a wrapped cancellation was read as recoverable")
 	}
 }
 
@@ -444,21 +459,57 @@ func TestDeadLetterQueueStatsOnEmptyDirectory(t *testing.T) {
 	}
 }
 
-// TestBufferPathsCollideOnUnderscore records that the database and collection
-// names are joined with an underscore and neither is escaped, so distinct pairs
-// can map to one directory and one resume token file. Two tasks sharing a state
-// directory — the natural way to configure them — would then interleave their
-// buffered events and overwrite each other's resume token.
-func TestBufferPathsCollideOnUnderscore(t *testing.T) {
+// TestTwoCollectionsCannotShareOneBuffer covers the state directory several
+// tasks are naturally pointed at. The database and the collection used to be
+// joined with an underscore and neither was escaped, so "daily" of "shop_orders"
+// and "orders_daily" of "shop" produced the same name — one buffer directory
+// holding both streams' events interleaved, and one resume token file each
+// overwriting the other's.
+func TestTwoCollectionsCannotShareOneBuffer(t *testing.T) {
 	s := newBufferSyncer(t)
 	s.cfg = config.SyncConfig{MongoDBResumeTokenPath: t.TempDir()}
 
-	if a, b := s.getBufferPath("shop_orders", "daily"), s.getBufferPath("shop", "orders_daily"); a != b {
-		t.Fatalf("the two pairs now map to %q and %q; the names may have been "+
-			"escaped, which would be an improvement", a, b)
+	if a, b := s.getBufferPath("shop_orders", "daily"), s.getBufferPath("shop", "orders_daily"); a == b {
+		t.Errorf("both pairs map to the buffer directory %q", a)
 	}
-	if a, b := s.getResumeTokenPath("shop_orders", "daily"), s.getResumeTokenPath("shop", "orders_daily"); a != b {
-		t.Errorf("resume token paths %q and %q no longer collide", a, b)
+	if a, b := s.getResumeTokenPath("shop_orders", "daily"), s.getResumeTokenPath("shop", "orders_daily"); a == b {
+		t.Errorf("both pairs map to the resume token file %q", a)
+	}
+	if a, b := s.deadLetterPath("shop_orders", "daily"), s.deadLetterPath("shop", "orders_daily"); a == b {
+		t.Errorf("both pairs map to the dead letter directory %q", a)
+	}
+}
+
+// TestNothingInANameEscapesTheStateDirectory covers what a database or
+// collection name is allowed to do to a path.
+func TestNothingInANameEscapesTheStateDirectory(t *testing.T) {
+	s := newBufferSyncer(t)
+
+	for _, name := range []string{"../escaped", "a/b", "."} {
+		got := s.getBufferPath("shop", name)
+		if filepath.Dir(got) != s.bufferDir {
+			t.Errorf("getBufferPath(%q) = %q, which is outside %q", name, got, s.bufferDir)
+		}
+	}
+}
+
+// TestStateWrittenUnderTheOldNameIsAdopted covers the upgrade. Without it the
+// syncer looks under the new name, finds nothing, and whatever was buffered sits
+// on disk until somebody notices the volume filling.
+func TestStateWrittenUnderTheOldNameIsAdopted(t *testing.T) {
+	s := newBufferSyncer(t)
+
+	old := filepath.Join(s.bufferDir, "shop_orders")
+	if err := os.MkdirAll(old, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(old, "batch_1.bsonstream"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	current := s.getBufferPath("shop", "orders")
+	if _, err := os.Stat(filepath.Join(current, "batch_1.bsonstream")); err != nil {
+		t.Errorf("the buffered file did not come across: %v", err)
 	}
 }
 

@@ -3,6 +3,7 @@ package mongodb
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -38,7 +39,10 @@ func deadClient(t *testing.T) *mongo.Client {
 func briefCtx(t *testing.T) context.Context {
 	t.Helper()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	// Long enough to read a buffer file on a loaded machine — the parser stops
+	// when its context is done — and short enough to cut the retry backoff at
+	// the first sleep.
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	t.Cleanup(cancel)
 	return ctx
 }
@@ -122,7 +126,10 @@ func TestConvertRawBSONToWriteModel(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := s.convertRawBSONToWriteModel(event(t, tc.doc), "shop", "orders")
+			got, err := s.convertRawBSONToWriteModel(event(t, tc.doc), "shop", "orders")
+			if err != nil {
+				t.Fatalf("conversion of %v: %v", tc.doc, err)
+			}
 			if got == nil {
 				t.Fatalf("conversion returned nil for %v", tc.doc)
 			}
@@ -141,12 +148,15 @@ func TestConvertRawBSONToWriteModel(t *testing.T) {
 func TestAnUpdateIsReplicatedAsAWholeDocumentReplacement(t *testing.T) {
 	s := newBufferSyncer(t)
 
-	model := s.convertRawBSONToWriteModel(event(t, bson.M{
+	model, err := s.convertRawBSONToWriteModel(event(t, bson.M{
 		"operationType":     "update",
 		"documentKey":       bson.M{"_id": "1"},
 		"fullDocument":      bson.M{"_id": "1", "name": "Grace"},
 		"updateDescription": bson.M{"updatedFields": bson.M{"name": "Grace"}},
 	}), "shop", "orders")
+	if err != nil {
+		t.Fatalf("conversion: %v", err)
+	}
 
 	replace, ok := model.(*mongo.ReplaceOneModel)
 	if !ok {
@@ -157,69 +167,89 @@ func TestAnUpdateIsReplicatedAsAWholeDocumentReplacement(t *testing.T) {
 	}
 }
 
-// TestAnUpdateWithoutFullDocumentIsSilentlyDropped records the consequence of
-// the replacement design: if the change stream was not opened with
-// fullDocument, or the document was deleted before the lookup, the event
-// produces no model at all and the change is lost with a single warning line.
-func TestAnUpdateWithoutFullDocumentIsSilentlyDropped(t *testing.T) {
+// TestAnUpdateWithoutFullDocumentIsStillApplied covers the case the replacement
+// design cannot serve: the document was deleted between the update and the
+// lookup, so the stream has nothing to attach. The event used to produce no
+// model at all and the change was lost behind one warning line, leaving the
+// target on the older revision. The change itself is in the event, so it is
+// applied from there.
+func TestAnUpdateWithoutFullDocumentIsStillApplied(t *testing.T) {
 	s := newBufferSyncer(t)
 
-	model := s.convertRawBSONToWriteModel(event(t, bson.M{
-		"operationType":     "update",
-		"documentKey":       bson.M{"_id": "1"},
-		"updateDescription": bson.M{"updatedFields": bson.M{"name": "Grace"}},
+	model, err := s.convertRawBSONToWriteModel(event(t, bson.M{
+		"operationType": "update",
+		"documentKey":   bson.M{"_id": "1"},
+		"updateDescription": bson.M{
+			"updatedFields": bson.M{"name": "Grace"},
+			"removedFields": bson.A{"nickname"},
+		},
 	}), "shop", "orders")
+	if err != nil {
+		t.Fatalf("conversion: %v", err)
+	}
 
-	if model != nil {
-		t.Fatalf("model = %T; the missing document appears to be handled now, so "+
-			"assert that instead", model)
+	update, ok := model.(*mongo.UpdateOneModel)
+	if !ok {
+		t.Fatalf("model = %T, want an update", model)
+	}
+	doc, ok := update.Update.(bson.M)
+	if !ok {
+		t.Fatalf("update = %T, want a document", update.Update)
+	}
+	if set, ok := doc["$set"].(bson.M); !ok || set["name"] != "Grace" {
+		t.Errorf("update = %v, want the changed field set", doc)
+	}
+	if unset, ok := doc["$unset"].(bson.M); !ok {
+		t.Errorf("update = %v, want the removed field unset", doc)
+	} else if _, named := unset["nickname"]; !named {
+		t.Errorf("unset = %v, want the removed field named", unset)
 	}
 }
 
-// TestAnInsertWithoutFullDocumentIsDropped records the same gap for inserts,
-// where fullDocument is always present in a real stream — so this only fires on
-// a corrupt buffer file.
-func TestAnInsertWithoutFullDocumentIsDropped(t *testing.T) {
+// TestAnEventThatCannotBeReadIsReported covers every way a buffered event can be
+// unusable. They used to be indistinguishable from "nothing to do": each logged
+// and returned nil, so a change nobody could parse left the target without it
+// while the batch was recorded as applied and the buffer file deleted.
+func TestAnEventThatCannotBeReadIsReported(t *testing.T) {
 	s := newBufferSyncer(t)
 
-	if model := s.convertRawBSONToWriteModel(event(t, bson.M{
-		"operationType": "insert",
-	}), "shop", "orders"); model != nil {
-		t.Errorf("model = %T, want none", model)
-	}
-}
-
-func TestConversionRejectsAMalformedEvent(t *testing.T) {
-	s := newBufferSyncer(t)
-
-	for _, name := range []string{"garbage", "empty", "no operationType", "unknown type"} {
+	for name, raw := range map[string]bson.Raw{
+		"garbage":                    bson.Raw("not bson at all"),
+		"empty":                      event(t, bson.M{}),
+		"no operation type":          event(t, bson.M{"fullDocument": bson.M{"_id": "1"}}),
+		"an insert with no document": event(t, bson.M{"operationType": "insert"}),
+		"a delete with no key":       event(t, bson.M{"operationType": "delete"}),
+		"an update with no key": event(t, bson.M{
+			"operationType": "update",
+			"fullDocument":  bson.M{"_id": "1"},
+		}),
+		"an update describing nothing": event(t, bson.M{
+			"operationType": "update",
+			"documentKey":   bson.M{"_id": "1"},
+		}),
+	} {
 		t.Run(name, func(t *testing.T) {
-			var raw bson.Raw
-			switch name {
-			case "garbage":
-				raw = bson.Raw("not bson at all")
-			case "empty":
-				raw = event(t, bson.M{})
-			case "no operationType":
-				raw = event(t, bson.M{"fullDocument": bson.M{"_id": "1"}})
-			case "unknown type":
-				raw = event(t, bson.M{"operationType": "invalidate"})
-			}
-			if model := s.convertRawBSONToWriteModel(raw, "shop", "orders"); model != nil {
-				t.Errorf("model = %T, want none", model)
+			model, err := s.convertRawBSONToWriteModel(raw, "shop", "orders")
+			if err == nil {
+				t.Errorf("conversion returned %v and no error", model)
 			}
 		})
 	}
 }
 
-// TestADeleteWithoutADocumentKeyIsDropped covers the guard that keeps an
-// unqualified delete out of the target.
-func TestADeleteWithoutADocumentKeyIsDropped(t *testing.T) {
+// TestACollectionLevelEventIsNotReplicated covers the events that are not row
+// changes — a drop, a rename, an invalidate. There is nothing to write for
+// them, and applying them is the decision the MySQL side makes about a
+// destructive DDL: it does not.
+func TestACollectionLevelEventIsNotReplicated(t *testing.T) {
 	s := newBufferSyncer(t)
 
-	if model := s.convertRawBSONToWriteModel(event(t, bson.M{
-		"operationType": "delete",
-	}), "shop", "orders"); model != nil {
+	model, err := s.convertRawBSONToWriteModel(
+		event(t, bson.M{"operationType": "invalidate"}), "shop", "orders")
+	if err != nil {
+		t.Fatalf("conversion: %v", err)
+	}
+	if model != nil {
 		t.Errorf("model = %T, want none", model)
 	}
 }
@@ -242,12 +272,16 @@ func TestIgnoreDeleteOpsDropsTheEvent(t *testing.T) {
 		"operationType": "delete",
 		"documentKey":   bson.M{"_id": "1"},
 	})
-	if model := s.convertRawBSONToWriteModel(deleteEvent, "shop", "orders"); model != nil {
+	model, err := s.convertRawBSONToWriteModel(deleteEvent, "shop", "orders")
+	if err != nil {
+		t.Fatalf("conversion: %v", err)
+	}
+	if model != nil {
 		t.Errorf("model = %T, want the delete ignored", model)
 	}
 	// Another collection keeps its deletes.
-	if model := s.convertRawBSONToWriteModel(deleteEvent, "shop", "customers"); model == nil {
-		t.Error("the setting leaked to a collection it does not name")
+	if model, err := s.convertRawBSONToWriteModel(deleteEvent, "shop", "customers"); err != nil || model == nil {
+		t.Errorf("the setting leaked to a collection it does not name (%v, %v)", model, err)
 	}
 }
 
@@ -344,10 +378,10 @@ func TestParseFileToWriteModelsReportsAMissingFile(t *testing.T) {
 	}
 }
 
-// TestParseFileToWriteModelsIgnoresTheContext records that the parser takes a
-// context and never consults it, so a cancelled batch keeps reading a 100 MB
-// file to the end.
-func TestParseFileToWriteModelsIgnoresTheContext(t *testing.T) {
+// TestParseFileToWriteModelsStopsWhenCancelled covers shutdown. The parser took
+// a context and never consulted it, so a cancelled batch read its file — up to a
+// hundred megabytes of it — to the end before noticing.
+func TestParseFileToWriteModelsStopsWhenCancelled(t *testing.T) {
 	s := newBufferSyncer(t)
 	path := writeStream(t, s.getBufferPath("shop", "orders"), "batch_1.bsonstream",
 		insertEvent(t, "1"))
@@ -355,12 +389,8 @@ func TestParseFileToWriteModelsIgnoresTheContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	models, err := s.parseFileToWriteModels(ctx, path, "shop", "orders")
-	if err != nil {
-		t.Fatalf("the parser appears to honour the context now: %v", err)
-	}
-	if len(models) != 1 {
-		t.Errorf("models = %d", len(models))
+	if _, err := s.parseFileToWriteModels(ctx, path, "shop", "orders"); !errors.Is(err, context.Canceled) {
+		t.Errorf("parseFileToWriteModels = %v, want the cancellation", err)
 	}
 }
 
@@ -666,14 +696,14 @@ func TestTheWrittenFileIsReadBackByTheParser(t *testing.T) {
 
 // --------------------------------------------------- buffered batch run
 
-// TestAFailedWriteWithNoDeadLetterQueueLosesTheChanges records the worst path
+// TestAFailedWriteWithNoDeadLetterQueueKeepsTheBuffer covers the worst path
 // through the writer. The bulk write to an unreachable target fails, the
-// individual-operation fallback fails too, and with the dead-letter queue
-// disabled the operations are dropped — but the fallback still returns nil
-// ("always consider successful"), so the batch counts as written and the buffer
-// file is deleted. The change is gone from both queues, and the only trace is a
-// warning line per operation.
-func TestAFailedWriteWithNoDeadLetterQueueLosesTheChanges(t *testing.T) {
+// individual-operation fallback fails too, and with the dead letter queue turned
+// off there is nowhere to park the operations. The fallback used to return nil
+// regardless — "always consider successful" — so the batch counted as written,
+// the buffer file was deleted, and the change was gone from both queues behind
+// one warning line per operation.
+func TestAFailedWriteWithNoDeadLetterQueueKeepsTheBuffer(t *testing.T) {
 	s := newBufferSyncer(t)
 	s.targetClient = deadClient(t)
 	s.enableDeadLetterQueue = false
@@ -686,18 +716,17 @@ func TestAFailedWriteWithNoDeadLetterQueueLosesTheChanges(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read buffer dir: %v", err)
 	}
-	if len(files) != 0 {
-		t.Fatalf("%d buffer files left; the failure appears to be reported now, so "+
-			"assert that instead", len(files))
+	if len(files) != 1 {
+		t.Fatalf("%d buffer files left, want the change still there to retry", len(files))
 	}
 	if _, err := os.Stat(s.deadLetterDir); err == nil {
 		t.Error("something was parked with the dead letter queue disabled")
 	}
 }
 
-// TestTheWriterNeverReportsAFailure pins the "always return success" contract
-// directly, since that is what makes the loss above possible.
-func TestTheWriterNeverReportsAFailure(t *testing.T) {
+// TestTheWriterReportsWhatItCouldNotApply pins the contract directly, since
+// "always return success" is what made the loss above possible.
+func TestTheWriterReportsWhatItCouldNotApply(t *testing.T) {
 	s := newBufferSyncer(t)
 	s.targetClient = deadClient(t)
 	s.enableDeadLetterQueue = false
@@ -706,9 +735,11 @@ func TestTheWriterNeverReportsAFailure(t *testing.T) {
 	err := s.flushWriteModels(briefCtx(t), coll,
 		[]mongo.WriteModel{mongo.NewInsertOneModel().SetDocument(bson.M{"_id": "1"})},
 		"shop", "orders")
-	if err != nil {
-		t.Fatalf("flushWriteModels reported %v; the failure appears to be "+
-			"propagated now, so assert that instead", err)
+	if err == nil {
+		t.Fatal("flushWriteModels = nil for a change the target never received")
+	}
+	if !strings.Contains(err.Error(), "dead letter queue is turned off") {
+		t.Errorf("err = %v, want it to say why there was nowhere to keep the change", err)
 	}
 }
 
@@ -734,7 +765,9 @@ func TestAFileWithNothingToApplyIsDeletedWithoutAWrite(t *testing.T) {
 	writeStream(t, dir, "batch_1.bsonstream",
 		event(t, bson.M{"operationType": "invalidate"}))
 
-	s.processBufferedChanges(briefCtx(t), "shop", "orders", "shop", "orders")
+	// Not briefCtx: the parser now stops when its context is done, and there is
+	// nothing here for the unreachable target to be asked about anyway.
+	s.processBufferedChanges(context.Background(), "shop", "orders", "shop", "orders")
 
 	files, err := os.ReadDir(dir)
 	if err != nil {
@@ -860,31 +893,18 @@ func TestTheDeadLetterQueueCanBeTurnedOff(t *testing.T) {
 	}
 }
 
-// TestAnUnserialisableModelIsSkippedNotReported records that a model the
-// serialiser does not know is logged and left out of the batch, so the
-// operation disappears with the queue reporting success.
-func TestAnUnserialisableModelIsSkippedNotReported(t *testing.T) {
+// TestAModelThatCannotBeWrittenDownIsReported covers a change that failed
+// against the target and cannot be recorded for retry either. It used to be
+// logged and left out of the batch while the call reported success, so the file
+// on disk looked complete while holding fewer operations than had failed.
+func TestAModelThatCannotBeWrittenDownIsReported(t *testing.T) {
 	s := newBufferSyncer(t)
 
 	err := s.storeToDeadLetterQueue(
 		[]mongo.WriteModel{mongo.NewUpdateManyModel().SetFilter(bson.M{}).SetUpdate(bson.M{})},
 		nil, 1, 0, "shop", "orders")
-	if err != nil {
-		t.Fatalf("storeToDeadLetterQueue: %v", err)
-	}
-
-	entries, _ := os.ReadDir(filepath.Join(s.deadLetterDir, "shop_orders"))
-	if len(entries) != 1 {
-		t.Fatalf("%d files, want the batch still written", len(entries))
-	}
-	data, _ := os.ReadFile(filepath.Join(s.deadLetterDir, "shop_orders", entries[0].Name()))
-	var batch DeadLetterBatch
-	if err := json.Unmarshal(data, &batch); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if len(batch.FailedOps) != 0 {
-		t.Errorf("%d operations recorded; the unsupported model appears to be "+
-			"handled now, so assert that instead", len(batch.FailedOps))
+	if err == nil {
+		t.Fatal("storeToDeadLetterQueue = nil for a change it could not record")
 	}
 }
 
@@ -1060,15 +1080,16 @@ func TestTheRetryLoopMisattributesFailuresAfterASkip(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 
-	// "broken" is recorded twice — once for the deserialise failure and once
-	// wrongly for the retry failure that belongs to "genuine" — and "genuine"
-	// never appears at all.
+	// One entry each: "broken" for the deserialise failure, "genuine" for its
+	// own retry failure. The model list used to skip whatever would not
+	// deserialise while the retry loop indexed the operation list with the same
+	// counter, so from the first skip onward every failure was recorded against
+	// the wrong operation — "broken" twice, "genuine" not at all.
 	counts := map[string]int{}
 	for _, op := range after.FailedOps {
 		counts[op.ID]++
 	}
-	if counts["genuine"] != 0 || counts["broken"] != 2 {
-		t.Fatalf("recorded operations = %v; the indexing appears to be fixed now, "+
-			"so assert that instead", counts)
+	if counts["genuine"] != 1 || counts["broken"] != 1 {
+		t.Fatalf("recorded operations = %v, want one entry each", counts)
 	}
 }

@@ -85,8 +85,13 @@ func (s *MongoDBSyncer) buildSmartBatch(bufferPath string) ([]string, int64) {
 
 		fileSize := info.Size()
 
-		// Check if adding this file would exceed the target size
-		if currentBatchSize+fileSize > s.targetBatchSizeBytes && len(selectedFiles) >= s.minFilesPerBatch {
+		// Check if adding this file would exceed the target size.
+		//
+		// The limit used to apply only once minFilesPerBatch files had been
+		// picked, so the first five files went in whatever their size — which is
+		// the one case the limit exists for. A single file larger than the target
+		// is still taken, because otherwise nothing would ever progress.
+		if currentBatchSize+fileSize > s.targetBatchSizeBytes && len(selectedFiles) > 0 {
 			s.logger.Debugf("[MongoDB] Stopping batch construction: adding file would exceed target size (current: %.2f MB + file: %.2f MB > target: %.2f MB)",
 				float64(currentBatchSize)/(1024*1024), float64(fileSize)/(1024*1024), float64(s.targetBatchSizeBytes)/(1024*1024))
 			break
@@ -151,29 +156,16 @@ func (s *MongoDBSyncer) calculateAverageFileSize(bufferPath string) int64 {
 	return avgSize
 }
 
-// updateBatchSizeConfig allows dynamic adjustment of batch size parameters
-func (s *MongoDBSyncer) updateBatchSizeConfig(targetSizeBytes int64, maxFiles, minFiles int) {
-	if targetSizeBytes > 0 {
-		s.targetBatchSizeBytes = targetSizeBytes
-	}
-	if maxFiles > 0 {
-		s.maxFilesPerBatch = maxFiles
-	}
-	if minFiles > 0 {
-		s.minFilesPerBatch = minFiles
-	}
-
-	s.logger.Infof("[MongoDB] Updated batch size config: target=%.2f MB, maxFiles=%d, minFiles=%d",
-		float64(s.targetBatchSizeBytes)/(1024*1024), s.maxFilesPerBatch, s.minFilesPerBatch)
-}
-
-// getBatchSizeConfig returns current batch size configuration
-func (s *MongoDBSyncer) getBatchSizeConfig() (int64, int, int) {
-	return s.targetBatchSizeBytes, s.maxFilesPerBatch, s.minFilesPerBatch
-}
-
-// estimateOptimalBatchSize estimates optimal batch size based on buffer directory statistics
-func (s *MongoDBSyncer) estimateOptimalBatchSize(bufferPath string) {
+// reportBatchSizeFit says whether the fixed batch limits suit the size of the
+// files actually arriving.
+//
+// It used to be called estimateOptimalBatchSize and to sit beside a pair of
+// functions for applying an estimate that nothing ever called, so the "smart
+// adaptive batching" the names promised amounted to a log line. The limits are
+// what the constructor sets; this is a report, and it is named as one. Changing
+// them from here would race with the batch builder, which reads them without a
+// lock.
+func (s *MongoDBSyncer) reportBatchSizeFit(bufferPath string) {
 	avgFileSize := s.calculateAverageFileSize(bufferPath)
 	if avgFileSize == 0 {
 		return

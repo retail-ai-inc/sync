@@ -5,27 +5,32 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/retail-ai-inc/sync/internal/platform/metrics"
 	"github.com/retail-ai-inc/sync/internal/platform/resilience"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
-func (s *MongoDBSyncer) convertRawBSONToWriteModel(rawData bson.Raw, sourceDB, collectionName string) mongo.WriteModel {
+// convertRawBSONToWriteModel turns one buffered change stream event into the
+// write that applies it.
+//
+// It reports three things apart: a write to make, nothing to do — an event this
+// does not replicate, or a delete the task is configured to ignore — and an
+// event it could not read. The third used to be indistinguishable from the
+// second: every failure logged and returned nil, so a change nobody could parse
+// left the target without it and the batch went on to be recorded as applied.
+func (s *MongoDBSyncer) convertRawBSONToWriteModel(rawData bson.Raw, sourceDB, collectionName string) (mongo.WriteModel, error) {
 	var event bson.M
 	if err := bson.Unmarshal(rawData, &event); err != nil {
-		s.logger.Errorf("[MongoDB] Failed to unmarshal raw BSON event: %v", err)
-		return nil
+		return nil, fmt.Errorf("read a buffered change: %w", err)
 	}
 
 	opType, _ := event["operationType"].(string)
 	if opType == "" {
-		s.logger.Warnf("[MongoDB] Operation type is missing from BSON event")
-		return nil
+		return nil, fmt.Errorf("a buffered change carries no operation type")
 	}
 
-	// This is a simplified conversion. A full implementation would need the logic from the old `convertToWriteModel`.
-	// For now, we'll just handle insert as an example.
 	switch opType {
 	case "insert":
 		// An upsert rather than an insert: the stream resumes from the cluster
@@ -34,7 +39,8 @@ func (s *MongoDBSyncer) convertRawBSONToWriteModel(rawData bson.Raw, sourceDB, c
 		// insert would fail on every one of them.
 		fullDoc, ok := event["fullDocument"]
 		if !ok {
-			return nil
+			return nil, fmt.Errorf("an insert event for %s.%s carries no document",
+				sourceDB, collectionName)
 		}
 		id := idOf(fullDoc)
 		if id == nil {
@@ -43,42 +49,93 @@ func (s *MongoDBSyncer) convertRawBSONToWriteModel(rawData bson.Raw, sourceDB, c
 			}
 		}
 		if id == nil {
-			return mongo.NewInsertOneModel().SetDocument(fullDoc)
+			return mongo.NewInsertOneModel().SetDocument(fullDoc), nil
 		}
 		return mongo.NewReplaceOneModel().
 			SetFilter(bson.M{"_id": id}).
 			SetReplacement(fullDoc).
-			SetUpsert(true)
+			SetUpsert(true), nil
+
 	case "update", "replace":
-		var docID interface{}
-		if dk, ok := event["documentKey"].(bson.M); ok {
-			docID = dk["_id"]
-		} else {
-			return nil
+		dk, ok := event["documentKey"].(bson.M)
+		if !ok {
+			return nil, fmt.Errorf("an %s event for %s.%s names no document",
+				opType, sourceDB, collectionName)
 		}
+		docID := dk["_id"]
+
 		if fullDoc, ok := event["fullDocument"]; ok {
-			return mongo.NewReplaceOneModel().SetFilter(bson.M{"_id": docID}).SetReplacement(fullDoc).SetUpsert(true)
+			return mongo.NewReplaceOneModel().
+				SetFilter(bson.M{"_id": docID}).
+				SetReplacement(fullDoc).
+				SetUpsert(true), nil
 		}
+
+		// The stream is opened with fullDocument=updateLookup, so the document
+		// is normally attached. It is not when the document was deleted between
+		// the update and the lookup — and it used to be dropped there, silently,
+		// leaving the target on the older revision. The change itself is in the
+		// event, so it can be applied without the lookup.
+		update, err := updateFromDescription(event)
+		if err != nil {
+			return nil, fmt.Errorf("%s.%s: %w", sourceDB, collectionName, err)
+		}
+		return mongo.NewUpdateOneModel().
+			SetFilter(bson.M{"_id": docID}).
+			SetUpdate(update), nil
+
 	case "delete":
 		// Check if delete operations should be ignored for this collection
 		advancedSettings := s.findTableAdvancedSettings(collectionName)
 		if advancedSettings.IgnoreDeleteOps {
 			s.logger.Debugf("[MongoDB] Ignoring delete operation for %s.%s (ignoreDeleteOps=true)",
 				sourceDB, collectionName)
-			return nil
+			return nil, nil
 		}
 
-		var docID interface{}
-		if dk, ok := event["documentKey"].(bson.M); ok {
-			docID = dk["_id"]
-		} else {
-			return nil
+		dk, ok := event["documentKey"].(bson.M)
+		if !ok {
+			return nil, fmt.Errorf("a delete event for %s.%s names no document",
+				sourceDB, collectionName)
 		}
-		return mongo.NewDeleteOneModel().SetFilter(bson.M{"_id": docID})
+		return mongo.NewDeleteOneModel().SetFilter(bson.M{"_id": dk["_id"]}), nil
 	}
 
-	s.logger.Warnf("[MongoDB] Unhandled operation type '%s' in convertRawBSONToWriteModel", opType)
-	return nil
+	// Collection-level events — drop, rename, invalidate — are not replicated.
+	// They are the same decision the MySQL side makes about a destructive DDL,
+	// and they are not row changes, so there is nothing to write here.
+	s.logger.Warnf("[MongoDB] %s.%s: not replicating a %q event", sourceDB, collectionName, opType)
+	return nil, nil
+}
+
+// updateFromDescription builds the update an event describes, for the case
+// where the full document was not attached.
+func updateFromDescription(event bson.M) (bson.M, error) {
+	description, ok := event["updateDescription"].(bson.M)
+	if !ok {
+		return nil, fmt.Errorf("an update event carries neither the document nor a " +
+			"description of what changed")
+	}
+
+	update := bson.M{}
+	if set, ok := description["updatedFields"].(bson.M); ok && len(set) > 0 {
+		update["$set"] = set
+	}
+	if removed, ok := description["removedFields"].(bson.A); ok && len(removed) > 0 {
+		unset := bson.M{}
+		for _, field := range removed {
+			if name, ok := field.(string); ok {
+				unset[name] = ""
+			}
+		}
+		if len(unset) > 0 {
+			update["$unset"] = unset
+		}
+	}
+	if len(update) == 0 {
+		return nil, fmt.Errorf("an update event describes no change")
+	}
+	return update, nil
 }
 
 // flushWriteModels applies a batch of changes to the target.
@@ -213,23 +270,58 @@ func (s *MongoDBSyncer) handleBulkWriteErrors(ctx context.Context, targetColl *m
 		}
 	}
 
-	// Move still failed operations to dead letter queue
-	if len(stillFailedModels) > 0 && s.enableDeadLetterQueue {
-		err := s.storeToDeadLetterQueue(stillFailedModels, stillFailedErrors, len(models), len(successfulModels), sourceDB, collectionName)
-		if err != nil {
-			s.logger.Errorf("[MongoDB] Failed to store failed operations to dead letter queue: %v", err)
-		} else {
-			s.logger.Infof("[MongoDB] Moved %d failed operations to dead letter queue for %s.%s",
-				len(stillFailedModels), sourceDB, collectionName)
-		}
+	return s.setAside(stillFailedModels, stillFailedErrors, len(models), len(successfulModels), sourceDB, collectionName)
+}
+
+// setAside puts the operations that could not be applied where they can be
+// retried, and reports when it cannot.
+//
+// Both failure paths used to return nil no matter what happened. With the dead
+// letter queue turned off, or with the write to it failing, the operations were
+// dropped on the floor and the batch was reported as applied: the checkpoint
+// moved past changes the target never received, so nothing would ever send them
+// again and the only trace was a warning in a log.
+func (s *MongoDBSyncer) setAside(models []mongo.WriteModel, errs []mongo.BulkWriteError,
+	total, applied int, sourceDB, collectionName string) error {
+
+	if len(models) == 0 {
+		return nil
 	}
 
-	// Always consider the operation successful if we processed the data
-	// Failed operations are safely stored in dead letter queue
-	s.logger.Infof("[MongoDB] Bulk write completed for %s.%s: %d successful, %d moved to dead letter queue",
-		sourceDB, collectionName, len(successfulModels), len(stillFailedModels))
+	metrics.Failed(s.metricLabels(collectionName), len(models))
 
-	return nil // Always return success - failed data is in dead letter queue
+	if !s.enableDeadLetterQueue {
+		return fmt.Errorf("%d of %d changes to %s.%s could not be applied to the "+
+			"target and the dead letter queue is turned off, so there is nowhere to "+
+			"keep them: %v", len(models), total, sourceDB, collectionName, firstError(errs))
+	}
+
+	if err := s.storeToDeadLetterQueue(models, errs, total, applied, sourceDB, collectionName); err != nil {
+		return fmt.Errorf("%d of %d changes to %s.%s could not be applied to the "+
+			"target, and could not be written to the dead letter queue either: %w",
+			len(models), total, sourceDB, collectionName, err)
+	}
+
+	// An error, not a warning: these are changes the source has and the target
+	// does not, and the file they are in is on this pod's disk.
+	s.logger.Errorf("[MongoDB] %d of %d changes to %s.%s could not be applied and "+
+		"are held in the dead letter queue at %s. Until they are retried the target "+
+		"is missing them.", len(models), total, sourceDB, collectionName, s.deadLetterDir)
+
+	if pending, _, err := s.getDeadLetterQueueStats(sourceDB, collectionName); err == nil {
+		metrics.SetDeadLettered(s.metricLabels(collectionName), float64(pending))
+	}
+	return nil
+}
+
+// firstError names one of the reasons, for a message somebody has to act on.
+func firstError(errs []mongo.BulkWriteError) string {
+	for _, e := range errs {
+		if e.Message != "" {
+			return e.Message
+		}
+	}
+	return "no reason was reported"
 }
 
 // serializeWriteModel converts a WriteModel to JSON for storage
@@ -440,19 +532,8 @@ func (s *MongoDBSyncer) handleBulkWriteWithIndividualOps(ctx context.Context, ta
 	s.logger.Infof("[MongoDB] Individual operations completed for %s.%s: %d successful, %d failed",
 		sourceDB, collectionName, successCount, len(failedModels))
 
-	// Store failed operations to dead letter queue
-	if len(failedModels) > 0 && s.enableDeadLetterQueue {
-		// Create empty error slice for failed operations (no specific bulk write errors)
-		failedErrors := make([]mongo.BulkWriteError, len(failedModels))
-		err := s.storeToDeadLetterQueue(failedModels, failedErrors, len(models), successCount, sourceDB, collectionName)
-		if err != nil {
-			s.logger.Errorf("[MongoDB] Failed to store failed operations to dead letter queue: %v", err)
-		} else {
-			s.logger.Infof("[MongoDB] Moved %d failed operations to dead letter queue for %s.%s",
-				len(failedModels), sourceDB, collectionName)
-		}
-	}
-
-	// Always consider successful - failed operations are in dead letter queue
-	return nil
+	// No bulk write errors to carry here: the batch failed before the server
+	// reported per-operation reasons.
+	return s.setAside(failedModels, make([]mongo.BulkWriteError, len(failedModels)),
+		len(models), successCount, sourceDB, collectionName)
 }
