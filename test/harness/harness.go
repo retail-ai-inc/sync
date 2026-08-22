@@ -113,14 +113,20 @@ func Consistently(t *testing.T, window time.Duration, cond func() error) {
 // RunSyncer starts a syncer in the background and returns a stop function that
 // cancels it and waits for the goroutine to unwind. Every test must call the
 // returned function, normally through t.Cleanup.
-func RunSyncer(t *testing.T, start func(context.Context)) (stop func()) {
+//
+// A syncer that stops with a reason logs it here. Failing the test on it would
+// be wrong: several tests deliberately drive a syncer into stopping, and one
+// that is cancelled at the end of a test reports nothing anyway.
+func RunSyncer(t *testing.T, start func(context.Context) error) (stop func()) {
 	t.Helper()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		start(ctx)
+		if err := start(ctx); err != nil {
+			t.Logf("the syncer stopped: %v", err)
+		}
 	}()
 
 	var stopped bool

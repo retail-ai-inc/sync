@@ -309,3 +309,32 @@ func (r *Registry) Snapshot(name string) []Sample {
 	sort.Slice(out, func(i, j int) bool { return out[i].Labels.Key() < out[j].Labels.Key() })
 	return out
 }
+
+// Supervision metrics. A task that stops and is restarted, and a task that
+// stops and is not, are different events and an operator needs to tell them
+// apart: the first is noise until it becomes a pattern, the second means
+// replication has halted and nothing will resume it.
+const (
+	// RestartsTotal counts how often a task has been restarted after stopping
+	// by itself.
+	RestartsTotal = "sync_task_restarts_total"
+	// TaskBlocked is 1 while a task is stopped for a reason retrying cannot fix.
+	TaskBlocked = "sync_task_blocked"
+
+	helpRestarts = "Times a task has been restarted after stopping by itself"
+	helpBlocked  = "1 while a task is stopped for a reason retrying cannot fix"
+)
+
+// CountRestart records that a task was restarted.
+func CountRestart(labels Labels) {
+	Default.AddCounter(RestartsTotal, helpRestarts, labels, 1)
+}
+
+// SetTaskBlocked records whether a task is stopped and will not be retried.
+func SetTaskBlocked(labels Labels, blocked bool) {
+	value := 0.0
+	if blocked {
+		value = 1
+	}
+	Default.SetGauge(TaskBlocked, helpBlocked, labels, value)
+}

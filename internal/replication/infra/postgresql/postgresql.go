@@ -20,6 +20,7 @@ import (
 	_ "github.com/lib/pq"
 	"github.com/retail-ai-inc/sync/internal/platform/config"
 	"github.com/retail-ai-inc/sync/internal/platform/resilience"
+	"github.com/retail-ai-inc/sync/internal/replication/domain"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/security"
 	"github.com/sirupsen/logrus"
 )
@@ -64,7 +65,11 @@ func NewPostgreSQLSyncer(cfg config.SyncConfig, logger *logrus.Logger) *PostgreS
 }
 
 // Start begins the synchronization process
-func (s *PostgreSQLSyncer) Start(ctx context.Context) {
+// Start replicates until the context is cancelled, or until it cannot carry on.
+//
+// The returned error is what the supervisor decides on: nil or a transient
+// failure means try again, an ErrUnrecoverable means stop and tell somebody.
+func (s *PostgreSQLSyncer) Start(ctx context.Context) error {
 	var err error
 
 	s.logger.Info("[PostgreSQL] Starting synchronization...")
@@ -76,16 +81,14 @@ func (s *PostgreSQLSyncer) Start(ctx context.Context) {
 		return connErr
 	})
 	if err != nil {
-		s.logger.Errorf("[PostgreSQL] Failed to connect to source (normal) after retries: %v", err)
-		return
+		return fmt.Errorf("connect to the source: %w", err)
 	}
 	defer s.sourceConnNormal.Close(ctx)
 
 	// Connect replication
 	replDSN, err := s.buildReplicationDSN(s.cfg.SourceConnection)
 	if err != nil {
-		s.logger.Errorf("[PostgreSQL] Failed to build replication DSN: %v", err)
-		return
+		return domain.Unrecoverable("build the replication DSN: %v", err)
 	}
 	err = resilience.Retry(5, 2*time.Second, 2.0, func() error {
 		var connErr error
@@ -93,23 +96,20 @@ func (s *PostgreSQLSyncer) Start(ctx context.Context) {
 		return connErr
 	})
 	if err != nil {
-		s.logger.Errorf("[PostgreSQL] Failed to connect to source (replication) after retries: %v", err)
-		return
+		return fmt.Errorf("open a replication connection to the source: %w", err)
 	}
 	defer s.sourceConnRepl.Close(ctx)
 
 	// Connect target
 	s.targetDB, err = sql.Open("postgres", s.cfg.TargetConnection)
 	if err != nil {
-		s.logger.Errorf("[PostgreSQL] Failed to open target DB: %v", err)
-		return
+		return fmt.Errorf("open the target: %w", err)
 	}
 	err = resilience.Retry(5, 2*time.Second, 2.0, func() error {
 		return s.targetDB.PingContext(ctx)
 	})
 	if err != nil {
-		s.logger.Errorf("[PostgreSQL] Failed to connect to target DB after retries: %v", err)
-		return
+		return fmt.Errorf("connect to the target: %w", err)
 	}
 	defer s.targetDB.Close()
 
@@ -117,8 +117,8 @@ func (s *PostgreSQLSyncer) Start(ctx context.Context) {
 	s.outputPlugin = s.cfg.PGPlugin()
 	s.publicationNames = s.cfg.PGPublicationNames
 	if s.repSlot == "" || s.outputPlugin == "" {
-		s.logger.Error("[PostgreSQL] Must specify pg_replication_slot and pg_plugin in config")
-		return
+		return domain.Unrecoverable("this task specifies no pg_replication_slot or " +
+			"pg_plugin, so there is nothing to read changes from")
 	}
 
 	s.state = replicationState{
@@ -134,8 +134,7 @@ func (s *PostgreSQLSyncer) Start(ctx context.Context) {
 
 	err = s.ensureReplicationSlot(ctx)
 	if err != nil {
-		s.logger.Errorf("[PostgreSQL] ensureReplicationSlot error: %v", err)
-		return
+		return fmt.Errorf("prepare the replication slot: %w", err)
 	}
 
 	if s.cfg.PGPositionPath != "" {
@@ -154,19 +153,21 @@ func (s *PostgreSQLSyncer) Start(ctx context.Context) {
 	// Perform initial sync
 	err = s.doInitialSync(ctx)
 	if err != nil {
-		s.logger.Errorf("[PostgreSQL] doInitialSync failed after retries: %v", err)
-		return
+		return fmt.Errorf("make the initial copy: %w", err)
 	}
 	s.logger.Info("[PostgreSQL] Initial full sync done.")
 
 	// Start logical replication
 	err = s.startLogicalReplication(ctx)
 	if err != nil {
-		s.logger.Errorf("[PostgreSQL] Logical replication failed: %v", err)
-		return
+		if ctx.Err() != nil {
+			return nil
+		}
+		return fmt.Errorf("read the replication stream: %w", err)
 	}
 
 	s.logger.Info("[PostgreSQL] Synchronization tasks completed.")
+	return nil
 }
 
 // buildReplicationDSN constructs replication DSN

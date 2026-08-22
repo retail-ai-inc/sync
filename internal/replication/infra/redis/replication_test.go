@@ -920,7 +920,7 @@ func TestStartRunsTheWholeSequence(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		s.Start(ctx)
+		_ = s.Start(ctx)
 		close(done)
 	}()
 
@@ -959,7 +959,7 @@ func TestStartWithNoMappingsReplicatesTheKeyspace(t *testing.T) {
 	done := make(chan interface{}, 1)
 	go func() {
 		defer func() { done <- recover() }()
-		s.Start(ctx)
+		_ = s.Start(ctx)
 	}()
 
 	waitFor(t, func() bool { return source.sawCommand("PSUBSCRIBE") })
@@ -998,7 +998,7 @@ func TestStartRefusesAPromotedTarget(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		s.Start(context.Background())
+		_ = s.Start(context.Background())
 		close(done)
 	}()
 

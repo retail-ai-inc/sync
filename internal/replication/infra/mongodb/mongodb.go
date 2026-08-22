@@ -13,6 +13,7 @@ import (
 	"github.com/retail-ai-inc/sync/internal/platform/dsn"
 	"github.com/retail-ai-inc/sync/internal/platform/metrics"
 	"github.com/retail-ai-inc/sync/internal/platform/resilience"
+	"github.com/retail-ai-inc/sync/internal/replication/domain"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/checkpoint"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/directionlock"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/discovery"
@@ -50,6 +51,11 @@ type MongoDBSyncer struct {
 	globalConfig *config.Config
 	// checkpoints is where the resume tokens and start times are recorded.
 	checkpoints checkpoint.Store
+	// faults carries the first reason a watcher gave up, so Start can report it
+	// rather than blocking on collections that have all stopped. It holds one
+	// value: the first reason is the one worth acting on and the rest follow
+	// from it.
+	faults chan error
 }
 
 func NewMongoDBSyncer(cfg config.SyncConfig, globalConfig *config.Config, logger *logrus.Logger) *MongoDBSyncer {
@@ -153,12 +159,22 @@ func NewMongoDBSyncer(cfg config.SyncConfig, globalConfig *config.Config, logger
 	}
 }
 
-func (s *MongoDBSyncer) Start(ctx context.Context) {
+// Start replicates until the context is cancelled, or until it cannot carry on.
+//
+// The returned error is what the supervisor decides on: nil or a transient
+// failure means try again, an ErrUnrecoverable means stop and tell somebody.
+func (s *MongoDBSyncer) Start(ctx context.Context) error {
 	if s.sourceClient == nil || s.targetClient == nil {
-		s.logger.Error("[MongoDB] MongoDBSyncer Start aborted: source/target client is nil.")
-		return
+		// The constructor could not reach one of them, which a later attempt may.
+		return fmt.Errorf("connect to the source and target")
 	}
 	s.logger.Info("[MongoDB] Starting synchronization...")
+
+	s.faults = make(chan error, 1)
+	// Everything below runs under a context this call owns, so returning early
+	// on a fault stops the watchers rather than leaving them behind.
+	ctx, stopWatchers := context.WithCancel(ctx)
+	defer stopWatchers()
 
 	var wg sync.WaitGroup
 	sourceDBName := dsn.GetDatabaseName(s.cfg.Type, s.cfg.SourceConnection)
@@ -172,8 +188,9 @@ func (s *MongoDBSyncer) Start(ctx context.Context) {
 
 	stopGuard, guardErr := s.claimDirection(ctx, sourceDBName, targetDBName)
 	if guardErr != nil {
-		s.logger.Errorf("[MongoDB] %v", guardErr)
-		return
+		// A reversed direction is not something a retry resolves: somebody has
+		// to decide which side is authoritative.
+		return domain.Unrecoverable("%v", guardErr)
 	}
 	defer stopGuard()
 
@@ -187,25 +204,62 @@ func (s *MongoDBSyncer) Start(ctx context.Context) {
 		// looks exactly like everything working.
 		s.logger.Infof("[MongoDB] No collections configured; replicating every "+
 			"collection in %s, including ones created later", sourceDBName)
-		s.discoverAndWatch(ctx, sourceDBName, targetDBName)
+		return s.awaitFault(ctx, func() {
+			s.discoverAndWatch(ctx, sourceDBName, targetDBName)
+		})
+	}
+
+	return s.awaitFault(ctx, func() {
+		for _, mapping := range s.cfg.Mappings {
+			if len(mapping.Tables) > 0 {
+				wg.Add(1)
+				go func(m config.DatabaseMapping) {
+					defer wg.Done()
+					s.syncDatabase(ctx, m, sourceDBName, targetDBName)
+				}(mapping)
+			} else {
+				s.logger.Warn("[MongoDB] Table mappings are empty, skipping processing")
+				continue
+			}
+		}
+		wg.Wait()
+		s.logger.Info("[MongoDB] All database mappings have been processed.")
+	})
+}
+
+// report records the first reason a watcher gave up. Later reasons are dropped:
+// they follow from the first, and the first is the one that says what happened.
+func (s *MongoDBSyncer) report(err error) {
+	if err == nil {
 		return
 	}
-
-	for _, mapping := range s.cfg.Mappings {
-		if len(mapping.Tables) > 0 {
-			wg.Add(1)
-			go func(m config.DatabaseMapping) {
-				defer wg.Done()
-				s.syncDatabase(ctx, m, sourceDBName, targetDBName)
-			}(mapping)
-		} else {
-			s.logger.Warn("[MongoDB] Table mappings are empty, skipping processing")
-			continue
-		}
+	s.logger.Errorf("[MongoDB] %v", err)
+	select {
+	case s.faults <- err:
+	default:
 	}
-	wg.Wait()
+}
 
-	s.logger.Info("[MongoDB] All database mappings have been processed.")
+// awaitFault brings the collections up and then blocks until the context is
+// cancelled or a watcher reports it cannot carry on.
+//
+// It blocks deliberately. Start used to return as soon as the watchers had been
+// launched — they kept running on the caller's context — so a running task and
+// a stopped one looked identical from outside, which is exactly what the
+// supervisor needs to tell apart. Returning now means the task has stopped.
+//
+// The work is not waited on: bringing up a collection ends with a watcher
+// goroutine, so "the work finished" says nothing about whether anything is
+// being replicated.
+func (s *MongoDBSyncer) awaitFault(ctx context.Context, work func()) error {
+	go work()
+
+	select {
+	case <-ctx.Done():
+		return nil
+	case err := <-s.faults:
+		return err
+	}
 }
 
 func (s *MongoDBSyncer) syncDatabase(ctx context.Context, mapping config.DatabaseMapping, sourceDBName, targetDBName string) {
@@ -213,12 +267,20 @@ func (s *MongoDBSyncer) syncDatabase(ctx context.Context, mapping config.Databas
 	targetDB := s.targetClient.Database(targetDBName)
 	s.logger.Infof("[MongoDB] Processing database mapping: %s -> %s", sourceDBName, targetDBName)
 
-	s.startCollections(ctx, mapping.Tables, sourceDB, targetDB, sourceDBName, targetDBName)
+	if started := s.startCollections(ctx, mapping.Tables, sourceDB, targetDB, sourceDBName, targetDBName); started == 0 && len(mapping.Tables) > 0 {
+		// The task is configured to replicate something and none of it came up.
+		// Left unsaid this reads as a healthy task with nothing happening on it,
+		// which is the shape of failure hardest to notice.
+		s.report(fmt.Errorf("none of the %d configured collections of %s could be "+
+			"brought up, so this task is replicating nothing",
+			len(mapping.Tables), sourceDBName))
+	}
 }
 
 // startCollections brings up the copy and the change stream for each mapped
-// collection.
-func (s *MongoDBSyncer) startCollections(ctx context.Context, tables []config.TableMapping, sourceDB, targetDB *mongo.Database, sourceDBName, targetDBName string) {
+// collection, and reports how many it managed.
+func (s *MongoDBSyncer) startCollections(ctx context.Context, tables []config.TableMapping, sourceDB, targetDB *mongo.Database, sourceDBName, targetDBName string) int {
+	started := 0
 	for _, tableMap := range tables {
 		srcColl := sourceDB.Collection(tableMap.SourceTable)
 		tgtColl := targetDB.Collection(tableMap.TargetTable)
@@ -269,7 +331,9 @@ func (s *MongoDBSyncer) startCollections(ctx context.Context, tables []config.Ta
 
 		// Start watching changes
 		go s.watchChangesWithRetry(ctx, srcColl, tgtColl, sourceDBName, tableMap.SourceTable)
+		started++
 	}
+	return started
 }
 
 func (s *MongoDBSyncer) ensureCollectionExists(ctx context.Context, db *mongo.Database, collName string) error {
@@ -478,7 +542,10 @@ func (s *MongoDBSyncer) discoverAndWatch(ctx context.Context, sourceDBName, targ
 		}
 		s.logger.Infof("[MongoDB] Replicating %d newly discovered collections in %s: %v",
 			len(added), sourceDBName, added)
-		s.startCollections(ctx, tables, sourceDB, targetDB, sourceDBName, targetDBName)
+		if started := s.startCollections(ctx, tables, sourceDB, targetDB, sourceDBName, targetDBName); started == 0 {
+			s.report(fmt.Errorf("none of the %d collections discovered in %s could be "+
+				"brought up, so this task is replicating nothing", len(added), sourceDBName))
+		}
 	}
 
 	scan()

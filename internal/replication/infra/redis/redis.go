@@ -15,6 +15,7 @@ import (
 	"github.com/retail-ai-inc/sync/internal/platform/dsn"
 	"github.com/retail-ai-inc/sync/internal/platform/metrics"
 	"github.com/retail-ai-inc/sync/internal/platform/resilience"
+	"github.com/retail-ai-inc/sync/internal/replication/domain"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/checkpoint"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/directionlock"
 	"github.com/sirupsen/logrus"
@@ -96,7 +97,11 @@ func (r *RedisSyncer) streamMappings() []streamPair {
 	return pairs
 }
 
-func (r *RedisSyncer) Start(ctx context.Context) {
+// Start replicates until the context is cancelled, or until it cannot carry on.
+//
+// The returned error is what the supervisor decides on: nil or a transient
+// failure means try again, an ErrUnrecoverable means stop and tell somebody.
+func (r *RedisSyncer) Start(ctx context.Context) error {
 	r.logger.Info("[Redis] Starting synchronization...")
 
 	var err error
@@ -106,8 +111,7 @@ func (r *RedisSyncer) Start(ctx context.Context) {
 		return connErr
 	})
 	if err != nil {
-		r.logger.Errorf("[Redis] Failed to connect to source after retries: %v", err)
-		return
+		return fmt.Errorf("connect to the source: %w", err)
 	}
 	err = resilience.Retry(5, 2*time.Second, 2.0, func() error {
 		var connErr error
@@ -115,8 +119,7 @@ func (r *RedisSyncer) Start(ctx context.Context) {
 		return connErr
 	})
 	if err != nil {
-		r.logger.Errorf("[Redis] Failed to connect to target after retries: %v", err)
-		return
+		return fmt.Errorf("connect to the target: %w", err)
 	}
 	defer r.source.Close()
 	defer r.target.Close()
@@ -127,8 +130,9 @@ func (r *RedisSyncer) Start(ctx context.Context) {
 	// side with the older one.
 	stopGuard, guardErr := r.claimDirection(ctx)
 	if guardErr != nil {
-		r.logger.Errorf("[Redis] %v", guardErr)
-		return
+		// A reversed direction is not something a retry resolves: somebody has
+		// to decide which side is authoritative.
+		return domain.Unrecoverable("%v", guardErr)
 	}
 	defer stopGuard()
 
@@ -159,6 +163,7 @@ func (r *RedisSyncer) Start(ctx context.Context) {
 
 	<-ctx.Done()
 	r.logger.Info("[Redis] Synchronization stopped.")
+	return nil
 }
 
 // sourceDatabase reports the database index the source DSN addresses. The

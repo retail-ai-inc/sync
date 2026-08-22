@@ -20,6 +20,7 @@ import (
 	"github.com/retail-ai-inc/sync/internal/platform/dsn"
 	"github.com/retail-ai-inc/sync/internal/platform/metrics"
 	"github.com/retail-ai-inc/sync/internal/platform/resilience"
+	"github.com/retail-ai-inc/sync/internal/replication/domain"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/checkpoint"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/directionlock"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/discovery"
@@ -51,7 +52,11 @@ func NewMySQLSyncer(cfg config.SyncConfig, logger *logrus.Logger) *MySQLSyncer {
 	}
 }
 
-func (s *MySQLSyncer) Start(ctx context.Context) {
+// Start replicates until the context is cancelled, or until it cannot carry on.
+//
+// The returned error is what the supervisor decides on: nil or a transient
+// failure means try again, an ErrUnrecoverable means stop and tell somebody.
+func (s *MySQLSyncer) Start(ctx context.Context) error {
 	s.logger.Info("[MySQL] Starting synchronization...")
 
 	cfg := canal.NewDefaultConfig()
@@ -93,13 +98,11 @@ func (s *MySQLSyncer) Start(ctx context.Context) {
 		return e
 	})
 	if err != nil {
-		s.logger.Errorf("[MySQL] Failed to create canal after retries: %v", err)
-		return
+		return fmt.Errorf("connect to the source: %w", err)
 	}
 
 	if err := s.checkRowImage(c); err != nil {
-		s.logger.Errorf("[MySQL] Refusing to replicate from this source: %v", err)
-		return
+		return domain.Unrecoverable("%v", err)
 	}
 
 	var targetDB *sql.DB
@@ -112,8 +115,7 @@ func (s *MySQLSyncer) Start(ctx context.Context) {
 		return targetDB.PingContext(ctx)
 	})
 	if err != nil {
-		s.logger.Errorf("[MySQL] Failed to connect to target DB after retries: %v", err)
-		return
+		return fmt.Errorf("connect to the target: %w", err)
 	}
 
 	// Nothing is read or written until the direction is agreed. A target that
@@ -122,8 +124,9 @@ func (s *MySQLSyncer) Start(ctx context.Context) {
 	// newer side with the older one.
 	releaseGuard, guardErr := s.claimDirection(ctx, targetDB)
 	if guardErr != nil {
-		s.logger.Errorf("[MySQL] %v", guardErr)
-		return
+		// A reversed direction is not something a retry resolves: somebody has
+		// to decide which side is authoritative.
+		return domain.Unrecoverable("%v", guardErr)
 	}
 	defer releaseGuard()
 
@@ -137,9 +140,8 @@ func (s *MySQLSyncer) Start(ctx context.Context) {
 		// "There is no checkpoint" and "the checkpoint could not be read" lead
 		// to opposite decisions, and acting on the wrong one either re-copies
 		// the whole database or skips whatever was in flight.
-		s.logger.Errorf("[MySQL] Could not read the stored checkpoint, so this task "+
-			"cannot safely decide where to resume from: %v", err)
-		return
+		return fmt.Errorf("read the stored checkpoint, without which this task "+
+			"cannot safely decide where to resume from: %w", err)
 	}
 	if stored == nil {
 		stored = s.snapshot(ctx, targetDB)
@@ -197,32 +199,75 @@ func (s *MySQLSyncer) Start(ctx context.Context) {
 		}
 	}()
 
+	stopped := make(chan error, 1)
 	go func() {
-		var runErr error
 		switch {
 		case stored == nil:
-			runErr = c.Run()
+			stopped <- c.Run()
 		case stored.gtidSet() != nil:
 			// Preferred: the transactions themselves, which stay meaningful
 			// across a failover to a different server.
-			runErr = c.StartFromGTID(stored.gtidSet())
+			stopped <- c.StartFromGTID(stored.gtidSet())
 		default:
-			runErr = c.RunFrom(stored.position())
-		}
-		if runErr != nil {
-			if strings.Contains(runErr.Error(), "context canceled") {
-				s.logger.Warnf("[MySQL] canal run context canceled => %v", runErr)
-			} else {
-				s.logger.Errorf("[MySQL] Failed to run canal => %v", runErr)
-			}
+			stopped <- c.RunFrom(stored.position())
 		}
 	}()
 
 	metrics.SetTaskUp(s.metricLabels(), true)
 	defer metrics.SetTaskUp(s.metricLabels(), false)
 
-	<-ctx.Done()
-	s.logger.Info("[MySQL] Synchronization stopped.")
+	select {
+	case <-ctx.Done():
+		s.logger.Info("[MySQL] Synchronization stopped.")
+		return nil
+
+	case runErr := <-stopped:
+		// The stream ended by itself. Whether that is worth retrying is the
+		// whole question: it used to be logged and then waited on for a context
+		// cancellation that might never come, so the task sat there doing
+		// nothing until the process restarted.
+		if runErr == nil {
+			s.logger.Warn("[MySQL] The binlog stream ended without an error.")
+			return nil
+		}
+		if strings.Contains(runErr.Error(), "context canceled") {
+			return nil
+		}
+		if reason, lost := positionNoLongerAvailable(runErr); lost {
+			return domain.Unrecoverable("%s", reason)
+		}
+		return fmt.Errorf("read the binlog: %w", runErr)
+	}
+}
+
+// positionNoLongerAvailable reports whether an error says the source has
+// discarded the binlog this task would resume from.
+//
+// Cloud SQL expires binary logs on a retention schedule, so a task stopped for
+// longer than that comes back to find its offset gone. Retrying cannot help:
+// the bytes are not there, and every attempt fails the same way. What is needed
+// is a fresh copy, which somebody has to decide to make — and while nobody
+// knows, the replica falls further behind.
+func positionNoLongerAvailable(err error) (string, bool) {
+	if err == nil {
+		return "", false
+	}
+	text := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"could not find first log file name",
+		"could not find next log",
+		"requested master_log_file",
+		"error 1236",
+		"binary log is not available",
+		"the slave is connecting using change master to master_auto_position",
+	} {
+		if strings.Contains(text, marker) {
+			return "the source no longer has the binlog this task would resume from (" +
+				err.Error() + "). Clear the stored checkpoint to take a fresh copy; " +
+				"until then nothing is being replicated", true
+		}
+	}
+	return "", false
 }
 
 // snapshot copies the source into the target and reports the binlog coordinates

@@ -3,20 +3,31 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"strconv"
 	"time"
 
 	"github.com/retail-ai-inc/sync/internal/monitoring/app"
 	"github.com/retail-ai-inc/sync/internal/platform/config"
+	"github.com/retail-ai-inc/sync/internal/platform/metrics"
 	replicationapp "github.com/retail-ai-inc/sync/internal/replication/app"
+	"github.com/retail-ai-inc/sync/internal/replication/domain"
 	"github.com/sirupsen/logrus"
 )
 
 const (
-	// configReloadInterval is how often the stored configuration is re-read.
+	// configReloadInterval is how often the stored configuration is re-read. It
+	// is also how often a task that stopped by itself is considered for a
+	// restart.
 	configReloadInterval = 10 * time.Second
 	// drainTimeout is how long a task is given to finish what it was applying
 	// after being asked to stop.
 	drainTimeout = 30 * time.Second
+	// restartBackoff is how long to wait before starting a task that stopped on
+	// its own, doubling each time it stops again.
+	restartBackoff = 10 * time.Second
+	// maxRestartBackoff caps that wait. A source that is down for an hour should
+	// be retried every few minutes, not once more at the end of the day.
+	maxRestartBackoff = 5 * time.Minute
 )
 
 // runningTask is one syncer the supervisor has started.
@@ -27,6 +38,26 @@ type runningTask struct {
 	fingerprint string
 	cancel      context.CancelFunc
 	done        chan struct{}
+	// err is why the task stopped, written before done is closed and read only
+	// after, so the channel close orders the two.
+	err error
+
+	// attempts counts consecutive stops, and nextAttempt is when to try again.
+	attempts    int
+	nextAttempt time.Time
+	// blocked means the task stopped for a reason retrying cannot fix, so it is
+	// left stopped until somebody changes something.
+	blocked bool
+}
+
+// exited reports whether the task's goroutine has finished.
+func (t *runningTask) exited() bool {
+	select {
+	case <-t.done:
+		return true
+	default:
+		return false
+	}
 }
 
 // fingerprint renders a task's configuration for comparison.
@@ -80,7 +111,7 @@ type supervisor struct {
 	// build resolves a task's configuration to the function that runs it. It is
 	// a field so a test can substitute a stub for the real syncers, which need
 	// databases.
-	build func(config.SyncConfig, *config.Config, *logrus.Logger) func(context.Context)
+	build func(config.SyncConfig, *config.Config, *logrus.Logger) func(context.Context) error
 }
 
 func newSupervisor(log *logrus.Logger) *supervisor {
@@ -112,13 +143,70 @@ func (s *supervisor) apply(ctx context.Context, cfg *config.Config) {
 	}
 
 	for id, sc := range desired {
-		if _, already := s.running[id]; already {
-			continue
+		existing, already := s.running[id]
+		switch {
+		case !already:
+			s.start(ctx, sc)
+		case existing.exited():
+			s.reconsider(ctx, sc, existing)
 		}
-		s.start(ctx, sc)
 	}
 
 	s.applyMonitoring(ctx, cfg)
+}
+
+// reconsider decides what to do about a task that stopped by itself.
+//
+// Nothing used to: a task whose goroutine returned stayed in the running map
+// with its fingerprint unchanged, so it was never looked at again. That mattered
+// more once replication was made to stop deliberately on a failed write — a
+// connection reset across the region boundary, or one Cloud SQL maintenance
+// restart, and the task was dead until somebody edited it or the process was
+// restarted, with nothing anywhere saying so.
+func (s *supervisor) reconsider(ctx context.Context, sc config.SyncConfig, task *runningTask) {
+	if task.blocked {
+		return
+	}
+
+	if domain.IsUnrecoverable(task.err) {
+		// Restarting would fail identically for as long as anybody let it, and
+		// the looping would bury the one thing somebody needs to be told.
+		task.blocked = true
+		metrics.SetTaskBlocked(taskLabels(sc), true)
+		s.log.Errorf("Task %d has stopped and will not be restarted: %v. "+
+			"Replication for it has halted until this is dealt with.", sc.ID, task.err)
+		return
+	}
+
+	if time.Now().Before(task.nextAttempt) {
+		return
+	}
+
+	attempts := task.attempts
+	wait := restartBackoff << attempts
+	if wait > maxRestartBackoff || wait <= 0 {
+		wait = maxRestartBackoff
+	}
+
+	s.log.Warnf("Task %d stopped (%v); restarting it, attempt %d",
+		sc.ID, task.err, attempts+1)
+	metrics.CountRestart(taskLabels(sc))
+
+	s.start(ctx, sc)
+	if restarted, ok := s.running[sc.ID]; ok {
+		restarted.attempts = attempts + 1
+		restarted.nextAttempt = time.Now().Add(wait)
+	}
+}
+
+// taskLabels identify a task in the metrics the supervisor records. They are
+// deliberately the subset every engine agrees on, so a dashboard can sum across
+// them.
+func taskLabels(sc config.SyncConfig) metrics.Labels {
+	return metrics.Labels{
+		"task":   strconv.Itoa(sc.ID),
+		"engine": sc.Type,
+	}
 }
 
 // start launches one task.
@@ -136,8 +224,9 @@ func (s *supervisor) start(parentCtx context.Context, sc config.SyncConfig) {
 
 	go func() {
 		defer close(done)
-		syncer(ctx)
+		task.err = syncer(ctx)
 	}()
+	metrics.SetTaskBlocked(taskLabels(sc), false)
 	s.log.Infof("Task %d (%s) started", sc.ID, sc.Type)
 }
 
@@ -209,16 +298,24 @@ func (s *supervisor) applyMonitoring(ctx context.Context, cfg *config.Config) {
 
 // syncerFor reports the Start function for a task's engine, or nil when the
 // engine is not one this build replicates.
-func syncerFor(sc config.SyncConfig, global *config.Config, log *logrus.Logger) func(context.Context) {
+func syncerFor(sc config.SyncConfig, global *config.Config, log *logrus.Logger) func(context.Context) error {
 	switch sc.Type {
 	case "mongodb":
-		return func(ctx context.Context) { replicationapp.NewMongoDBSyncer(sc, global, log).Start(ctx) }
+		return func(ctx context.Context) error {
+			return replicationapp.NewMongoDBSyncer(sc, global, log).Start(ctx)
+		}
 	case "mysql", "mariadb":
-		return func(ctx context.Context) { replicationapp.NewMySQLSyncer(sc, log).Start(ctx) }
+		return func(ctx context.Context) error {
+			return replicationapp.NewMySQLSyncer(sc, log).Start(ctx)
+		}
 	case "postgresql":
-		return func(ctx context.Context) { replicationapp.NewPostgreSQLSyncer(sc, log).Start(ctx) }
+		return func(ctx context.Context) error {
+			return replicationapp.NewPostgreSQLSyncer(sc, log).Start(ctx)
+		}
 	case "redis":
-		return func(ctx context.Context) { replicationapp.NewRedisSyncer(sc, log).Start(ctx) }
+		return func(ctx context.Context) error {
+			return replicationapp.NewRedisSyncer(sc, log).Start(ctx)
+		}
 	}
 	return nil
 }

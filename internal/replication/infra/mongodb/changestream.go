@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/retail-ai-inc/sync/internal/platform/metrics"
+	"github.com/retail-ai-inc/sync/internal/replication/domain"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -19,7 +20,10 @@ type streamEvent struct {
 	ResumeToken bson.Raw
 }
 
-func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl *mongo.Collection, sourceDB, collectionName string) {
+// watchChanges follows one collection's change stream until the context is
+// cancelled or the stream ends. The returned error is what the guardian decides
+// on: an ErrUnrecoverable means the position is gone and retrying is pointless.
+func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl *mongo.Collection, sourceDB, collectionName string) error {
 	key := fmt.Sprintf("%s.%s", sourceDB, collectionName)
 
 	s.processorMutex.Lock()
@@ -68,8 +72,13 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 
 	cs, err := sourceColl.Watch(ctx, pipeline, opts)
 	if err != nil {
-		s.logger.Errorf("[MongoDB] Failed to establish change stream for %s.%s: %v", sourceDB, collectionName, err)
-		return
+		if positionLost(err) {
+			return domain.Unrecoverable("the change stream for %s.%s cannot be resumed "+
+				"from the position this task holds (%v). The oplog no longer reaches "+
+				"back that far, so a fresh copy is needed: clear the stored checkpoint. "+
+				"Until then nothing is being replicated", sourceDB, collectionName, err)
+		}
+		return fmt.Errorf("open the change stream for %s.%s: %w", sourceDB, collectionName, err)
 	}
 	defer cs.Close(ctx)
 	s.logger.Infof("[MongoDB] Watching changes => %s.%s", sourceDB, collectionName)
@@ -78,23 +87,27 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 		select {
 		case <-ctx.Done():
 			s.logger.Infof("[MongoDB] Context cancelled, stopping change stream for %s.%s", sourceDB, collectionName)
-			return
+			return nil
 		default:
 			if !cs.Next(ctx) {
-				if err := cs.Err(); err != nil {
-					s.logger.Errorf("[MongoDB] Change stream error for %s.%s: %v", sourceDB, collectionName, err)
-
-					// Check if this is a recoverable error
-					if isRecoverableError(err) {
-						s.logger.Warnf("[MongoDB] Recoverable error detected for %s.%s, will be retried by guardian", sourceDB, collectionName)
-					} else {
-						s.logger.Errorf("[MongoDB] Non-recoverable error for %s.%s, stopping", sourceDB, collectionName)
-					}
-				} else {
+				err := cs.Err()
+				switch {
+				case err == nil:
 					s.logger.Infof("[MongoDB] Change stream ended normally for %s.%s", sourceDB, collectionName)
+					return nil
+				case positionLost(err):
+					return domain.Unrecoverable("the change stream for %s.%s cannot be "+
+						"resumed from the position this task holds (%v). The oplog no "+
+						"longer reaches back that far, so a fresh copy is needed: clear "+
+						"the stored checkpoint. Until then nothing is being replicated",
+						sourceDB, collectionName, err)
+				case isRecoverableError(err):
+					s.logger.Warnf("[MongoDB] Recoverable error detected for %s.%s, will be retried by guardian", sourceDB, collectionName)
+					return err
+				default:
+					s.logger.Errorf("[MongoDB] Change stream error for %s.%s: %v", sourceDB, collectionName, err)
+					return err
 				}
-				// Stream closed or an error occurred, exit and let the guardian restart.
-				return
 			}
 
 			event := streamEvent{
@@ -109,10 +122,11 @@ func (s *MongoDBSyncer) watchChanges(ctx context.Context, sourceColl, targetColl
 			case eventChannel <- event:
 				// Event successfully sent
 			case <-ctx.Done():
-				return
+				return nil
 			case <-time.After(10 * time.Second):
-				s.logger.Errorf("[MongoDB] Channel full for 10 seconds, potential deadlock or severe bottleneck for %s.%s. Stopping.", sourceDB, collectionName)
-				return
+				return fmt.Errorf("the pipeline for %s.%s has been blocked for ten "+
+					"seconds, so the change stream is being closed rather than read "+
+					"further ahead of what can be applied", sourceDB, collectionName)
 			}
 		}
 	}
@@ -153,10 +167,11 @@ func (s *MongoDBSyncer) watchChangesWithRetry(ctx context.Context, sourceColl, t
 			// Start the actual watchChanges in a separate goroutine
 			watchCtx, watchCancel := context.WithCancel(ctx)
 			watchDone := make(chan struct{})
+			var watchErr error
 
 			go func() {
 				defer close(watchDone)
-				s.watchChanges(watchCtx, sourceColl, targetColl, sourceDB, collectionName)
+				watchErr = s.watchChanges(watchCtx, sourceColl, targetColl, sourceDB, collectionName)
 			}()
 
 			// Wait for watchChanges to complete or context to be cancelled
@@ -164,6 +179,15 @@ func (s *MongoDBSyncer) watchChangesWithRetry(ctx context.Context, sourceColl, t
 			case <-watchDone:
 				// watchChanges has exited; release its context either way.
 				watchCancel()
+
+				// A position that no longer exists is not something the guardian
+				// can retry its way out of: every attempt fails identically, and
+				// looping hides the one thing somebody needs to be told.
+				if domain.IsUnrecoverable(watchErr) {
+					s.report(watchErr)
+					return
+				}
+
 				// Check whether it was due to context cancellation.
 				select {
 				case <-ctx.Done():
@@ -173,7 +197,9 @@ func (s *MongoDBSyncer) watchChangesWithRetry(ctx context.Context, sourceColl, t
 					// watchChanges exited due to error, retry
 					retryCount++
 					if retryCount > maxRetries {
-						s.logger.Errorf("[MongoDB] Max retries (%d) exceeded for %s.%s, stopping guardian loop", maxRetries, sourceDB, collectionName)
+						s.report(fmt.Errorf("the change stream for %s.%s failed %d times "+
+							"in a row, most recently with: %v", sourceDB, collectionName,
+							maxRetries, watchErr))
 						return
 					}
 
@@ -240,5 +266,31 @@ func isRecoverableError(err error) bool {
 		return true
 	}
 
+	return false
+}
+
+// positionLost reports whether an error says the change stream cannot be
+// resumed from the token or cluster time this task holds.
+//
+// The oplog is a capped collection: a task stopped for longer than it covers
+// comes back to find its resume point gone. Retrying cannot help — the entries
+// are not there — and the tempting repair, dropping the token and watching from
+// now, silently skips everything in between. So it is reported instead.
+func positionLost(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"changestreamhistorylost",
+		"resume of change stream was not possible",
+		"resume point may no longer be in the oplog",
+		"invalid resume token",
+		"the resume point may no longer be in the oplog",
+	} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
 	return false
 }

@@ -3,7 +3,6 @@
 package mysql
 
 import (
-	"context"
 	"database/sql"
 	"fmt"
 	"testing"
@@ -99,7 +98,7 @@ func startSyncer(t *testing.T, cfg config.SyncConfig) (stop func()) {
 	if syncer == nil {
 		t.Fatal("NewMySQLSyncer returned nil")
 	}
-	stop = harness.RunSyncer(t, func(ctx context.Context) { syncer.Start(ctx) })
+	stop = harness.RunSyncer(t, syncer.Start)
 	t.Cleanup(stop)
 	return stop
 }

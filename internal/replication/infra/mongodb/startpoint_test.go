@@ -2,6 +2,7 @@ package mongodb
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/retail-ai-inc/sync/internal/platform/config"
@@ -204,5 +205,70 @@ func TestWithNowhereToRecordItTheSnapshotIsNeverDone(t *testing.T) {
 
 	if s.snapshotDone("shop", "orders") {
 		t.Error("the copy was reported done with nowhere to record it")
+	}
+}
+
+// -------------------------------------------------- unrecoverable positions
+
+// TestALostChangeStreamPositionIsRecognised is the distinction the supervisor
+// acts on. The oplog is capped: a task stopped for longer than it covers comes
+// back to find its resume point gone. Retrying fails identically every time, and
+// the tempting repair — dropping the token and watching from now — silently
+// skips everything in between.
+func TestALostChangeStreamPositionIsRecognised(t *testing.T) {
+	for _, text := range []string{
+		"(ChangeStreamHistoryLost) Resume of change stream was not possible, as the resume point may no longer be in the oplog.",
+		"invalid resume token",
+		"Resume of change stream was not possible",
+	} {
+		if !positionLost(fmt.Errorf("%s", text)) {
+			t.Errorf("positionLost(%q) = false", text)
+		}
+	}
+}
+
+// TestATransientChangeStreamFailureIsNotAPositionLoss keeps a task from being
+// stopped permanently by something that comes back.
+func TestATransientChangeStreamFailureIsNotAPositionLoss(t *testing.T) {
+	for _, text := range []string{
+		"server selection timeout",
+		"connection refused",
+		"interrupted at shutdown",
+		"cursor not found",
+		"",
+	} {
+		var err error
+		if text != "" {
+			err = fmt.Errorf("%s", text)
+		}
+		if positionLost(err) {
+			t.Errorf("positionLost(%q) = true", text)
+		}
+	}
+}
+
+// TestTheFirstFaultIsTheOneReported pins that a task whose collections all give
+// up reports the first reason rather than the last, and does not block on the
+// channel when several arrive.
+func TestTheFirstFaultIsTheOneReported(t *testing.T) {
+	s := checkpointSyncer(t)
+	s.faults = make(chan error, 1)
+
+	s.report(fmt.Errorf("first"))
+	s.report(fmt.Errorf("second"))
+	s.report(nil)
+
+	select {
+	case got := <-s.faults:
+		if got.Error() != "first" {
+			t.Errorf("fault = %v, want the first", got)
+		}
+	default:
+		t.Fatal("no fault was recorded")
+	}
+	select {
+	case got := <-s.faults:
+		t.Errorf("a second fault was queued: %v", got)
+	default:
 	}
 }

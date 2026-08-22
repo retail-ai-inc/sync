@@ -24,7 +24,7 @@ func TestStartGivesUpOnAnUnreachableSource(t *testing.T) {
 	cancel() // already cancelled; the retry loop does not consult it
 
 	start := time.Now()
-	s.Start(ctx)
+	_ = s.Start(ctx)
 
 	if elapsed := time.Since(start); elapsed < time.Second {
 		t.Fatalf("Start gave up in %v; the retries appear to honour the context "+

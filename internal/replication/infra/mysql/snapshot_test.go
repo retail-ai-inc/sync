@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -335,5 +336,57 @@ func TestMariaDBIsNotAsked(t *testing.T) {
 
 	if err := s.checkRowImage(nil); err != nil {
 		t.Errorf("checkRowImage for MariaDB = %v", err)
+	}
+}
+
+// -------------------------------------------------- unrecoverable positions
+
+// TestAPurgedBinlogIsUnrecoverable is the distinction the supervisor acts on.
+// Cloud SQL expires binary logs on a schedule, so a task stopped for longer than
+// that comes back to find its offset gone. Retrying cannot help — the bytes are
+// not there — and looping on it hides the one thing an operator needs to know,
+// which is that a fresh copy is required and the replica is falling behind until
+// it is made.
+func TestAPurgedBinlogIsUnrecoverable(t *testing.T) {
+	errors := []string{
+		"ERROR 1236 (HY000): Could not find first log file name in binary log index file",
+		"could not find next log; the first event could not be read",
+		"Error 1236: Cannot replicate because the master purged required binary logs",
+		"the binary log is not available",
+	}
+
+	for _, text := range errors {
+		t.Run(text[:24], func(t *testing.T) {
+			reason, lost := positionNoLongerAvailable(fmt.Errorf("%s", text))
+			if !lost {
+				t.Fatalf("positionNoLongerAvailable(%q) said the position is fine", text)
+			}
+			if !strings.Contains(reason, "fresh copy") {
+				t.Errorf("reason = %q, want it to say what to do", reason)
+			}
+			if !strings.Contains(reason, text) {
+				t.Errorf("reason = %q, want it to carry the original message", reason)
+			}
+		})
+	}
+}
+
+// TestAnOrdinaryFailureIsRetryable is the other side: the errors that come and
+// go must not stop a task permanently.
+func TestAnOrdinaryFailureIsRetryable(t *testing.T) {
+	for _, text := range []string{
+		"connection reset by peer",
+		"dial tcp 10.0.0.1:3306: connect: connection refused",
+		"i/o timeout",
+		"Error 1045: Access denied for user",
+		"",
+	} {
+		var err error
+		if text != "" {
+			err = fmt.Errorf("%s", text)
+		}
+		if _, lost := positionNoLongerAvailable(err); lost {
+			t.Errorf("positionNoLongerAvailable(%q) said the position is gone", text)
+		}
 	}
 }
