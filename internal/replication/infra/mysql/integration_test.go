@@ -554,3 +554,79 @@ func min(a, b int) int {
 	}
 	return b
 }
+
+// TestAStoppedTaskStopsWriting is what makes stopping mean anything. The reader
+// used to be left running when the task's context was cancelled: the supervisor
+// restarting a task then ran a second reader beside the first, and a task edited
+// to point at a different target went on writing to the old one for the life of
+// the process. Nothing reported either.
+func TestAStoppedTaskStopsWriting(t *testing.T) {
+	table := harness.UniqueName("stopped")
+	src, tgt := open(t, harness.MySQLSource, sourceDB), open(t, harness.MySQLTarget, targetDB)
+
+	createSourceTable(t, src, tgt, table)
+	mustExec(t, src, fmt.Sprintf("INSERT INTO %s (id, name) VALUES (1, 'seed')", table))
+
+	stop := startSyncer(t, syncTask(t, table))
+	harness.Eventually(t, 45*time.Second, func() error {
+		if n := countRows(t, tgt, table, ""); n != 1 {
+			return fmt.Errorf("initial sync has not landed: %d rows", n)
+		}
+		return nil
+	})
+
+	stop()
+
+	// Written after the task stopped. Nothing should carry it across.
+	mustExec(t, src, fmt.Sprintf("INSERT INTO %s (id, name) VALUES (2, 'after the stop')", table))
+
+	harness.Consistently(t, 10*time.Second, func() error {
+		if n := countRows(t, tgt, table, "id = 2"); n != 0 {
+			return fmt.Errorf("a row written after the task stopped reached the "+
+				"target: the reader is still running (%d rows)", n)
+		}
+		return nil
+	})
+}
+
+// TestTheFinalPositionIsRecordedOnACleanStop pins the other half of stopping.
+// The position is written at most every SYNC_MYSQL_CHECKPOINT_INTERVAL while
+// running, so a clean stop has to record where it actually got to — otherwise
+// every orderly restart replays the last interval.
+func TestTheFinalPositionIsRecordedOnACleanStop(t *testing.T) {
+	table := harness.UniqueName("finalpos")
+	src, tgt := open(t, harness.MySQLSource, sourceDB), open(t, harness.MySQLTarget, targetDB)
+
+	createSourceTable(t, src, tgt, table)
+	mustExec(t, src, fmt.Sprintf("INSERT INTO %s (id, name) VALUES (1, 'seed')", table))
+
+	base := syncTask(t, table)
+	stop := startSyncer(t, base)
+	harness.Eventually(t, 45*time.Second, func() error {
+		if n := countRows(t, tgt, table, ""); n != 1 {
+			return fmt.Errorf("initial sync has not landed: %d rows", n)
+		}
+		return nil
+	})
+
+	// A change, then an immediate stop: the throttle is still holding the
+	// position this produced.
+	mustExec(t, src, fmt.Sprintf("INSERT INTO %s (id, name) VALUES (2, 'last')", table))
+	harness.Eventually(t, 20*time.Second, func() error {
+		if n := countRows(t, tgt, table, "id = 2"); n != 1 {
+			return fmt.Errorf("the change has not been applied yet")
+		}
+		return nil
+	})
+	stop()
+
+	var payload string
+	if err := tgt.QueryRow(
+		"SELECT payload FROM _sync_checkpoint WHERE task_id = ?", base.ID).Scan(&payload); err != nil {
+		t.Fatalf("read the recorded position: %v", err)
+	}
+	if payload == "" {
+		t.Fatal("no position was recorded")
+	}
+	t.Logf("recorded position: %s", payload)
+}

@@ -173,9 +173,6 @@ func (s *MySQLSyncer) Start(ctx context.Context) error {
 		checkpointEvery:   checkpointInterval(),
 	}
 	c.SetEventHandler(h)
-	// A clean stop records the position the throttle was holding, so an orderly
-	// restart does not replay the last interval.
-	defer h.recordPendingCheckpoint()
 
 	// Add connection health check
 	connCheckTicker := time.NewTicker(5 * time.Minute)
@@ -205,6 +202,28 @@ func (s *MySQLSyncer) Start(ctx context.Context) error {
 	}()
 
 	stopped := make(chan error, 1)
+	var readerReturned atomic.Bool
+
+	// Stopping the reader is what makes this function's return mean anything.
+	// Cancelling the context used to return from here and leave canal reading
+	// the binlog and writing to the target for the life of the process: a task
+	// restarted by the supervisor ran a second reader beside the first, and a
+	// task edited to point somewhere else went on writing to where it used to
+	// point. The final position is recorded afterwards, once the handler is
+	// quiet, so nothing is applied after the position that names it.
+	defer func() {
+		c.Close()
+		if !readerReturned.Load() {
+			select {
+			case <-stopped:
+			case <-time.After(10 * time.Second):
+				s.logger.Warn("[MySQL] The binlog reader did not stop within ten " +
+					"seconds of being closed")
+			}
+		}
+		h.recordPendingCheckpoint()
+	}()
+
 	go func() {
 		switch {
 		case stored == nil:
@@ -227,6 +246,7 @@ func (s *MySQLSyncer) Start(ctx context.Context) error {
 		return nil
 
 	case runErr := <-stopped:
+		readerReturned.Store(true)
 		// The stream ended by itself. Whether that is worth retrying is the
 		// whole question: it used to be logged and then waited on for a context
 		// cancellation that might never come, so the task sat there doing
