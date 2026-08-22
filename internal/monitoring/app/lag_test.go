@@ -171,3 +171,114 @@ func TestStartLagAlertingStopsWithItsContext(t *testing.T) {
 	// Nothing to assert beyond it not panicking or blocking: the goroutine
 	// returns on the cancelled context.
 }
+
+// deadLettersFor records dead-lettered operations for a task and removes them
+// afterwards, so the tests do not see each other's numbers.
+func deadLettersFor(t *testing.T, task string, count float64) metrics.Labels {
+	t.Helper()
+
+	labels := metrics.Labels{
+		"task": task, "engine": "mongodb", "collection": "orders",
+		"source": "tokyo:27017/shop", "target": "osaka:27017/shop",
+	}
+	metrics.SetDeadLettered(labels, count)
+	t.Cleanup(func() { metrics.Default.Forget(labels) })
+	return labels
+}
+
+// TestADeadLetteredChangeIsReported covers the alert on the hole a dead letter
+// leaves. The operation is on the source and not on the target, and it lived in
+// a file on the syncer's own disk with a counter nobody watched — so the copy
+// that exists to be switched to could be missing rows and the first anybody
+// heard of it was after the switch.
+func TestADeadLetteredChangeIsReported(t *testing.T) {
+	deadLettersFor(t, "dl-1", 4)
+	n := &recordingNotifier{configured: true}
+
+	alerted := checkDeadLetters(context.Background(), n, quiet(),
+		map[string]time.Time{}, time.Now())
+
+	if len(alerted) != 1 {
+		t.Fatalf("%d alerts, want one: %v", len(alerted), alerted)
+	}
+	if len(n.messages) != 1 {
+		t.Fatalf("%d notifications, want one", len(n.messages))
+	}
+	message := n.messages[0]
+	for _, want := range []string{"4 change(s)", "dl-1", "orders", "tokyo:27017/shop", "osaka:27017/shop"} {
+		if !strings.Contains(message, want) {
+			t.Errorf("message = %q, want it to carry %q", message, want)
+		}
+	}
+}
+
+// TestATaskWithNoDeadLettersIsNotReported records that a counter sitting at zero
+// is silence. Alerting on it would train everybody to ignore the alert.
+func TestATaskWithNoDeadLettersIsNotReported(t *testing.T) {
+	deadLettersFor(t, "dl-2", 0)
+	n := &recordingNotifier{configured: true}
+
+	if alerted := checkDeadLetters(context.Background(), n, quiet(),
+		map[string]time.Time{}, time.Now()); len(alerted) != 0 {
+		t.Errorf("alerts = %v, want none for a task with nothing dead-lettered", alerted)
+	}
+	if len(n.messages) != 0 {
+		t.Errorf("a notification was sent for a task with nothing dead-lettered: %v", n.messages)
+	}
+}
+
+// TestTheSameDeadLetterIsNotReportedRepeatedly records the cooldown. The counter
+// stays raised until the retry succeeds, so without one every tick would send
+// the same alert.
+func TestTheSameDeadLetterIsNotReportedRepeatedly(t *testing.T) {
+	deadLettersFor(t, "dl-3", 2)
+	n := &recordingNotifier{configured: true}
+	lastAlert := map[string]time.Time{}
+	now := time.Now()
+
+	first := checkDeadLetters(context.Background(), n, quiet(), lastAlert, now)
+	if len(first) != 1 {
+		t.Fatalf("the first check reported %v, want one alert", first)
+	}
+
+	again := checkDeadLetters(context.Background(), n, quiet(), lastAlert, now.Add(time.Minute))
+	if len(again) != 0 {
+		t.Errorf("the same dead letter was reported again within the cooldown: %v", again)
+	}
+
+	later := checkDeadLetters(context.Background(), n, quiet(), lastAlert, now.Add(2*lagAlertCooldown))
+	if len(later) != 1 {
+		t.Errorf("nothing was reported after the cooldown had passed: %v", later)
+	}
+}
+
+// TestADeadLetterIsLoggedEvenWithNoSlack records that the alert reaches the log
+// whether or not a webhook is configured. A deployment with no Slack must still
+// leave a trace of a replica that is missing rows.
+func TestADeadLetterIsLoggedEvenWithNoSlack(t *testing.T) {
+	deadLettersFor(t, "dl-4", 7)
+
+	log := logrus.New()
+	var out strings.Builder
+	log.SetOutput(&out)
+
+	alerted := checkDeadLetters(context.Background(), nil, log, map[string]time.Time{}, time.Now())
+	if len(alerted) != 1 {
+		t.Fatalf("%d alerts, want one: %v", len(alerted), alerted)
+	}
+	if !strings.Contains(out.String(), "7 change(s)") {
+		t.Errorf("output = %q, want the count in it", out.String())
+	}
+}
+
+// TestASlackFailureDoesNotStopTheDeadLetterCheck records that one task whose
+// notification fails does not silence the rest.
+func TestASlackFailureDoesNotStopTheDeadLetterCheck(t *testing.T) {
+	deadLettersFor(t, "dl-5", 1)
+	n := &recordingNotifier{configured: true, err: errors.New("slack is down")}
+
+	if alerted := checkDeadLetters(context.Background(), n, quiet(),
+		map[string]time.Time{}, time.Now()); len(alerted) != 1 {
+		t.Errorf("alerts = %v, want the check to have carried on", alerted)
+	}
+}

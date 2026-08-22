@@ -74,33 +74,7 @@ func main() {
 			"not be accepted by another replica. Set it before running more than one.")
 	}
 
-	router := chi.NewRouter()
-	router.Mount("/api", httpapi.NewRouter())
-
-	// Probes, outside /api because they must answer before anything is
-	// configured and must never require a credential.
-	router.Get("/healthz", httpapi.Health)
-	router.Get("/readyz", httpapi.Ready)
-
-	// The exposition a scraper reads. It sits outside /api and takes no
-	// credential, which is what every scraper expects; keeping the port off the
-	// public network is the requirement that replaces the token.
-	router.Get("/metrics", metrics.Handler)
-
-	router.Get("/*", func(w http.ResponseWriter, r *http.Request) {
-		path := r.URL.Path
-		filePath := filepath.Join("ui/dist", path)
-
-		_, err := os.Stat(filePath)
-		fileExists := !os.IsNotExist(err)
-
-		if fileExists {
-			http.StripPrefix("/", http.FileServer(http.Dir("ui/dist"))).ServeHTTP(w, r)
-			return
-		}
-
-		http.ServeFile(w, r, "ui/dist/index.html")
-	})
+	router := newRouter()
 
 	// Every timeout is set. Without them a connection that opens and then sends
 	// nothing holds a goroutine and a file descriptor for as long as it likes,
@@ -146,4 +120,47 @@ func main() {
 		log.Warn("Replication did not stop within the drain timeout")
 	}
 	log.Info("Program exited")
+}
+
+// newRouter builds the whole HTTP surface: the API under /api, the probes and
+// the metrics beside it, and the single-page application under everything else.
+//
+// A function rather than a block inside main so it can be exercised: what is
+// reachable without a credential is a security property, and "the probes answer
+// before anything is configured" is the property a rolling deployment depends
+// on.
+func newRouter() *chi.Mux {
+	router := chi.NewRouter()
+	router.Mount("/api", httpapi.NewRouter())
+
+	// Probes, outside /api because they must answer before anything is
+	// configured and must never require a credential.
+	router.Get("/healthz", httpapi.Health)
+	router.Get("/readyz", httpapi.Ready)
+
+	// The exposition a scraper reads. It sits outside /api and takes no
+	// credential, which is what every scraper expects; keeping the port off the
+	// public network is the requirement that replaces the token.
+	router.Get("/metrics", metrics.Handler)
+
+	router.Get("/*", serveUI)
+	return router
+}
+
+// serveUI answers with a built file when one exists and with the application's
+// entry point otherwise, because the routes belong to the single-page
+// application rather than to this server.
+func serveUI(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Path
+	filePath := filepath.Join("ui/dist", path)
+
+	_, err := os.Stat(filePath)
+	fileExists := !os.IsNotExist(err)
+
+	if fileExists {
+		http.StripPrefix("/", http.FileServer(http.Dir("ui/dist"))).ServeHTTP(w, r)
+		return
+	}
+
+	http.ServeFile(w, r, "ui/dist/index.html")
 }

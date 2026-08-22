@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	_ "github.com/go-sql-driver/mysql"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo"
 
 	"github.com/retail-ai-inc/sync/internal/platform/config"
 	"github.com/retail-ai-inc/sync/internal/platform/metrics"
@@ -241,5 +243,192 @@ func TestARepairMakesTheTargetMatch(t *testing.T) {
 	}
 	if extras != 0 {
 		t.Errorf("%d rows the source does not have are still on the target", extras)
+	}
+}
+
+// ------------------------------------------------------------------ MongoDB
+
+// verifyMongoTask describes a comparison of one collection against a live
+// MongoDB pair.
+func verifyMongoTask(t *testing.T, collection string) config.SyncConfig {
+	t.Helper()
+
+	return config.SyncConfig{
+		ID:               harness.UniqueTaskID(),
+		Type:             "mongodb",
+		Enable:           true,
+		SourceConnection: "mongodb://" + harness.MongoSource + "/" + sourceDB + "?directConnection=true",
+		TargetConnection: "mongodb://" + harness.MongoTarget + "/" + targetDB + "?directConnection=true",
+		Mappings: []config.DatabaseMapping{{
+			SourceDatabase: sourceDB, TargetDatabase: targetDB,
+			Tables: []config.TableMapping{{SourceTable: collection, TargetTable: collection}},
+		}},
+	}
+}
+
+// verifyCollections empties the same collection on both sides and drops them
+// afterwards.
+func verifyCollections(t *testing.T, collection string) (source, target *mongo.Collection) {
+	t.Helper()
+
+	src := openMongo(t, harness.MongoSource)
+	tgt := openMongo(t, harness.MongoTarget)
+
+	source = src.Database(sourceDB).Collection(collection)
+	target = tgt.Database(targetDB).Collection(collection)
+	t.Cleanup(func() {
+		_ = source.Drop(context.Background())
+		_ = target.Drop(context.Background())
+	})
+	return source, target
+}
+
+// TestTwoIdenticalCollectionsCompareEqual covers the MongoDB half of the
+// periodic comparison, which had no test against a server at all. It is the
+// check that answers "is the copy we would switch to actually complete", and a
+// comparison that reports differences between two identical collections is as
+// useless as one that reports none between two that differ.
+func TestTwoIdenticalCollectionsCompareEqual(t *testing.T) {
+	collection := harness.UniqueName("verify_mongo")
+	source, target := verifyCollections(t, collection)
+
+	var docs []interface{}
+	for i := 1; i <= 12; i++ {
+		docs = append(docs, bson.M{"_id": i, "amount": i * 100, "note": "paid"})
+	}
+	if _, err := source.InsertMany(t.Context(), docs); err != nil {
+		t.Fatalf("seed the source: %v", err)
+	}
+	if _, err := target.InsertMany(t.Context(), docs); err != nil {
+		t.Fatalf("seed the target: %v", err)
+	}
+
+	task := verifyMongoTask(t, collection)
+	checkMongoTask(context.Background(), task, nil, quiet())
+
+	if got := differencesFound(t, task); got != 0 {
+		t.Errorf("the comparison found %v differences between two identical collections", got)
+	}
+}
+
+// TestEachKindOfMongoDivergenceIsReported covers the three things replication
+// can get wrong: a document that never arrived, one that was not deleted, and
+// one whose contents drifted.
+func TestEachKindOfMongoDivergenceIsReported(t *testing.T) {
+	collection := harness.UniqueName("verify_mongo_diff")
+	source, target := verifyCollections(t, collection)
+
+	var sourceDocs []interface{}
+	for i := 1; i <= 12; i++ {
+		sourceDocs = append(sourceDocs, bson.M{"_id": i, "amount": 100})
+	}
+	if _, err := source.InsertMany(t.Context(), sourceDocs); err != nil {
+		t.Fatalf("seed the source: %v", err)
+	}
+
+	// The target is missing 11, holds an extra 99, and disagrees about 10.
+	var targetDocs []interface{}
+	for i := 1; i <= 12; i++ {
+		if i == 11 {
+			continue
+		}
+		amount := 100
+		if i == 10 {
+			amount = 999
+		}
+		targetDocs = append(targetDocs, bson.M{"_id": i, "amount": amount})
+	}
+	targetDocs = append(targetDocs, bson.M{"_id": 99, "amount": 100})
+	if _, err := target.InsertMany(t.Context(), targetDocs); err != nil {
+		t.Fatalf("seed the target: %v", err)
+	}
+
+	task := verifyMongoTask(t, collection)
+	checkMongoTask(context.Background(), task, nil, quiet())
+
+	if got := differencesFound(t, task); got != 3 {
+		t.Errorf("the comparison found %v differences, want exactly three", got)
+	}
+}
+
+// TestAMongoRepairMakesTheTargetMatch covers the repair, which only runs when it
+// has been turned on. It is what makes the comparison worth running before a
+// switchover rather than only worth reading afterwards.
+func TestAMongoRepairMakesTheTargetMatch(t *testing.T) {
+	t.Setenv("SYNC_VERIFY_REPAIR", "true")
+
+	collection := harness.UniqueName("verify_mongo_repair")
+	source, target := verifyCollections(t, collection)
+
+	if _, err := source.InsertMany(t.Context(), []interface{}{
+		bson.M{"_id": 1, "amount": 100},
+		bson.M{"_id": 2, "amount": 200},
+	}); err != nil {
+		t.Fatalf("seed the source: %v", err)
+	}
+	// One document missing and one that drifted.
+	if _, err := target.InsertOne(t.Context(), bson.M{"_id": 1, "amount": 999}); err != nil {
+		t.Fatalf("seed the target: %v", err)
+	}
+	// And one the source no longer has.
+	if _, err := target.InsertOne(t.Context(), bson.M{"_id": 3, "amount": 300}); err != nil {
+		t.Fatalf("seed the extra document: %v", err)
+	}
+
+	task := verifyMongoTask(t, collection)
+	checkMongoTask(context.Background(), task, nil, quiet())
+
+	var repaired []bson.M
+	cursor, err := target.Find(t.Context(), bson.M{})
+	if err != nil {
+		t.Fatalf("read the target: %v", err)
+	}
+	if err := cursor.All(t.Context(), &repaired); err != nil {
+		t.Fatalf("decode the target: %v", err)
+	}
+
+	amounts := map[int32]int32{}
+	for _, doc := range repaired {
+		id, _ := doc["_id"].(int32)
+		amount, _ := doc["amount"].(int32)
+		amounts[id] = amount
+	}
+	if len(amounts) != 2 {
+		t.Fatalf("the target holds %d documents after the repair, want 2: %v", len(amounts), amounts)
+	}
+	if amounts[1] != 100 {
+		t.Errorf("document 1 = %d, want the source's 100", amounts[1])
+	}
+	if amounts[2] != 200 {
+		t.Errorf("document 2 = %d, want the one that never arrived", amounts[2])
+	}
+}
+
+// TestTheCollectionsAreDiscoveredWhenTheTaskListsNone records that a task with
+// no table mappings compares everything the source holds, rather than nothing.
+// A task configured to copy a whole database would otherwise be verified by a
+// comparison that silently checked no collections at all.
+func TestTheCollectionsAreDiscoveredWhenTheTaskListsNone(t *testing.T) {
+	collection := harness.UniqueName("verify_mongo_discover")
+	source, _ := verifyCollections(t, collection)
+
+	if _, err := source.InsertOne(t.Context(), bson.M{"_id": 1}); err != nil {
+		t.Fatalf("seed the source: %v", err)
+	}
+
+	task := verifyMongoTask(t, collection)
+	task.Mappings = nil
+
+	src := openMongo(t, harness.MongoSource)
+	pairs := mongoCollectionPairs(context.Background(), task, src.Database(sourceDB), quiet())
+
+	var found bool
+	for _, pair := range pairs {
+		if pair.source == collection && pair.target == collection {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the collection just seeded is not among the %d discovered: %v", len(pairs), pairs)
 	}
 }

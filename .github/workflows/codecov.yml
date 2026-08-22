@@ -126,7 +126,7 @@ jobs:
           # total either way.
           {
             echo "mode: atomic"
-            grep -v '^mode:' coverage.raw | sort -t' ' -k1,1 -k3,3nr | sort -t' ' -u -k1,1
+  X
           } > coverage.txt
 
       - name: Upload results to Codecov
