@@ -288,3 +288,52 @@ func TestACheckpointWithNoSourceIsStillUsed(t *testing.T) {
 		t.Fatal("a checkpoint from an older build was ignored, which would re-copy every table")
 	}
 }
+
+// ------------------------------------------------------------- row images
+
+// TestOnlyFullRowImagesAreAccepted is the guard against a silent corruption.
+// With anything but FULL the binlog carries only the columns that changed plus
+// the primary key, and the driver fills the rest with nils; the UPDATE this
+// syncer builds sets every column, so those nils go to the target as NULL over
+// values that never changed. The row counts still match and nothing errors.
+func TestOnlyFullRowImagesAreAccepted(t *testing.T) {
+	for _, image := range []string{"FULL", "full", "Full"} {
+		if err := requireFullRowImage(image); err != nil {
+			t.Errorf("requireFullRowImage(%q) = %v, want it accepted", image, err)
+		}
+	}
+
+	for _, image := range []string{"MINIMAL", "minimal", "NOBLOB", "noblob"} {
+		err := requireFullRowImage(image)
+		if err == nil {
+			t.Errorf("requireFullRowImage(%q) accepted it", image)
+			continue
+		}
+		if !strings.Contains(err.Error(), "binlog_row_image=FULL") {
+			t.Errorf("error = %v, want it to say what to set", err)
+		}
+		if !strings.Contains(err.Error(), "NULL") {
+			t.Errorf("error = %v, want it to say what goes wrong", err)
+		}
+	}
+}
+
+// TestAServerWithNoRowImageSettingIsAccepted covers MySQL before 5.6, which has
+// no such variable and always logs whole rows.
+func TestAServerWithNoRowImageSettingIsAccepted(t *testing.T) {
+	if err := requireFullRowImage(""); err != nil {
+		t.Errorf("requireFullRowImage(\"\") = %v", err)
+	}
+}
+
+// TestMariaDBIsNotAsked records that the check is skipped for MariaDB, which has
+// no binlog_row_image setting and logs whole rows unconditionally. The nil canal
+// proves it: reaching the query would panic.
+func TestMariaDBIsNotAsked(t *testing.T) {
+	s := newSyncer(t)
+	s.cfg.Type = "mariadb"
+
+	if err := s.checkRowImage(nil); err != nil {
+		t.Errorf("checkRowImage for MariaDB = %v", err)
+	}
+}

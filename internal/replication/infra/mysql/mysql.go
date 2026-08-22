@@ -97,6 +97,11 @@ func (s *MySQLSyncer) Start(ctx context.Context) {
 		return
 	}
 
+	if err := s.checkRowImage(c); err != nil {
+		s.logger.Errorf("[MySQL] Refusing to replicate from this source: %v", err)
+		return
+	}
+
 	var targetDB *sql.DB
 	err = resilience.Retry(5, 2*time.Second, 2.0, func() error {
 		var connErr error
@@ -1256,4 +1261,47 @@ func (s *MySQLSyncer) resolveMappings(ctx context.Context, conn *sql.Conn, sourc
 	}
 	s.logger.Infof("[MySQL] Discovered %d tables in %s", len(mapped), sourceDBName)
 	return []config.DatabaseMapping{{Tables: mapped}}
+}
+
+// checkRowImage refuses a source whose binlog does not carry whole rows.
+//
+// canal checks binlog_format for itself, but not binlog_row_image: that check is
+// an exported method it never calls. MariaDB has no such setting and always logs
+// the whole row, so it is only asked of MySQL.
+func (s *MySQLSyncer) checkRowImage(c *canal.Canal) error {
+	if strings.EqualFold(s.cfg.Type, "mariadb") {
+		return nil
+	}
+
+	result, err := c.Execute(`SHOW GLOBAL VARIABLES LIKE 'binlog_row_image'`)
+	if err != nil {
+		return fmt.Errorf("read binlog_row_image: %w", err)
+	}
+	image, _ := result.GetString(0, 1)
+	return requireFullRowImage(image)
+}
+
+// requireFullRowImage reports why a binlog row image cannot be replicated from.
+//
+// With anything other than FULL the binlog carries only the columns that changed
+// plus the primary key, and the driver fills the rest of the row with nils. The
+// UPDATE this syncer builds sets every column, so those nils are written as NULL
+// over values that never changed — silently, with the target looking perfectly
+// healthy and the row counts matching.
+//
+// There is no way to tell such a nil from a column that really is NULL, so this
+// cannot be worked around by writing fewer columns. It has to be refused.
+func requireFullRowImage(image string) error {
+	switch {
+	case image == "":
+		// Servers before 5.6 have no such setting and always log whole rows.
+		return nil
+	case strings.EqualFold(image, "FULL"):
+		return nil
+	default:
+		return fmt.Errorf("the source logs %s binlog row images, which carry only the "+
+			"columns that changed. Every other column would be written to the target "+
+			"as NULL, with nothing to show that it happened. Set binlog_row_image=FULL "+
+			"on the source", image)
+	}
 }
