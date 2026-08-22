@@ -13,26 +13,81 @@ import (
 	goredis "github.com/redis/go-redis/v9"
 	"github.com/retail-ai-inc/sync/internal/platform/config"
 	intRedis "github.com/retail-ai-inc/sync/internal/platform/dbconn/redis"
+	"github.com/retail-ai-inc/sync/internal/platform/dsn"
 	"github.com/retail-ai-inc/sync/internal/platform/resilience"
 	"github.com/sirupsen/logrus"
 )
 
+// defaultReconcileInterval is how often the whole keyspace is compared against
+// the source when nothing is configured.
+//
+// Keyspace notifications are fire-and-forget: Redis publishes them with no
+// acknowledgement and no replay, so anything published while the subscriber is
+// reconnecting is gone. They cannot be the only path a payment keyspace
+// reaches the disaster-recovery copy by, which is what the periodic full
+// comparison is for.
+const defaultReconcileInterval = time.Hour
+
+// streamGroup is the consumer group the stream reader creates on the source.
+const streamGroup = "sync_group"
+
 type RedisSyncer struct {
 	cfg         config.SyncConfig
 	logger      logrus.FieldLogger
-	source      *goredis.Client
-	target      *goredis.Client
+	source      goredis.UniversalClient
+	target      goredis.UniversalClient
 	lastExecErr int32
 
 	positionPath string
+	// reconcileEvery is how often the keyspace is fully compared. Zero turns
+	// the comparison off.
+	reconcileEvery time.Duration
 }
 
 func NewRedisSyncer(cfg config.SyncConfig, logger *logrus.Logger) *RedisSyncer {
-	return &RedisSyncer{
-		cfg:          cfg,
-		logger:       logger.WithField("sync_task_id", cfg.ID),
-		positionPath: cfg.RedisPositionPath,
+	interval := cfg.RedisReconcileInterval
+	if interval == 0 {
+		interval = defaultReconcileInterval
 	}
+	if interval < 0 {
+		interval = 0
+	}
+	return &RedisSyncer{
+		cfg:            cfg,
+		logger:         logger.WithField("sync_task_id", cfg.ID),
+		positionPath:   cfg.RedisPositionPath,
+		reconcileEvery: interval,
+	}
+}
+
+// streamPair names one stream mapping.
+type streamPair struct {
+	source string
+	target string
+}
+
+// streamMappings reports the streams this task replicates.
+//
+// It used to be one line — cfg.Mappings[0].Tables[0].SourceTable — with no
+// bounds check at all, and the configuration loader inserts an empty mapping
+// when a task has none, so the index was out of range for every task with no
+// tables configured. That panicked in a goroutine with no recover, taking the
+// whole syncer process down with it, every other replication task included.
+func (r *RedisSyncer) streamMappings() []streamPair {
+	var pairs []streamPair
+	for _, mapping := range r.cfg.Mappings {
+		for _, table := range mapping.Tables {
+			if table.SourceTable == "" {
+				continue
+			}
+			target := table.TargetTable
+			if target == "" {
+				target = table.SourceTable
+			}
+			pairs = append(pairs, streamPair{source: table.SourceTable, target: target})
+		}
+	}
+	return pairs
 }
 
 func (r *RedisSyncer) Start(ctx context.Context) {
@@ -60,6 +115,8 @@ func (r *RedisSyncer) Start(ctx context.Context) {
 	defer r.source.Close()
 	defer r.target.Close()
 
+	r.checkKeyspaceNotifications(ctx)
+
 	if err := r.doInitialSync(ctx); err != nil {
 		r.logger.Errorf("[Redis] doInitialSync error: %v", err)
 	}
@@ -67,47 +124,108 @@ func (r *RedisSyncer) Start(ctx context.Context) {
 
 	r.logger.Info("[Redis] Subscribing keyspace notifications...")
 	go r.watchKeyspaceChanges(ctx)
+	go r.reconcileLoop(ctx)
 
-	streamName := r.cfg.Mappings[0].Tables[0].SourceTable
-	lastID := r.loadStreamPosition()
-	if lastID == "" {
-		lastID = "0-0"
+	pairs := r.streamMappings()
+	if len(pairs) == 0 {
+		r.logger.Info("[Redis] No stream mappings configured; replicating the keyspace only.")
 	}
-	groupName := "sync_group"
-	err = r.source.XGroupCreateMkStream(ctx, streamName, groupName, lastID).Err()
-	if err != nil && !strings.Contains(err.Error(), "BUSYGROUP") {
-		r.logger.Errorf("[Redis] XGroupCreate fail => %v", err)
+	for _, pair := range pairs {
+		go r.replicateStream(ctx, pair)
+	}
+
+	<-ctx.Done()
+	r.logger.Info("[Redis] Synchronization stopped.")
+}
+
+// sourceDatabase reports the database index the source DSN addresses. The
+// keyspace notification channel is per-database, so subscribing to database 0
+// regardless — which is what it used to do — meant a task configured against
+// any other database saw nothing at all and reported no error.
+func (r *RedisSyncer) sourceDatabase() string {
+	db := dsn.GetDatabaseName("redis", r.cfg.SourceConnection)
+	if db == "" {
+		return "0"
+	}
+	return db
+}
+
+// checkKeyspaceNotifications reports whether the source will actually publish
+// the events the subscription depends on.
+//
+// The subscription itself succeeds whether or not the server is configured to
+// publish, so a source with notify-keyspace-events unset looks exactly like a
+// source with nothing happening on it: the task runs, reports no error, and
+// replicates nothing. Memorystore leaves the setting empty by default.
+func (r *RedisSyncer) checkKeyspaceNotifications(ctx context.Context) {
+	values, err := r.source.ConfigGet(ctx, "notify-keyspace-events").Result()
+	if err != nil {
+		r.logger.Warnf("[Redis] Could not read notify-keyspace-events (%v); if the "+
+			"source does not publish keyspace events, incremental replication will "+
+			"be silently empty and only the periodic comparison will carry changes", err)
 		return
 	}
-	r.logger.Infof("[Redis] Using group=%s on stream=%s from lastID=%s", groupName, streamName, lastID)
 
-	r.logger.Info("[Redis] Starting stream-based replication (if any) ...")
-	r.watchStreamChanges(ctx, streamName, groupName, lastID)
-	r.logger.Info("[Redis] Stream-based replication ended, synchronization finished.")
+	flags := values["notify-keyspace-events"]
+	switch {
+	case !strings.Contains(flags, "K"):
+		r.logger.Errorf("[Redis] The source has notify-keyspace-events=%q, which does "+
+			"not include K: no keyspace event will ever be published and incremental "+
+			"replication will be silently empty. Set it to at least KEA.", flags)
+	case !strings.ContainsAny(flags, "A$lshzxeg"):
+		r.logger.Errorf("[Redis] The source has notify-keyspace-events=%q, which names "+
+			"no event class: changes will not be published. Set it to at least KEA.", flags)
+	default:
+		r.logger.Infof("[Redis] Source notify-keyspace-events=%q", flags)
+	}
 }
+
+// ------------------------------------------------------------ full copies
 
 func (r *RedisSyncer) doInitialSync(ctx context.Context) error {
 	r.logger.Info("[Redis] Starting initial full sync...")
-	var cursor uint64
+	return r.scanSource(ctx, func(keys []string) {
+		if err := r.copyKeys(ctx, keys); err != nil {
+			r.logger.Errorf("[Redis] copyKeys error: %v", err)
+			atomic.StoreInt32(&r.lastExecErr, 1)
+		}
+	})
+}
+
+// scanSource walks the whole source keyspace, one page at a time, across every
+// master when the source is a cluster.
+func (r *RedisSyncer) scanSource(ctx context.Context, page func(keys []string)) error {
+	return scanAll(ctx, r.source, page)
+}
+
+// scanAll walks a keyspace. A cluster keeps its keys on many nodes and SCAN
+// only ever walks the node it reached, so each master is scanned in turn.
+func scanAll(ctx context.Context, client goredis.UniversalClient, page func(keys []string)) error {
 	const batchSize = 100
 
-	for {
-		keys, nextCursor, err := r.source.Scan(ctx, cursor, "*", batchSize).Result()
-		if err != nil {
-			return fmt.Errorf("SCAN fail at cursor=%d: %v", cursor, err)
-		}
-		if len(keys) > 0 {
-			if err2 := r.copyKeys(ctx, keys); err2 != nil {
-				r.logger.Errorf("[Redis] copyKeys error: %v", err2)
-				atomic.StoreInt32(&r.lastExecErr, 1)
+	scanOne := func(ctx context.Context, c goredis.UniversalClient) error {
+		var cursor uint64
+		for {
+			keys, next, err := c.Scan(ctx, cursor, "*", batchSize).Result()
+			if err != nil {
+				return fmt.Errorf("SCAN fail at cursor=%d: %v", cursor, err)
+			}
+			if len(keys) > 0 {
+				page(keys)
+			}
+			cursor = next
+			if cursor == 0 {
+				return nil
 			}
 		}
-		cursor = nextCursor
-		if cursor == 0 {
-			break
-		}
 	}
-	return nil
+
+	if cluster, ok := client.(*goredis.ClusterClient); ok {
+		return cluster.ForEachMaster(ctx, func(ctx context.Context, node *goredis.Client) error {
+			return scanOne(ctx, node)
+		})
+	}
+	return scanOne(ctx, client)
 }
 
 func (r *RedisSyncer) copyKeys(ctx context.Context, keys []string) error {
@@ -116,12 +234,13 @@ func (r *RedisSyncer) copyKeys(ctx context.Context, keys []string) error {
 			r.logger.Errorf("[Redis] copyFullKey fail => key=%s, error=%v", k, err)
 			atomic.StoreInt32(&r.lastExecErr, 1)
 		} else {
-			r.logger.Infof("[Redis][COPY] key=%s copied successfully", k)
+			r.logger.Debugf("[Redis][COPY] key=%s copied successfully", k)
 		}
 	}
 	return nil
 }
 
+// copyFullKey copies one key byte for byte, TTL included.
 func (r *RedisSyncer) copyFullKey(ctx context.Context, key string) error {
 	ttl, err := r.source.TTL(ctx, key).Result()
 	if err != nil {
@@ -163,14 +282,41 @@ func (r *RedisSyncer) copyFullKey(ctx context.Context, key string) error {
 	return nil
 }
 
+// ------------------------------------------------------ keyspace watching
+
 func (r *RedisSyncer) watchKeyspaceChanges(ctx context.Context) {
-	pubsub := r.source.PSubscribe(ctx, "__keyspace@0__:*")
+	pattern := fmt.Sprintf("__keyspace@%s__:*", r.sourceDatabase())
+
+	// A cluster publishes keyspace events on the node that owns the key, so a
+	// single subscription would only ever see one node's share of them.
+	if cluster, ok := r.source.(*goredis.ClusterClient); ok {
+		var wg sync.WaitGroup
+		err := cluster.ForEachMaster(ctx, func(ctx context.Context, node *goredis.Client) error {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				r.subscribeKeyspace(ctx, node, pattern)
+			}()
+			return nil
+		})
+		if err != nil {
+			r.logger.Errorf("[Redis] Could not subscribe to every master: %v", err)
+		}
+		wg.Wait()
+		return
+	}
+	r.subscribeKeyspace(ctx, r.source, pattern)
+}
+
+// subscribeKeyspace consumes one node's keyspace notifications.
+func (r *RedisSyncer) subscribeKeyspace(ctx context.Context, client goredis.UniversalClient, pattern string) {
+	pubsub := client.PSubscribe(ctx, pattern)
 	if pubsub == nil {
 		r.logger.Error("[Redis] PSubscribe returned nil => no keyspace subscription.")
 		return
 	}
 	defer pubsub.Close()
-	r.logger.Info("[Redis] Keyspace subscription started on DB0.")
+	r.logger.Infof("[Redis] Keyspace subscription started on %s.", pattern)
 
 	for {
 		select {
@@ -187,6 +333,12 @@ func (r *RedisSyncer) watchKeyspaceChanges(ctx context.Context) {
 	}
 }
 
+// handleKeyspaceChange applies one notification.
+//
+// Everything that is not a removal is applied as a full copy. Rebuilding the
+// value from its type — GET then SET, HGETALL then HSET — dropped the TTL and
+// merged rather than replaced a hash, so a key whose expiry mattered lost it
+// and a hash that had fields removed kept them.
 func (r *RedisSyncer) handleKeyspaceChange(ctx context.Context, ch, op string) {
 	parts := strings.SplitN(ch, ":", 2)
 	if len(parts) < 2 {
@@ -194,133 +346,221 @@ func (r *RedisSyncer) handleKeyspaceChange(ctx context.Context, ch, op string) {
 		return
 	}
 	key := parts[1]
-	srcType, err := r.source.Type(ctx, key).Result()
-	if err != nil {
-		r.logger.Errorf("[Redis] Failed to get type for key=%s: %v", key, err)
-		return
-	}
 
 	switch strings.ToLower(op) {
-	case "del":
+	case "del", "expired", "evicted":
 		r.logger.Debugf("[Redis][DELETE] command=\"DEL key=%s\"", key)
-		if err2 := r.target.Del(ctx, key).Err(); err2 != nil {
-			r.logger.Errorf("[Redis][DELETE] key=%s error=%v", key, err2)
+		if err := r.target.Del(ctx, key).Err(); err != nil {
+			r.logger.Errorf("[Redis][DELETE] key=%s error=%v", key, err)
+			atomic.StoreInt32(&r.lastExecErr, 1)
 		} else {
-			r.logger.Infof("[Redis][DELETE] key=%s success", key)
-		}
-
-	case "set":
-		switch srcType {
-		case "string":
-			val, err := r.source.Get(ctx, key).Result()
-			if err == nil {
-				r.target.Set(ctx, key, val, 0)
-			}
-		case "hash":
-			fields, err := r.source.HGetAll(ctx, key).Result()
-			if err == nil {
-				r.target.HSet(ctx, key, fields)
-			}
-		default:
-			r.logger.Debugf("[Redis][UPSERT] Unsupported type for key=%s: %s", key, srcType)
+			r.logger.Debugf("[Redis][DELETE] key=%s success", key)
 		}
 
 	default:
 		r.logger.Debugf("[Redis][UPSERT] command=\"FULLCOPY key=%s\"", key)
-		r.copyFullKey(ctx, key)
+		if err := r.copyFullKey(ctx, key); err != nil {
+			r.logger.Errorf("[Redis][UPSERT] key=%s error=%v", key, err)
+			atomic.StoreInt32(&r.lastExecErr, 1)
+		}
 	}
 }
 
-func (r *RedisSyncer) watchStreamChanges(ctx context.Context, streamName, groupName, lastID string) {
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				streams, xerr := r.source.XReadGroup(ctx, &goredis.XReadGroupArgs{
-					Group:    groupName,
-					Consumer: "sync_consumer_1",
-					Streams:  []string{streamName, lastID},
-					Count:    10,
-					Block:    2000 * time.Millisecond,
-				}).Result()
-				if xerr != nil && xerr != goredis.Nil {
-					if strings.Contains(xerr.Error(), "context canceled") {
-						r.logger.Warnf("[Redis] XReadGroup context canceled => %v", xerr)
-						return
-					}
-					r.logger.Errorf("[Redis] XReadGroup error => %v", xerr)
-					continue
+// --------------------------------------------------------- reconciliation
+
+// reconcileLoop periodically brings the target back in line with the source.
+//
+// Keyspace notifications are published with no acknowledgement and no replay:
+// anything Redis publishes while the subscriber is reconnecting is simply gone,
+// and nothing in the protocol reports that it happened. The comparison is
+// therefore not an optimisation, it is the only thing that makes the target
+// eventually correct.
+func (r *RedisSyncer) reconcileLoop(ctx context.Context) {
+	if r.reconcileEvery <= 0 {
+		r.logger.Warn("[Redis] Periodic reconciliation is disabled; keyspace " +
+			"notifications are the only path changes reach the target by, and they " +
+			"are lost whenever the subscription drops.")
+		return
+	}
+
+	ticker := time.NewTicker(r.reconcileEvery)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			r.reconcile(ctx)
+		}
+	}
+}
+
+// reconcile copies every source key over the target and removes target keys the
+// source no longer has.
+func (r *RedisSyncer) reconcile(ctx context.Context) {
+	start := time.Now()
+	copied, removed := 0, 0
+
+	if err := r.scanSource(ctx, func(keys []string) {
+		_ = r.copyKeys(ctx, keys)
+		copied += len(keys)
+	}); err != nil {
+		r.logger.Errorf("[Redis] Reconciliation could not read the source: %v", err)
+		return
+	}
+
+	if err := scanAll(ctx, r.target, func(keys []string) {
+		removed += r.removeKeysMissingFromSource(ctx, keys)
+	}); err != nil {
+		r.logger.Errorf("[Redis] Reconciliation could not read the target: %v", err)
+		return
+	}
+
+	r.logger.Infof("[Redis] Reconciliation finished in %v: %d keys copied, %d removed",
+		time.Since(start), copied, removed)
+}
+
+// removeKeysMissingFromSource deletes the target keys the source no longer
+// holds, which is how a delete lost with a dropped subscription is corrected.
+func (r *RedisSyncer) removeKeysMissingFromSource(ctx context.Context, keys []string) int {
+	removed := 0
+	for _, key := range keys {
+		exists, err := r.source.Exists(ctx, key).Result()
+		if err != nil {
+			r.logger.Errorf("[Redis] Reconciliation could not check key=%s: %v", key, err)
+			continue
+		}
+		if exists > 0 {
+			continue
+		}
+		if err := r.target.Del(ctx, key).Err(); err != nil {
+			r.logger.Errorf("[Redis] Reconciliation could not remove key=%s: %v", key, err)
+			continue
+		}
+		r.logger.Debugf("[Redis][RECONCILE] key=%s removed; the source no longer has it", key)
+		removed++
+	}
+	return removed
+}
+
+// -------------------------------------------------------- stream watching
+
+// replicateStream mirrors one source stream onto the target.
+func (r *RedisSyncer) replicateStream(ctx context.Context, pair streamPair) {
+	lastID := r.loadStreamPosition(pair.source)
+	if lastID == "" {
+		lastID = "0-0"
+	}
+
+	err := r.source.XGroupCreateMkStream(ctx, pair.source, streamGroup, lastID).Err()
+	if err != nil && !strings.Contains(err.Error(), "BUSYGROUP") {
+		r.logger.Errorf("[Redis] XGroupCreate fail => %v", err)
+		return
+	}
+	r.logger.Infof("[Redis] Using group=%s on stream=%s from lastID=%s", streamGroup, pair.source, lastID)
+
+	r.watchStreamChanges(ctx, pair, streamGroup, lastID)
+	r.logger.Infof("[Redis] Stream replication for %s ended.", pair.source)
+}
+
+func (r *RedisSyncer) watchStreamChanges(ctx context.Context, pair streamPair, groupName, lastID string) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			streams, xerr := r.source.XReadGroup(ctx, &goredis.XReadGroupArgs{
+				Group:    groupName,
+				Consumer: "sync_consumer_1",
+				Streams:  []string{pair.source, ">"},
+				Count:    10,
+				Block:    2000 * time.Millisecond,
+			}).Result()
+			if xerr != nil && xerr != goredis.Nil {
+				if strings.Contains(xerr.Error(), "context canceled") {
+					r.logger.Warnf("[Redis] XReadGroup context canceled => %v", xerr)
+					return
 				}
-				if len(streams) == 0 {
-					continue
-				}
-				for _, st := range streams {
-					for _, msg := range st.Messages {
-						r.logger.Debugf("[Redis][STREAM] command=\"XINSERT stream=%s msgID=%s\"", streamName, msg.ID)
-						if err2 := r.processStreamMessage(ctx, msg); err2 == nil {
-							r.source.XAck(ctx, streamName, groupName, msg.ID)
-							lastID = msg.ID
-							r.saveStreamPosition(lastID)
-						} else {
-							r.logger.Errorf("[Redis] processStreamMessage fail => skip XACK => %v", err2)
-							atomic.StoreInt32(&r.lastExecErr, 1)
-						}
+				r.logger.Errorf("[Redis] XReadGroup error => %v", xerr)
+				continue
+			}
+			if len(streams) == 0 {
+				continue
+			}
+			for _, st := range streams {
+				for _, msg := range st.Messages {
+					r.logger.Debugf("[Redis][STREAM] command=\"XADD stream=%s msgID=%s\"", pair.target, msg.ID)
+					if err := r.processStreamMessage(ctx, pair.target, msg); err != nil {
+						r.logger.Errorf("[Redis] processStreamMessage fail => skip XACK => %v", err)
+						atomic.StoreInt32(&r.lastExecErr, 1)
+						continue
 					}
+					r.source.XAck(ctx, pair.source, groupName, msg.ID)
+					lastID = msg.ID
+					r.saveStreamPosition(pair.source, lastID)
 				}
 			}
 		}
-	}()
-	wg.Wait()
+	}
 }
 
-func (r *RedisSyncer) processStreamMessage(ctx context.Context, msg goredis.XMessage) error {
-	hashKey := fmt.Sprintf("msg:%s", msg.ID)
-	pipe := r.target.Pipeline()
-	fields := make(map[string]interface{})
-	for k, v := range msg.Values {
-		fields[k] = v
-	}
+// processStreamMessage appends one source entry to the target stream, keeping
+// its identifier.
+//
+// It used to write the entry into a hash called msg:<id> on the target, and to
+// decide how by asking the *source* for the type of that hash — a key the
+// source has never had. The type came back as "none", the call returned an
+// error, the entry was never acknowledged, and the reader read the same entry
+// forever. Nothing was replicated and the loop never moved on.
+func (r *RedisSyncer) processStreamMessage(ctx context.Context, targetStream string, msg goredis.XMessage) error {
+	err := r.target.XAdd(ctx, &goredis.XAddArgs{
+		Stream: targetStream,
+		ID:     msg.ID,
+		Values: msg.Values,
+	}).Err()
 
-	// Check the type of the key before deciding whether it's an update or a new key
-	srcType, err := r.source.Type(ctx, hashKey).Result()
 	if err != nil {
-		r.logger.Errorf("[Redis] Failed to get type for key=%s: %v", hashKey, err)
+		if isAlreadyAppended(err) {
+			// The entry is already on the target, which is what a replay after a
+			// restart looks like. Reporting success is what lets the reader
+			// acknowledge it and move on.
+			r.logger.Debugf("[Redis][STREAM] id=%s is already on %s", msg.ID, targetStream)
+			return nil
+		}
+		r.logger.Errorf("[Redis][STREAM] XADD => id=%s error=%v", msg.ID, err)
 		return err
 	}
 
-	// Handle based on the type of the source key
-	switch srcType {
-	case "string":
-		// Use SET to update the value in the target
-		pipe.Set(ctx, hashKey, fields, 0)
-	case "hash":
-		// Use HSET to update the hash in the target
-		pipe.HSet(ctx, hashKey, fields)
-	default:
-		r.logger.Debugf("[Redis][STREAM] Unsupported type for key=%s: %s", hashKey, srcType)
-		return fmt.Errorf("unsupported key type %s for key=%s", srcType, hashKey)
-	}
-
-	_, err = pipe.Exec(ctx)
-	if err != nil {
-		r.logger.Errorf("[Redis][STREAM] processStreamMessage => id=%s error=%v", msg.ID, err)
-		return err
-	}
-
-	r.logger.Infof("[Redis][STREAM] id=%s => stored as hashKey=%s fieldsCount=%d", msg.ID, hashKey, len(fields))
+	r.logger.Debugf("[Redis][STREAM] id=%s => appended to %s with %d fields",
+		msg.ID, targetStream, len(msg.Values))
 	return nil
 }
 
-func (r *RedisSyncer) loadStreamPosition() string {
+// isAlreadyAppended reports the error Redis returns for an identifier that is
+// not greater than the target stream's last one, which is how a replayed entry
+// presents.
+func isAlreadyAppended(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "equal or smaller")
+}
+
+// ------------------------------------------------------------- positions
+
+// streamPositionPath names the file holding one stream's position. The stream
+// name is part of it because a task may replicate more than one.
+func (r *RedisSyncer) streamPositionPath(stream string) string {
 	if r.positionPath == "" {
 		return ""
 	}
-	data, err := os.ReadFile(r.positionPath)
+	return r.positionPath + "." + stream
+}
+
+func (r *RedisSyncer) loadStreamPosition(stream string) string {
+	path := r.streamPositionPath(stream)
+	if path == "" {
+		return ""
+	}
+	data, err := os.ReadFile(path)
 	if err != nil {
 		r.logger.Infof("[Redis] No stream position file => %v", err)
 		return ""
@@ -328,16 +568,16 @@ func (r *RedisSyncer) loadStreamPosition() string {
 	return strings.TrimSpace(string(data))
 }
 
-func (r *RedisSyncer) saveStreamPosition(id string) {
-	if r.positionPath == "" {
+func (r *RedisSyncer) saveStreamPosition(stream, id string) {
+	path := r.streamPositionPath(stream)
+	if path == "" {
 		return
 	}
-	dir := filepath.Dir(r.positionPath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		r.logger.Errorf("[Redis] mkdir fail: %v", err)
 		return
 	}
-	if err := os.WriteFile(r.positionPath, []byte(id), 0644); err != nil {
+	if err := os.WriteFile(path, []byte(id), 0644); err != nil {
 		r.logger.Errorf("[Redis] write position fail: %v", err)
 	}
 }

@@ -58,6 +58,12 @@ type SyncConfig struct {
 	PGPositionPath         string
 	PGPublicationNames     string
 	RedisPositionPath      string
+	// RedisReconcileInterval is how often the Redis keyspace is fully compared
+	// against the source. Keyspace notifications are published with no
+	// acknowledgement and no replay, so the comparison is what makes the target
+	// eventually correct after a dropped subscription. Zero means the default;
+	// a negative value turns it off.
+	RedisReconcileInterval time.Duration
 	Status                 string
 	TaskName               string
 }
@@ -223,6 +229,7 @@ ORDER BY id ASC
 				PGPositionPath         *string           `json:"pg_position_path"`
 				PGPublicationNames     *string           `json:"pg_publication_names"`
 				RedisPositionPath      *string           `json:"redis_position_path"`
+				RedisReconcileInterval *string           `json:"redis_reconcile_interval"`
 				SecurityEnabled        *bool             `json:"securityEnabled"`
 			}
 			if errJ := json.Unmarshal([]byte(js), &extra); errJ != nil {
@@ -255,6 +262,13 @@ ORDER BY id ASC
 				}
 				if extra.RedisPositionPath != nil {
 					sc.RedisPositionPath = *extra.RedisPositionPath
+				}
+				if extra.RedisReconcileInterval != nil {
+					if d, errD := time.ParseDuration(*extra.RedisReconcileInterval); errD == nil {
+						sc.RedisReconcileInterval = d
+					} else {
+						log.Printf("[WARN] redis_reconcile_interval for id=%d is not a duration: %v", id, errD)
+					}
 				}
 
 				sc.Mappings = extra.Mappings

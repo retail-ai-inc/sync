@@ -251,117 +251,109 @@ func TestTheKeyNameKeepsItsColons(t *testing.T) {
 	t.Errorf("target commands = %v, want the whole key", target.seen())
 }
 
-func TestAStringSetIsCopiedWithSet(t *testing.T) {
-	source := newFakeRedis(t).on("TYPE", "+string\r\n").on("GET", bulk("hello"))
-	target := newFakeRedis(t).on("SET", "+OK\r\n")
-	s := newRedisSyncerWithFakes(t, source, target)
-
-	s.handleKeyspaceChange(ctxFor(t), "__keyspace@0__:greeting", "set")
-
-	if !target.sawCommand("SET") {
-		t.Errorf("target commands = %v, want a SET", target.seen())
-	}
-}
-
-// TestACopiedStringLosesItsTTL records a real gap in the incremental path: the
-// SET carries no expiry, so a key that had one on the source becomes permanent
-// on the target. The initial-sync path preserves it; this one does not.
-func TestACopiedStringLosesItsTTL(t *testing.T) {
-	source := newFakeRedis(t).on("TYPE", "+string\r\n").on("GET", bulk("hello"))
-	target := newFakeRedis(t).on("SET", "+OK\r\n")
+// TestAChangedKeyIsCopiedWholeWithItsTTL pins the incremental path. It used to
+// rebuild the value from its type — GET then SET for a string, HGETALL then
+// HSET for a hash — which dropped the expiry, merged rather than replaced a
+// hash, and silently ignored every other type. A DUMP and RESTORE copies the
+// value byte for byte with its expiry, whatever the type is.
+func TestAChangedKeyIsCopiedWholeWithItsTTL(t *testing.T) {
+	source := newFakeRedis(t).on("TTL", ":60\r\n").on("DUMP", bulk("payload"))
+	target := newFakeRedis(t).on("RESTORE", "+OK\r\n")
 	s := newRedisSyncerWithFakes(t, source, target)
 
 	s.handleKeyspaceChange(ctxFor(t), "__keyspace@0__:greeting", "set")
 
 	for _, cmd := range target.seen() {
-		if strings.HasPrefix(cmd, "SET ") {
-			if strings.Contains(strings.ToUpper(cmd), "EX") {
-				t.Fatalf("the SET carries an expiry now (%q), so assert that instead", cmd)
+		if strings.HasPrefix(cmd, "RESTORE ") {
+			if !strings.Contains(cmd, "60000") {
+				t.Errorf("restore = %q, want the source's expiry in milliseconds", cmd)
 			}
 			return
 		}
 	}
-	t.Errorf("target commands = %v, want a SET", target.seen())
+	t.Errorf("target commands = %v, want a RESTORE", target.seen())
 }
 
-func TestAHashSetIsCopiedWithHSet(t *testing.T) {
-	source := newFakeRedis(t).on("TYPE", "+hash\r\n").
-		on("HGETALL", "*2\r\n$5\r\nfield\r\n$5\r\nvalue\r\n")
-	target := newFakeRedis(t).on("HSET", ":1\r\n")
-	s := newRedisSyncerWithFakes(t, source, target)
-
-	s.handleKeyspaceChange(ctxFor(t), "__keyspace@0__:user:1", "set")
-
-	if !target.sawCommand("HSET") {
-		t.Errorf("target commands = %v, want an HSET", target.seen())
-	}
-}
-
-// TestAHashSetIsNotAReplacement records that HSET merges: a field deleted on the
-// source stays on the target forever, because nothing ever removes it. The two
-// sides drift apart silently.
-func TestAHashSetIsNotAReplacement(t *testing.T) {
-	source := newFakeRedis(t).on("TYPE", "+hash\r\n").
-		on("HGETALL", "*2\r\n$5\r\nfield\r\n$5\r\nvalue\r\n")
-	target := newFakeRedis(t).on("HSET", ":1\r\n").on("DEL", ":1\r\n")
-	s := newRedisSyncerWithFakes(t, source, target)
-
-	s.handleKeyspaceChange(ctxFor(t), "__keyspace@0__:user:1", "set")
-
-	if target.sawCommand("DEL") {
-		t.Fatal("the hash is cleared before the copy now, so assert that instead")
-	}
-}
-
-// TestAnUnsupportedTypeOnSetIsDropped records the gap in the "set" branch: only
-// strings and hashes are handled, so a change to a list, set, sorted set or
-// stream is logged at debug level and never replicated. The key stays at
-// whatever the initial sync left in the target.
-func TestAnUnsupportedTypeOnSetIsDropped(t *testing.T) {
-	for _, kind := range []string{"list", "set", "zset", "stream"} {
-		t.Run(kind, func(t *testing.T) {
-			source := newFakeRedis(t).on("TYPE", "+"+kind+"\r\n")
-			target := newFakeRedis(t)
+// TestEveryTypeIsReplicatedOnAChange covers the types the old type-by-type
+// branch dropped without a word: a change to a list, set, sorted set or stream
+// left the target holding whatever the initial copy had put there.
+func TestEveryTypeIsReplicatedOnAChange(t *testing.T) {
+	for _, op := range []string{"set", "hset", "lpush", "sadd", "zadd", "xadd", "rename_from"} {
+		t.Run(op, func(t *testing.T) {
+			source := newFakeRedis(t).on("TTL", ":-1\r\n").on("DUMP", bulk("payload"))
+			target := newFakeRedis(t).on("RESTORE", "+OK\r\n")
 			s := newRedisSyncerWithFakes(t, source, target)
 
-			s.handleKeyspaceChange(ctxFor(t), "__keyspace@0__:items", "set")
+			s.handleKeyspaceChange(ctxFor(t), "__keyspace@0__:items", op)
 
-			if len(target.seen()) != 0 {
-				t.Errorf("target commands = %v; %s appears to be replicated now, so "+
-					"assert that instead", target.seen(), kind)
+			if !target.sawCommand("RESTORE") {
+				t.Errorf("target commands = %v, want a full copy", target.seen())
 			}
 		})
 	}
 }
 
-// TestAnyOtherOperationTriggersAFullCopy records the catch-all: operations the
-// switch does not name — lpush, sadd, expire, rename — fall through to a full
-// DUMP and RESTORE of the key, which is correct for every type but copies the
-// whole value for every single change.
-func TestAnyOtherOperationTriggersAFullCopy(t *testing.T) {
-	source := newFakeRedis(t).on("TYPE", "+list\r\n").
-		on("TTL", ":-1\r\n").on("DUMP", bulk("payload"))
+// TestARestoreReplacesRatherThanMerges is what makes a removed hash field
+// disappear from the target too. HSET merged, so a field deleted at the source
+// stayed on the target for good and the two sides drifted apart silently.
+func TestARestoreReplacesRatherThanMerges(t *testing.T) {
+	source := newFakeRedis(t).on("TTL", ":-1\r\n").on("DUMP", bulk("payload"))
 	target := newFakeRedis(t).on("RESTORE", "+OK\r\n")
 	s := newRedisSyncerWithFakes(t, source, target)
 
-	s.handleKeyspaceChange(ctxFor(t), "__keyspace@0__:items", "lpush")
+	s.handleKeyspaceChange(ctxFor(t), "__keyspace@0__:user:1", "hset")
 
-	if !target.sawCommand("RESTORE") {
-		t.Errorf("target commands = %v, want a full copy", target.seen())
+	for _, cmd := range target.seen() {
+		if strings.HasPrefix(cmd, "RESTORE ") {
+			if !strings.Contains(strings.ToUpper(cmd), "REPLACE") {
+				t.Errorf("restore = %q, want REPLACE so the old value is not merged", cmd)
+			}
+			return
+		}
+	}
+	t.Errorf("target commands = %v, want a RESTORE", target.seen())
+}
+
+// TestAnExpiryRemovesTheKeyFromTheTarget covers the notifications Redis sends
+// when a key goes away by itself. They used to fall through to a full copy of a
+// key that no longer exists, which did nothing, so the target kept it.
+func TestAnExpiryRemovesTheKeyFromTheTarget(t *testing.T) {
+	for _, op := range []string{"del", "expired", "evicted"} {
+		t.Run(op, func(t *testing.T) {
+			target := newFakeRedis(t).on("DEL", ":1\r\n")
+			s := newRedisSyncerWithFakes(t, newFakeRedis(t), target)
+
+			s.handleKeyspaceChange(ctxFor(t), "__keyspace@0__:items", op)
+
+			if !target.sawCommand("DEL") {
+				t.Errorf("target commands = %v, want a DEL", target.seen())
+			}
+		})
 	}
 }
 
-// TestAFullCopyFailureIsDiscardedInTheKeyspacePath records that the fall-through
-// branch ignores copyFullKey's error entirely — no log line, no error flag. A
-// list that cannot be copied is lost with no trace at all.
-func TestAFullCopyFailureIsDiscardedInTheKeyspacePath(t *testing.T) {
-	source := newFakeRedis(t).on("TYPE", "+list\r\n").on("TTL", "-ERR nope\r\n")
+// TestAFullCopyFailureIsRecorded closes the gap where the fall-through branch
+// discarded copyFullKey's error entirely — no log line, no flag, no trace that
+// a key had been lost.
+func TestAFullCopyFailureIsRecorded(t *testing.T) {
+	source := newFakeRedis(t).on("TTL", "-ERR nope\r\n")
 	s := newRedisSyncerWithFakes(t, source, newFakeRedis(t))
 
 	s.handleKeyspaceChange(ctxFor(t), "__keyspace@0__:items", "lpush")
 
-	if atomic.LoadInt32(&s.lastExecErr) != 0 {
-		t.Fatal("the failure is recorded now, so assert that instead")
+	if atomic.LoadInt32(&s.lastExecErr) != 1 {
+		t.Error("a key that could not be copied left no trace")
+	}
+}
+
+func TestAFailedDeleteIsRecorded(t *testing.T) {
+	target := newFakeRedis(t).on("DEL", "-ERR read only replica\r\n")
+	s := newRedisSyncerWithFakes(t, newFakeRedis(t), target)
+
+	s.handleKeyspaceChange(ctxFor(t), "__keyspace@0__:items", "del")
+
+	if atomic.LoadInt32(&s.lastExecErr) != 1 {
+		t.Error("a delete the target refused left no trace")
 	}
 }
 
@@ -376,25 +368,16 @@ func TestAMalformedKeyspaceChannelIsIgnored(t *testing.T) {
 	}
 }
 
-func TestAKeyspaceChangeStopsWhenTheTypeCannotBeRead(t *testing.T) {
-	source := newFakeRedis(t).on("TYPE", "-ERR nope\r\n")
-	target := newFakeRedis(t)
-	s := newRedisSyncerWithFakes(t, source, target)
+// ------------------------------------------------------ subscription
 
-	s.handleKeyspaceChange(ctxFor(t), "__keyspace@0__:user:1", "del")
-
-	if len(target.seen()) != 0 {
-		t.Errorf("target commands = %v, want none", target.seen())
-	}
-}
-
-// TestTheSubscriptionOnlyWatchesDatabaseZero records the hardcoded pattern:
-// "__keyspace@0__:*". A task whose source uses any other Redis database gets no
-// incremental replication at all — the initial sync runs and then nothing.
-func TestTheSubscriptionOnlyWatchesDatabaseZero(t *testing.T) {
-	source := newFakeRedis(t).on("TYPE", "+none\r\n")
-	target := newFakeRedis(t).on("DEL", ":1\r\n")
-	s := newRedisSyncerWithFakes(t, source, target)
+// TestTheSubscriptionFollowsTheConfiguredDatabase is the fix for a hardcoded
+// "__keyspace@0__:*". Keyspace notifications are published per database, so a
+// task whose source used any other one got no incremental replication at all:
+// the initial copy ran and then nothing happened, with no error anywhere.
+func TestTheSubscriptionFollowsTheConfiguredDatabase(t *testing.T) {
+	source := newFakeRedis(t)
+	s := newRedisSyncerWithFakes(t, source, newFakeRedis(t))
+	s.cfg.SourceConnection = "redis://127.0.0.1:6379/3"
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -403,16 +386,41 @@ func TestTheSubscriptionOnlyWatchesDatabaseZero(t *testing.T) {
 		close(done)
 	}()
 
-	source.publish("__keyspace@0__:user:1", "del")
-	waitFor(t, func() bool { return target.sawCommand("DEL") })
+	waitFor(t, func() bool { return source.sawCommand("PSUBSCRIBE") })
+	cancel()
+	<-done
+
+	for _, cmd := range source.seen() {
+		if strings.HasPrefix(cmd, "PSUBSCRIBE ") {
+			if cmd != "PSUBSCRIBE __keyspace@3__:*" {
+				t.Errorf("subscription = %q, want database 3", cmd)
+			}
+			return
+		}
+	}
+	t.Errorf("source commands = %v, want a PSUBSCRIBE", source.seen())
+}
+
+func TestADSNWithNoDatabaseWatchesZero(t *testing.T) {
+	source := newFakeRedis(t)
+	s := newRedisSyncerWithFakes(t, source, newFakeRedis(t))
+	s.cfg.SourceConnection = "redis://127.0.0.1:6379"
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		s.watchKeyspaceChanges(ctx)
+		close(done)
+	}()
+
+	waitFor(t, func() bool { return source.sawCommand("PSUBSCRIBE") })
 	cancel()
 	<-done
 
 	for _, cmd := range source.seen() {
 		if strings.HasPrefix(cmd, "PSUBSCRIBE ") {
 			if cmd != "PSUBSCRIBE __keyspace@0__:*" {
-				t.Errorf("subscription = %q; another database appears to be watched "+
-					"now, so assert that instead", cmd)
+				t.Errorf("subscription = %q, want database 0", cmd)
 			}
 			return
 		}
@@ -422,10 +430,9 @@ func TestTheSubscriptionOnlyWatchesDatabaseZero(t *testing.T) {
 
 // TestADroppedSubscriptionIsReconnectedByTheClient records that the "channel
 // closed" branch in the watcher is effectively unreachable: go-redis reconnects
-// a broken pub/sub connection by itself and keeps the channel open, logging
-// "discarding bad PubSub connection" each time. So a source that goes away
-// leaves the watcher alive and spinning through reconnects rather than
-// returning — and nothing above it learns that notifications have stopped.
+// a broken pub/sub connection by itself and keeps the channel open. A source
+// that goes away leaves the watcher alive and spinning through reconnects
+// rather than returning — which is why the periodic comparison exists.
 func TestADroppedSubscriptionIsReconnectedByTheClient(t *testing.T) {
 	source := newFakeRedis(t)
 	s := newRedisSyncerWithFakes(t, source, newFakeRedis(t))
@@ -456,93 +463,93 @@ func TestADroppedSubscriptionIsReconnectedByTheClient(t *testing.T) {
 	}
 }
 
+// ------------------------------------------ keyspace notification check
+
+// TestASourceThatPublishesNothingIsReported covers the configuration that makes
+// incremental replication silently empty: the subscription succeeds whether or
+// not the server publishes anything, so without this check a source with
+// notify-keyspace-events unset looks exactly like a source with no traffic.
+// Memorystore leaves it unset by default.
+func TestASourceThatPublishesNothingIsReported(t *testing.T) {
+	source := newFakeRedis(t).on("CONFIG", "*2\r\n$22\r\nnotify-keyspace-events\r\n$0\r\n\r\n")
+	s := newRedisSyncerWithFakes(t, source, newFakeRedis(t))
+
+	s.checkKeyspaceNotifications(ctxFor(t))
+
+	if !source.sawCommand("CONFIG") {
+		t.Errorf("source commands = %v, want the setting to be read", source.seen())
+	}
+}
+
+func TestAConfiguredSourceIsAccepted(t *testing.T) {
+	source := newFakeRedis(t).on("CONFIG", "*2\r\n$22\r\nnotify-keyspace-events\r\n$3\r\nKEA\r\n")
+	s := newRedisSyncerWithFakes(t, source, newFakeRedis(t))
+
+	s.checkKeyspaceNotifications(ctxFor(t)) // must not panic or block
+}
+
+// TestAServerThatRefusesConfigGetIsTolerated covers the managed services that
+// do not allow CONFIG GET at all: the check is advisory, so it must not stop
+// the task.
+func TestAServerThatRefusesConfigGetIsTolerated(t *testing.T) {
+	source := newFakeRedis(t).on("CONFIG", "-ERR unknown command\r\n")
+	s := newRedisSyncerWithFakes(t, source, newFakeRedis(t))
+
+	s.checkKeyspaceNotifications(ctxFor(t))
+}
+
 // ---------------------------------------------------------- stream events
 
-// TestAStreamMessageIsStoredAsAHash records the stream mapping: each message
-// becomes a key named "msg:<id>" in the target, written with the type the
-// *source* reports for that key — which for a new message is "none", so nothing
-// is written at all.
-func TestAStreamMessageIsStoredAsAHash(t *testing.T) {
-	source := newFakeRedis(t).on("TYPE", "+hash\r\n")
-	target := newFakeRedis(t).on("HSET", ":1\r\n")
-	s := newRedisSyncerWithFakes(t, source, target)
+// TestAStreamEntryIsAppendedToTheTargetStream is the whole point of the stream
+// path. It used to write the entry into a hash called msg:<id> on the target,
+// and to decide how by asking the *source* for the type of that hash — a key
+// the source has never had. The type came back "none", the write was refused,
+// the entry was never acknowledged, and the reader read it forever.
+func TestAStreamEntryIsAppendedToTheTargetStream(t *testing.T) {
+	target := newFakeRedis(t).on("XADD", bulk("1-1"))
+	s := newRedisSyncerWithFakes(t, newFakeRedis(t), target)
 
-	err := s.processStreamMessage(ctxFor(t), goredis.XMessage{
+	err := s.processStreamMessage(ctxFor(t), "events_copy", goredis.XMessage{
 		ID:     "1-1",
 		Values: map[string]interface{}{"field": "value"},
 	})
 	if err != nil {
 		t.Fatalf("processStreamMessage: %v", err)
 	}
-	if !target.sawCommand("HSET") {
-		t.Errorf("target commands = %v, want an HSET", target.seen())
+
+	for _, cmd := range target.seen() {
+		if strings.HasPrefix(cmd, "XADD ") {
+			if !strings.Contains(cmd, "events_copy") {
+				t.Errorf("xadd = %q, want the target stream", cmd)
+			}
+			if !strings.Contains(cmd, "1-1") {
+				t.Errorf("xadd = %q, want the source identifier kept", cmd)
+			}
+			return
+		}
 	}
+	t.Errorf("target commands = %v, want an XADD", target.seen())
 }
 
-// TestANewStreamMessageIsRejected records the consequence of asking the source
-// for the type of a key the source never had: a brand-new message reports type
-// "none", which is neither string nor hash, so the message is rejected, never
-// acknowledged, and the stream never advances. The key the code looks up
-// ("msg:<id>") is one the *target* would hold, not the source.
-func TestANewStreamMessageIsRejected(t *testing.T) {
-	source := newFakeRedis(t).on("TYPE", "+none\r\n")
-	target := newFakeRedis(t)
-	s := newRedisSyncerWithFakes(t, source, target)
+// TestAReplayedEntryIsTreatedAsApplied is what lets the reader move on after a
+// restart. Redis refuses an identifier that is not greater than the stream's
+// last one, and that refusal means the entry is already there.
+func TestAReplayedEntryIsTreatedAsApplied(t *testing.T) {
+	target := newFakeRedis(t).on("XADD",
+		"-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n")
+	s := newRedisSyncerWithFakes(t, newFakeRedis(t), target)
 
-	err := s.processStreamMessage(ctxFor(t), goredis.XMessage{
-		ID:     "1-1",
-		Values: map[string]interface{}{"field": "value"},
-	})
-	if err == nil || !strings.Contains(err.Error(), "unsupported key type") {
-		t.Fatalf("err = %v; the lookup appears to be fixed now, so assert that "+
-			"instead", err)
-	}
-	if len(target.seen()) != 0 {
-		t.Errorf("target commands = %v, want none", target.seen())
-	}
-}
-
-// TestTheStringStreamBranchCanNeverSucceed records a dead branch: it passes the
-// whole field map to SET as the value, and go-redis refuses to marshal a
-// map — "can't marshal map[string]interface {}". So a stream message whose
-// target key is a string always fails, is never acknowledged, and the stream
-// stops advancing. Only the hash branch works.
-func TestTheStringStreamBranchCanNeverSucceed(t *testing.T) {
-	source := newFakeRedis(t).on("TYPE", "+string\r\n")
-	target := newFakeRedis(t).on("SET", "+OK\r\n")
-	s := newRedisSyncerWithFakes(t, source, target)
-
-	err := s.processStreamMessage(ctxFor(t), goredis.XMessage{
-		ID:     "1-1",
-		Values: map[string]interface{}{"field": "value"},
-	})
-	if err == nil {
-		t.Fatal("the string branch succeeded; the value appears to be encoded " +
-			"properly now, so assert that instead")
-	}
-	if !strings.Contains(err.Error(), "marshal") {
-		t.Errorf("err = %v, want the marshalling failure", err)
-	}
-	if target.sawCommand("SET") {
-		t.Error("a SET reached the server despite the marshalling failure")
-	}
-}
-
-func TestProcessStreamMessageReportsATypeFailure(t *testing.T) {
-	source := newFakeRedis(t).on("TYPE", "-ERR nope\r\n")
-	s := newRedisSyncerWithFakes(t, source, newFakeRedis(t))
-
-	if err := s.processStreamMessage(ctxFor(t), goredis.XMessage{ID: "1-1"}); err == nil {
-		t.Fatal("processStreamMessage reported success")
+	err := s.processStreamMessage(ctxFor(t), "events", goredis.XMessage{ID: "1-1"})
+	if err != nil {
+		t.Errorf("processStreamMessage: %v; a replayed entry must not stop the reader", err)
 	}
 }
 
 func TestProcessStreamMessageReportsAWriteFailure(t *testing.T) {
-	source := newFakeRedis(t).on("TYPE", "+hash\r\n")
-	target := newFakeRedis(t).on("HSET", "-ERR read only replica\r\n")
-	s := newRedisSyncerWithFakes(t, source, target)
+	target := newFakeRedis(t).on("XADD", "-ERR read only replica\r\n")
+	s := newRedisSyncerWithFakes(t, newFakeRedis(t), target)
 
-	if err := s.processStreamMessage(ctxFor(t), goredis.XMessage{
+	if err := s.processStreamMessage(ctxFor(t), "events", goredis.XMessage{
 		ID:     "1-1",
 		Values: map[string]interface{}{"f": "v"},
 	}); err == nil {
@@ -624,25 +631,121 @@ func TestTheInitialSyncReportsAScanFailure(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------- reconciliation
+
+// TestReconciliationCopiesTheSourceOver is the safety net under the keyspace
+// subscription. Redis publishes notifications with no acknowledgement and no
+// replay, so anything published while the subscriber is reconnecting is gone
+// and nothing reports it; only a full comparison brings the target back.
+func TestReconciliationCopiesTheSourceOver(t *testing.T) {
+	source := newFakeRedis(t).
+		on("SCAN", "*2\r\n$1\r\n0\r\n*1\r\n$5\r\nuser1\r\n").
+		on("TTL", ":-1\r\n").
+		on("DUMP", bulk("payload")).
+		on("EXISTS", ":1\r\n")
+	target := newFakeRedis(t).
+		on("SCAN", "*2\r\n$1\r\n0\r\n*1\r\n$5\r\nuser1\r\n").
+		on("RESTORE", "+OK\r\n")
+	s := newRedisSyncerWithFakes(t, source, target)
+
+	s.reconcile(ctxFor(t))
+
+	if !target.sawCommand("RESTORE") {
+		t.Errorf("target commands = %v, want the source copied over", target.seen())
+	}
+}
+
+// TestReconciliationRemovesWhatTheSourceNoLongerHas is how a delete lost with a
+// dropped subscription is corrected.
+func TestReconciliationRemovesWhatTheSourceNoLongerHas(t *testing.T) {
+	source := newFakeRedis(t).
+		on("SCAN", "*2\r\n$1\r\n0\r\n*0\r\n").
+		on("EXISTS", ":0\r\n")
+	target := newFakeRedis(t).
+		on("SCAN", "*2\r\n$1\r\n0\r\n*1\r\n$5\r\nstale\r\n").
+		on("DEL", ":1\r\n")
+	s := newRedisSyncerWithFakes(t, source, target)
+
+	s.reconcile(ctxFor(t))
+
+	for _, cmd := range target.seen() {
+		if cmd == "DEL stale" {
+			return
+		}
+	}
+	t.Errorf("target commands = %v, want the stale key removed", target.seen())
+}
+
+// TestReconciliationKeepsWhatTheSourceStillHas is the other half: a key present
+// on both sides must survive the comparison.
+func TestReconciliationKeepsWhatTheSourceStillHas(t *testing.T) {
+	source := newFakeRedis(t).
+		on("SCAN", "*2\r\n$1\r\n0\r\n*0\r\n").
+		on("EXISTS", ":1\r\n")
+	target := newFakeRedis(t).
+		on("SCAN", "*2\r\n$1\r\n0\r\n*1\r\n$5\r\nalive\r\n").
+		on("DEL", ":1\r\n")
+	s := newRedisSyncerWithFakes(t, source, target)
+
+	s.reconcile(ctxFor(t))
+
+	if target.sawCommand("DEL") {
+		t.Errorf("target commands = %v; a key the source still holds was removed", target.seen())
+	}
+}
+
+func TestReconciliationIsSkippedWhenDisabled(t *testing.T) {
+	source := newFakeRedis(t)
+	s := newRedisSyncerWithFakes(t, source, newFakeRedis(t))
+	s.reconcileEvery = -1
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s.reconcileLoop(ctx) // returns at once rather than blocking on a ticker
+
+	if len(source.seen()) != 0 {
+		t.Errorf("source commands = %v, want none", source.seen())
+	}
+}
+
+func TestTheDefaultReconcileIntervalIsApplied(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.PanicLevel)
+
+	if got := NewRedisSyncer(sampleConfig(), logger).reconcileEvery; got != defaultReconcileInterval {
+		t.Errorf("reconcileEvery = %v, want %v", got, defaultReconcileInterval)
+	}
+
+	cfg := sampleConfig()
+	cfg.RedisReconcileInterval = 5 * time.Minute
+	if got := NewRedisSyncer(cfg, logger).reconcileEvery; got != 5*time.Minute {
+		t.Errorf("reconcileEvery = %v, want the configured 5m", got)
+	}
+
+	cfg.RedisReconcileInterval = -1
+	if got := NewRedisSyncer(cfg, logger).reconcileEvery; got != 0 {
+		t.Errorf("reconcileEvery = %v, want it turned off", got)
+	}
+}
+
 // ---------------------------------------------------------- stream loop
 
 // TestTheStreamLoopAcknowledgesWhatItApplies records the happy path of the
-// stream watcher: a message read from the group is written to the target,
-// acknowledged, and its id saved as the new position.
+// stream watcher: an entry read from the group is appended to the target
+// stream, acknowledged, and its id saved as the new position.
 func TestTheStreamLoopAcknowledgesWhatItApplies(t *testing.T) {
 	source := newFakeRedis(t).
 		on("XREADGROUP", "*1\r\n*2\r\n$6\r\nevents\r\n*1\r\n*2\r\n$3\r\n1-1\r\n"+
 			"*2\r\n$5\r\nfield\r\n$5\r\nvalue\r\n").
-		on("TYPE", "+hash\r\n").
 		on("XACK", ":1\r\n")
-	target := newFakeRedis(t).on("HSET", ":1\r\n")
+	target := newFakeRedis(t).on("XADD", bulk("1-1"))
 	s := newRedisSyncerWithFakes(t, source, target)
 	s.positionPath = filepath.Join(t.TempDir(), "redis.pos")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		s.watchStreamChanges(ctx, "events", "sync_group", "0-0")
+		s.watchStreamChanges(ctx, streamPair{source: "events", target: "events"}, "sync_group", "0-0")
 		close(done)
 	}()
 
@@ -650,26 +753,53 @@ func TestTheStreamLoopAcknowledgesWhatItApplies(t *testing.T) {
 	cancel()
 	<-done
 
-	if got := s.loadStreamPosition(); got != "1-1" {
+	if got := s.loadStreamPosition("events"); got != "1-1" {
 		t.Errorf("position = %q, want the acknowledged id", got)
 	}
 }
 
-// TestAnUnappliedStreamMessageIsNotAcknowledged records the other side: a
-// message the target rejects is left unacknowledged, so it is redelivered — but
-// the loop reads with the same lastID every time, so it also keeps failing on
-// the same message, and the error flag is the only trace.
-func TestAnUnappliedStreamMessageIsNotAcknowledged(t *testing.T) {
-	source := newFakeRedis(t).
-		on("XREADGROUP", "*1\r\n*2\r\n$6\r\nevents\r\n*1\r\n*2\r\n$3\r\n1-1\r\n"+
-					"*2\r\n$5\r\nfield\r\n$5\r\nvalue\r\n").
-		on("TYPE", "+none\r\n") // neither string nor hash, so the write is refused
+// TestTheStreamLoopReadsUndeliveredEntries pins the ">" identifier. Reading with
+// the stored id instead returns the consumer's already-delivered backlog, so a
+// group that had nothing pending read the same empty history forever and never
+// saw a new entry.
+func TestTheStreamLoopReadsUndeliveredEntries(t *testing.T) {
+	source := newFakeRedis(t).on("XREADGROUP", "*0\r\n")
 	s := newRedisSyncerWithFakes(t, source, newFakeRedis(t))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		s.watchStreamChanges(ctx, "events", "sync_group", "0-0")
+		s.watchStreamChanges(ctx, streamPair{source: "events", target: "events"}, "sync_group", "5-5")
+		close(done)
+	}()
+
+	waitFor(t, func() bool { return source.sawCommand("XREADGROUP") })
+	cancel()
+	<-done
+
+	for _, cmd := range source.seen() {
+		if strings.HasPrefix(cmd, "XREADGROUP") {
+			if !strings.Contains(cmd, ">") {
+				t.Errorf("read = %q, want the undelivered-entries identifier", cmd)
+			}
+			return
+		}
+	}
+}
+
+// TestAnUnappliedStreamEntryIsNotAcknowledged records the other side: an entry
+// the target rejects is left unacknowledged, so it is redelivered.
+func TestAnUnappliedStreamEntryIsNotAcknowledged(t *testing.T) {
+	source := newFakeRedis(t).
+		on("XREADGROUP", "*1\r\n*2\r\n$6\r\nevents\r\n*1\r\n*2\r\n$3\r\n1-1\r\n"+
+			"*2\r\n$5\r\nfield\r\n$5\r\nvalue\r\n")
+	target := newFakeRedis(t).on("XADD", "-ERR read only replica\r\n")
+	s := newRedisSyncerWithFakes(t, source, target)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		s.watchStreamChanges(ctx, streamPair{source: "events", target: "events"}, "sync_group", "0-0")
 		close(done)
 	}()
 
@@ -678,7 +808,7 @@ func TestAnUnappliedStreamMessageIsNotAcknowledged(t *testing.T) {
 	<-done
 
 	if source.sawCommand("XACK") {
-		t.Error("a message that was not applied was acknowledged anyway")
+		t.Error("an entry that was not applied was acknowledged anyway")
 	}
 }
 
@@ -692,7 +822,7 @@ func TestTheStreamLoopKeepsGoingAfterAReadFailure(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		s.watchStreamChanges(ctx, "events", "sync_group", "0-0")
+		s.watchStreamChanges(ctx, streamPair{source: "events", target: "events"}, "sync_group", "0-0")
 		close(done)
 	}()
 
@@ -707,6 +837,56 @@ func TestTheStreamLoopKeepsGoingAfterAReadFailure(t *testing.T) {
 	})
 	cancel()
 	<-done
+}
+
+// ------------------------------------------------------ stream mappings
+
+func TestTheStreamMappingsComeFromTheConfiguration(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.PanicLevel)
+	cfg := sampleConfig()
+	cfg.Mappings = []config.DatabaseMapping{{
+		Tables: []config.TableMapping{
+			{SourceTable: "events", TargetTable: "events_copy"},
+			{SourceTable: "audit"}, // no target named, so the source name is reused
+			{},                     // the empty entry the loader inserts
+		},
+	}}
+
+	got := NewRedisSyncer(cfg, logger).streamMappings()
+
+	want := []streamPair{{"events", "events_copy"}, {"audit", "audit"}}
+	if len(got) != len(want) {
+		t.Fatalf("mappings = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("mapping %d = %v, want %v", i, got[i], want[i])
+		}
+	}
+}
+
+// TestNoMappingsMeansNoStreams is the fix for a panic. The stream name was read
+// as cfg.Mappings[0].Tables[0].SourceTable with no bounds check, and the
+// configuration loader inserts a mapping with an empty table list when a task
+// has none — so the index was out of range for every Redis task saved without
+// tables, and the panic took the whole syncer process down.
+func TestNoMappingsMeansNoStreams(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.PanicLevel)
+
+	for _, mappings := range [][]config.DatabaseMapping{
+		nil,
+		{},
+		{{Tables: []config.TableMapping{}}},
+		{{Tables: []config.TableMapping{{}}}},
+	} {
+		cfg := sampleConfig()
+		cfg.Mappings = mappings
+		if got := NewRedisSyncer(cfg, logger).streamMappings(); len(got) != 0 {
+			t.Errorf("mappings = %v, want none", got)
+		}
+	}
 }
 
 // ---------------------------------------------------------------- start
@@ -757,11 +937,9 @@ func TestStartRunsTheWholeSequence(t *testing.T) {
 	}
 }
 
-// TestStartPanicsWithNoMappings records that the stream name is read as
-// cfg.Mappings[0].Tables[0].SourceTable with no bounds check, so a Redis task
-// saved without a table mapping takes the whole process down as soon as it
-// starts — after the initial sync has already run.
-func TestStartPanicsWithNoMappings(t *testing.T) {
+// TestStartWithNoMappingsReplicatesTheKeyspace is the same task that used to
+// panic on startup. It now runs the keyspace path and says so.
+func TestStartWithNoMappingsReplicatesTheKeyspace(t *testing.T) {
 	source := newFakeRedis(t).on("SCAN", "*2\r\n$1\r\n0\r\n*0\r\n")
 	target := newFakeRedis(t)
 
@@ -772,24 +950,22 @@ func TestStartPanicsWithNoMappings(t *testing.T) {
 	cfg.TargetConnection = "redis://" + target.listener.Addr().String() + "/0"
 	s := NewRedisSyncer(cfg, logger)
 
-	recovered := make(chan interface{}, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan interface{}, 1)
 	go func() {
-		defer func() { recovered <- recover() }()
-		s.Start(context.Background())
+		defer func() { done <- recover() }()
+		s.Start(ctx)
 	}()
 
+	waitFor(t, func() bool { return source.sawCommand("PSUBSCRIBE") })
+	cancel()
+
 	select {
-	case r := <-recovered:
-		if r == nil {
-			t.Error("Start returned without panicking; the empty mapping appears to " +
-				"be handled now, so assert that instead")
+	case r := <-done:
+		if r != nil {
+			t.Fatalf("Start panicked on a task with no table mapping: %v", r)
 		}
 	case <-time.After(10 * time.Second):
-		t.Fatal("Start neither panicked nor returned")
+		t.Fatal("Start did not return after the context was cancelled")
 	}
 }
-
-// The matching test for an unreachable source — Start's connection retry budget
-// is five attempts with exponential backoff, 62 seconds in total, and the loop
-// never consults the context — lives behind the integration tag, because it
-// cannot be shortened from outside.

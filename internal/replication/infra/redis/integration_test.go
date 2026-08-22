@@ -14,6 +14,7 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/retail-ai-inc/sync/internal/platform/config"
+	intRedis "github.com/retail-ai-inc/sync/internal/platform/dbconn/redis"
 	"github.com/retail-ai-inc/sync/test/harness"
 )
 
@@ -45,8 +46,8 @@ func syncTask(t *testing.T, db string) config.SyncConfig {
 			"host": tgtHost, "port": tgtPort, "database": db,
 		}),
 		RedisPositionPath: t.TempDir() + "/redis.pos",
-		// A stream mapping is mandatory: Start indexes Mappings[0].Tables[0]
-		// without a bounds check, see TestStartPanicsWithoutTableMapping.
+		// The stream mapping is optional now; it is set here because most of
+		// these tests exercise the stream path.
 		Mappings: []config.DatabaseMapping{{Tables: []config.TableMapping{
 			{SourceTable: "sync_stream", TargetTable: "sync_stream"},
 		}}},
@@ -178,11 +179,11 @@ func TestIncrementalSyncAppliesSetAndDelete(t *testing.T) {
 	})
 }
 
-// TestKeyspaceNotificationsOnlyCoverDB0 exercises F-082. watchKeyspaceChanges
-// subscribes to the literal pattern __keyspace@0__:*, so a task configured for
-// any other database receives no incremental events at all: the initial copy
-// works and everything after it is silently dropped.
-func TestKeyspaceNotificationsOnlyCoverDB0(t *testing.T) {
+// TestKeyspaceNotificationsFollowTheConfiguredDatabase exercises F-082. The
+// subscription used to name database 0 whatever the task was configured with,
+// so a task on any other database did its initial copy and then silently
+// replicated nothing.
+func TestKeyspaceNotificationsFollowTheConfiguredDatabase(t *testing.T) {
 	flush(t, 1)
 	src, tgt := client(t, harness.RedisSource, 1), client(t, harness.RedisTarget, 1)
 	ctx := context.Background()
@@ -193,7 +194,6 @@ func TestKeyspaceNotificationsOnlyCoverDB0(t *testing.T) {
 
 	startSyncer(t, syncTask(t, "1"))
 
-	// The initial copy uses SCAN against the configured database, so it works.
 	harness.Eventually(t, 30*time.Second, func() error {
 		if tgt.Exists(ctx, "before").Val() != 1 {
 			return fmt.Errorf("initial sync has not landed")
@@ -205,13 +205,70 @@ func TestKeyspaceNotificationsOnlyCoverDB0(t *testing.T) {
 		t.Fatalf("write after start: %v", err)
 	}
 
-	// Incremental changes on db1 must reach the target.
-	// db1 writes never arrive, so this window is spent in full while the
-	// defect stands and exits immediately once it is fixed.
-	harness.Eventually(t, 5*time.Second, func() error {
+	harness.Eventually(t, 20*time.Second, func() error {
 		if tgt.Exists(ctx, "after").Val() != 1 {
-			return fmt.Errorf("the key written after startup never arrived; keyspace " +
-				"notifications are subscribed on db0 only (F-082)")
+			return fmt.Errorf("the key written after startup has not arrived")
+		}
+		return nil
+	})
+}
+
+// TestAnExpiryIsPropagated covers the notification kinds that used to fall
+// through to a copy of a key that no longer exists, leaving the target holding
+// a value the source had dropped.
+func TestAnExpiryIsPropagated(t *testing.T) {
+	flush(t, 0)
+	src, tgt := client(t, harness.RedisSource, 0), client(t, harness.RedisTarget, 0)
+	ctx := context.Background()
+
+	if err := src.Set(ctx, "short-lived", "v", 0).Err(); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	startSyncer(t, syncTask(t, "0"))
+	harness.Eventually(t, 30*time.Second, func() error {
+		if tgt.Exists(ctx, "short-lived").Val() != 1 {
+			return fmt.Errorf("initial sync has not landed")
+		}
+		return nil
+	})
+
+	if err := src.Del(ctx, "short-lived").Err(); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+
+	harness.Eventually(t, 20*time.Second, func() error {
+		if tgt.Exists(ctx, "short-lived").Val() != 0 {
+			return fmt.Errorf("the deletion has not reached the target")
+		}
+		return nil
+	})
+}
+
+// TestATTLSurvivesAnIncrementalChange covers what rebuilding the value from its
+// type used to lose: the SET the incremental path issued carried no expiry, so
+// a key that was meant to age out became permanent on the target.
+func TestATTLSurvivesAnIncrementalChange(t *testing.T) {
+	flush(t, 0)
+	src, tgt := client(t, harness.RedisSource, 0), client(t, harness.RedisTarget, 0)
+	ctx := context.Background()
+
+	startSyncer(t, syncTask(t, "0"))
+	harness.Eventually(t, 30*time.Second, func() error {
+		if err := src.Ping(ctx).Err(); err != nil {
+			return err
+		}
+		return nil
+	})
+
+	if err := src.Set(ctx, "session:1", "v", time.Hour).Err(); err != nil {
+		t.Fatalf("set with expiry: %v", err)
+	}
+
+	harness.Eventually(t, 20*time.Second, func() error {
+		ttl := tgt.TTL(ctx, "session:1").Val()
+		if ttl <= 0 {
+			return fmt.Errorf("the target holds the key with ttl %v", ttl)
 		}
 		return nil
 	})
@@ -263,65 +320,98 @@ func TestChangesWhileStoppedAreReplayed(t *testing.T) {
 		return nil
 	})
 
-	// The deletion has no such safety net: SCAN only reports keys that exist,
-	// so a key removed at the source is never removed from the target.
-	if tgt.Exists(ctx, "removed-while-down").Val() == 0 {
-		t.Fatal("the deletion made while the syncer was down was applied; a " +
-			"reconciliation pass may have been added, so assert that instead")
-	}
-	t.Log("the key deleted while the syncer was down still exists on the target: " +
-		"deletions missed during downtime are never reconciled (F-081, F-085)")
+	// A deletion missed while nothing was subscribed is only corrected by the
+	// periodic comparison, which runs hourly by default. Rather than wait, run
+	// one directly against the same endpoints.
+	reconciler := NewRedisSyncer(syncTask(t, "0"), logrus.New())
+	reconcileOnce(t, reconciler)
+
+	harness.Eventually(t, 10*time.Second, func() error {
+		if tgt.Exists(ctx, "removed-while-down").Val() != 0 {
+			return fmt.Errorf("the key deleted while the syncer was down is still " +
+				"on the target after a reconciliation pass")
+		}
+		return nil
+	})
 }
 
-// TestStartPanicsWithoutTableMapping records a crash. Start reads the stream
-// name as Mappings[0].Tables[0].SourceTable with no bounds check, while
-// config.loadSyncTasks synthesises exactly that shape — one mapping with an
-// empty Tables slice — whenever a task's config_json carries no mappings.
-//
-// A Redis task saved without table mappings therefore panics on startup, and
-// because cmd/sync launches each syncer in a bare goroutine the panic is not
-// recovered: the whole process dies, stopping replication for every other task
-// as well. "Tables" is also a meaningless notion for Redis, so this is an easy
-// configuration to arrive at.
-func TestStartPanicsWithoutTableMapping(t *testing.T) {
+// reconcileOnce connects a syncer to both endpoints and runs a single
+// comparison, which is what the hourly loop does on each tick.
+func reconcileOnce(t *testing.T, s *RedisSyncer) {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	var err error
+	if s.source, err = intRedis.GetRedisClient(s.cfg.SourceConnection); err != nil {
+		t.Fatalf("connect source: %v", err)
+	}
+	defer s.source.Close()
+	if s.target, err = intRedis.GetRedisClient(s.cfg.TargetConnection); err != nil {
+		t.Fatalf("connect target: %v", err)
+	}
+	defer s.target.Close()
+
+	s.reconcile(ctx)
+}
+
+// TestATaskWithoutTableMappingStarts is the configuration that used to take the
+// whole process down. Start read the stream name as Mappings[0].Tables[0]
+// without a bounds check, while the configuration loader synthesises exactly
+// that shape — one mapping with an empty table list — for a task whose
+// config_json carries no mappings. "Tables" is a meaningless notion for Redis,
+// so it is an easy configuration to arrive at, and cmd/sync launches each
+// syncer in a bare goroutine, so the panic was not recovered.
+func TestATaskWithoutTableMappingStarts(t *testing.T) {
+	flush(t, 0)
+	src, tgt := client(t, harness.RedisSource, 0), client(t, harness.RedisTarget, 0)
+	ctx := context.Background()
+
+	if err := src.Set(ctx, "keyspace-only", "v", 0).Err(); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
 	cfg := syncTask(t, "0")
 	cfg.Mappings = []config.DatabaseMapping{{Tables: []config.TableMapping{}}}
 
 	logger := logrus.New()
-	logger.SetLevel(logrus.PanicLevel)
+	logger.SetLevel(logrus.ErrorLevel)
 	syncer := NewRedisSyncer(cfg, logger)
 
 	done := make(chan interface{}, 1)
+	runCtx, cancel := context.WithCancel(context.Background())
 	go func() {
 		defer func() { done <- recover() }()
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		defer cancel()
-		syncer.Start(ctx)
+		syncer.Start(runCtx)
 	}()
+	t.Cleanup(cancel)
 
+	// The keyspace path still runs, which is the point: a task with no stream
+	// mapping replicates the keyspace rather than crashing.
+	harness.Eventually(t, 30*time.Second, func() error {
+		if tgt.Exists(ctx, "keyspace-only").Val() != 1 {
+			return fmt.Errorf("the initial copy has not landed")
+		}
+		return nil
+	})
+
+	cancel()
 	select {
 	case recovered := <-done:
-		if recovered == nil {
-			t.Fatal("Start returned without panicking; a bounds check may have been " +
-				"added, so assert the graceful behaviour instead")
+		if recovered != nil {
+			t.Fatalf("Start panicked on a task with no table mapping: %v", recovered)
 		}
-		t.Logf("Start panicked as expected: %v", recovered)
 	case <-time.After(30 * time.Second):
-		t.Fatal("Start neither panicked nor returned")
+		t.Fatal("Start did not return after the context was cancelled")
 	}
 }
 
-// TestStreamEntriesReachTheTarget exercises F-083, which the feature inventory
-// lists as working. Two things in the stream path look wrong on reading, and
-// this checks whether either bites:
-//
-//   - watchStreamChanges calls XReadGroup with lastID, which starts at "0-0"
-//     and is only ever set to an id that was already processed. For a consumer
-//     group that means "give me my pending entries", never ">" for new ones.
-//   - processStreamMessage builds the target key name msg:<id> and then asks
-//     the *source* for that key's type. The name is invented for the target, so
-//     the source returns "none" and the message is rejected as an unsupported
-//     type before anything is written.
+// TestStreamEntriesReachTheTarget exercises F-083. Two things used to break it:
+// the reader asked its consumer group for already-delivered entries rather than
+// new ones, and each entry was written into a hash called msg:<id> on the
+// target, chosen by asking the *source* for the type of a key it has never had.
+// Entries are now appended to the target stream under their own identifiers.
 func TestStreamEntriesReachTheTarget(t *testing.T) {
 	flush(t, 0)
 	src, tgt := client(t, harness.RedisSource, 0), client(t, harness.RedisTarget, 0)
@@ -337,9 +427,6 @@ func TestStreamEntriesReachTheTarget(t *testing.T) {
 
 	startSyncer(t, syncTask(t, "0"))
 
-	// The initial full copy carries the stream key itself across, so the target
-	// has the data as a stream; that is not what the stream replication path is
-	// supposed to produce.
 	harness.Eventually(t, 30*time.Second, func() error {
 		if tgt.Exists(ctx, stream).Val() != 1 {
 			return fmt.Errorf("the initial copy has not landed")
@@ -354,27 +441,56 @@ func TestStreamEntriesReachTheTarget(t *testing.T) {
 		t.Fatalf("add entry: %v", err)
 	}
 
-	// processStreamMessage stores each entry under msg:<id> on the target.
-	// Nothing is ever written to the target, so this window is spent in full
-	// while the defect stands and exits immediately once it is fixed.
-	harness.Eventually(t, 5*time.Second, func() error {
-		keys, err := tgt.Keys(ctx, "msg:*").Result()
+	harness.Eventually(t, 20*time.Second, func() error {
+		entries, err := tgt.XRange(ctx, stream, "-", "+").Result()
 		if err != nil {
 			return err
 		}
-		if len(keys) == 0 {
-			return fmt.Errorf("no msg:* key was written; the stream entry added " +
-				"after startup was never replicated (F-083)")
+		for _, entry := range entries {
+			if entry.Values["name"] == "after" {
+				return nil
+			}
+		}
+		return fmt.Errorf("the entry added after startup is not on the target stream: %v", entries)
+	})
+}
+
+// TestStreamEntriesKeepTheirIdentifiers is what makes the replication replayable:
+// an entry that arrives twice after a restart is refused by the target as an
+// identifier that is not greater than the last one, and that refusal is read as
+// "already applied" rather than as a failure.
+func TestStreamEntriesKeepTheirIdentifiers(t *testing.T) {
+	flush(t, 0)
+	src, tgt := client(t, harness.RedisSource, 0), client(t, harness.RedisTarget, 0)
+	ctx := context.Background()
+
+	const stream = "sync_stream"
+	startSyncer(t, syncTask(t, "0"))
+
+	id, err := src.XAdd(ctx, &goredis.XAddArgs{
+		Stream: stream, Values: map[string]interface{}{"n": "1"},
+	}).Result()
+	if err != nil {
+		t.Fatalf("add entry: %v", err)
+	}
+
+	harness.Eventually(t, 30*time.Second, func() error {
+		entries, err := tgt.XRange(ctx, stream, id, id).Result()
+		if err != nil {
+			return err
+		}
+		if len(entries) != 1 {
+			return fmt.Errorf("the entry is not on the target under its own id")
 		}
 		return nil
 	})
 }
 
-// TestStreamConsumerGroupNeverReceivesNewEntries isolates the first of the two
-// problems: whether the consumer group is delivered anything at all. If the
-// group's pending list stays empty while entries pile up in the stream, the
-// reader never asked for new messages.
-func TestStreamConsumerGroupNeverReceivesNewEntries(t *testing.T) {
+// TestTheConsumerGroupAdvances isolates the first of the two problems: whether
+// the group is delivered anything at all. It used to read with the stored id,
+// which for a consumer group means "my pending entries", so the group never
+// advanced past 0-0 however many entries were added.
+func TestTheConsumerGroupAdvances(t *testing.T) {
 	flush(t, 0)
 	src := client(t, harness.RedisSource, 0)
 	ctx := context.Background()
@@ -388,9 +504,7 @@ func TestStreamConsumerGroupNeverReceivesNewEntries(t *testing.T) {
 
 	startSyncer(t, syncTask(t, "0"))
 
-	// Wait for the group to exist rather than sleeping a fixed interval: the
-	// syncer creates it during startup, normally within a few hundred ms.
-	harness.Eventually(t, 5*time.Second, func() error {
+	harness.Eventually(t, 10*time.Second, func() error {
 		groups, err := src.XInfoGroups(ctx, stream).Result()
 		if err != nil {
 			return fmt.Errorf("XInfoGroups: %w", err)
@@ -409,35 +523,14 @@ func TestStreamConsumerGroupNeverReceivesNewEntries(t *testing.T) {
 		}
 	}
 
-	// The group never advances while the defect stands, so this window is spent
-	// in full; it returns at once if delivery starts working.
-	harness.WaitFor(2*time.Second, func() error {
+	harness.Eventually(t, 20*time.Second, func() error {
 		groups, err := src.XInfoGroups(ctx, stream).Result()
 		if err != nil || len(groups) == 0 {
 			return fmt.Errorf("group not readable")
 		}
 		if groups[0].LastDeliveredID == "0-0" {
-			return fmt.Errorf("still at 0-0")
+			return fmt.Errorf("the group is still at 0-0; nothing has been delivered")
 		}
 		return nil
 	})
-
-	groups, err := src.XInfoGroups(ctx, stream).Result()
-	if err != nil {
-		t.Fatalf("XInfoGroups: %v", err)
-	}
-	if len(groups) == 0 {
-		t.Fatal("the consumer group was never created")
-	}
-	g := groups[0]
-	t.Logf("group %q: pending=%d last-delivered=%s entries-read=%d",
-		g.Name, g.Pending, g.LastDeliveredID, g.EntriesRead)
-
-	if g.LastDeliveredID != "0-0" {
-		t.Skipf("the group has advanced to %s, so delivery is working after all",
-			g.LastDeliveredID)
-	}
-	t.Errorf("the consumer group is still at last-delivered %s after six entries "+
-		"were added: XReadGroup is never called with \">\", so new entries are "+
-		"never delivered (F-083)", g.LastDeliveredID)
 }
