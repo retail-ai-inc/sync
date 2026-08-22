@@ -233,3 +233,88 @@ func TestTheHandlerServesTheExposition(t *testing.T) {
 		t.Errorf("body =\n%s", rec.Body.String())
 	}
 }
+
+// ---------------------------------------------------------------- snapshot
+
+// TestASnapshotReportsWhatAScrapeWouldSee is what lets the lag alerter act on
+// the same numbers Prometheus reads, rather than keeping a second copy of them
+// that can drift from the exposition.
+func TestASnapshotReportsWhatAScrapeWouldSee(t *testing.T) {
+	r := New()
+	r.SetGauge(LagSeconds, helpLag, Labels{"task": "2"}, 30)
+	r.SetGauge(LagSeconds, helpLag, Labels{"task": "1"}, 5)
+
+	got := r.Snapshot(LagSeconds)
+
+	if len(got) != 2 {
+		t.Fatalf("snapshot = %+v, want both series", got)
+	}
+	if got[0].Labels["task"] != "1" || got[1].Labels["task"] != "2" {
+		t.Errorf("snapshot is not in a stable order: %+v", got)
+	}
+	if got[0].Value != 5 || got[1].Value != 30 {
+		t.Errorf("snapshot values = %v, %v", got[0].Value, got[1].Value)
+	}
+	if got[0].Name != LagSeconds {
+		t.Errorf("sample name = %q", got[0].Name)
+	}
+}
+
+func TestASnapshotOfAMetricNobodyRecordedIsEmpty(t *testing.T) {
+	if got := New().Snapshot(LagSeconds); len(got) != 0 {
+		t.Errorf("snapshot = %+v, want nothing", got)
+	}
+}
+
+// TestASnapshotDoesNotShareItsLabels pins that a caller holding a snapshot
+// cannot reach into the registry through it, which would race with a scrape.
+func TestASnapshotDoesNotShareItsLabels(t *testing.T) {
+	r := New()
+	labels := Labels{"task": "1"}
+	r.SetGauge(LagSeconds, helpLag, labels, 5)
+
+	got := r.Snapshot(LagSeconds)
+	got[0].Labels["task"] = "rewritten"
+
+	if again := r.Snapshot(LagSeconds); again[0].Labels["task"] != "1" {
+		t.Errorf("the registry's labels were rewritten through a snapshot: %+v", again[0])
+	}
+}
+
+// ------------------------------------------------------------- supervision
+
+// TestARestartIsCounted matters because one restart is noise and a hundred is
+// an incident, and only a counter tells them apart.
+func TestARestartIsCounted(t *testing.T) {
+	labels := Labels{"task": "restart-test"}
+	t.Cleanup(func() { Default.Forget(labels) })
+
+	CountRestart(labels)
+	CountRestart(labels)
+
+	var b strings.Builder
+	if err := Default.Write(&b); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if !strings.Contains(b.String(), `sync_task_restarts_total{task="restart-test"} 2`) {
+		t.Errorf("exposition =\n%s", b.String())
+	}
+}
+
+// TestABlockedTaskIsReportedAsBlocked is the other half: a task nothing will
+// restart has to be visible, or replication halts and the only symptom is a lag
+// that keeps growing.
+func TestABlockedTaskIsReportedAsBlocked(t *testing.T) {
+	labels := Labels{"task": "blocked-test"}
+	t.Cleanup(func() { Default.Forget(labels) })
+
+	SetTaskBlocked(labels, true)
+	if got := Default.Snapshot(TaskBlocked); len(got) != 1 || got[0].Value != 1 {
+		t.Fatalf("snapshot = %+v, want one series at 1", got)
+	}
+
+	SetTaskBlocked(labels, false)
+	if got := Default.Snapshot(TaskBlocked); len(got) != 1 || got[0].Value != 0 {
+		t.Errorf("snapshot = %+v, want one series at 0", got)
+	}
+}

@@ -299,3 +299,106 @@ func TestExtractSequenceName(t *testing.T) {
 		})
 	}
 }
+
+// ------------------------------------------------------- the position store
+
+// TestThePositionIsRecordedOnTheTarget is the reason the store is layered. The
+// file alone was the problem: the syncer runs beside the source, so the outage
+// this setup exists to survive takes the record of what has been applied with
+// it, and a replacement started in the other region has nothing to resume from.
+func TestThePositionIsRecordedOnTheTarget(t *testing.T) {
+	target := targetDB(t, "")
+	s := newSyncer(t, config.SyncConfig{
+		ID:               3,
+		SourceConnection: "postgres://u:p@tokyo:5432/shop",
+	})
+	s.targetDB = target
+	s.checkpoints = s.checkpointStore()
+
+	want := pglogrepl.LSN(uint64(9)<<32 + 0x2a)
+	if err := s.recordLSN(context.Background(), want); err != nil {
+		t.Fatalf("recordLSN: %v", err)
+	}
+
+	// Read it through a fresh store, so nothing in-process is answering.
+	s.checkpoints = s.checkpointStore()
+	got, err := s.loadStoredLSN(context.Background())
+	if err != nil {
+		t.Fatalf("loadStoredLSN: %v", err)
+	}
+	if got != want {
+		t.Errorf("read back %s, recorded %s", got, want)
+	}
+
+	var stored string
+	if err := target.QueryRow(
+		`SELECT payload FROM _sync_checkpoint WHERE task_id = 3`).Scan(&stored); err != nil {
+		t.Fatalf("read the checkpoint row: %v", err)
+	}
+	if !strings.Contains(stored, "9/2A") {
+		t.Errorf("the target holds %q", stored)
+	}
+}
+
+// TestThePositionIsAlsoWrittenToTheConfiguredFile keeps the setting doing
+// something: an operator who configured a path still has a file to look at.
+func TestThePositionIsAlsoWrittenToTheConfiguredFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nested", "pos")
+	s := newSyncer(t, config.SyncConfig{
+		ID:               4,
+		PGPositionPath:   path,
+		SourceConnection: "postgres://u:p@tokyo:5432/shop",
+	})
+	s.targetDB = targetDB(t, "")
+	s.checkpoints = s.checkpointStore()
+
+	if err := s.recordLSN(context.Background(), pglogrepl.LSN(1)); err != nil {
+		t.Fatalf("recordLSN: %v", err)
+	}
+
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("the configured position file was not written: %v", err)
+	}
+}
+
+// TestTheMetricsNameTheTaskWithoutItsCredentials pins what goes into an
+// exposition that is scraped and stored for months.
+func TestTheMetricsNameTheTaskWithoutItsCredentials(t *testing.T) {
+	s := newSyncer(t, config.SyncConfig{
+		ID:               11,
+		SourceConnection: "postgres://u:hunter2@tokyo:5432/shop",
+		TargetConnection: "postgres://u:hunter2@osaka:5432/shop",
+	})
+
+	labels := s.metricLabels()
+
+	if labels["task"] != "11" || labels["engine"] != "postgresql" {
+		t.Errorf("labels = %v", labels)
+	}
+	if labels["source"] != "tokyo:5432/shop" || labels["target"] != "osaka:5432/shop" {
+		t.Errorf("endpoints = %q -> %q", labels["source"], labels["target"])
+	}
+	for name, value := range labels {
+		if strings.Contains(value, "hunter2") {
+			t.Errorf("label %s carries the password: %q", name, value)
+		}
+	}
+}
+
+// TestAnUnreachableSourceStopsTheDirectionClaim covers the refusal path: a task
+// that cannot record which way it replicates must not start replicating, or two
+// syncers can overwrite each other after a failover.
+func TestAnUnreachableSourceStopsTheDirectionClaim(t *testing.T) {
+	s := newSyncer(t, config.SyncConfig{
+		ID:               5,
+		SourceConnection: "postgres://u:p@127.0.0.1:1/shop?sslmode=disable&connect_timeout=1",
+		TargetConnection: "postgres://u:p@osaka:5432/shop",
+	})
+	s.targetDB = targetDB(t, "")
+
+	release, err := s.claimDirection(context.Background())
+	if err == nil {
+		release()
+		t.Fatal("the direction was claimed against an unreachable source")
+	}
+}

@@ -1,6 +1,7 @@
 package infra
 
 import (
+	"encoding/base64"
 	"strconv"
 	"testing"
 	"time"
@@ -767,5 +768,165 @@ func TestWithNoKeyTheStoreBehavesAsItAlwaysDid(t *testing.T) {
 
 	if stored := readConfig(t, db, id); !contains(stored, "tokyo-secret") {
 		t.Errorf("the stored document = %s", stored)
+	}
+}
+
+// ------------------------------------------------------- stored credentials
+
+// withKey points the credential keeper at a fixed test key for one test. The
+// package-level keeper is built from the environment at init, so a test that
+// wants encryption has to install one rather than set the variable.
+func withKey(t *testing.T) {
+	t.Helper()
+
+	t.Setenv("SYNC_CONFIG_KEY", base64.StdEncoding.EncodeToString(
+		[]byte("0123456789abcdef0123456789abcdef")))
+	k, err := secret.KeeperFromEnv()
+	if err != nil {
+		t.Fatalf("KeeperFromEnv: %v", err)
+	}
+	previous := secret.Default
+	secret.Default = k
+	t.Cleanup(func() { secret.Default = previous })
+}
+
+// withoutKey removes the keeper for one test, which is the state of every
+// deployment that has not set the variable.
+func withoutKey(t *testing.T) {
+	t.Helper()
+
+	previous := secret.Default
+	secret.Default = nil
+	t.Cleanup(func() { secret.Default = previous })
+}
+
+// TestAStoredPasswordIsNotReadableInTheFile is the point of the whole exercise:
+// anybody holding the SQLite file — a backup, a volume snapshot, one cat inside
+// the pod — must not thereby hold the credentials for both regions.
+func TestAStoredPasswordIsNotReadableInTheFile(t *testing.T) {
+	db := useTempTaskDB(t)
+	withKey(t)
+
+	id, err := InsertTask(1, "now", domain.ConfigFrom(domain.Request{
+		TaskName:   "orders",
+		SourceConn: map[string]string{"host": "tokyo", "password": "s3cret"},
+		TargetConn: map[string]string{"host": "osaka", "password": "s3cret"},
+	}))
+	if err != nil {
+		t.Fatalf("InsertTask: %v", err)
+	}
+
+	stored := readConfig(t, db, id)
+	if contains(stored, "s3cret") {
+		t.Errorf("the password is in the file in the clear: %s", stored)
+	}
+	// The host is deliberately left readable: it is not a secret, and an
+	// operator reading the file needs to be able to tell the tasks apart.
+	if !contains(stored, "tokyo") {
+		t.Errorf("the stored document lost the host: %s", stored)
+	}
+}
+
+// TestAStoredPasswordIsOpenedOnTheWayBack keeps the encryption invisible to the
+// rest of the read path, which otherwise would connect with a ciphertext.
+func TestAStoredPasswordIsOpenedOnTheWayBack(t *testing.T) {
+	useTempTaskDB(t)
+	withKey(t)
+
+	if _, err := InsertTask(1, "now", domain.ConfigFrom(domain.Request{
+		TaskName:   "orders",
+		SourceConn: map[string]string{"password": "s3cret"},
+	})); err != nil {
+		t.Fatalf("InsertTask: %v", err)
+	}
+
+	tasks, err := ListTasks()
+	if err != nil {
+		t.Fatalf("ListTasks: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("ListTasks returned %d tasks", len(tasks))
+	}
+	cfg, err := tasks[0].Config()
+	if err != nil {
+		t.Fatalf("Config: %v", err)
+	}
+	if got := cfg.SourceConn["password"]; got != "s3cret" {
+		t.Errorf("password = %q, want the plaintext", got)
+	}
+}
+
+// TestAnUpdateReplacesTheSealedPassword covers the write path the UI uses most,
+// where a task edited once must not end up storing the ciphertext of its own
+// ciphertext or a password nobody can open.
+func TestAnUpdateReplacesTheSealedPassword(t *testing.T) {
+	db := useTempTaskDB(t)
+	withKey(t)
+	id := insertTask(t, db, 1, `{"taskName":"orders"}`)
+
+	if err := UpdateTask(itoa(id), 1, "now", domain.ConfigFrom(domain.Request{
+		TaskName:   "orders",
+		SourceConn: map[string]string{"password": "rotated"},
+	})); err != nil {
+		t.Fatalf("UpdateTask: %v", err)
+	}
+
+	if stored := readConfig(t, db, id); contains(stored, "rotated") {
+		t.Errorf("the rotated password is in the file in the clear: %s", stored)
+	}
+
+	tasks, err := ListTasks()
+	if err != nil {
+		t.Fatalf("ListTasks: %v", err)
+	}
+	cfg, err := tasks[0].Config()
+	if err != nil {
+		t.Fatalf("Config: %v", err)
+	}
+	if got := cfg.SourceConn["password"]; got != "rotated" {
+		t.Errorf("password = %q after the update", got)
+	}
+}
+
+// TestAPasswordNobodyCanOpenStillListsItsTask matters because the alternative is
+// worse: one row sealed under a key that has since been lost would otherwise
+// fail the whole listing, and with it every task the UI can see.
+func TestAPasswordNobodyCanOpenStillListsItsTask(t *testing.T) {
+	db := useTempTaskDB(t)
+	withoutKey(t)
+	insertTask(t, db, 1, `{"taskName":"orders","sourceConn":{"password":"enc:v1:AAAA"}}`)
+
+	tasks, err := ListTasks()
+	if err != nil {
+		t.Fatalf("ListTasks: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("ListTasks returned %d tasks, want the task listed anyway", len(tasks))
+	}
+	cfg, err := tasks[0].Config()
+	if err != nil {
+		t.Fatalf("Config: %v", err)
+	}
+	if got := cfg.SourceConn["password"]; got != "enc:v1:AAAA" {
+		t.Errorf("password = %q, want the sealed form carried through", got)
+	}
+}
+
+// TestWithoutAKeyThePasswordIsStoredAsItAlwaysWas pins the upgrade path: a
+// deployment that has not set a key keeps working exactly as before rather than
+// refusing to write.
+func TestWithoutAKeyThePasswordIsStoredAsItAlwaysWas(t *testing.T) {
+	db := useTempTaskDB(t)
+	withoutKey(t)
+
+	id, err := InsertTask(1, "now", domain.ConfigFrom(domain.Request{
+		SourceConn: map[string]string{"password": "plain"},
+	}))
+	if err != nil {
+		t.Fatalf("InsertTask: %v", err)
+	}
+
+	if stored := readConfig(t, db, id); !contains(stored, `"password":"plain"`) {
+		t.Errorf("stored document = %s", stored)
 	}
 }

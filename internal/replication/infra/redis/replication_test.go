@@ -1109,3 +1109,106 @@ func TestTheRediscoveryIntervalIsShorterThanTheReconciliation(t *testing.T) {
 			"than by resubscribing", masterRediscoveryInterval, defaultReconcileInterval)
 	}
 }
+
+// clusterOf builds a cluster client whose topology is a fixed set of masters,
+// each of them the stub server. The topology is supplied rather than discovered
+// so the stub does not have to answer CLUSTER SLOTS.
+func clusterOf(t *testing.T, f *fakeRedis, masters int) *goredis.ClusterClient {
+	t.Helper()
+
+	addr := f.listener.Addr().String()
+	addrs := make([]string, 0, masters)
+	for i := 0; i < masters; i++ {
+		addrs = append(addrs, addr)
+	}
+
+	cluster := goredis.NewClusterClient(&goredis.ClusterOptions{
+		Addrs:    addrs,
+		Username: "syncer",
+		Password: "p4ss",
+		ClusterSlots: func(context.Context) ([]goredis.ClusterSlot, error) {
+			slots := make([]goredis.ClusterSlot, 0, masters)
+			width := 16384 / masters
+			for i := 0; i < masters; i++ {
+				end := (i+1)*width - 1
+				if i == masters-1 {
+					end = 16383
+				}
+				slots = append(slots, goredis.ClusterSlot{
+					Start: i * width, End: end,
+					Nodes: []goredis.ClusterNode{{Addr: addr}},
+				})
+			}
+			return slots, nil
+		},
+	})
+	t.Cleanup(func() { _ = cluster.Close() })
+	return cluster
+}
+
+// TestTheMastersAreReadFromTheCluster covers the lookup the rediscovery tick
+// depends on: the addresses have to come from the cluster each time, because the
+// set of them is exactly what changes after a failover.
+func TestTheMastersAreReadFromTheCluster(t *testing.T) {
+	f := newFakeRedis(t)
+	cluster := clusterOf(t, f, 1)
+
+	masters, err := clusterMasters(ctxFor(t), cluster)
+	if err != nil {
+		t.Fatalf("clusterMasters: %v", err)
+	}
+	if len(masters) != 1 || masters[0] != f.listener.Addr().String() {
+		t.Errorf("masters = %v, want the stub's address", masters)
+	}
+}
+
+// TestANodeClientCarriesTheClustersCredentials matters because a subscription
+// opened without them authenticates as nobody, and a managed Redis refuses it.
+func TestANodeClientCarriesTheClustersCredentials(t *testing.T) {
+	f := newFakeRedis(t)
+	s := newRedisSyncerWithFakes(t, f, newFakeRedis(t))
+	cluster := clusterOf(t, f, 1)
+
+	client := s.nodeClient(cluster, "shard-2:6379")
+	defer client.Close()
+
+	opts := client.Options()
+	if opts.Addr != "shard-2:6379" {
+		t.Errorf("Addr = %q", opts.Addr)
+	}
+	if opts.Username != "syncer" || opts.Password != "p4ss" {
+		t.Errorf("credentials = %q/%q", opts.Username, opts.Password)
+	}
+}
+
+// TestAClusterIsSubscribedNodeByNode is the whole cluster path end to end: one
+// subscription per master rather than one for the cluster, which would only ever
+// receive the events of whichever node the client happened to pick.
+func TestAClusterIsSubscribedNodeByNode(t *testing.T) {
+	f := newFakeRedis(t).on("AUTH", "+OK\r\n")
+	s := newRedisSyncerWithFakes(t, f, newFakeRedis(t))
+	s.source = clusterOf(t, f, 1)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.watchKeyspaceChanges(ctx)
+	}()
+
+	deadline := time.After(5 * time.Second)
+	for !f.sawCommand("PSUBSCRIBE") {
+		select {
+		case <-deadline:
+			t.Fatalf("no subscription was opened; commands = %v", f.seen())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Error("watchKeyspaceChanges did not return when the context was cancelled")
+	}
+}

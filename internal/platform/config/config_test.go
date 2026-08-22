@@ -2,12 +2,14 @@ package config
 
 import (
 	"database/sql"
+	"encoding/base64"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
+	"github.com/retail-ai-inc/sync/internal/platform/secret"
 )
 
 // newConfigDB creates a throwaway SQLite database carrying the two tables the
@@ -370,5 +372,78 @@ func TestLoadSyncTasksNumericDurationSurvives(t *testing.T) {
 	if want := 3 * time.Second; got[0].Mappings[0].Tables[0].AdvancedSettings.BaseRetryDelay != want {
 		t.Errorf("BaseRetryDelay = %v, want %v",
 			got[0].Mappings[0].Tables[0].AdvancedSettings.BaseRetryDelay, want)
+	}
+}
+
+// ---------------------------------------------------- encrypted credentials
+
+// TestASealedPasswordIsOpenedBeforeItIsUsed keeps the encryption invisible to
+// the replication path, which would otherwise connect with a ciphertext for a
+// password.
+func TestASealedPasswordIsOpenedBeforeItIsUsed(t *testing.T) {
+	t.Setenv("SYNC_CONFIG_KEY", base64.StdEncoding.EncodeToString(
+		[]byte("0123456789abcdef0123456789abcdef")))
+	keeper, err := secret.KeeperFromEnv()
+	if err != nil {
+		t.Fatalf("KeeperFromEnv: %v", err)
+	}
+	previous := secret.Default
+	secret.Default = keeper
+	t.Cleanup(func() { secret.Default = previous })
+
+	sealed, err := secret.SealTaskConfig(
+		`{"type":"mysql","sourceConn":{"host":"tokyo","password":"s3cret"},` +
+			`"targetConn":{"host":"osaka","password":"s3cret"}}`)
+	if err != nil {
+		t.Fatalf("SealTaskConfig: %v", err)
+	}
+	if strings.Contains(sealed, "s3cret") {
+		t.Fatalf("the fixture is not actually sealed: %s", sealed)
+	}
+
+	db := newConfigDB(t)
+	if _, err := db.Exec(
+		`INSERT INTO sync_tasks (id, enable, config_json) VALUES (1, 1, ?)`, sealed); err != nil {
+		t.Fatalf("seed sync_tasks: %v", err)
+	}
+
+	got, err := loadSyncTasks(db)
+	if err != nil {
+		t.Fatalf("loadSyncTasks: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d tasks, want 1", len(got))
+	}
+	if !strings.Contains(got[0].SourceConnection, "s3cret") {
+		t.Errorf("source connection = %q, want the opened password", got[0].SourceConnection)
+	}
+}
+
+// TestATaskWhosePasswordCannotBeOpenedIsNotStarted is the deliberate choice.
+// Starting it would connect with a ciphertext and fail authentication against
+// the payment database, with an error naming neither the task nor the reason;
+// skipping it says exactly which task is not replicating and why.
+func TestATaskWhosePasswordCannotBeOpenedIsNotStarted(t *testing.T) {
+	previous := secret.Default
+	secret.Default = nil // no key configured, as on a deployment that lost it
+	t.Cleanup(func() { secret.Default = previous })
+
+	db := newConfigDB(t)
+	if _, err := db.Exec(
+		`INSERT INTO sync_tasks (id, enable, config_json) VALUES
+		 (1, 1, '{"type":"mysql","sourceConn":{"password":"enc:v1:AAAA"}}'),
+		 (2, 1, '{"type":"mysql","sourceConn":{"password":"plain"}}')`); err != nil {
+		t.Fatalf("seed sync_tasks: %v", err)
+	}
+
+	got, err := loadSyncTasks(db)
+	if err != nil {
+		t.Fatalf("loadSyncTasks: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("loaded %d tasks, want only the one that can be opened", len(got))
+	}
+	if got[0].ID != 2 {
+		t.Errorf("loaded task %d, want the readable one", got[0].ID)
 	}
 }
