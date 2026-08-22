@@ -1,30 +1,28 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
-	"sync"
 	"syscall"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	identity "github.com/retail-ai-inc/sync/internal/identity/domain"
-	"github.com/retail-ai-inc/sync/internal/monitoring/app"
 	"github.com/retail-ai-inc/sync/internal/platform/config"
 	"github.com/retail-ai-inc/sync/internal/platform/httpapi"
 	"github.com/retail-ai-inc/sync/internal/platform/logging"
 	"github.com/retail-ai-inc/sync/internal/platform/webui"
-	replicationapp "github.com/retail-ai-inc/sync/internal/replication/app"
 	"github.com/sirupsen/logrus"
 )
 
 func main() {
-	cfg := config.NewConfig()
+	cfg, err := config.NewConfig()
+	if err != nil {
+		logrus.Fatalf("Failed to read the configuration: %v", err)
+	}
 	log := logging.InitLogger(cfg.LogLevel)
 
 	if _, err := os.Stat("ui/dist"); os.IsNotExist(err) {
@@ -93,7 +91,11 @@ func main() {
 		}
 	}()
 
-	go runSyncTasks(ctx, log, cfg)
+	syncDone := make(chan struct{})
+	go func() {
+		defer close(syncDone)
+		runSyncTasks(ctx, log, cfg)
+	}()
 
 	<-ctx.Done()
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -104,105 +106,14 @@ func main() {
 		log.Info("HTTP server gracefully stopped")
 	}
 
-	time.Sleep(2 * time.Second)
+	// Wait for the replication tasks to finish applying what they had in hand.
+	// This used to be a two-second sleep, which discarded whatever a syncer was
+	// midway through; the deadline is the container's grace period to use.
+	select {
+	case <-syncDone:
+		log.Info("Replication stopped cleanly")
+	case <-time.After(drainTimeout + 5*time.Second):
+		log.Warn("Replication did not stop within the drain timeout")
+	}
 	log.Info("Program exited")
-}
-
-func runSyncTasks(parentCtx context.Context, log *logrus.Logger, cfg *config.Config) {
-	configReloadInterval := 10 * time.Second
-	currentConfig := cfg
-	var wg sync.WaitGroup
-	syncCtx, syncCancel := context.WithCancel(parentCtx)
-	startSyncTasks(syncCtx, currentConfig, &wg, log)
-	ticker := time.NewTicker(configReloadInterval)
-	defer ticker.Stop()
-
-	// Monitor for config changes and restart row count monitoring if needed
-	var rowCountMonitorCancel context.CancelFunc
-	var rowCountMonitorCtx context.Context
-
-	// Initialize row count monitoring (if enabled)
-	if currentConfig.EnableTableRowCountMonitoring {
-		rowCountMonitorCtx, rowCountMonitorCancel = context.WithCancel(parentCtx)
-		app.StartRowCountMonitoring(rowCountMonitorCtx, currentConfig, log, currentConfig.MonitorInterval)
-	}
-
-	for {
-		select {
-		case <-parentCtx.Done():
-			syncCancel()
-			wg.Wait()
-			if rowCountMonitorCancel != nil {
-				rowCountMonitorCancel()
-			}
-			return
-		case <-ticker.C:
-			newConfig := config.NewConfig()
-			if !configsEqual(currentConfig, newConfig) {
-				log.Info("Config change detected, restarting sync tasks and row count monitoring...")
-				syncCancel()
-				wg.Wait()
-
-				// Stop existing row count monitoring
-				if rowCountMonitorCancel != nil {
-					rowCountMonitorCancel()
-					rowCountMonitorCancel = nil
-				}
-
-				currentConfig = newConfig
-				syncCtx, syncCancel = context.WithCancel(parentCtx)
-				wg = sync.WaitGroup{}
-				startSyncTasks(syncCtx, currentConfig, &wg, log)
-
-				// Restart row count monitoring (if enabled)
-				if currentConfig.EnableTableRowCountMonitoring {
-					rowCountMonitorCtx, rowCountMonitorCancel = context.WithCancel(parentCtx)
-					app.StartRowCountMonitoring(rowCountMonitorCtx, currentConfig, log, currentConfig.MonitorInterval)
-				}
-			}
-		}
-	}
-}
-
-func startSyncTasks(ctx context.Context, cfg *config.Config, wg *sync.WaitGroup, log *logrus.Logger) {
-	for _, syncCfg := range cfg.SyncConfigs {
-		if !syncCfg.Enable {
-			continue
-		}
-		wg.Add(1)
-		switch syncCfg.Type {
-		case "mongodb":
-			go func(sc config.SyncConfig) {
-				defer wg.Done()
-				replicationapp.NewMongoDBSyncer(sc, cfg, log).Start(ctx)
-			}(syncCfg)
-		case "mysql", "mariadb":
-			go func(sc config.SyncConfig) {
-				defer wg.Done()
-				replicationapp.NewMySQLSyncer(sc, log).Start(ctx)
-			}(syncCfg)
-		case "postgresql":
-			go func(sc config.SyncConfig) {
-				defer wg.Done()
-				replicationapp.NewPostgreSQLSyncer(sc, log).Start(ctx)
-			}(syncCfg)
-		case "redis":
-			go func(sc config.SyncConfig) {
-				defer wg.Done()
-				replicationapp.NewRedisSyncer(sc, log).Start(ctx)
-			}(syncCfg)
-		default:
-			log.Errorf("Unknown sync type: %s", syncCfg.Type)
-			wg.Done()
-		}
-	}
-}
-
-func configsEqual(c1, c2 *config.Config) bool {
-	b1, err1 := json.Marshal(c1.SyncConfigs)
-	b2, err2 := json.Marshal(c2.SyncConfigs)
-	if err1 != nil || err2 != nil {
-		return false
-	}
-	return bytes.Equal(b1, b2)
 }

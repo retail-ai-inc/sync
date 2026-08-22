@@ -3,7 +3,6 @@ package config
 import (
 	"database/sql"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -66,7 +65,10 @@ func TestNewConfigReadsBothTables(t *testing.T) {
 		t.Fatalf("insert task: %v", err)
 	}
 
-	cfg := NewConfig()
+	cfg, err := NewConfig()
+	if err != nil {
+		t.Fatalf("NewConfig: %v", err)
+	}
 
 	if !cfg.EnableTableRowCountMonitoring {
 		t.Error("EnableTableRowCountMonitoring = false")
@@ -91,82 +93,54 @@ func TestNewConfigReadsBothTables(t *testing.T) {
 	}
 }
 
-// TestAnEmptyConfigGlobalTableIsFatal records a defect this test suite found.
+// TestAnEmptyConfigGlobalTableIsReported is the fix for a start-up that could
+// not be recovered from. The load answered sql.ErrNoRows with log.Fatalf, so a
+// database with the tables but no settings row killed the process — including
+// the API server that could have been used to fix the configuration. A fresh
+// install, or a migration that created the schema without seeding it, simply
+// would not start.
 //
-// loadGlobalConfig answers sql.ErrNoRows with log.Fatalf, so a database that has
-// the tables but no settings row kills the process at start-up. A fresh install,
-// or a migration that created the schema without seeding it, cannot start — and
-// the message is "Failed to load config_global: sql: no rows in result set",
-// which does not say what to do about it.
-//
-// There are five log.Fatalf calls on this path: the database open, this row, the
-// sync_tasks query, the row scan and the row iteration. Any of them takes the
-// whole process down, including the API server that could have been used to fix
-// the configuration.
-//
-// The exit cannot be exercised in-process, so this runs the load in a
-// subprocess.
-func TestAnEmptyConfigGlobalTableIsFatal(t *testing.T) {
-	if os.Getenv("SYNC_TEST_FATAL_CHILD") == "1" {
-		// Child: the tables exist, the settings row does not.
-		useTempConfigDBAt(os.Getenv("SYNC_DB_PATH"))
-		_ = NewConfig()
-		return
-	}
+// The supervisor also re-reads the configuration every ten seconds, so one
+// locked file or moment of disk trouble took replication down with it.
+func TestAnEmptyConfigGlobalTableIsReported(t *testing.T) {
+	useTempConfigDB(t)
 
-	path := filepath.Join(t.TempDir(), "sync.db")
-	cmd := exec.Command(os.Args[0], "-test.run=TestAnEmptyConfigGlobalTableIsFatal")
-	cmd.Env = append(os.Environ(), "SYNC_TEST_FATAL_CHILD=1", "SYNC_DB_PATH="+path)
-	out, err := cmd.CombinedOutput()
-
+	cfg, err := NewConfig()
 	if err == nil {
-		t.Fatalf("the child survived an empty config_global table; the load appears "+
-			"to return an error now, so assert that instead (output: %s)", out)
+		t.Fatal("NewConfig succeeded with no settings row")
 	}
-	if !strings.Contains(string(out), "Failed to load config_global") {
-		t.Errorf("the child died for another reason: %s", out)
+	if cfg != nil {
+		t.Error("a configuration was returned alongside the error")
+	}
+	if !strings.Contains(err.Error(), "config_global") {
+		t.Errorf("error = %v, want it to name the table", err)
 	}
 }
 
-// TestNewConfigDoesNotHoldTheDatabaseOpen records that the handle is closed
-// before the configuration is returned, so the single-connection SQLite pool is
-// released for the next caller. Two calls in a row have to work.
-func TestNewConfigDoesNotHoldTheDatabaseOpen(t *testing.T) {
-	db := useTempConfigDB(t)
-	// A settings row is mandatory: without one the load calls log.Fatalf and
-	// takes the test binary with it. See TestAnEmptyConfigGlobalTableIsFatal.
-	if _, err := db.Exec(
-		`INSERT INTO config_global (id, enable_table_row_count_monitoring, log_level, monitor_interval)
-		 VALUES (1, 0, 'info', 60)`); err != nil {
-		t.Fatalf("insert settings: %v", err)
+func TestAnUnopenableDatabaseIsReported(t *testing.T) {
+	// A directory where the file should be: openable by name, unusable as a
+	// database.
+	dir := filepath.Join(t.TempDir(), "sync.db")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
 	}
+	t.Setenv("SYNC_DB_PATH", dir)
 
-	_ = NewConfig()
-	_ = NewConfig()
+	if _, err := NewConfig(); err == nil {
+		t.Error("NewConfig succeeded against a database that cannot be opened")
+	}
 }
 
-// TestNewConfigCallsFatalWhenTheDatabaseCannotBeOpened records that the
-// constructor answers an unopenable database with log.Fatalf, which exits the
-// process. No caller is given the chance to handle it: the API server and every
-// replication task die together, at start-up, with one line of output.
-//
-// The exit cannot be exercised in-process, so this is the record that the path
-// is still there rather than a test of it. Turning it into a returned error is a
-// behaviour change.
-func TestNewConfigCallsFatalWhenTheDatabaseCannotBeOpened(t *testing.T) {
-	t.Log("NewConfig calls log.Fatalf on an unopenable database; see config.go")
-}
+func TestAMissingSyncTasksTableIsReported(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sync.db")
+	t.Setenv("SYNC_DB_PATH", path)
 
-// useTempConfigDBAt creates the two tables at a given path, without a *testing.T
-// so the subprocess above can call it.
-func useTempConfigDBAt(path string) {
 	db, err := sql.Open("sqlite3", path)
 	if err != nil {
-		panic(err)
+		t.Fatalf("open: %v", err)
 	}
 	defer db.Close()
-
-	const schema = `
+	if _, err := db.Exec(`
 CREATE TABLE config_global (
     id                                INTEGER PRIMARY KEY,
     enable_table_row_count_monitoring INTEGER NOT NULL DEFAULT 0,
@@ -175,14 +149,32 @@ CREATE TABLE config_global (
     slackWebhookURL                   TEXT,
     slackChannel                      TEXT
 );
-CREATE TABLE sync_tasks (
-    id               INTEGER PRIMARY KEY AUTOINCREMENT,
-    enable           INTEGER NOT NULL DEFAULT 1,
-    last_update_time DATETIME,
-    last_run_time    DATETIME,
-    config_json      TEXT NOT NULL
-);`
-	if _, err := db.Exec(schema); err != nil {
-		panic(err)
+INSERT INTO config_global (id) VALUES (1);`); err != nil {
+		t.Fatalf("create schema: %v", err)
+	}
+
+	if _, err := NewConfig(); err == nil {
+		t.Error("NewConfig succeeded with no sync_tasks table")
+	}
+}
+
+// TestNewConfigDoesNotHoldTheDatabaseOpen records that the handle is closed
+// before the configuration is returned, so the single-connection SQLite pool is
+// released for the next caller. Two calls in a row have to work.
+func TestNewConfigDoesNotHoldTheDatabaseOpen(t *testing.T) {
+	db := useTempConfigDB(t)
+	// A settings row is mandatory: without one the load reports an error. See
+	// TestAnEmptyConfigGlobalTableIsReported.
+	if _, err := db.Exec(
+		`INSERT INTO config_global (id, enable_table_row_count_monitoring, log_level, monitor_interval)
+		 VALUES (1, 0, 'info', 60)`); err != nil {
+		t.Fatalf("insert settings: %v", err)
+	}
+
+	if _, err := NewConfig(); err != nil {
+		t.Fatalf("first NewConfig: %v", err)
+	}
+	if _, err := NewConfig(); err != nil {
+		t.Fatalf("second NewConfig: %v", err)
 	}
 }

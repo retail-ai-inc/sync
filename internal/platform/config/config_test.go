@@ -52,7 +52,10 @@ VALUES (1, 1, 'debug', 300, 'https://hooks.example.com/x', '#alerts')`); err != 
 		t.Fatalf("seed config_global: %v", err)
 	}
 
-	got := loadGlobalConfig(db)
+	got, err := loadGlobalConfig(db)
+	if err != nil {
+		t.Fatalf("loadGlobalConfig: %v", err)
+	}
 
 	if !got.EnableTableRowCountMonitoring {
 		t.Error("EnableTableRowCountMonitoring = false, want true")
@@ -80,7 +83,10 @@ VALUES (1, 0, 'info', 60)`); err != nil {
 		t.Fatalf("seed config_global: %v", err)
 	}
 
-	got := loadGlobalConfig(db)
+	got, err := loadGlobalConfig(db)
+	if err != nil {
+		t.Fatalf("loadGlobalConfig: %v", err)
+	}
 
 	// The query wraps both Slack columns in COALESCE, so NULL must not fail the scan.
 	if got.SlackWebhookURL != "" || got.SlackChannel != "" {
@@ -133,7 +139,10 @@ func TestLoadSyncTasks(t *testing.T) {
 		t.Fatalf("seed sync_tasks: %v", err)
 	}
 
-	got := loadSyncTasks(db)
+	got, err := loadSyncTasks(db)
+	if err != nil {
+		t.Fatalf("loadSyncTasks: %v", err)
+	}
 	if len(got) != 1 {
 		t.Fatalf("loadSyncTasks returned %d tasks, want 1", len(got))
 	}
@@ -209,7 +218,10 @@ func TestLoadSyncTasksOrdersByID(t *testing.T) {
 		}
 	}
 
-	got := loadSyncTasks(db)
+	got, err := loadSyncTasks(db)
+	if err != nil {
+		t.Fatalf("loadSyncTasks: %v", err)
+	}
 
 	if len(got) != 3 {
 		t.Fatalf("got %d tasks, want 3", len(got))
@@ -228,7 +240,10 @@ func TestLoadSyncTasksSynthesisesEmptyMapping(t *testing.T) {
 		t.Fatalf("seed sync_tasks: %v", err)
 	}
 
-	got := loadSyncTasks(db)
+	got, err := loadSyncTasks(db)
+	if err != nil {
+		t.Fatalf("loadSyncTasks: %v", err)
+	}
 
 	// A task with no mappings gets one empty DatabaseMapping so downstream
 	// range loops do not have to special-case nil.
@@ -252,7 +267,10 @@ func TestLoadSyncTasksSwallowsMalformedJSON(t *testing.T) {
 		t.Fatalf("seed sync_tasks: %v", err)
 	}
 
-	got := loadSyncTasks(db)
+	got, err := loadSyncTasks(db)
+	if err != nil {
+		t.Fatalf("loadSyncTasks: %v", err)
+	}
 
 	if len(got) != 1 {
 		t.Fatalf("got %d tasks, want 1", len(got))
@@ -313,7 +331,10 @@ func TestLoadSyncTasksStringDurationVoidsWholeTask(t *testing.T) {
 		t.Fatalf("seed sync_tasks: %v", err)
 	}
 
-	got := loadSyncTasks(db)
+	got, err := loadSyncTasks(db)
+	if err != nil {
+		t.Fatalf("loadSyncTasks: %v", err)
+	}
 	if len(got) != 1 {
 		t.Fatalf("got %d tasks, want 1", len(got))
 	}
@@ -339,7 +360,10 @@ func TestLoadSyncTasksNumericDurationSurvives(t *testing.T) {
 		t.Fatalf("seed sync_tasks: %v", err)
 	}
 
-	got := loadSyncTasks(db)
+	got, err := loadSyncTasks(db)
+	if err != nil {
+		t.Fatalf("loadSyncTasks: %v", err)
+	}
 	if len(got) != 1 || len(got[0].Mappings) != 1 || len(got[0].Mappings[0].Tables) != 1 {
 		t.Fatalf("task did not load: %+v", got)
 	}

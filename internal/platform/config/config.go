@@ -3,6 +3,7 @@ package config
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 	"time"
 
@@ -132,16 +133,29 @@ type jsonMapping struct {
 	} `json:"tables"`
 }
 
-func NewConfig() *Config {
+// NewConfig reads the stored configuration.
+//
+// Every failure used to be log.Fatalf, and the supervisor re-reads the
+// configuration every ten seconds: one unreadable read — a locked SQLite file,
+// a moment of disk trouble — took the whole process down, replication and
+// control plane together. A disaster-recovery component cannot be that brittle,
+// so the failure is reported and the caller decides.
+func NewConfig() (*Config, error) {
 	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
-		log.Fatalf("Failed opening DB: %v", err)
+		return nil, fmt.Errorf("open the configuration database: %w", err)
+	}
+	defer db.Close()
+
+	gcfg, err := loadGlobalConfig(db)
+	if err != nil {
+		return nil, err
+	}
+	syncCfgs, err := loadSyncTasks(db)
+	if err != nil {
+		return nil, err
 	}
 
-	gcfg := loadGlobalConfig(db)
-	syncCfgs := loadSyncTasks(db)
-
-	_ = db.Close()
 	return &Config{
 		EnableTableRowCountMonitoring: gcfg.EnableTableRowCountMonitoring,
 		LogLevel:                      gcfg.LogLevel,
@@ -150,10 +164,10 @@ func NewConfig() *Config {
 		MonitorInterval:               gcfg.MonitorInterval,
 		SlackWebhookURL:               gcfg.SlackWebhookURL,
 		SlackChannel:                  gcfg.SlackChannel,
-	}
+	}, nil
 }
 
-func loadGlobalConfig(db *sql.DB) globalConfig {
+func loadGlobalConfig(db *sql.DB) (globalConfig, error) {
 	var em int
 	var ll string
 	var mi int
@@ -166,7 +180,7 @@ FROM config_global
 WHERE id=1
 `).Scan(&em, &ll, &mi, &swu, &sc)
 	if err != nil {
-		log.Fatalf("Failed to load config_global: %v", err)
+		return globalConfig{}, fmt.Errorf("load config_global: %w", err)
 	}
 	return globalConfig{
 		EnableTableRowCountMonitoring: (em != 0),
@@ -174,10 +188,10 @@ WHERE id=1
 		MonitorInterval:               time.Duration(mi) * time.Second,
 		SlackWebhookURL:               swu,
 		SlackChannel:                  sc,
-	}
+	}, nil
 }
 
-func loadSyncTasks(db *sql.DB) []SyncConfig {
+func loadSyncTasks(db *sql.DB) ([]SyncConfig, error) {
 	rows, err := db.Query(`
 SELECT
   id,
@@ -189,7 +203,7 @@ FROM sync_tasks
 ORDER BY id ASC
 `)
 	if err != nil {
-		log.Fatalf("Failed to query sync_tasks: %v", err)
+		return nil, fmt.Errorf("query sync_tasks: %w", err)
 	}
 	defer rows.Close()
 
@@ -203,7 +217,7 @@ ORDER BY id ASC
 			js        string
 		)
 		if err2 := rows.Scan(&id, &enableInt, &upTime, &runTime, &js); err2 != nil {
-			log.Fatalf("scan row fail: %v", err2)
+			return nil, fmt.Errorf("scan a sync_tasks row: %w", err2)
 		}
 
 		sc := SyncConfig{
@@ -351,7 +365,7 @@ ORDER BY id ASC
 		results = append(results, sc)
 	}
 	if err := rows.Err(); err != nil {
-		log.Fatalf("rows iteration fail: %v", err)
+		return nil, fmt.Errorf("read sync_tasks: %w", err)
 	}
-	return results
+	return results, nil
 }

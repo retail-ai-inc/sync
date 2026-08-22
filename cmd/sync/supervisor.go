@@ -1,0 +1,248 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"time"
+
+	"github.com/retail-ai-inc/sync/internal/monitoring/app"
+	"github.com/retail-ai-inc/sync/internal/platform/config"
+	replicationapp "github.com/retail-ai-inc/sync/internal/replication/app"
+	"github.com/sirupsen/logrus"
+)
+
+const (
+	// configReloadInterval is how often the stored configuration is re-read.
+	configReloadInterval = 10 * time.Second
+	// drainTimeout is how long a task is given to finish what it was applying
+	// after being asked to stop.
+	drainTimeout = 30 * time.Second
+)
+
+// runningTask is one syncer the supervisor has started.
+type runningTask struct {
+	// fingerprint is the configuration the task was started from. A task whose
+	// fingerprint no longer matches the stored configuration is restarted; one
+	// whose fingerprint is unchanged is left alone.
+	fingerprint string
+	cancel      context.CancelFunc
+	done        chan struct{}
+}
+
+// fingerprint renders a task's configuration for comparison.
+func fingerprint(sc config.SyncConfig) string {
+	encoded, err := json.Marshal(sc)
+	if err != nil {
+		// An unencodable configuration is treated as changed, which restarts
+		// the task rather than leaving it running on something unknown.
+		return time.Now().String()
+	}
+	return string(encoded)
+}
+
+// globalFingerprint renders the settings that belong to the process rather than
+// to one task. The reload used to compare only the task list, so changing the
+// monitor interval, the Slack webhook or the log level took effect on the next
+// restart and not before.
+func globalFingerprint(cfg *config.Config) string {
+	encoded, err := json.Marshal(struct {
+		Monitoring bool
+		Interval   time.Duration
+		Webhook    string
+		Channel    string
+		LogLevel   string
+	}{
+		cfg.EnableTableRowCountMonitoring, cfg.MonitorInterval,
+		cfg.SlackWebhookURL, cfg.SlackChannel, cfg.LogLevel,
+	})
+	if err != nil {
+		return time.Now().String()
+	}
+	return string(encoded)
+}
+
+// supervisor keeps the running syncers in step with the stored configuration.
+//
+// It used to hold one context for all of them: any change to any task cancelled
+// every syncer and started them all again, so editing one task's table list
+// stopped replication for every other task — including the ones carrying
+// payments — for as long as their initial checks took.
+type supervisor struct {
+	log *logrus.Logger
+	// global is the configuration the syncers read process-wide settings from,
+	// currently the Slack credentials the MongoDB syncer alerts through.
+	global  *config.Config
+	running map[int]*runningTask
+
+	monitorFingerprint string
+	monitorCancel      context.CancelFunc
+
+	// build resolves a task's configuration to the function that runs it. It is
+	// a field so a test can substitute a stub for the real syncers, which need
+	// databases.
+	build func(config.SyncConfig, *config.Config, *logrus.Logger) func(context.Context)
+}
+
+func newSupervisor(log *logrus.Logger) *supervisor {
+	return &supervisor{log: log, running: map[int]*runningTask{}, build: syncerFor}
+}
+
+// apply starts, stops and restarts tasks so the running set matches cfg.
+func (s *supervisor) apply(ctx context.Context, cfg *config.Config) {
+	s.global = cfg
+
+	desired := map[int]config.SyncConfig{}
+	for _, sc := range cfg.SyncConfigs {
+		if sc.Enable {
+			desired[sc.ID] = sc
+		}
+	}
+
+	for id, task := range s.running {
+		wanted, keep := desired[id]
+		if keep && fingerprint(wanted) == task.fingerprint {
+			continue
+		}
+		if keep {
+			s.log.Infof("Task %d has changed, restarting it", id)
+		} else {
+			s.log.Infof("Task %d is no longer enabled, stopping it", id)
+		}
+		s.stop(id)
+	}
+
+	for id, sc := range desired {
+		if _, already := s.running[id]; already {
+			continue
+		}
+		s.start(ctx, sc)
+	}
+
+	s.applyMonitoring(ctx, cfg)
+}
+
+// start launches one task.
+func (s *supervisor) start(parentCtx context.Context, sc config.SyncConfig) {
+	syncer := s.build(sc, s.global, s.log)
+	if syncer == nil {
+		s.log.Errorf("Unknown sync type: %s", sc.Type)
+		return
+	}
+
+	ctx, cancel := context.WithCancel(parentCtx)
+	done := make(chan struct{})
+	task := &runningTask{fingerprint: fingerprint(sc), cancel: cancel, done: done}
+	s.running[sc.ID] = task
+
+	go func() {
+		defer close(done)
+		syncer(ctx)
+	}()
+	s.log.Infof("Task %d (%s) started", sc.ID, sc.Type)
+}
+
+// stop cancels one task and waits for it to finish, up to the drain timeout.
+func (s *supervisor) stop(id int) {
+	task, ok := s.running[id]
+	if !ok {
+		return
+	}
+	delete(s.running, id)
+
+	task.cancel()
+	select {
+	case <-task.done:
+	case <-time.After(drainTimeout):
+		s.log.Warnf("Task %d did not finish within %v of being asked to stop",
+			id, drainTimeout)
+	}
+}
+
+// stopAll asks every task to stop and waits for them together, so shutting down
+// takes one drain timeout rather than one per task.
+func (s *supervisor) stopAll() {
+	for _, task := range s.running {
+		task.cancel()
+	}
+
+	deadline := time.After(drainTimeout)
+	for id, task := range s.running {
+		select {
+		case <-task.done:
+		case <-deadline:
+			s.log.Warnf("Task %d did not finish within %v of being asked to stop; "+
+				"whatever it had buffered is lost", id, drainTimeout)
+		}
+	}
+	s.running = map[int]*runningTask{}
+
+	if s.monitorCancel != nil {
+		s.monitorCancel()
+		s.monitorCancel = nil
+	}
+}
+
+// applyMonitoring brings the row-count monitor into line with the settings.
+func (s *supervisor) applyMonitoring(ctx context.Context, cfg *config.Config) {
+	wanted := globalFingerprint(cfg)
+	if wanted == s.monitorFingerprint && (s.monitorCancel != nil) == cfg.EnableTableRowCountMonitoring {
+		return
+	}
+
+	if s.monitorCancel != nil {
+		s.monitorCancel()
+		s.monitorCancel = nil
+	}
+	s.monitorFingerprint = wanted
+
+	if !cfg.EnableTableRowCountMonitoring {
+		return
+	}
+	monitorCtx, cancel := context.WithCancel(ctx)
+	s.monitorCancel = cancel
+	app.StartRowCountMonitoring(monitorCtx, cfg, s.log, cfg.MonitorInterval)
+}
+
+// syncerFor reports the Start function for a task's engine, or nil when the
+// engine is not one this build replicates.
+func syncerFor(sc config.SyncConfig, global *config.Config, log *logrus.Logger) func(context.Context) {
+	switch sc.Type {
+	case "mongodb":
+		return func(ctx context.Context) { replicationapp.NewMongoDBSyncer(sc, global, log).Start(ctx) }
+	case "mysql", "mariadb":
+		return func(ctx context.Context) { replicationapp.NewMySQLSyncer(sc, log).Start(ctx) }
+	case "postgresql":
+		return func(ctx context.Context) { replicationapp.NewPostgreSQLSyncer(sc, log).Start(ctx) }
+	case "redis":
+		return func(ctx context.Context) { replicationapp.NewRedisSyncer(sc, log).Start(ctx) }
+	}
+	return nil
+}
+
+// runSyncTasks keeps the running syncers in step with the stored configuration
+// until its context is cancelled.
+func runSyncTasks(parentCtx context.Context, log *logrus.Logger, cfg *config.Config) {
+	s := newSupervisor(log)
+	s.apply(parentCtx, cfg)
+
+	ticker := time.NewTicker(configReloadInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-parentCtx.Done():
+			s.stopAll()
+			return
+		case <-ticker.C:
+			newConfig, err := config.NewConfig()
+			if err != nil {
+				// One unreadable read is not a reason to stop replicating; the
+				// tasks go on running on the configuration they have.
+				log.Errorf("Could not re-read the configuration, keeping the "+
+					"running tasks as they are: %v", err)
+				continue
+			}
+			s.apply(parentCtx, newConfig)
+		}
+	}
+}

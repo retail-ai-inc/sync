@@ -57,26 +57,6 @@ VALUES (1, 0, 'info', 3600);`); err != nil {
 	return db
 }
 
-// TestConfigsEqualComparesTheMappingsToo records that the comparison marshals
-// the whole task slice, so any difference inside a task counts — the mappings
-// included. Editing one task's table list therefore restarts every task's
-// syncer, not just that one's, because the supervisor cancels the shared context
-// and starts them all again.
-func TestConfigsEqualComparesTheMappingsToo(t *testing.T) {
-	a := &config.Config{SyncConfigs: []config.SyncConfig{
-		{ID: 1, Type: "mongodb", Enable: true,
-			Mappings: []config.DatabaseMapping{{SourceDatabase: "src"}}},
-	}}
-	b := &config.Config{SyncConfigs: []config.SyncConfig{
-		{ID: 1, Type: "mongodb", Enable: true, Mappings: nil},
-	}}
-
-	if configsEqual(a, b) {
-		t.Fatal("configsEqual = true for tasks with different mappings; the comparison " +
-			"appears to have narrowed, so assert the new one instead")
-	}
-}
-
 // TestRunSyncTasksStopsWhenItsContextIsCancelled records that the supervisor
 // returns once the parent context is done, having cancelled its children and
 // waited for them.

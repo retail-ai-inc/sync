@@ -22,7 +22,12 @@ func SendTableComparisonSlackNotification(ctx context.Context, sc config.SyncCon
 	}
 
 	// Get global config to access Slack settings
-	cfg := config.NewConfig()
+	cfg, err := config.NewConfig()
+	if err != nil {
+		log.Warnf("[Monitor] Could not read the Slack settings, so no notification "+
+			"was sent for task %d: %v", sc.ID, err)
+		return
+	}
 	slackNotifier := slack.NewSlackNotifierFromConfig(cfg, log)
 	if !slackNotifier.IsConfigured() {
 		return
