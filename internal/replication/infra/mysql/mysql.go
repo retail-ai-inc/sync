@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -93,8 +94,24 @@ func (s *MySQLSyncer) Start(ctx context.Context) {
 		return
 	}
 
-	// Perform initial sync if target is empty
-	s.doInitialSync(ctx, targetDB)
+	// The stored checkpoint is the authority on whether the copy has been made:
+	// a previous run that reached the stream wrote one. Without it the copy runs
+	// and its starting coordinates are pinned first, so writes made while it is
+	// running are replayed by the stream rather than falling between the two.
+	var checkpoint *binlogCheckpoint
+	if s.cfg.MySQLPositionPath != "" {
+		checkpoint = s.loadCheckpoint(s.cfg.MySQLPositionPath)
+	}
+	if checkpoint == nil {
+		checkpoint = s.snapshot(ctx, targetDB)
+		if checkpoint != nil && s.cfg.MySQLPositionPath != "" {
+			if err := writeCheckpoint(s.cfg.MySQLPositionPath, *checkpoint); err != nil {
+				s.logger.Errorf("[MySQL] Failed to store the snapshot checkpoint: %v", err)
+			}
+		}
+	} else {
+		s.logger.Infof("[MySQL] Resuming from a stored checkpoint: %+v", *checkpoint)
+	}
 
 	h := &MyEventHandler{
 		targetDB:          targetDB,
@@ -107,14 +124,6 @@ func (s *MySQLSyncer) Start(ctx context.Context) {
 		flavor:            cfg.Flavor,
 	}
 	c.SetEventHandler(h)
-
-	var checkpoint *binlogCheckpoint
-	if s.cfg.MySQLPositionPath != "" {
-		checkpoint = s.loadCheckpoint(s.cfg.MySQLPositionPath)
-		if checkpoint != nil {
-			s.logger.Infof("[MySQL] Starting canal from saved checkpoint: %+v", *checkpoint)
-		}
-	}
 
 	// Add connection health check
 	connCheckTicker := time.NewTicker(5 * time.Minute)
@@ -168,15 +177,124 @@ func (s *MySQLSyncer) Start(ctx context.Context) {
 	s.logger.Info("[MySQL] Synchronization stopped.")
 }
 
-func (s *MySQLSyncer) doInitialSync(ctx context.Context, targetDB *sql.DB) {
-	s.logger.Info("[MySQL] Checking if initial full sync is needed...")
-
+// snapshot copies the source into the target and reports the binlog coordinates
+// the stream must resume from.
+//
+// The coordinates are read before a row is copied, inside the same transaction
+// the copy reads through. Reading them afterwards — which is what starting canal
+// with no stored position amounts to — loses every write made while the copy was
+// running, and the copy of a payment table runs for as long as it runs.
+//
+// nil means the coordinates could not be pinned. The caller then has no safe
+// place to resume from, which is worth saying out loud rather than papering over.
+func (s *MySQLSyncer) snapshot(ctx context.Context, targetDB *sql.DB) *binlogCheckpoint {
 	sourceDB, err := sql.Open("mysql", s.cfg.SourceConnection)
 	if err != nil {
 		s.logger.Errorf("[MySQL] Failed to open source DB: %v", err)
-		return
+		return nil
 	}
 	defer sourceDB.Close()
+
+	// One pinned connection: the consistent snapshot and every SELECT that reads
+	// through it have to be the same session.
+	conn, err := sourceDB.Conn(ctx)
+	if err != nil {
+		s.logger.Errorf("[MySQL] Failed to pin a source connection: %v", err)
+		return nil
+	}
+	defer conn.Close()
+
+	if _, err := conn.ExecContext(ctx, "START TRANSACTION WITH CONSISTENT SNAPSHOT"); err != nil {
+		s.logger.Errorf("[MySQL] Failed to open a consistent snapshot: %v", err)
+		return nil
+	}
+	defer func() { _, _ = conn.ExecContext(ctx, "COMMIT") }()
+
+	checkpoint, err := s.sourceCheckpoint(ctx, conn)
+	if err != nil {
+		s.logger.Errorf("[MySQL] Failed to read the source binlog coordinates: %v. "+
+			"The copy cannot start without them, because every write made while "+
+			"it ran would then belong to neither the copy nor the stream", err)
+		return nil
+	}
+	s.logger.Infof("[MySQL] Snapshot pinned at %+v", *checkpoint)
+
+	s.doInitialSync(ctx, conn, targetDB)
+	return checkpoint
+}
+
+// sourceCheckpoint reads the source's current binlog coordinates.
+//
+// The column list of SHOW MASTER STATUS has changed across server versions and
+// the statement itself was renamed in 8.4, so the result is read by column name
+// and the newer spelling is tried when the older one is not recognised.
+func (s *MySQLSyncer) sourceCheckpoint(ctx context.Context, conn *sql.Conn) (*binlogCheckpoint, error) {
+	var lastErr error
+	for _, stmt := range []string{"SHOW MASTER STATUS", "SHOW BINARY LOG STATUS"} {
+		cp, err := readBinlogStatus(ctx, conn, stmt)
+		if err == nil {
+			cp.Flavor = mysql.MySQLFlavor
+			if strings.EqualFold(s.cfg.Type, "mariadb") {
+				cp.Flavor = mysql.MariaDBFlavor
+			}
+			return cp, nil
+		}
+		lastErr = err
+	}
+	return nil, lastErr
+}
+
+// readBinlogStatus runs one form of the status statement and maps its columns.
+func readBinlogStatus(ctx context.Context, conn *sql.Conn, stmt string) (*binlogCheckpoint, error) {
+	rows, err := conn.QueryContext(ctx, stmt)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	columns, err := rows.Columns()
+	if err != nil {
+		return nil, err
+	}
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("%s returned no row: is the binary log enabled?", stmt)
+	}
+
+	cells := make([]sql.NullString, len(columns))
+	scan := make([]interface{}, len(columns))
+	for i := range cells {
+		scan[i] = &cells[i]
+	}
+	if err := rows.Scan(scan...); err != nil {
+		return nil, err
+	}
+
+	var cp binlogCheckpoint
+	for i, name := range columns {
+		switch strings.ToLower(name) {
+		case "file":
+			cp.Name = cells[i].String
+		case "position":
+			pos, err := strconv.ParseUint(cells[i].String, 10, 32)
+			if err != nil {
+				return nil, fmt.Errorf("%s reported position %q: %w", stmt, cells[i].String, err)
+			}
+			cp.Pos = uint32(pos)
+		case "executed_gtid_set":
+			cp.GTID = strings.ReplaceAll(cells[i].String, "\n", "")
+		}
+	}
+	if cp.Name == "" {
+		return nil, fmt.Errorf("%s reported no binlog file: is the binary log enabled?", stmt)
+	}
+	return &cp, nil
+}
+
+func (s *MySQLSyncer) doInitialSync(ctx context.Context, sourceDB *sql.Conn, targetDB *sql.DB) {
+	s.logger.Info("[MySQL] Starting the initial full sync...")
 
 	const batchSize = 100
 	sourceDBName := dsn.GetDatabaseName(s.cfg.Type, s.cfg.SourceConnection)
@@ -219,15 +337,23 @@ func (s *MySQLSyncer) doInitialSync(ctx context.Context, targetDB *sql.DB) {
 					targetDBName, tableMap.TargetTable, sourceDBName, tableMap.SourceTable, createdCount)
 			}
 
-			targetCountQuery := fmt.Sprintf("SELECT COUNT(1) FROM %s.%s", targetDBName, tableMap.TargetTable)
-			var count int
-			if errC := targetDB.QueryRow(targetCountQuery).Scan(&count); errC != nil {
-				s.logger.Errorf("[MySQL] Could not check if table %s.%s is empty: %v", targetDBName, tableMap.TargetTable, errC)
-				continue
-			}
-			if count > 0 {
-				s.logger.Infof("[MySQL] table %s.%s has %d rows => skip initial sync", targetDBName, tableMap.TargetTable, count)
-				continue
+			// A target that already holds rows is not evidence the copy
+			// finished: an interrupted copy leaves exactly that. The copy is
+			// made of upserts, so re-reading rows it already wrote costs time
+			// and nothing else, and it is the only way to fill the gap an
+			// interrupted copy left. With no position path there is nothing to
+			// remember between runs, so the row count is all there is to go on.
+			if s.cfg.MySQLPositionPath == "" {
+				targetCountQuery := fmt.Sprintf("SELECT COUNT(1) FROM %s.%s", targetDBName, tableMap.TargetTable)
+				var count int
+				if errC := targetDB.QueryRow(targetCountQuery).Scan(&count); errC != nil {
+					s.logger.Errorf("[MySQL] Could not check if table %s.%s is empty: %v", targetDBName, tableMap.TargetTable, errC)
+					continue
+				}
+				if count > 0 {
+					s.logger.Infof("[MySQL] table %s.%s has %d rows and no position path is configured => skip initial sync", targetDBName, tableMap.TargetTable, count)
+					continue
+				}
 			}
 
 			s.logger.Infof("[MySQL] Doing initial full sync from %s.%s => %s.%s", sourceDBName, tableMap.SourceTable, targetDBName, tableMap.TargetTable)
@@ -295,7 +421,7 @@ func (s *MySQLSyncer) targetTableExists(ctx context.Context, db *sql.DB, dbName,
 
 func (s *MySQLSyncer) createTargetTableAndIndexes(
 	ctx context.Context,
-	sourceDB, targetDB *sql.DB,
+	sourceDB *sql.Conn, targetDB *sql.DB,
 	srcDBName, srcTableName, tgtDBName, tgtTableName string,
 ) error {
 	createStmt, seqs, errGen := s.generateCreateTableSQL(ctx, sourceDB, srcDBName, srcTableName, tgtDBName, tgtTableName)
@@ -331,7 +457,7 @@ func (s *MySQLSyncer) createTargetTableAndIndexes(
 
 func (s *MySQLSyncer) generateCreateTableSQL(
 	ctx context.Context,
-	sourceDB *sql.DB,
+	sourceDB *sql.Conn,
 	srcDBName, srcTableName, tgtDBName, tgtTableName string,
 ) (string, []string, error) {
 	var tableName, createSQL string
@@ -492,6 +618,18 @@ func (c *binlogCheckpoint) gtidSet() mysql.GTIDSet {
 	return set
 }
 
+// writeCheckpoint stores a checkpoint, creating the directory it lives in.
+func writeCheckpoint(path string, cp binlogCheckpoint) error {
+	if err := os.MkdirAll(filepath.Dir(path), os.ModePerm); err != nil {
+		return fmt.Errorf("create directory for %s: %w", path, err)
+	}
+	data, err := json.Marshal(cp)
+	if err != nil {
+		return fmt.Errorf("marshal checkpoint: %w", err)
+	}
+	return os.WriteFile(path, data, 0o644)
+}
+
 // loadCheckpoint reads the stored position, reporting nil when there is none.
 func (s *MySQLSyncer) loadCheckpoint(path string) *binlogCheckpoint {
 	positionDir := filepath.Dir(path)
@@ -562,7 +700,7 @@ func (s *MySQLSyncer) parseUserPassword(dsn string) (string, string) {
 	return cfg.User, cfg.Passwd
 }
 
-func (s *MySQLSyncer) getTableColumns(ctx context.Context, db *sql.DB, database, table string) ([]string, error) {
+func (s *MySQLSyncer) getTableColumns(ctx context.Context, db *sql.Conn, database, table string) ([]string, error) {
 	query := fmt.Sprintf("SHOW COLUMNS FROM %s.%s", database, table)
 	rows, err := db.QueryContext(ctx, query)
 	if err != nil {
@@ -892,14 +1030,7 @@ func (h *MyEventHandler) OnPosSynced(header *replication.EventHeader, pos mysql.
 		cp.Flavor = h.flavor
 	}
 
-	data, err := json.Marshal(cp)
-	if err != nil {
-		h.logger.Errorf("[MySQL] Failed to marshal position: %v", err)
-		return err
-	}
-
-	// Write to file
-	if err := os.WriteFile(h.positionSaverPath, data, 0644); err != nil {
+	if err := writeCheckpoint(h.positionSaverPath, cp); err != nil {
 		h.logger.Errorf("[MySQL] Failed to write position file: %v", err)
 		return err
 	}

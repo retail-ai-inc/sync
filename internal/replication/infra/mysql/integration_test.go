@@ -313,10 +313,10 @@ func TestSecurityPolicyIsAppliedToMySQL(t *testing.T) {
 }
 
 // TestWritesDuringInitialSyncAreNotLost exercises F-040, the MySQL counterpart
-// of the MongoDB snapshot gap. doInitialSync copies rows with batched INSERTs
-// and only then starts canal, which with no stored position begins from the
-// master's current coordinates. Rows written between the copy and that call
-// belong to neither path.
+// of the MongoDB snapshot gap. The copy reads through a consistent snapshot
+// whose binlog coordinates are pinned before the first row is read, so a write
+// made while the copy is running is replayed by the stream that resumes from
+// those coordinates rather than falling between the two.
 func TestWritesDuringInitialSyncAreNotLost(t *testing.T) {
 	table := harness.UniqueName("snapshotgap")
 	src, tgt := open(t, harness.MySQLSource, sourceDB), open(t, harness.MySQLTarget, targetDB)
