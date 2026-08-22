@@ -125,9 +125,59 @@ Upon restart, the tool resumes from the stored state (resume token for MongoDB, 
 ## Availability  
 
 - MongoDB: MongoDB Change Streams require a replica set or sharded cluster. See [Convert Standalone to Replica Set](https://www.mongodb.com/docs/manual/tutorial/convert-standalone-to-replica-set/).
-- MySQL/MariaDB: MySQL/MariaDB binlog-based incremental sync requires ROW or MIXED binlog format for proper event capturing.
+- MySQL/MariaDB: MySQL/MariaDB binlog-based incremental sync requires ROW binlog format and `binlog_row_image=FULL`. With `MINIMAL` the binlog carries only the changed columns, which cannot be told apart from real NULLs, so a task refuses to start rather than write NULL over columns nobody touched.
 - PostgreSQL: PostgreSQL incremental sync requires logical replication enabled with a replication slot.
-- Redis: Redis sync supports standalone and Sentinel setups but does not support Redis Cluster mode. Redis does not support resuming from the last synced state after a crash or interruption.
+- Redis: Redis sync supports standalone, Sentinel and Cluster setups. Keyspace notifications are not a durable log, so a periodic full reconciliation pass is what makes the copy converge; Redis has no offset to resume from after an interruption.
+
+## Operating it
+
+### Where the state lives
+
+Two different kinds of state, with different durability requirements:
+
+| State | Where it lives | Lost when |
+| --- | --- | --- |
+| Replication position (MongoDB resume token, MySQL GTID/binlog position, PostgreSQL LSN) and the replication direction lock | The **target** database, in `_sync_checkpoint` and `_sync_direction_lock` | Never, short of losing the target |
+| Task definitions, users, sync history, backup jobs | One local **SQLite** file at `SYNC_DB_PATH` | The filesystem holding it goes away |
+| MongoDB change buffer and dead letters | Local directories under the task's configured path (`./mongodb_buffer` by default) | The filesystem holding them goes away — see below |
+
+Positions are on the target on purpose: a syncer that is rescheduled, or rebuilt
+in another region, resumes from where the data actually is rather than from
+whatever a local disk happened to keep.
+
+### The control plane needs one replica and a persistent volume
+
+`SYNC_DB_PATH` is a single SQLite file, and that has two consequences worth
+planning around rather than discovering:
+
+- **It must be on a persistent volume.** On Kubernetes without one, a
+  rescheduled pod comes up with no tasks at all: replication stops until
+  somebody re-enters the configuration. Replication positions survive, since
+  they are on the target, but nothing knows to go and use them.
+- **Only one replica may run.** SQLite takes one writer, and the pool is capped
+  at one connection. Two replicas sharing a volume contend for the same file;
+  two replicas on separate volumes each run every task twice, writing the same
+  rows to the same target. Use `replicas: 1` with the `Recreate` strategy, and
+  let the scheduler restart the pod rather than run a second one beside it.
+
+The MongoDB buffer directory needs a persistent volume for a different reason:
+it holds changes that have been read from the source but not yet applied to the
+target. On `emptyDir`, a reschedule while the target is unreachable drops them.
+`SYNC_MONGO_BUFFER_LIMIT_BYTES` caps the directory and applies backpressure to
+the change stream when it fills, so a long target outage stops replication
+loudly instead of filling the disk.
+
+### Environment
+
+| Variable | Effect |
+| --- | --- |
+| `SYNC_DB_PATH` | Path to the control-plane SQLite file. Defaults to `sync.db` beside the binary. |
+| `SYNC_CONFIG_KEY` | 32-byte key, base64 or hex, that encrypts the database passwords stored in the task configuration. Without it they are stored in clear text and startup says so. |
+| `SYNC_TOKEN_SECRET` | Signing secret for API tokens. Without it a generated one is used, so tokens do not survive a restart. |
+| `SYNC_LAG_ALERT_SECONDS` | Replication lag, in seconds, past which a task is reported as alerting. |
+| `SYNC_MONGO_BUFFER_LIMIT_BYTES` | Cap on the MongoDB change buffer directory. |
+| `SYNC_VERIFY_INTERVAL` | How often to compare each table against its source, e.g. `1h`. Unset means never. |
+| `SYNC_VERIFY_REPAIR` | `true` to also repair the differences the comparison finds, rather than only report them. |
 
 ## Contributing
 
