@@ -7,11 +7,19 @@
 // disaster-recovery copy of a payment ledger "probably identical" is not a
 // statement anyone can act on.
 //
-// The comparison walks both sides in primary-key order and hashes each row, so
-// it reports three distinct things: rows the target is missing, rows it holds
-// that the source does not, and rows that exist on both sides with different
-// contents. Repair then makes each of them right, because knowing a row is
-// wrong and having to fix it by hand is most of the work.
+// Each side is walked once and its keys are looked up on the other, so the
+// comparison reports three distinct things: rows the target is missing, rows it
+// holds that the source does not, and rows that exist on both sides with
+// different contents. Repair then makes each of them right, because knowing a
+// row is wrong and having to fix it by hand is most of the work.
+//
+// It deliberately does not merge two ordered streams, which would be cheaper.
+// That only works if both sides order keys the way the comparison does, and
+// neither does: MySQL orders an integer column numerically while Go compares the
+// decimal strings, so 10 sorts before 9 and every row after the first
+// disagreement would be reported as both missing and extra. A document store is
+// worse still, since an _id may be an ObjectId, a string or a number and the
+// server's order over those is not the order their rendered forms take.
 package verify
 
 import (
@@ -38,20 +46,12 @@ const DefaultReportLimit = 100
 // Row is one row as the comparison sees it: what identifies it, and a hash of
 // everything else.
 type Row struct {
-	// Key identifies the row. Both sides must render it the same way, because
-	// the comparison walks them in this order.
+	// Key identifies the row. It is only ever tested for equality, never
+	// ordered, so it may be any rendering that is one-to-one with the row's
+	// identity — which is what lets a composite primary key be used at all.
 	Key string
 	// Digest is a hash of the row's contents.
 	Digest string
-}
-
-// Side is one end of a comparison.
-type Side interface {
-	// Rows reports up to limit rows whose key sorts after the given one, in key
-	// order. An empty after means start at the beginning.
-	Rows(ctx context.Context, after string, limit int) ([]Row, error)
-	// Name describes the side for a report.
-	Name() string
 }
 
 // Difference is what the comparison found about one row.
@@ -114,11 +114,63 @@ func (r Result) Summary() string {
 		r.Total(), r.SourceRows, r.TargetRows, r.Missing, r.Extra, r.Differing)
 }
 
-// Compare walks both sides and reports what they disagree about.
+// recorder returns the function a comparison calls for each difference it finds.
 //
-// Both sides are read in key order and merged, so the whole of neither has to
-// be held in memory: at any moment it holds one chunk from each.
-func Compare(ctx context.Context, source, target Side, chunkSize int) (Result, error) {
+// It counts every difference, keeps the first DefaultReportLimit of them for the
+// report, and — when a repair was asked for — fixes each one as it is found
+// rather than from the capped sample afterwards.
+func (r *Result) recorder(fix func(Difference) error) func(string, Kind) {
+	return func(key string, kind Kind) {
+		switch kind {
+		case Missing:
+			r.Missing++
+		case Extra:
+			r.Extra++
+		case Differing:
+			r.Differing++
+		}
+
+		difference := Difference{Key: key, Kind: kind}
+		if len(r.Sample) < DefaultReportLimit {
+			r.Sample = append(r.Sample, difference)
+		} else {
+			r.Truncated = true
+		}
+
+		if fix == nil {
+			return
+		}
+		// A repair that fails is counted and the walk carries on: stopping at
+		// the first failure would leave the rest of the table wrong for the sake
+		// of one row.
+		if err := fix(difference); err != nil {
+			r.RepairFailed++
+			return
+		}
+		r.Repaired++
+	}
+}
+
+// Cursor streams one side's rows in that side's own order, once through.
+type Cursor interface {
+	// Next reports up to limit more rows, or none when the side is exhausted.
+	Next(ctx context.Context, limit int) ([]Row, error)
+	Name() string
+}
+
+// Lookup finds specific rows by key.
+type Lookup interface {
+	Lookup(ctx context.Context, keys []string) (map[string]Row, error)
+}
+
+// End is one side of a comparison.
+type End interface {
+	Cursor
+	Lookup
+}
+
+// Compare walks both sides and reports what they disagree about.
+func Compare(ctx context.Context, source, target End, chunkSize int) (Result, error) {
 	return CompareAndRepair(ctx, source, target, chunkSize, nil)
 }
 
@@ -127,149 +179,142 @@ func Compare(ctx context.Context, source, target Side, chunkSize int) (Result, e
 //
 // Repairing from the reported sample instead would only ever fix the first
 // hundred: a table a thousand rows apart needed ten passes to converge, and
-// nothing said how far along it was. Fixing during the walk repairs everything
-// in one pass, and the counts say what happened.
-func CompareAndRepair(ctx context.Context, source, target Side, chunkSize int, fix func(Difference) error) (Result, error) {
+// nothing said how far along it was.
+func CompareAndRepair(ctx context.Context, source, target End, chunkSize int, fix func(Difference) error) (Result, error) {
 	if chunkSize <= 0 {
 		chunkSize = DefaultChunkSize
 	}
 
 	var result Result
-	var sourceChunk, targetChunk []Row
-	var sourceAfter, targetAfter string
-	sourceDone, targetDone := false, false
-
-	// fill tops up a chunk when it has been consumed.
-	fill := func(side Side, chunk *[]Row, after *string, done *bool) error {
-		if len(*chunk) > 0 || *done {
-			return nil
-		}
-		rows, err := side.Rows(ctx, *after, chunkSize)
-		if err != nil {
-			return fmt.Errorf("read %s: %w", side.Name(), err)
-		}
-		if len(rows) == 0 {
-			*done = true
-			return nil
-		}
-		*chunk = rows
-		*after = rows[len(rows)-1].Key
-		return nil
-	}
-
 	record := result.recorder(fix)
 
+	// Walk the source: anything the target does not have is missing, anything it
+	// has with a different digest is differing.
 	for {
-		if err := fill(source, &sourceChunk, &sourceAfter, &sourceDone); err != nil {
-			return result, err
+		batch, err := source.Next(ctx, chunkSize)
+		if err != nil {
+			return result, fmt.Errorf("read %s: %w", source.Name(), err)
 		}
-		if err := fill(target, &targetChunk, &targetAfter, &targetDone); err != nil {
-			return result, err
+		if len(batch) == 0 {
+			break
 		}
-		if len(sourceChunk) == 0 && len(targetChunk) == 0 {
-			return result, nil
+		result.SourceRows += int64(len(batch))
+
+		found, err := target.Lookup(ctx, keysOf(batch))
+		if err != nil {
+			return result, fmt.Errorf("look up in %s: %w", target.Name(), err)
 		}
-
-		switch {
-		case len(targetChunk) == 0:
-			// Everything left on the source is missing from the target.
-			result.SourceRows++
-			record(sourceChunk[0].Key, Missing)
-			sourceChunk = sourceChunk[1:]
-
-		case len(sourceChunk) == 0:
-			result.TargetRows++
-			record(targetChunk[0].Key, Extra)
-			targetChunk = targetChunk[1:]
-
-		default:
-			s, t := sourceChunk[0], targetChunk[0]
+		for _, row := range batch {
+			other, ok := found[row.Key]
 			switch {
-			case s.Key == t.Key:
-				result.SourceRows++
-				result.TargetRows++
-				if s.Digest != t.Digest {
-					record(s.Key, Differing)
-				}
-				sourceChunk, targetChunk = sourceChunk[1:], targetChunk[1:]
-			case s.Key < t.Key:
-				result.SourceRows++
-				record(s.Key, Missing)
-				sourceChunk = sourceChunk[1:]
-			default:
-				result.TargetRows++
-				record(t.Key, Extra)
-				targetChunk = targetChunk[1:]
+			case !ok:
+				record(row.Key, Missing)
+			case other.Digest != row.Digest:
+				record(row.Key, Differing)
 			}
 		}
 	}
-}
 
-// ------------------------------------------------------------------- SQL
-
-// SQLSide reads one SQL table.
-type SQLSide struct {
-	DB *sql.DB
-	// Schema may be empty, in which case the table is addressed unqualified.
-	Schema string
-	Table  string
-	// Key is the column the comparison orders by. It has to identify a row on
-	// its own, which for a replicated table is what the primary key does.
-	Key string
-	// Columns are the columns whose contents are hashed. The key is included, so
-	// a row whose key was rewritten shows up as two differences rather than
-	// none.
-	Columns []string
-}
-
-func (s *SQLSide) Name() string {
-	if s.Schema == "" {
-		return s.Table
-	}
-	return s.Schema + "." + s.Table
-}
-
-func (s *SQLSide) Rows(ctx context.Context, after string, limit int) ([]Row, error) {
-	columns := strings.Join(quoteAll(s.Columns), ", ")
-	query := fmt.Sprintf("SELECT %s, %s FROM %s", quote(s.Key), columns, s.Name())
-	args := []interface{}{}
-	if after != "" {
-		query += fmt.Sprintf(" WHERE %s > ?", quote(s.Key))
-		args = append(args, after)
-	}
-	query += fmt.Sprintf(" ORDER BY %s LIMIT %d", quote(s.Key), limit)
-
-	rows, err := s.DB.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var out []Row
-	for rows.Next() {
-		cells := make([]sql.NullString, len(s.Columns)+1)
-		scan := make([]interface{}, len(cells))
-		for i := range cells {
-			scan[i] = &cells[i]
+	// Walk the target for rows the source does not have. The digests were
+	// already compared above, so this pass only asks whether the key exists.
+	for {
+		batch, err := target.Next(ctx, chunkSize)
+		if err != nil {
+			return result, fmt.Errorf("read %s: %w", target.Name(), err)
 		}
-		if err := rows.Scan(scan...); err != nil {
-			return nil, err
+		if len(batch) == 0 {
+			break
 		}
-		out = append(out, Row{Key: cells[0].String, Digest: Digest(cells[1:])})
+		result.TargetRows += int64(len(batch))
+
+		found, err := source.Lookup(ctx, keysOf(batch))
+		if err != nil {
+			return result, fmt.Errorf("look up in %s: %w", source.Name(), err)
+		}
+		for _, row := range batch {
+			if _, ok := found[row.Key]; !ok {
+				record(row.Key, Extra)
+			}
+		}
 	}
-	return out, rows.Err()
+
+	SortDifferences(result.Sample)
+	return result, nil
 }
 
-// quote renders an identifier. Backticks are what MySQL uses and SQLite
-// accepts, which is what the hermetic suite drives this against.
-func quote(name string) string { return "`" + name + "`" }
-
-func quoteAll(names []string) []string {
-	out := make([]string, len(names))
-	for i, name := range names {
-		out[i] = quote(name)
+// keysOf collects a batch's keys.
+func keysOf(batch []Row) []string {
+	keys := make([]string, 0, len(batch))
+	for _, row := range batch {
+		keys = append(keys, row.Key)
 	}
-	return out
+	return keys
+}
+
+// ------------------------------------------------------------------- keys
+
+// encodeKey renders a row's key columns as one string.
+//
+// Each part carries its length, so two rows whose key columns run together the
+// same way — ("ab", "c") and ("a", "bc") — do not collide, and a NULL is
+// distinguished from an empty string. The result is compared for equality and
+// decoded again for a repair; it is never ordered, which is what lets a
+// composite key be used at all.
+func encodeKey(values []sql.NullString) string {
+	parts := make([]string, len(values))
+	for i, v := range values {
+		if !v.Valid {
+			parts[i] = "n"
+			continue
+		}
+		parts[i] = "v" + strconv.Itoa(len(v.String)) + ":" + v.String
+	}
+	return strings.Join(parts, "|")
+}
+
+// decodeKey reverses encodeKey, so a repair can address the row the comparison
+// named.
+func decodeKey(key string) ([]sql.NullString, error) {
+	malformed := func() error { return fmt.Errorf("read the comparison key %q", key) }
+
+	var values []sql.NullString
+	rest := key
+	for {
+		switch {
+		case rest == "":
+			return values, nil
+		case rest[0] == 'n':
+			values = append(values, sql.NullString{})
+			rest = rest[1:]
+		case rest[0] == 'v':
+			colon := strings.IndexByte(rest, ':')
+			if colon < 0 {
+				return nil, malformed()
+			}
+			length, err := strconv.Atoi(rest[1:colon])
+			if err != nil || length < 0 || colon+1+length > len(rest) {
+				return nil, malformed()
+			}
+			values = append(values, sql.NullString{String: rest[colon+1 : colon+1+length], Valid: true})
+			rest = rest[colon+1+length:]
+		default:
+			return nil, malformed()
+		}
+
+		switch {
+		case rest == "":
+			return values, nil
+		case rest[0] == '|':
+			// A separator has to be followed by another part. A trailing one
+			// would otherwise decode as if it were not there, and a key one part
+			// short of the table's would then be looked up as a valid one.
+			if rest = rest[1:]; rest == "" {
+				return nil, malformed()
+			}
+		default:
+			return nil, malformed()
+		}
+	}
 }
 
 // Digest hashes a row's cells.
@@ -326,83 +371,6 @@ func SQLColumns(ctx context.Context, db *sql.DB, schema, table string) ([]string
 	return columns, rows.Err()
 }
 
-// ---------------------------------------------------------------- repair
-
-// Repairer fixes what a comparison found.
-type Repairer interface {
-	// Repair makes the named rows right and reports how many it fixed.
-	Repair(ctx context.Context, differences []Difference) (int, error)
-}
-
-// SQLRepairer copies rows from a source table to a target table.
-type SQLRepairer struct {
-	Source *SQLSide
-	Target *SQLSide
-	// Upsert renders the statement that writes one row. It is supplied rather
-	// than built here because the two flavours spell an upsert differently, and
-	// the syncer already has a builder for its own dialect.
-	Upsert func(schema, table string, columns []string) string
-}
-
-// Repair re-reads each named row from the source and writes it to the target,
-// deleting the ones the source no longer has.
-//
-// It is deliberately row by row. A repair runs after something has already gone
-// wrong, so being slow and obvious beats being fast and hard to reason about.
-func (r *SQLRepairer) Repair(ctx context.Context, differences []Difference) (int, error) {
-	fixed := 0
-	for _, d := range differences {
-		var err error
-		switch d.Kind {
-		case Extra:
-			err = r.deleteRow(ctx, d.Key)
-		case Missing, Differing:
-			err = r.copyRow(ctx, d.Key)
-		}
-		if err != nil {
-			return fixed, fmt.Errorf("repair %s %s: %w", d.Kind, d.Key, err)
-		}
-		fixed++
-	}
-	return fixed, nil
-}
-
-func (r *SQLRepairer) deleteRow(ctx context.Context, key string) error {
-	_, err := r.Target.DB.ExecContext(ctx,
-		fmt.Sprintf("DELETE FROM %s WHERE %s = ?", r.Target.Name(), quote(r.Target.Key)), key)
-	return err
-}
-
-func (r *SQLRepairer) copyRow(ctx context.Context, key string) error {
-	columns := r.Source.Columns
-	query := fmt.Sprintf("SELECT %s FROM %s WHERE %s = ?",
-		strings.Join(quoteAll(columns), ", "), r.Source.Name(), quote(r.Source.Key))
-
-	cells := make([]sql.NullString, len(columns))
-	scan := make([]interface{}, len(cells))
-	for i := range cells {
-		scan[i] = &cells[i]
-	}
-	switch err := r.Source.DB.QueryRowContext(ctx, query, key).Scan(scan...); {
-	case err == sql.ErrNoRows:
-		// The source has lost the row since the comparison, so the target
-		// should not have it either.
-		return r.deleteRow(ctx, key)
-	case err != nil:
-		return err
-	}
-
-	values := make([]interface{}, len(cells))
-	for i, cell := range cells {
-		if cell.Valid {
-			values[i] = cell.String
-		}
-	}
-	_, err := r.Target.DB.ExecContext(ctx,
-		r.Upsert(r.Target.Schema, r.Target.Table, columns), values...)
-	return err
-}
-
 // SortDifferences orders differences by key, so two reports of the same problem
 // read the same way.
 func SortDifferences(differences []Difference) {
@@ -412,151 +380,4 @@ func SortDifferences(differences []Difference) {
 		}
 		return differences[i].Kind < differences[j].Kind
 	})
-}
-
-// ----------------------------------------------------- ordering-free compare
-
-// Cursor streams one side's rows in that side's own order, once through.
-type Cursor interface {
-	// Next reports up to limit more rows, or none when the side is exhausted.
-	Next(ctx context.Context, limit int) ([]Row, error)
-	Name() string
-}
-
-// Lookup finds specific rows by key.
-type Lookup interface {
-	Lookup(ctx context.Context, keys []string) (map[string]Row, error)
-}
-
-// End is one side of a comparison that does not assume both sides sort keys the
-// same way.
-type End interface {
-	Cursor
-	Lookup
-}
-
-// CompareByKey compares two sides without relying on them ordering keys
-// identically.
-//
-// Compare merges two ordered streams, which is the cheaper approach and the
-// right one for two SQL tables: both sort a primary key the same way. It is the
-// wrong one for a document store, where the key can be an ObjectId, a string or
-// a number, and the order the server sorts those in is not the order their
-// rendered forms sort in. Getting that wrong would not merely miss differences,
-// it would invent them — every row after the first disagreement reported as both
-// missing and extra.
-//
-// This walks each side once and looks the keys up on the other, so only equality
-// of keys matters.
-func CompareByKey(ctx context.Context, source, target End, chunkSize int) (Result, error) {
-	return CompareByKeyAndRepair(ctx, source, target, chunkSize, nil)
-}
-
-// CompareByKeyAndRepair is CompareByKey with a repair applied to each difference
-// as it is found.
-func CompareByKeyAndRepair(ctx context.Context, source, target End, chunkSize int, fix func(Difference) error) (Result, error) {
-	if chunkSize <= 0 {
-		chunkSize = DefaultChunkSize
-	}
-
-	var result Result
-	record := result.recorder(fix)
-
-	// Walk the source: anything the target does not have is missing, anything it
-	// has with a different digest is differing.
-	for {
-		batch, err := source.Next(ctx, chunkSize)
-		if err != nil {
-			return result, fmt.Errorf("read %s: %w", source.Name(), err)
-		}
-		if len(batch) == 0 {
-			break
-		}
-		result.SourceRows += int64(len(batch))
-
-		keys := make([]string, 0, len(batch))
-		for _, row := range batch {
-			keys = append(keys, row.Key)
-		}
-		found, err := target.Lookup(ctx, keys)
-		if err != nil {
-			return result, fmt.Errorf("look up in %s: %w", target.Name(), err)
-		}
-		for _, row := range batch {
-			other, ok := found[row.Key]
-			switch {
-			case !ok:
-				record(row.Key, Missing)
-			case other.Digest != row.Digest:
-				record(row.Key, Differing)
-			}
-		}
-	}
-
-	// Walk the target for rows the source does not have. The digests were
-	// already compared above, so this pass only asks whether the key exists.
-	for {
-		batch, err := target.Next(ctx, chunkSize)
-		if err != nil {
-			return result, fmt.Errorf("read %s: %w", target.Name(), err)
-		}
-		if len(batch) == 0 {
-			break
-		}
-		result.TargetRows += int64(len(batch))
-
-		keys := make([]string, 0, len(batch))
-		for _, row := range batch {
-			keys = append(keys, row.Key)
-		}
-		found, err := source.Lookup(ctx, keys)
-		if err != nil {
-			return result, fmt.Errorf("look up in %s: %w", source.Name(), err)
-		}
-		for _, row := range batch {
-			if _, ok := found[row.Key]; !ok {
-				record(row.Key, Extra)
-			}
-		}
-	}
-
-	SortDifferences(result.Sample)
-	return result, nil
-}
-
-// recorder returns the function a comparison calls for each difference it finds.
-//
-// It counts every difference, keeps the first DefaultReportLimit of them for the
-// report, and — when a repair was asked for — fixes each one as it is found
-// rather than from the capped sample afterwards.
-func (r *Result) recorder(fix func(Difference) error) func(string, Kind) {
-	return func(key string, kind Kind) {
-		switch kind {
-		case Missing:
-			r.Missing++
-		case Extra:
-			r.Extra++
-		case Differing:
-			r.Differing++
-		}
-
-		difference := Difference{Key: key, Kind: kind}
-		if len(r.Sample) < DefaultReportLimit {
-			r.Sample = append(r.Sample, difference)
-		} else {
-			r.Truncated = true
-		}
-
-		if fix == nil {
-			return
-		}
-		// A repair that fails is counted and the walk carries on: stopping at
-		// the first failure would leave the rest of the table wrong for the sake
-		// of one row.
-		if err := fix(difference); err != nil {
-			r.RepairFailed++
-			return
-		}
-		r.Repaired++
-	}
 }

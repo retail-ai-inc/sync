@@ -193,14 +193,14 @@ func checkSQLTask(ctx context.Context, task config.SyncConfig, n notifier, log *
 			log.Errorf("[Verify] Task %d: %v", task.ID, err)
 			continue
 		}
-		key, err := primaryKey(ctx, source, sourceDB, pair.source)
+		keys, err := primaryKey(ctx, source, sourceDB, pair.source)
 		if err != nil {
 			log.Warnf("[Verify] Task %d: %s cannot be compared: %v", task.ID, pair.source, err)
 			continue
 		}
 
-		sourceSide := &verify.SQLSide{DB: source, Schema: sourceDB, Table: pair.source, Key: key, Columns: columns}
-		targetSide := &verify.SQLSide{DB: target, Schema: targetDB, Table: pair.target, Key: key, Columns: columns}
+		sourceSide := &verify.SQLEnd{DB: source, Schema: sourceDB, Table: pair.source, Keys: keys, Columns: columns}
+		targetSide := &verify.SQLEnd{DB: target, Schema: targetDB, Table: pair.target, Keys: keys, Columns: columns}
 
 		// Repairing during the walk rather than from the reported sample
 		// afterwards: the sample is capped, so a table a thousand rows apart
@@ -262,17 +262,19 @@ func sqlTablePairs(ctx context.Context, task config.SyncConfig, source *sql.DB, 
 	return pairs
 }
 
-// primaryKey reports the single column a table's rows are identified by.
+// primaryKey reports the columns a table's rows are identified by, in order.
 //
-// A composite key is refused rather than guessed at: comparing on part of one
-// would report differences that are not there.
-func primaryKey(ctx context.Context, db *sql.DB, schema, table string) (string, error) {
+// A composite key is returned whole. Comparing on part of one would report
+// differences that are not there — every row sharing the first column would look
+// like a duplicate — and a payment ledger's tables are commonly keyed by a pair,
+// so refusing them would have left the tables that matter most unverifiable.
+func primaryKey(ctx context.Context, db *sql.DB, schema, table string) ([]string, error) {
 	rows, err := db.QueryContext(ctx,
 		`SELECT column_name FROM information_schema.key_column_usage
 		 WHERE table_schema = ? AND table_name = ? AND constraint_name = 'PRIMARY'
 		 ORDER BY ordinal_position`, schema, table)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer rows.Close()
 
@@ -280,23 +282,17 @@ func primaryKey(ctx context.Context, db *sql.DB, schema, table string) (string, 
 	for rows.Next() {
 		var name string
 		if err := rows.Scan(&name); err != nil {
-			return "", err
+			return nil, err
 		}
 		columns = append(columns, name)
 	}
 	if err := rows.Err(); err != nil {
-		return "", err
+		return nil, err
 	}
-
-	switch len(columns) {
-	case 0:
-		return "", fmt.Errorf("it has no primary key, so a row cannot be addressed")
-	case 1:
-		return columns[0], nil
-	default:
-		return "", fmt.Errorf("its primary key spans %d columns, which this comparison does not handle",
-			len(columns))
+	if len(columns) == 0 {
+		return nil, fmt.Errorf("it has no primary key, so a row cannot be addressed")
 	}
+	return columns, nil
 }
 
 // mysqlUpsert renders the statement a repair writes with.
@@ -353,7 +349,7 @@ func checkMongoTask(ctx context.Context, task config.SyncConfig, n notifier, log
 			}
 		}
 
-		result, err := verify.CompareByKeyAndRepair(ctx,
+		result, err := verify.CompareAndRepair(ctx,
 			&verify.MongoEnd{Coll: sourceColl}, &verify.MongoEnd{Coll: targetColl}, 0, fix)
 		if err != nil {
 			log.Errorf("[Verify] Task %d: comparing %s: %v", task.ID, pair.source, err)

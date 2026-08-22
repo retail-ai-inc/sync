@@ -3,7 +3,6 @@ package verify
 import (
 	"context"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/hex"
 	"fmt"
 	"sort"
@@ -14,72 +13,6 @@ import (
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
-
-// ------------------------------------------------------------------- SQL
-
-// SQLEnd streams and looks up rows of one SQL table, so a table can be compared
-// without relying on both sides ordering keys identically.
-type SQLEnd struct {
-	Side *SQLSide
-	// last is how far the stream has got.
-	last string
-	done bool
-}
-
-func (e *SQLEnd) Name() string { return e.Side.Name() }
-
-func (e *SQLEnd) Next(ctx context.Context, limit int) ([]Row, error) {
-	if e.done {
-		return nil, nil
-	}
-	rows, err := e.Side.Rows(ctx, e.last, limit)
-	if err != nil {
-		return nil, err
-	}
-	if len(rows) == 0 {
-		e.done = true
-		return nil, nil
-	}
-	e.last = rows[len(rows)-1].Key
-	return rows, nil
-}
-
-func (e *SQLEnd) Lookup(ctx context.Context, keys []string) (map[string]Row, error) {
-	if len(keys) == 0 {
-		return map[string]Row{}, nil
-	}
-
-	placeholders := make([]string, len(keys))
-	args := make([]interface{}, len(keys))
-	for i, key := range keys {
-		placeholders[i] = "?"
-		args[i] = key
-	}
-
-	query := fmt.Sprintf("SELECT %s, %s FROM %s WHERE %s IN (%s)",
-		quote(e.Side.Key), strings.Join(quoteAll(e.Side.Columns), ", "),
-		e.Side.Name(), quote(e.Side.Key), strings.Join(placeholders, ", "))
-
-	rows, err := e.Side.DB.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	found := make(map[string]Row, len(keys))
-	for rows.Next() {
-		cells := make([]sql.NullString, len(e.Side.Columns)+1)
-		scan := make([]interface{}, len(cells))
-		for i := range cells {
-			scan[i] = &cells[i]
-		}
-		if err := rows.Scan(scan...); err != nil {
-			return nil, err
-		}
-		found[cells[0].String] = Row{Key: cells[0].String, Digest: Digest(cells[1:])}
-	}
-	return found, rows.Err()
-}
 
 // --------------------------------------------------------------- MongoDB
 
