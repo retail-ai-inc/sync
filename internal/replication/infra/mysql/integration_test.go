@@ -182,10 +182,9 @@ func TestIncrementalSyncAppliesInsertUpdateDelete(t *testing.T) {
 	})
 }
 
-// TestDDLIsPropagated exercises F-044. MyEventHandler implements only OnRow and
-// OnPosSynced, so canal's no-op OnDDL and OnTableChanged handle schema changes.
-// A column added at the source never reaches the target, and the rows that use
-// it cannot be replicated afterwards.
+// TestDDLIsPropagated exercises F-044. A column added at the source is applied
+// to the target before the rows that use it arrive, so a schema change no
+// longer stops replication for the affected table.
 func TestDDLIsPropagated(t *testing.T) {
 	table := harness.UniqueName("ddl")
 	src, tgt := open(t, harness.MySQLSource, sourceDB), open(t, harness.MySQLTarget, targetDB)
@@ -205,9 +204,6 @@ func TestDDLIsPropagated(t *testing.T) {
 	mustExec(t, src, fmt.Sprintf("ALTER TABLE %s ADD COLUMN email VARCHAR(100)", table))
 	mustExec(t, src, fmt.Sprintf("INSERT INTO %s (id, name, email) VALUES (2, 'after', 'a@b.com')", table))
 
-	// Poll rather than sleep a fixed window: the column and the row never
-	// arrive while the defect stands, so this costs the full window, but it
-	// returns at once if DDL propagation is ever implemented.
 	emailColumns := func() int {
 		t.Helper()
 		var n int
@@ -219,24 +215,58 @@ func TestDDLIsPropagated(t *testing.T) {
 		}
 		return n
 	}
-	harness.WaitFor(4*time.Second, func() error {
-		if emailColumns() == 0 && countRows(t, tgt, table, "id = 2") == 0 {
-			return fmt.Errorf("neither the column nor the row has arrived")
+
+	harness.Eventually(t, 30*time.Second, func() error {
+		if emailColumns() == 0 {
+			return fmt.Errorf("the column has not been propagated")
+		}
+		if countRows(t, tgt, table, "id = 2") != 1 {
+			return fmt.Errorf("the row written after the ALTER has not arrived")
 		}
 		return nil
 	})
 
-	columnCount := emailColumns()
-	rowsOnTarget := countRows(t, tgt, table, "id = 2")
-
-	if columnCount != 0 {
-		t.Fatalf("the target gained the email column; DDL replication appears to " +
-			"have been implemented, so assert the propagated schema instead")
+	var email string
+	if err := tgt.QueryRow(fmt.Sprintf("SELECT email FROM %s WHERE id = 2", table)).Scan(&email); err != nil {
+		t.Fatalf("read the new column: %v", err)
 	}
-	t.Errorf("the source column `email` was not propagated and the row written "+
-		"after the ALTER %s on the target (F-044): a schema change at the source "+
-		"silently stops replication for the affected rows",
-		map[bool]string{true: "did land", false: "never landed"}[rowsOnTarget == 1])
+	if email != "a@b.com" {
+		t.Errorf("email = %q, want the replicated value", email)
+	}
+}
+
+// TestADroppedTableStopsReplication is the other half of DDL handling. A DROP
+// at the source is not applied to the disaster-recovery copy, because that copy
+// is what a mistaken DROP would be recovered from. Replication stops instead,
+// which an operator sees.
+func TestADroppedTableStopsReplication(t *testing.T) {
+	table := harness.UniqueName("ddldrop")
+	src, tgt := open(t, harness.MySQLSource, sourceDB), open(t, harness.MySQLTarget, targetDB)
+
+	createSourceTable(t, src, tgt, table)
+	mustExec(t, src, fmt.Sprintf("INSERT INTO %s (id, name) VALUES (1, 'keep me')", table))
+
+	startSyncer(t, syncTask(t, table))
+	harness.Eventually(t, 45*time.Second, func() error {
+		if n := countRows(t, tgt, table, ""); n != 1 {
+			return fmt.Errorf("initial sync has not landed: %d rows", n)
+		}
+		return nil
+	})
+
+	mustExec(t, src, "DROP TABLE "+table)
+
+	harness.WaitFor(10*time.Second, func() error {
+		if countRows(t, tgt, table, "") < 0 {
+			return nil // the table is gone, which is the failure this guards
+		}
+		return fmt.Errorf("still there")
+	})
+
+	if n := countRows(t, tgt, table, ""); n != 1 {
+		t.Errorf("the target table holds %d rows; the DROP was replicated to the "+
+			"disaster-recovery copy", n)
+	}
 }
 
 // TestSecurityPolicyIsAppliedToMySQL is the counterpart to the MongoDB case:

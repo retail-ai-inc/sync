@@ -11,6 +11,7 @@ require (
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/lib/pq v1.10.9
 	github.com/mattn/go-sqlite3 v1.14.24
+	github.com/pingcap/tidb/pkg/parser v0.0.0-20241118164214-4f047be191be
 	github.com/redis/go-redis/v9 v9.7.3
 	github.com/sirupsen/logrus v1.9.3
 	go.mongodb.org/mongo-driver v1.17.7
@@ -33,7 +34,6 @@ require (
 	github.com/pingcap/errors v0.11.5-0.20240311024730-e056997136bb // indirect
 	github.com/pingcap/failpoint v0.0.0-20240528011301-b51a646c7c86 // indirect
 	github.com/pingcap/log v1.1.1-0.20230317032135-a0d097d16e22 // indirect
-	github.com/pingcap/tidb/pkg/parser v0.0.0-20241118164214-4f047be191be // indirect
 	github.com/shopspring/decimal v1.2.0 // indirect
 	github.com/siddontang/go v0.0.0-20180604090527-bdc77568d726 // indirect
 	github.com/siddontang/go-log v0.0.0-20180807004314-8d05993dda07 // indirect
