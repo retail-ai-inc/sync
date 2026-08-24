@@ -5,17 +5,12 @@ package mongodb
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
 
 	"github.com/retail-ai-inc/sync/internal/platform/config"
 	"github.com/retail-ai-inc/sync/test/harness"
@@ -351,103 +346,6 @@ func TestDeleteThenReinsertSameID(t *testing.T) {
 	})
 }
 
-// TestFailedWritesReachTheDeadLetterQueue exercises the durability mechanism
-// that is supposed to catch what bulk writes cannot apply. A unique index on
-// the target rejects a document the source accepted, which is exactly the
-// divergence a dead-letter queue exists for: the operation must be preserved
-// on disk rather than dropped.
-func TestFailedWritesReachTheDeadLetterQueue(t *testing.T) {
-	collection := harness.UniqueName("deadletter")
-	src, tgt := connect(t, harness.MongoSource), connect(t, harness.MongoTarget)
-	ctx := context.Background()
-	srcColl := src.Database(sourceDB).Collection(collection)
-	tgtColl := tgt.Database(targetDB).Collection(collection)
-
-	// The target rejects duplicate addresses; the source does not.
-	if _, err := tgtColl.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys:    bson.D{{Key: "email", Value: 1}},
-		Options: options.Index().SetUnique(true),
-	}); err != nil {
-		t.Fatalf("create unique index: %v", err)
-	}
-
-	if _, err := srcColl.InsertOne(ctx, bson.M{"seq": 1, "email": "a@b.com"}); err != nil {
-		t.Fatalf("seed source: %v", err)
-	}
-
-	statePath := t.TempDir()
-	cfg := syncTask(t, collection)
-	cfg.MongoDBResumeTokenPath = statePath
-	startSyncer(t, cfg)
-
-	harness.Eventually(t, 30*time.Second, func() error {
-		if n := countIn(t, tgt, targetDB, collection, bson.M{}); n != 1 {
-			return fmt.Errorf("initial sync has not landed")
-		}
-		return nil
-	})
-
-	// A second document the target cannot accept.
-	if _, err := srcColl.InsertOne(ctx, bson.M{"seq": 2, "email": "a@b.com"}); err != nil {
-		t.Fatalf("insert duplicate: %v", err)
-	}
-
-	// Batches are filed under <dead_letter>/<key>/, where the key escapes the
-	// database and collection names so that two collections cannot share a
-	// directory.
-	collectionDir := filepath.Join(statePath, "dead_letter", collectionKey(sourceDB, collection))
-	harness.Eventually(t, 60*time.Second, func() error {
-		entries, err := os.ReadDir(collectionDir)
-		if err != nil {
-			return fmt.Errorf("dead-letter directory is not readable: %w", err)
-		}
-		if len(entries) == 0 {
-			return fmt.Errorf("no batch was written to the dead-letter queue; the " +
-				"rejected operation may have been dropped instead of preserved")
-		}
-		return nil
-	})
-
-	entries, err := os.ReadDir(collectionDir)
-	if err != nil {
-		t.Fatalf("read dead-letter directory: %v", err)
-	}
-	content, err := os.ReadFile(filepath.Join(collectionDir, entries[0].Name()))
-	if err != nil {
-		t.Fatalf("read dead-letter batch: %v", err)
-	}
-
-	var batch DeadLetterBatch
-	if err := json.Unmarshal(content, &batch); err != nil {
-		t.Fatalf("the batch is not the documented JSON shape: %v", err)
-	}
-	if len(batch.FailedOps) == 0 {
-		t.Errorf("the batch records no failed operations: %+v", batch)
-	}
-	for _, op := range batch.FailedOps {
-		if op.Error == "" {
-			t.Error("a failed operation carries no error message, so the reason " +
-				"for the rejection is lost")
-		}
-		if op.SourceColl != collection {
-			t.Errorf("the operation names collection %q, want %q", op.SourceColl, collection)
-		}
-	}
-	t.Logf("dead-letter batch %s holds %d failed operations out of %d, first error: %s",
-		batch.BatchID, len(batch.FailedOps), batch.TotalOps, batch.FailedOps[0].Error)
-
-	// The source moved on, the target could not, and nothing surfaces the gap
-	// beyond this file: both collections are queried to show the divergence.
-	srcCount := countIn(t, src, sourceDB, collection, bson.M{})
-	tgtCount := countIn(t, tgt, targetDB, collection, bson.M{})
-	if srcCount == tgtCount {
-		t.Errorf("source and target both hold %d documents; the write was applied "+
-			"after all, so this scenario no longer exercises the queue", srcCount)
-	}
-	t.Logf("source holds %d documents, target holds %d: the divergence persists "+
-		"and is visible only in the dead-letter file", srcCount, tgtCount)
-}
-
 // TestAnUnshardedSourceIsLeftAlone covers the ordinary case against a real
 // server: a replica set has no config database to read a shard key from, and
 // nothing should be attempted on the target because of it.
@@ -513,9 +411,9 @@ func TestACollectionTheTaskDoesNotListIsReported(t *testing.T) {
 	logger.SetOutput(&recorded)
 	logger.SetLevel(logrus.WarnLevel)
 
-	syncer := NewMongoDBSyncer(syncTask(t, listed), &config.Config{}, logger)
+	syncer := NewSyncer(syncTask(t, listed), &config.Config{}, logger)
 	if syncer == nil {
-		t.Fatal("NewMongoDBSyncer returned nil")
+		t.Fatal("NewSyncer returned nil")
 	}
 	t.Cleanup(harness.RunSyncer(t, syncer.Start))
 

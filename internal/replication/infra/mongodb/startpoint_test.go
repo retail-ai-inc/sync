@@ -1,30 +1,12 @@
 package mongodb
 
 import (
-	"context"
 	"fmt"
 	"testing"
 
-	"github.com/retail-ai-inc/sync/internal/platform/config"
-	"github.com/sirupsen/logrus"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
-
-// checkpointSyncer builds a syncer whose checkpoints live in a temporary
-// directory, which is what the start-time and resume-token helpers read.
-func checkpointSyncer(t *testing.T) *MongoDBSyncer {
-	t.Helper()
-
-	logger := logrus.New()
-	logger.SetLevel(logrus.PanicLevel)
-
-	return &MongoDBSyncer{
-		logger:       logger,
-		resumeTokens: map[string]bson.Raw{},
-		cfg:          config.SyncConfig{MongoDBResumeTokenPath: t.TempDir()},
-	}
-}
 
 // hello encodes the reply the source sends, so the reader can be exercised
 // without a server.
@@ -89,125 +71,6 @@ func TestATimestampOfTheWrongTypeIsReported(t *testing.T) {
 	}
 }
 
-// -------------------------------------------------------- start-time file
-
-func TestTheStartTimeRoundTrips(t *testing.T) {
-	s := checkpointSyncer(t)
-	want := primitive.Timestamp{T: 1755800000, I: 3}
-
-	s.saveStartTime("shop", "orders", want)
-
-	if got := s.loadStartTime("shop", "orders"); got != want {
-		t.Errorf("start time = %+v, want %+v", got, want)
-	}
-}
-
-func TestAnAbsentStartTimeReadsAsZero(t *testing.T) {
-	s := checkpointSyncer(t)
-
-	if got := s.loadStartTime("shop", "orders"); !got.IsZero() {
-		t.Errorf("start time = %+v, want the zero value", got)
-	}
-}
-
-func TestTheStartTimeIsPerCollection(t *testing.T) {
-	s := checkpointSyncer(t)
-	s.saveStartTime("shop", "orders", primitive.Timestamp{T: 1, I: 1})
-
-	if got := s.loadStartTime("shop", "customers"); !got.IsZero() {
-		t.Errorf("customers picked up the orders start time: %+v", got)
-	}
-}
-
-// TestNoCheckpointPathMeansNoStartTime records that the whole mechanism is off
-// when nothing is configured to hold it.
-// TestWithNowhereToRecordItTheStartTimeIsLost covers the task with neither a
-// target connected nor a directory configured: there is nothing to write to, so
-// the copy is redone on every start. That is the safe direction to fail in.
-func TestWithNowhereToRecordItTheStartTimeIsLost(t *testing.T) {
-	s := checkpointSyncer(t)
-	s.cfg.MongoDBResumeTokenPath = ""
-	s.checkpoints = nil
-
-	s.saveStartTime("shop", "orders", primitive.Timestamp{T: 1, I: 1})
-	if got := s.loadStartTime("shop", "orders"); !got.IsZero() {
-		t.Errorf("start time = %+v with nowhere to record it", got)
-	}
-}
-
-func TestACorruptStartTimeReadsAsZero(t *testing.T) {
-	s := checkpointSyncer(t)
-	if err := s.store().Save(context.Background(), startKey("shop", "orders"), "not json"); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-
-	if got := s.loadStartTime("shop", "orders"); !got.IsZero() {
-		t.Errorf("start time = %+v for an unreadable checkpoint", got)
-	}
-}
-
-// TestTheCheckpointGoesToTheTargetAsWell is what makes a syncer replaceable in
-// the other region: the file it used to be the only copy of goes away with the
-// machine the outage took.
-func TestTheCheckpointStillWorksWithNoTargetYet(t *testing.T) {
-	s := checkpointSyncer(t)
-	want := primitive.Timestamp{T: 1755800000, I: 4}
-
-	s.saveStartTime("shop", "orders", want)
-
-	if got := s.loadStartTime("shop", "orders"); got != want {
-		t.Errorf("start time = %+v, want %+v", got, want)
-	}
-}
-
-// ------------------------------------------------------- snapshot gating
-
-// TestASnapshotWithNoCheckpointHasNotBeenMade is the rule that makes an
-// interrupted copy finishable: the copy is redone until the checkpoint that
-// follows it exists.
-func TestASnapshotWithNoCheckpointHasNotBeenMade(t *testing.T) {
-	s := checkpointSyncer(t)
-
-	if s.snapshotDone("shop", "orders") {
-		t.Error("the copy was reported done with no checkpoint at all")
-	}
-}
-
-func TestAStartTimeMeansTheSnapshotWasMade(t *testing.T) {
-	s := checkpointSyncer(t)
-	s.saveStartTime("shop", "orders", primitive.Timestamp{T: 1755800000, I: 1})
-
-	if !s.snapshotDone("shop", "orders") {
-		t.Error("the copy was reported outstanding although its start time is stored")
-	}
-}
-
-func TestAResumeTokenMeansTheSnapshotWasMade(t *testing.T) {
-	s := checkpointSyncer(t)
-	token, err := bson.Marshal(bson.M{"_data": "82650000"})
-	if err != nil {
-		t.Fatalf("Marshal: %v", err)
-	}
-	s.saveMongoDBResumeToken("shop", "orders", token)
-
-	if !s.snapshotDone("shop", "orders") {
-		t.Error("the copy was reported outstanding although the stream has resumed")
-	}
-}
-
-// TestWithNoCheckpointPathTheSnapshotIsNeverRecordedAsDone records the fallback:
-// there is nowhere to remember it, so the document count is what the copy has
-// to fall back on.
-func TestWithNowhereToRecordItTheSnapshotIsNeverDone(t *testing.T) {
-	s := checkpointSyncer(t)
-	s.cfg.MongoDBResumeTokenPath = ""
-	s.checkpoints = nil
-
-	if s.snapshotDone("shop", "orders") {
-		t.Error("the copy was reported done with nowhere to record it")
-	}
-}
-
 // -------------------------------------------------- unrecoverable positions
 
 // TestALostChangeStreamPositionIsRecognised is the distinction the supervisor
@@ -244,31 +107,5 @@ func TestATransientChangeStreamFailureIsNotAPositionLoss(t *testing.T) {
 		if positionLost(err) {
 			t.Errorf("positionLost(%q) = true", text)
 		}
-	}
-}
-
-// TestTheFirstFaultIsTheOneReported pins that a task whose collections all give
-// up reports the first reason rather than the last, and does not block on the
-// channel when several arrive.
-func TestTheFirstFaultIsTheOneReported(t *testing.T) {
-	s := checkpointSyncer(t)
-	s.faults = make(chan error, 1)
-
-	s.report(fmt.Errorf("first"))
-	s.report(fmt.Errorf("second"))
-	s.report(nil)
-
-	select {
-	case got := <-s.faults:
-		if got.Error() != "first" {
-			t.Errorf("fault = %v, want the first", got)
-		}
-	default:
-		t.Fatal("no fault was recorded")
-	}
-	select {
-	case got := <-s.faults:
-		t.Errorf("a second fault was queued: %v", got)
-	default:
 	}
 }

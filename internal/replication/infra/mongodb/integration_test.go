@@ -90,9 +90,9 @@ func startSyncer(t *testing.T, cfg config.SyncConfig) (stop func()) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 
-	syncer := NewMongoDBSyncer(cfg, &config.Config{}, logger)
+	syncer := NewSyncer(cfg, &config.Config{}, logger)
 	if syncer == nil {
-		t.Fatal("NewMongoDBSyncer returned nil; the endpoints are probably unreachable")
+		t.Fatal("NewSyncer returned nil; the endpoints are probably unreachable")
 	}
 
 	stop = harness.RunSyncer(t, syncer.Start)

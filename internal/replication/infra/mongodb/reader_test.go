@@ -22,12 +22,12 @@ func rawEvent(t *testing.T, doc bson.D) bson.Raw {
 	return bson.Raw(encoded)
 }
 
-func changeDoc(db, coll, op string, documentKey bson.D) bson.D {
+func changeDoc(db, coll, op string, key bson.D) bson.D {
 	return bson.D{
 		{Key: "_id", Value: bson.D{{Key: "_data", Value: "8264"}}},
 		{Key: "operationType", Value: op},
 		{Key: "ns", Value: bson.D{{Key: "db", Value: db}, {Key: "coll", Value: coll}}},
-		{Key: "documentKey", Value: documentKey},
+		{Key: "documentKey", Value: key},
 	}
 }
 

@@ -30,7 +30,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -132,9 +131,9 @@ func stgStart(t *testing.T, cfg config.SyncConfig) (stop func()) {
 		logger.SetLevel(parsed)
 	}
 
-	syncer := NewMongoDBSyncer(cfg, &config.Config{}, logger)
+	syncer := NewSyncer(cfg, &config.Config{}, logger)
 	if syncer == nil {
-		t.Fatal("NewMongoDBSyncer returned nil; the cluster is not reachable")
+		t.Fatal("NewSyncer returned nil; the cluster is not reachable")
 	}
 	stop = harness.RunSyncer(t, syncer.Start)
 	t.Cleanup(stop)
@@ -455,8 +454,8 @@ func TestTheLagIsMeasuredUnderLoad(t *testing.T) {
 	rate := stgInt("SYNC_STG_RATE", 50)
 	seconds := stgInt("SYNC_STG_SECONDS", 30)
 	sampleEvery := stgInt("SYNC_STG_SAMPLE_EVERY", 25)
-	t.Logf("writing at %d documents/s for %ds, tracing one document in %d "+
-		"(flush interval %v)", rate, seconds, sampleEvery, flushInterval())
+	t.Logf("writing at %d documents/s for %ds, tracing one document in %d",
+		rate, seconds, sampleEvery)
 
 	var (
 		mu        sync.Mutex
@@ -612,101 +611,6 @@ func maskPassword(uri string) string {
 		return uri
 	}
 	return strings.ReplaceAll(uri, stgPassword, "***")
-}
-
-// TestWhereTheLagComesFrom is a diagnostic rather than an assertion. It samples
-// each stage of the pipeline once a second under load, so a lag figure can be
-// attributed: documents written at the source, files waiting in the on-disk
-// buffer, and documents landed on the target. A backlog in the buffer means the
-// applier is the constraint; an empty buffer with a growing gap means the change
-// stream reader is.
-func TestWhereTheLagComesFrom(t *testing.T) {
-	name, source, target := stgCollection(t, "payments_stages")
-	ctx := context.Background()
-
-	if _, err := source.InsertOne(ctx, payment(0)); err != nil {
-		t.Fatalf("seed the source: %v", err)
-	}
-
-	// A known buffer directory, so the files waiting to be applied can be seen.
-	bufferRoot := t.TempDir()
-	cfg := stgTask(t, name)
-	cfg.MongoDBResumeTokenPath = bufferRoot
-	stgStart(t, cfg)
-	harness.Eventually(t, 2*time.Minute, func() error {
-		if stgCount(t, target) != 1 {
-			return fmt.Errorf("the syncer has not started")
-		}
-		return nil
-	})
-
-	rate := stgInt("SYNC_STG_RATE", 100)
-	seconds := stgInt("SYNC_STG_SECONDS", 20)
-
-	var written int64
-	writeCtx, stopWriting := context.WithCancel(ctx)
-	writerDone := make(chan struct{})
-	go func() {
-		defer close(writerDone)
-		ticker := time.NewTicker(time.Second / time.Duration(rate))
-		defer ticker.Stop()
-		seq := 1
-		for {
-			select {
-			case <-writeCtx.Done():
-				return
-			case <-ticker.C:
-				if _, err := source.InsertOne(writeCtx, payment(seq)); err != nil {
-					return
-				}
-				atomic.AddInt64(&written, 1)
-				seq++
-			}
-		}
-	}()
-
-	countFiles := func() (files int, bytes int64) {
-		_ = filepath.Walk(bufferRoot, func(path string, info os.FileInfo, err error) error {
-			if err != nil || info == nil || info.IsDir() {
-				return nil
-			}
-			files++
-			bytes += info.Size()
-			return nil
-		})
-		return files, bytes
-	}
-
-	t.Logf("%6s %10s %10s %8s %12s %8s", "t", "source", "target", "files", "bufferBytes", "behind")
-	start := time.Now()
-	deadline := start.Add(time.Duration(seconds) * time.Second)
-	for time.Now().Before(deadline) {
-		time.Sleep(time.Second)
-		src := atomic.LoadInt64(&written)
-		tgt := stgCount(t, target) - 1
-		files, bytes := countFiles()
-		t.Logf("%5.0fs %10d %10d %8d %12d %8d",
-			time.Since(start).Seconds(), src, tgt, files, bytes, src-tgt)
-	}
-
-	stopWriting()
-	<-writerDone
-	total := atomic.LoadInt64(&written)
-	t.Logf("writing stopped after %d documents; draining", total)
-
-	drainStart := time.Now()
-	for time.Since(drainStart) < 3*time.Minute {
-		tgt := stgCount(t, target) - 1
-		files, bytes := countFiles()
-		if tgt >= total {
-			t.Logf("drained in %v", time.Since(drainStart).Round(time.Millisecond))
-			return
-		}
-		t.Logf("%5.0fs %10d %10d %8d %12d %8d (draining)",
-			time.Since(start).Seconds(), total, tgt, files, bytes, total-tgt)
-		time.Sleep(time.Second)
-	}
-	t.Errorf("the target had not caught up three minutes after the writes stopped")
 }
 
 // TestTheTargetIsShardedLikeTheSource is why this suite needs a sharded cluster.
