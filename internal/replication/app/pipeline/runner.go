@@ -106,7 +106,22 @@ type Runner struct {
 	// chunk was read, which is what orders the two against each other.
 	lastReadAt time.Time
 	queueUsed  int
+
+	// window is the source's retention, and windowAt when it was last asked
+	// for. It is a server setting rather than a moving quantity, so it is read
+	// occasionally and not once a second.
+	window   time.Duration
+	windowAt time.Time
+	// windowFailed stops a source that cannot answer from being asked, and
+	// logged about, on every refresh.
+	windowFailed bool
 }
+
+// retentionRefresh is how often the source is asked how far its log reaches.
+//
+// The answer is a configuration setting, not a measurement, and on a sharded
+// deployment reaching it costs a round trip per shard.
+const retentionRefresh = 5 * time.Minute
 
 func (r *Runner) now() time.Time {
 	if r.clock != nil {
@@ -501,14 +516,11 @@ func (r *Runner) report(ctx context.Context) (stop func()) {
 				// merely quiet — a database nobody had written to for an hour
 				// reported an hour of lag while being perfectly up to date, which
 				// is how a quiet Sunday pages somebody.
-				switch {
-				case !oldest.IsZero():
-					metrics.SetLag(r.Opts.Labels, now.Sub(oldest).Seconds())
-				case !read.IsZero():
-					metrics.SetLag(r.Opts.Labels, now.Sub(read).Seconds())
-				case !applied.IsZero():
-					metrics.SetLag(r.Opts.Labels, now.Sub(applied).Seconds())
+				lag, known := lagSeconds(now, oldest, read, applied)
+				if known {
+					metrics.SetLag(r.Opts.Labels, lag)
 				}
+				r.reportRetention(ctx, now, lag, known)
 				if !heard.IsZero() {
 					metrics.SetLastEventAge(r.Opts.Labels, now.Sub(heard).Seconds())
 				}
@@ -519,6 +531,68 @@ func (r *Runner) report(ctx context.Context) (stop func()) {
 
 	var once sync.Once
 	return func() { once.Do(func() { close(done) }) }
+}
+
+// lagSeconds is how far behind the source the task is.
+//
+// Behind: measured from the oldest change still waiting, so the number climbs
+// for exactly as long as the task is stuck.
+//
+// Caught up: measured from the newest thing the stream has reported, heartbeats
+// included. Measuring from the last change applied instead made the lag climb
+// whenever the source was merely quiet — a database nobody had written to for an
+// hour reported an hour of lag while being perfectly up to date, which is how a
+// quiet Sunday pages somebody.
+func lagSeconds(now, oldest, read, applied time.Time) (float64, bool) {
+	switch {
+	case !oldest.IsZero():
+		return now.Sub(oldest).Seconds(), true
+	case !read.IsZero():
+		return now.Sub(read).Seconds(), true
+	case !applied.IsZero():
+		return now.Sub(applied).Seconds(), true
+	}
+	return 0, false
+}
+
+// reportRetention publishes how long the task could afford to be stopped.
+//
+// The window is asked for rarely; the headroom is recomputed every tick from
+// it, because the lag underneath it moves.
+func (r *Runner) reportRetention(ctx context.Context, now time.Time, lag float64, lagKnown bool) {
+	source, ok := r.Reader.(domain.Retention)
+	if !ok || r.windowFailed {
+		return
+	}
+
+	if r.windowAt.IsZero() || now.Sub(r.windowAt) >= retentionRefresh {
+		window, err := source.Window(ctx)
+		switch {
+		case err != nil:
+			// Asked once, told no. Publishing a guess here would be worse than
+			// publishing nothing: the number is only read when somebody is
+			// deciding whether there is still time to restart rather than
+			// re-copy.
+			r.windowFailed = true
+			r.log().WithError(err).Warn(r.tag(
+				"the source did not say how far its log reaches, so no retention " +
+					"headroom is published for this task"))
+			return
+		case window <= 0:
+			r.windowFailed = true
+			r.log().Warn(r.tag(
+				"the source reported a retention window of zero, so no headroom is published"))
+			return
+		}
+		r.window, r.windowAt = window, now
+	}
+
+	if !lagKnown {
+		// Nothing has been read yet, so there is no position whose age the
+		// headroom could be measured from.
+		return
+	}
+	metrics.SetRetention(r.Opts.Labels, r.window.Seconds(), r.window.Seconds()-lag)
 }
 
 // newestSourceTime reports when the source made the most recent change in a

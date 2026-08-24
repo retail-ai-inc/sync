@@ -79,6 +79,13 @@ type SyncConfig struct {
 	// already watches, so the edit is the trigger. Removing the name again stops
 	// the re-copy from being started on the next restart.
 	Resync []string
+	// RetentionWindow is how far back the source's log reaches, for a source
+	// that cannot be asked: a sharded MongoDB deployment, whose local database
+	// is not addressable through mongos, or a managed MySQL whose real binlog
+	// retention is set outside the server. It is what the headroom metric is
+	// measured against; leaving it empty on such a source publishes no headroom
+	// rather than a guess.
+	RetentionWindow time.Duration
 }
 
 func (s *SyncConfig) PGReplicationSlot() string {
@@ -270,6 +277,7 @@ ORDER BY id ASC
 				RedisReconcileInterval *string           `json:"redis_reconcile_interval"`
 				SecurityEnabled        *bool             `json:"securityEnabled"`
 				Resync                 []string          `json:"resync"`
+				RetentionWindow        *string           `json:"retention_window"`
 			}
 			if errJ := json.Unmarshal([]byte(js), &extra); errJ != nil {
 				log.Printf("[WARN] parse config_json for id=%d => %v", id, errJ)
@@ -307,6 +315,14 @@ ORDER BY id ASC
 						sc.RedisReconcileInterval = d
 					} else {
 						log.Printf("[WARN] redis_reconcile_interval for id=%d is not a duration: %v", id, errD)
+					}
+				}
+
+				if extra.RetentionWindow != nil {
+					if d, errD := time.ParseDuration(*extra.RetentionWindow); errD == nil {
+						sc.RetentionWindow = d
+					} else {
+						log.Printf("[WARN] retention_window for id=%d is not a duration: %v", id, errD)
 					}
 				}
 

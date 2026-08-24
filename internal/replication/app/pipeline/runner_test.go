@@ -520,3 +520,179 @@ func TestAQuietSourceDoesNotLookLikeALag(t *testing.T) {
 			"an hour old is not a lag", got)
 	}
 }
+
+// ------------------------------------------------------- retention headroom
+
+// windowedReader is a reader that can say how far back its source's log reaches.
+type windowedReader struct {
+	*fakeReader
+	window time.Duration
+	err    error
+	calls  int
+}
+
+func (w *windowedReader) Window(context.Context) (time.Duration, error) {
+	w.calls++
+	return w.window, w.err
+}
+
+func headroomOf(t *testing.T, labels metrics.Labels) (float64, bool) {
+	t.Helper()
+	for _, s := range metrics.Default.Snapshot(metrics.RetentionHeadroomSeconds) {
+		if s.Labels.Key() == labels.Key() {
+			return s.Value, true
+		}
+	}
+	return 0, false
+}
+
+// runReporting drives one report tick against a runner whose clock is fixed.
+func runReporting(t *testing.T, r *Runner, lastRead time.Time) {
+	t.Helper()
+	r.mu.Lock()
+	r.lastReadAt = lastRead
+	r.mu.Unlock()
+
+	stop := r.report(context.Background())
+	defer stop()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, ok := headroomOf(t, r.Opts.Labels); ok {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// TestTheHeadroomIsTheWindowLessTheLag covers the number an operator reads
+// while deciding whether a stopped task can still be restarted.
+//
+// A day of binlog and a minute behind leaves a day less a minute. Once that
+// reaches zero the saved position has been purged and the only way back is
+// copying the database again, which is a decision worth making before the
+// deadline rather than after it.
+func TestTheHeadroomIsTheWindowLessTheLag(t *testing.T) {
+	labels := metrics.Labels{"task": "headroom-basic"}
+	defer metrics.Default.Forget(labels)
+
+	now := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	r := &Runner{
+		Reader: &windowedReader{fakeReader: &fakeReader{}, window: 24 * time.Hour},
+		clock:  func() time.Time { return now },
+		Opts:   Options{Labels: labels, ReportInterval: time.Millisecond},
+	}
+
+	runReporting(t, r, now.Add(-60*time.Second))
+
+	got, ok := headroomOf(t, labels)
+	if !ok {
+		t.Fatal("no headroom was published")
+	}
+	if want := (24 * time.Hour).Seconds() - 60; got != want {
+		t.Errorf("headroom = %v, want %v", got, want)
+	}
+}
+
+// TestTheHeadroomGoesNegativeOnceTheWindowIsPast keeps the metric from being
+// clamped at zero.
+//
+// A task an hour past its window and one a week past it need different answers:
+// the first is a re-copy, the second is a re-copy plus a conversation about how
+// nobody noticed for a week. Clamping loses that, and it also loses the slope an
+// alert would have fired on.
+func TestTheHeadroomGoesNegativeOnceTheWindowIsPast(t *testing.T) {
+	labels := metrics.Labels{"task": "headroom-negative"}
+	defer metrics.Default.Forget(labels)
+
+	now := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	r := &Runner{
+		Reader: &windowedReader{fakeReader: &fakeReader{}, window: time.Hour},
+		clock:  func() time.Time { return now },
+		Opts:   Options{Labels: labels, ReportInterval: time.Millisecond},
+	}
+
+	runReporting(t, r, now.Add(-3*time.Hour))
+
+	got, ok := headroomOf(t, labels)
+	if !ok {
+		t.Fatal("no headroom was published")
+	}
+	if want := -2 * time.Hour.Seconds(); got != want {
+		t.Errorf("headroom = %v, want %v", got, want)
+	}
+}
+
+// TestASourceThatCannotSayPublishesNothing covers the sharded MongoDB case,
+// where the oplog is not reachable through mongos.
+//
+// A guessed window would read exactly like a measured one, and it is read at
+// the moment somebody is deciding whether they still have time. Absence is the
+// honest answer.
+func TestASourceThatCannotSayPublishesNothing(t *testing.T) {
+	labels := metrics.Labels{"task": "headroom-unknown"}
+	defer metrics.Default.Forget(labels)
+
+	now := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	source := &windowedReader{fakeReader: &fakeReader{}, err: errors.New("not through mongos")}
+	r := &Runner{
+		Reader: source,
+		clock:  func() time.Time { return now },
+		Opts:   Options{Labels: labels, ReportInterval: time.Millisecond},
+	}
+
+	stop := r.report(context.Background())
+	time.Sleep(60 * time.Millisecond)
+	stop()
+
+	if _, ok := headroomOf(t, labels); ok {
+		t.Error("a headroom was published for a source that could not say what its window is")
+	}
+	if source.calls != 1 {
+		t.Errorf("the source was asked %d times, want once — a source that cannot answer "+
+			"should not be asked, or logged about, on every tick", source.calls)
+	}
+}
+
+// TestAReaderThatKnowsNothingOfRetentionIsLeftAlone keeps the metric optional:
+// Redis and PostgreSQL readers do not implement it.
+func TestAReaderThatKnowsNothingOfRetentionIsLeftAlone(t *testing.T) {
+	labels := metrics.Labels{"task": "headroom-absent"}
+	defer metrics.Default.Forget(labels)
+
+	now := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	r := &Runner{
+		Reader: &fakeReader{},
+		clock:  func() time.Time { return now },
+		Opts:   Options{Labels: labels, ReportInterval: time.Millisecond},
+	}
+
+	stop := r.report(context.Background())
+	time.Sleep(40 * time.Millisecond)
+	stop()
+
+	if _, ok := headroomOf(t, labels); ok {
+		t.Error("a headroom was published for a reader that knows nothing of retention")
+	}
+}
+
+// TestTheWindowIsNotReReadEveryTick keeps a per-second gauge refresh from
+// becoming a per-second query against the source.
+func TestTheWindowIsNotReReadEveryTick(t *testing.T) {
+	labels := metrics.Labels{"task": "headroom-cached"}
+	defer metrics.Default.Forget(labels)
+
+	now := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	source := &windowedReader{fakeReader: &fakeReader{}, window: time.Hour}
+	r := &Runner{
+		Reader: source,
+		clock:  func() time.Time { return now },
+		Opts:   Options{Labels: labels, ReportInterval: time.Millisecond},
+	}
+
+	runReporting(t, r, now.Add(-time.Minute))
+	time.Sleep(50 * time.Millisecond)
+
+	if source.calls != 1 {
+		t.Errorf("the source was asked %d times over many ticks, want once", source.calls)
+	}
+}

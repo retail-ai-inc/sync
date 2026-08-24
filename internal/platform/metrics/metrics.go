@@ -391,6 +391,14 @@ const (
 	LastEventAgeSeconds = "sync_source_last_event_age_seconds"
 	helpLastEventAge    = "Seconds since any event, heartbeat included, arrived from the source"
 
+	// RetentionWindowSeconds is how far back the source's log reaches.
+	RetentionWindowSeconds = "sync_source_retention_window_seconds"
+	helpRetentionWindow    = "Seconds of history the source still holds (binlog expiry, oplog window)"
+	// RetentionHeadroomSeconds is that window less the current lag: how long
+	// the task could stay stopped before its saved position is purged.
+	RetentionHeadroomSeconds = "sync_source_retention_headroom_seconds"
+	helpRetentionHeadroom    = "Seconds a stopped task has left before its position falls out of the source's log"
+
 	// QueueUsed is how much of the reader's hand-off queue is occupied. It
 	// filling up is what back pressure looks like from outside.
 	QueueUsed  = "sync_reader_queue_used"
@@ -410,6 +418,19 @@ func SetLastEventAge(labels Labels, seconds float64) {
 }
 
 // SetQueue records the reader hand-off queue's depth and capacity.
+// SetRetention publishes how much source history is left to fall back on.
+//
+// Headroom is the window less the lag: with a day of binlog kept and a minute
+// of lag, a task has just under a day to be fixed before its position falls out
+// of the log and the target has to be built again from scratch. It can go
+// negative, and that is the point — the number crossing zero is the moment the
+// answer changes from "restart it" to "re-copy everything", and an alert wants
+// to fire well before it does.
+func SetRetention(labels Labels, window, headroom float64) {
+	Default.SetGauge(RetentionWindowSeconds, helpRetentionWindow, labels, window)
+	Default.SetGauge(RetentionHeadroomSeconds, helpRetentionHeadroom, labels, headroom)
+}
+
 func SetQueue(labels Labels, used, capacity int) {
 	Default.SetGauge(QueueUsed, helpQueue, labels, float64(used))
 	Default.SetGauge(QueueTotal, helpQueueT, labels, float64(capacity))

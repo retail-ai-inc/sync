@@ -165,6 +165,21 @@ type Applier interface {
 	Apply(ctx context.Context, runs [][]*Event, pos Position) (committed bool, err error)
 }
 
+// Retention is a Reader that knows how far back the source's history reaches.
+//
+// It answers the only question that matters while a task is stopped: how long
+// it can stay stopped. Past that point the position it saved is no longer in the
+// source's log, and the only way back is copying everything again — which for a
+// payment database is measured in hours, and is a decision somebody wants to
+// make before the deadline rather than after.
+//
+// A Reader that cannot find out implements nothing, and no headroom is
+// published. A number that is silently wrong is worse than no number.
+type Retention interface {
+	// Window is how much history the source still holds, counted back from now.
+	Window(ctx context.Context) (time.Duration, error)
+}
+
 // Snapshotter makes the first copy, for a task that has no position yet.
 type Snapshotter interface {
 	// Pin records where the stream must resume from. It runs before a single
