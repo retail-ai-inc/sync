@@ -65,6 +65,36 @@ func (s *Snapshotter) Copy(ctx context.Context) error {
 			if targetName == "" {
 				targetName = table.SourceTable
 			}
+
+			// The collection has to exist, be partitioned the way the source is,
+			// and carry the source's indexes — all before a document is copied.
+			//
+			// Sharding an empty collection is immediate; sharding one that
+			// already holds the copy is a migration. And a sharded source
+			// replicated into a collection that MongoDB auto-created on first
+			// insert lands unsharded, which gives the disaster-recovery copy one
+			// shard's capacity where the source had all of them. Nothing reports
+			// it: the documents are all there.
+			if err := s.Syncer.ensureCollectionExists(ctx, target, targetName); err != nil {
+				failures = append(failures,
+					fmt.Sprintf("%s.%s: could not create the target collection: %v",
+						s.targetDB, targetName, err))
+				continue
+			}
+			s.Syncer.matchSharding(ctx, s.sourceDB, table.SourceTable, s.targetDB, targetName)
+
+			if table.AdvancedSettings.SyncIndexes {
+				if err := s.Syncer.copyIndexes(ctx,
+					source.Collection(table.SourceTable),
+					target.Collection(targetName)); err != nil {
+					// An index the target lacks makes it answer correctly and too
+					// slowly to serve, which at a failover is its own outage — but
+					// it is not a reason to leave the data uncopied.
+					s.Logger.Warnf("[MongoDB] Could not copy the indexes of %s.%s: %v",
+						s.sourceDB, table.SourceTable, err)
+				}
+			}
+
 			if err := s.Syncer.doInitialSync(ctx,
 				source.Collection(table.SourceTable),
 				target.Collection(targetName),
