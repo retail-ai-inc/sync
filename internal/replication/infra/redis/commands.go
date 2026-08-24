@@ -1,0 +1,178 @@
+package redis
+
+import (
+	"context"
+	"fmt"
+	"strings"
+
+	goredis "github.com/redis/go-redis/v9"
+
+	"github.com/retail-ai-inc/sync/internal/replication/domain"
+)
+
+// What each command in the stream means, and which key it touches.
+//
+// The slot a command belongs to is what decides which transaction its position
+// marker goes in, so getting the key wrong is not a cosmetic error — it would
+// put the marker in a different slot from the data and lose the atomicity the
+// whole design rests on.
+//
+// The key positions are read from the server with COMMAND INFO rather than
+// written down here. A table of command shapes is a table that drifts: Redis 8
+// alone added a set of commands and changed the key specification of others, and
+// a stale entry would misplace a key silently. The server always knows.
+//
+// One key is enough. Every command a cluster puts in its replication stream
+// touches keys in a single slot — a cross-slot command cannot be executed on a
+// cluster in the first place — so the first key names the slot for all of them.
+
+// classification is what the applier should do with a command.
+type classification uint8
+
+const (
+	// classWrite is an ordinary write, to be applied in its key's slot.
+	classWrite classification = iota + 1
+	// classHeartbeat proves the link is alive and changes nothing.
+	classHeartbeat
+	// classTransaction opens or closes a transaction in the stream.
+	classTransactionBegin
+	classTransactionEnd
+	// classIgnored is something with no effect on the target's data.
+	classIgnored
+	// classRefused is something that cannot be replicated safely.
+	classRefused
+)
+
+// commandTable knows how to read a key out of a command.
+type commandTable struct {
+	// keyAt is the one-based position of the first key, per command name.
+	keyAt map[string]int
+	// movable names commands whose keys are not at a fixed position.
+	movable map[string]bool
+}
+
+// loadCommandTable asks a server for its command specifications.
+func loadCommandTable(ctx context.Context, client goredis.UniversalClient) (*commandTable, error) {
+	infos, err := client.Command(ctx).Result()
+	if err != nil {
+		return nil, fmt.Errorf("read the server's command specifications: %w", err)
+	}
+	table := &commandTable{
+		keyAt:   make(map[string]int, len(infos)),
+		movable: make(map[string]bool),
+	}
+	for name, info := range infos {
+		lower := strings.ToLower(name)
+		table.keyAt[lower] = int(info.FirstKeyPos)
+		// A command with no fixed first key either takes none or works them out
+		// at runtime. The ones that matter here are told apart by asking the
+		// server for the keys of the actual command, which classify does.
+		if info.FirstKeyPos == 0 {
+			table.movable[lower] = true
+		}
+	}
+	if len(table.keyAt) == 0 {
+		return nil, fmt.Errorf("the server listed no commands")
+	}
+	return table, nil
+}
+
+// keyless names the commands that legitimately carry no key, and what to do
+// with each. Everything here is decided by what the command means for the
+// target's data, which is not something COMMAND INFO can say.
+var keyless = map[string]classification{
+	"ping":     classHeartbeat,
+	"multi":    classTransactionBegin,
+	"exec":     classTransactionEnd,
+	"replconf": classIgnored,
+	// Pub/sub is not state. A subscriber on the target is not a copy of one on
+	// the source, and forwarding the message would deliver it twice to anything
+	// listening in both regions.
+	"publish":  classIgnored,
+	"spublish": classIgnored,
+	// SELECT appears in a stream from a server with more than one database. A
+	// cluster has only database zero, so it is only ever "select 0" there.
+	"select": classIgnored,
+	"ping\n": classHeartbeat,
+
+	// The rest cannot be replicated safely, each for its own reason.
+	//
+	// Emptying the target is the one operation that destroys the disaster
+	// recovery copy, and it is indistinguishable at this level from an operator
+	// mistake on the source. Doing it because the stream said so would mean a
+	// fat-fingered FLUSHALL in Tokyo takes Osaka with it — so the task stops and
+	// a human decides.
+	"flushall": classRefused,
+	"flushdb":  classRefused,
+	"swapdb":   classRefused,
+}
+
+// classify decides what a command is, and which key names its slot.
+func (t *commandTable) classify(ctx context.Context, client goredis.UniversalClient,
+	command *Command) (classification, []byte, error) {
+
+	name := strings.ToLower(command.Name())
+	if name == "" {
+		return classIgnored, nil, nil
+	}
+	if class, ok := keyless[name]; ok {
+		return class, nil, nil
+	}
+
+	at, known := t.keyAt[name]
+	if !known {
+		// A command this target has never heard of cannot be applied to it, and
+		// guessing which key it touches would put its marker in the wrong slot.
+		return classRefused, nil, domain.Unrecoverable(
+			"the source sent %q, which the target does not know. The two are "+
+				"running different versions or different modules; replicating it "+
+				"would either fail or land in the wrong slot", command.Name())
+	}
+
+	if at > 0 && at < len(command.Args) {
+		return classWrite, command.Args[at], nil
+	}
+
+	if t.movable[name] {
+		// Commands that work their keys out at runtime. Redis 7 and later
+		// replicate the effects of a script rather than the script itself, so
+		// these should not reach the stream at all; asking the server is both
+		// correct and rare enough to afford.
+		key, err := t.askForKey(ctx, client, command)
+		if err != nil {
+			return classRefused, nil, err
+		}
+		if key == nil {
+			return classIgnored, nil, nil
+		}
+		return classWrite, key, nil
+	}
+	return classRefused, nil, domain.Unrecoverable(
+		"the source sent %q with %d arguments, but its first key should be at "+
+			"position %d", command.Name(), len(command.Args)-1, at)
+}
+
+// askForKey has the server work out which keys a command touches.
+func (t *commandTable) askForKey(ctx context.Context, client goredis.UniversalClient,
+	command *Command) ([]byte, error) {
+
+	args := make([]interface{}, 0, len(command.Args)+2)
+	args = append(args, "command", "getkeys")
+	for _, arg := range command.Args {
+		args = append(args, arg)
+	}
+	keys, err := client.Do(ctx, args...).StringSlice()
+	if err != nil {
+		if strings.Contains(err.Error(), "no keys") ||
+			strings.Contains(err.Error(), "The command has no key arguments") {
+			return nil, nil
+		}
+		return nil, domain.Unrecoverable(
+			"could not work out which key %q touches: %v. Applying it would risk "+
+				"recording its position against the wrong slot", command.Name(), err)
+	}
+	if len(keys) == 0 {
+		return nil, nil
+	}
+	return []byte(keys[0]), nil
+}

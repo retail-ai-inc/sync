@@ -43,6 +43,18 @@ type Options struct {
 	Logger logrus.FieldLogger
 	// Engine names the engine in log lines, as "[MySQL]" or "[MongoDB]".
 	Engine string
+
+	// StreamOrder hands the batch to the applier in the order it was read, as a
+	// single run, instead of splitting it into runs that may be applied in
+	// parallel.
+	//
+	// The split is safe for an engine whose events are idempotent writes of a
+	// whole record: two upserts of different rows commute. It is not safe for an
+	// engine whose log is a command stream. A command is not idempotent the way
+	// an upsert is — replaying INCR adds again — and two commands on different
+	// keys may still have been one atomic act at the source, so the order they
+	// were read in is the only order known to be correct.
+	StreamOrder bool
 }
 
 const (
@@ -444,7 +456,10 @@ func (r *Runner) applyBatch(ctx context.Context, events []*domain.Event, pos dom
 	committedByApplier := false
 
 	if len(writable) > 0 {
-		runs := orderedRuns(writable)
+		runs := [][]*domain.Event{writable}
+		if !r.Opts.StreamOrder {
+			runs = orderedRuns(writable)
+		}
 		committed, err := r.Applier.Apply(ctx, runs, pos)
 		if err != nil {
 			metrics.Failed(r.Opts.Labels, len(writable))

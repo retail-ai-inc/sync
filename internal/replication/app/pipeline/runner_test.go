@@ -696,3 +696,86 @@ func TestTheWindowIsNotReReadEveryTick(t *testing.T) {
 		t.Errorf("the source was asked %d times over many ticks, want once", source.calls)
 	}
 }
+
+// TestStreamOrderHandsTheBatchOverUnsplit covers the engine whose log is a
+// command stream rather than a set of record writes.
+//
+// Splitting a batch into runs lets an applier parallelise within a run, which is
+// correct when every event is an idempotent write of a whole record. A command
+// stream has neither property: replaying INCR adds again, and two commands on
+// different keys may have been one atomic act at the source. So the batch has to
+// arrive in the order it was read, as one run.
+func TestStreamOrderHandsTheBatchOverUnsplit(t *testing.T) {
+	applier := &fakeApplier{commits: true}
+	// Two events on the same key, which orderedRuns would put in separate runs.
+	events := []*domain.Event{
+		{NS: domain.Namespace{DB: "0"}, Op: domain.OpUpdate, Key: "counter",
+			Pos: domain.Position{Payload: "1"}, EndsTransaction: true},
+		{NS: domain.Namespace{DB: "0"}, Op: domain.OpUpdate, Key: "counter",
+			Pos: domain.Position{Payload: "2"}, EndsTransaction: true},
+	}
+
+	r := &Runner{
+		Reader:      &fakeReader{events: events},
+		Applier:     applier,
+		Checkpoints: newStore(),
+		Opts: Options{
+			Engine:        "Redis",
+			StreamOrder:   true,
+			FlushInterval: 5 * time.Millisecond,
+			Logger:        quietLogger(),
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = r.Run(ctx)
+
+	applier.mu.Lock()
+	defer applier.mu.Unlock()
+	if len(applier.batches) == 0 {
+		t.Fatal("nothing was applied")
+	}
+	for i, runs := range applier.batches {
+		if len(runs) != 1 {
+			t.Errorf("batch %d arrived as %d runs, want 1 — a command stream cannot "+
+				"be reordered", i, len(runs))
+		}
+	}
+}
+
+// TestWithoutStreamOrderTheBatchIsStillSplit keeps the change from altering what
+// MySQL and MongoDB see.
+func TestWithoutStreamOrderTheBatchIsStillSplit(t *testing.T) {
+	applier := &fakeApplier{commits: true}
+	events := []*domain.Event{
+		{NS: domain.Namespace{DB: "shop", Object: "orders"}, Op: domain.OpUpdate, Key: "1",
+			Pos: domain.Position{Payload: "1"}, EndsTransaction: true},
+		{NS: domain.Namespace{DB: "shop", Object: "orders"}, Op: domain.OpUpdate, Key: "1",
+			Pos: domain.Position{Payload: "2"}, EndsTransaction: true},
+	}
+
+	r := &Runner{
+		Reader:      &fakeReader{events: events},
+		Applier:     applier,
+		Checkpoints: newStore(),
+		Opts: Options{Engine: "MySQL", FlushInterval: 5 * time.Millisecond,
+			Logger: quietLogger()},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = r.Run(ctx)
+
+	applier.mu.Lock()
+	defer applier.mu.Unlock()
+	var split bool
+	for _, runs := range applier.batches {
+		if len(runs) > 1 {
+			split = true
+		}
+	}
+	if !split {
+		t.Error("two events on the same key were not split into separate runs")
+	}
+}

@@ -25,10 +25,11 @@ func StopTask(id string) error { return infra.SetEnable(id, false) }
 // The four engine adapters, constructed by the process entry point once per
 // configured task.
 //
-// MySQL and MongoDB run through the shared pipeline: one stream per source
-// server, batches cut only on source transaction boundaries, each batch applied
-// atomically with the position that points past it. PostgreSQL and Redis still
-// carry their own loops.
+// MySQL, MongoDB and Redis run through the shared pipeline: batches cut only on
+// source transaction boundaries, each batch applied atomically with the position
+// that points past it. MySQL and MongoDB read one stream per source server;
+// Redis has a replication stream per shard and so runs one pipeline for each.
+// PostgreSQL still carries its own loop.
 func NewMongoDBSyncer(cfg config.SyncConfig, globalConfig *config.Config, logger *logrus.Logger) *mongodb.Syncer {
 	return mongodb.NewSyncer(cfg, globalConfig, logger)
 }
@@ -41,6 +42,6 @@ func NewPostgreSQLSyncer(cfg config.SyncConfig, logger *logrus.Logger) *postgres
 	return postgresql.NewPostgreSQLSyncer(cfg, logger)
 }
 
-func NewRedisSyncer(cfg config.SyncConfig, logger *logrus.Logger) *redis.RedisSyncer {
-	return redis.NewRedisSyncer(cfg, logger)
+func NewRedisSyncer(cfg config.SyncConfig, logger *logrus.Logger) *redis.Syncer {
+	return redis.NewSyncer(cfg, logger)
 }

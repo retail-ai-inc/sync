@@ -95,6 +95,14 @@ type Buffer struct {
 	segments []*segment
 	active   *segment
 	closed   bool
+	// sealed says the writer has finished, so a cursor that reaches the end has
+	// reached the end for good rather than being merely up to date.
+	//
+	// Without it, a connection that dies while a cursor is waiting leaves the
+	// cursor waiting for ever: the condition it blocks on is only signalled by an
+	// append, and there will not be another one. A task that neither progresses
+	// nor fails is the worst of the three outcomes.
+	sealed bool
 }
 
 // segment is one file of the stream.
@@ -215,6 +223,17 @@ func (b *Buffer) Append(payload []byte) error {
 	return b.trimLocked()
 }
 
+// Seal says no more will be appended, waking anything waiting at the end.
+//
+// It is called when the connection filling the buffer stops, for any reason. The
+// buffer itself stays readable and on disk.
+func (b *Buffer) Seal() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.sealed = true
+	b.grown.Broadcast()
+}
+
 // Sync flushes the active segment to disk.
 //
 // Called once per applied batch rather than once per frame: the point of the
@@ -261,6 +280,7 @@ func (b *Buffer) Reset(start int64) error {
 	}
 	b.segments = []*segment{seg}
 	b.active = seg
+	b.sealed = false
 	b.grown.Broadcast()
 	return nil
 }
@@ -543,7 +563,7 @@ func (c *Cursor) waitOrAdvance(ctx context.Context) (bool, error) {
 		c.buffer.mu.Unlock()
 		return true, c.openSegment(next)
 	}
-	if c.buffer.closed {
+	if c.buffer.closed || c.buffer.sealed {
 		c.buffer.mu.Unlock()
 		return false, io.EOF
 	}

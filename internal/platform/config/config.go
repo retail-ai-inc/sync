@@ -86,6 +86,24 @@ type SyncConfig struct {
 	// measured against; leaving it empty on such a source publishes no headroom
 	// rather than a guess.
 	RetentionWindow time.Duration
+
+	// RedisBufferDir is where a Redis task writes the replication stream on its
+	// way through. A master keeps its backlog in memory and one megabyte by
+	// default, so without somewhere durable to put the stream, a target that is
+	// briefly unavailable costs a full resync — and a full resync of a
+	// disaster-recovery target is a window with no copy at all.
+	RedisBufferDir string
+	// RedisBufferBytes is roughly how much of the stream to keep. Zero means the
+	// default.
+	RedisBufferBytes int64
+	// RedisBatchWindow is how long changes are gathered before being applied.
+	// It trades the recovery point against how often the source is read for a
+	// key that keeps changing. Zero means the default.
+	RedisBatchWindow time.Duration
+	// RedisSourceReadRate caps keys read from the source per second during a
+	// first copy or a repair, so neither becomes a load test against a live
+	// payment database. Zero means no limit.
+	RedisSourceReadRate int
 }
 
 func (s *SyncConfig) PGReplicationSlot() string {
@@ -278,6 +296,10 @@ ORDER BY id ASC
 				SecurityEnabled        *bool             `json:"securityEnabled"`
 				Resync                 []string          `json:"resync"`
 				RetentionWindow        *string           `json:"retention_window"`
+				RedisBufferDir         *string           `json:"redis_buffer_dir"`
+				RedisBufferBytes       *int64            `json:"redis_buffer_bytes"`
+				RedisBatchWindow       *string           `json:"redis_batch_window"`
+				RedisSourceReadRate    *int              `json:"redis_source_read_rate"`
 			}
 			if errJ := json.Unmarshal([]byte(js), &extra); errJ != nil {
 				log.Printf("[WARN] parse config_json for id=%d => %v", id, errJ)
@@ -324,6 +346,23 @@ ORDER BY id ASC
 					} else {
 						log.Printf("[WARN] retention_window for id=%d is not a duration: %v", id, errD)
 					}
+				}
+
+				if extra.RedisBufferDir != nil {
+					sc.RedisBufferDir = *extra.RedisBufferDir
+				}
+				if extra.RedisBufferBytes != nil {
+					sc.RedisBufferBytes = *extra.RedisBufferBytes
+				}
+				if extra.RedisBatchWindow != nil {
+					if d, errD := time.ParseDuration(*extra.RedisBatchWindow); errD == nil {
+						sc.RedisBatchWindow = d
+					} else {
+						log.Printf("[WARN] redis_batch_window for id=%d is not a duration: %v", id, errD)
+					}
+				}
+				if extra.RedisSourceReadRate != nil {
+					sc.RedisSourceReadRate = *extra.RedisSourceReadRate
 				}
 
 				sc.Mappings = extra.Mappings
