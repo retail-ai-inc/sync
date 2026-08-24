@@ -16,8 +16,10 @@ package directionlock
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -100,9 +102,20 @@ func (g *Guard) staleAfter() time.Duration {
 	return DefaultStaleAfter
 }
 
+// owner names the process holding a claim, which is what tells a restarted
+// instance apart from a second one.
+//
+// The hostname is the default because it is the granularity that matters where
+// this runs: a restarted pod keeps its name and may take its own claim back at
+// once, while a second replica has a different name and is refused. SYNC_INSTANCE
+// overrides it for the places where the hostname is not distinctive — a test
+// running two instances on one machine, or a container that shares the host's.
 func (g *Guard) owner() string {
 	if g.Owner != "" {
 		return g.Owner
+	}
+	if named := strings.TrimSpace(os.Getenv("SYNC_INSTANCE")); named != "" {
+		return named
 	}
 	host, err := os.Hostname()
 	if err != nil {
@@ -117,6 +130,12 @@ type Conflict struct {
 	Endpoint string
 	Existing Claim
 	Reason   string
+	// Concurrent marks the one conflict that resolves itself: another process
+	// running this same task. The direction conflicts need somebody to decide
+	// which side is authoritative; this one only needs the other process to
+	// finish exiting, which is what a rolling update looks like from the new
+	// pod's side.
+	Concurrent bool
 }
 
 func (c *Conflict) Error() string {
@@ -125,6 +144,59 @@ func (c *Conflict) Error() string {
 		c.Reason, c.Endpoint, c.Existing.TaskID, c.Existing.Role,
 		c.Existing.Peer, c.Existing.Owner, c.Existing.UpdatedAt.Format(time.RFC3339))
 }
+
+// concurrentWith reports a claim held by another process running this same task.
+//
+// A claim for this task used to be skipped outright, so that a task restarted
+// after a crash could take its own claim back without waiting a quarter of an
+// hour for it to go stale. That is right, and it also let two processes run the
+// same task at once: each read the other's claim, saw its own task id, and
+// carried on.
+//
+// Two writers replaying one stream from different offsets will eventually apply
+// an older version of a record after a newer one. Idempotence does not save that
+// — an upsert of the older version is a regression — and the two only agree once
+// both have reached the end of the log, so at any moment in between, including
+// the moment of a failover, the target can hold stale values. On top of that:
+// twice the load on both databases, write conflicts between the two
+// transactions, and a position that ping-pongs between two offsets so that "how
+// far behind is the copy" stops having an answer.
+//
+// The owner is the hostname by default, which is the granularity that matters in
+// practice: a restarted pod keeps its name and may take its claim back at once,
+// while a second replica has a different name and is refused.
+func (g *Guard) concurrentWith(existing Claim, now time.Time, endpoint string) *Conflict {
+	if existing.TaskID != g.TaskID || existing.Owner == g.owner() {
+		return nil
+	}
+	if !existing.Fresh(now, ConcurrentAfter) {
+		// The other process has stopped refreshing, so it has gone.
+		return nil
+	}
+	return &Conflict{
+		Endpoint:   endpoint,
+		Existing:   existing,
+		Concurrent: true,
+		Reason: "another process is already running this task. Two writers replaying " +
+			"one stream from different offsets apply an older version of a record " +
+			"after a newer one, which no amount of idempotence undoes",
+	}
+}
+
+// IsConcurrent reports whether a failure is another process running the same
+// task, which is worth retrying rather than stopping for.
+func IsConcurrent(err error) bool {
+	var conflict *Conflict
+	return errors.As(err, &conflict) && conflict.Concurrent
+}
+
+// ConcurrentAfter is how recently another process must have refreshed its claim
+// for this one to treat it as still running.
+//
+// Three heartbeats: long enough that a process which is actually alive has
+// certainly refreshed within it, short enough that a genuine handover to another
+// host is not blocked for the quarter of an hour a direction claim survives.
+const ConcurrentAfter = 3 * HeartbeatInterval
 
 // Acquire checks both endpoints and records this task's direction.
 //
@@ -144,6 +216,9 @@ func (g *Guard) Acquire(ctx context.Context) error {
 		return fmt.Errorf("read the direction claims on %s: %w", g.Target.Endpoint(), err)
 	}
 	for _, existing := range targetClaims {
+		if conflict := g.concurrentWith(existing, now, g.Target.Endpoint()); conflict != nil {
+			return conflict
+		}
 		if existing.TaskID == g.TaskID || !existing.Fresh(now, g.staleAfter()) {
 			continue
 		}
@@ -171,6 +246,9 @@ func (g *Guard) Acquire(ctx context.Context) error {
 		return fmt.Errorf("read the direction claims on %s: %w", g.Source.Endpoint(), err)
 	}
 	for _, existing := range sourceClaims {
+		if conflict := g.concurrentWith(existing, now, g.Source.Endpoint()); conflict != nil {
+			return conflict
+		}
 		if existing.TaskID == g.TaskID || !existing.Fresh(now, g.staleAfter()) {
 			continue
 		}

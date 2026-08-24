@@ -161,10 +161,22 @@ func TestTwoTasksWritingOneTargetAreRefused(t *testing.T) {
 	}
 }
 
-// TestTheSameTaskReacquiresItsOwnClaim is what an ordinary restart does.
+// ownClaim is a claim this guard's own process left behind, which is what a
+// restart finds. The owner is what tells that apart from a second process
+// running the same task, and this fixture used to get it wrong: it named another
+// process and the test passed anyway, because a claim for the same task was
+// skipped whoever held it. That was the hole.
+func ownClaim(role Role, peer string, age time.Duration) Claim {
+	c := claim(1, role, peer, age)
+	c.Owner = "syncer-osaka-0"
+	return c
+}
+
+// TestTheSameTaskReacquiresItsOwnClaim is what an ordinary restart does: the
+// same process, by name, finding the claim it left behind.
 func TestTheSameTaskReacquiresItsOwnClaim(t *testing.T) {
-	source := newStore("tokyo:3306/shop", claim(1, RoleSource, "osaka:3306/shop", time.Minute))
-	target := newStore("osaka:3306/shop", claim(1, RoleTarget, "tokyo:3306/shop", time.Minute))
+	source := newStore("tokyo:3306/shop", ownClaim(RoleSource, "osaka:3306/shop", time.Minute))
+	target := newStore("osaka:3306/shop", ownClaim(RoleTarget, "tokyo:3306/shop", time.Minute))
 	g := guardFor(source, target)
 
 	if err := g.Acquire(context.Background()); err != nil {
@@ -172,6 +184,25 @@ func TestTheSameTaskReacquiresItsOwnClaim(t *testing.T) {
 	}
 	if got := target.claims[1].UpdatedAt; !got.Equal(fixedNow) {
 		t.Errorf("the claim was not refreshed: %v", got)
+	}
+}
+
+// TestAnotherProcessHoldingTheSameTaskIsRefused is the other half, and the one
+// the fixture above used to model by accident. Two writers replaying one stream
+// from different offsets apply an older version of a record after a newer one,
+// which idempotence does not undo.
+func TestAnotherProcessHoldingTheSameTaskIsRefused(t *testing.T) {
+	// claim() names syncer-tokyo-0; the guard is syncer-osaka-0.
+	source := newStore("tokyo:3306/shop", claim(1, RoleSource, "osaka:3306/shop", time.Minute))
+	target := newStore("osaka:3306/shop", claim(1, RoleTarget, "tokyo:3306/shop", time.Minute))
+	g := guardFor(source, target)
+
+	err := g.Acquire(context.Background())
+	if err == nil {
+		t.Fatal("a second process running the same task was allowed to start")
+	}
+	if !IsConcurrent(err) {
+		t.Errorf("error = %v, want it marked concurrent so the caller retries", err)
 	}
 }
 
@@ -549,5 +580,100 @@ func TestHoldStopsTheHeartbeatWithTheContext(t *testing.T) {
 	}
 	if after := runtime.NumGoroutine(); after > before {
 		t.Logf("goroutines: %d before, %d after", before, after)
+	}
+}
+
+// ------------------------------------------------- two instances, one task
+
+// TestASecondProcessRunningTheSameTaskIsRefused is the hole the direction lock
+// left open.
+//
+// A claim for this task was skipped outright, so that a task restarted after a
+// crash could take its own claim back without waiting a quarter of an hour. That
+// is right, and it also let two processes run the same task at once: each read
+// the other's claim, saw its own task id, and carried on.
+//
+// Two writers replaying one stream from different offsets eventually apply an
+// older version of a record after a newer one, which no amount of idempotence
+// undoes.
+func TestASecondProcessRunningTheSameTaskIsRefused(t *testing.T) {
+	source, target := newStore("tokyo"), newStore("osaka")
+
+	first := &Guard{TaskID: 7, Source: source, Target: target, Owner: "pod-a"}
+	if err := first.Acquire(context.Background()); err != nil {
+		t.Fatalf("the first process could not claim: %v", err)
+	}
+
+	second := &Guard{TaskID: 7, Source: source, Target: target, Owner: "pod-b"}
+	err := second.Acquire(context.Background())
+	if err == nil {
+		t.Fatal("a second process running the same task was allowed to start")
+	}
+	if !IsConcurrent(err) {
+		t.Errorf("error = %v, want it marked as a concurrency conflict so the caller "+
+			"retries rather than blocking for ever", err)
+	}
+	if !strings.Contains(err.Error(), "pod-a") {
+		t.Errorf("error = %v, want it to name the process already holding the task", err)
+	}
+}
+
+// TestTheSameProcessMayTakeItsClaimBack is the case the skip exists for: a
+// restart after a crash must not wait for the claim to go stale.
+func TestTheSameProcessMayTakeItsClaimBack(t *testing.T) {
+	source, target := newStore("tokyo"), newStore("osaka")
+
+	first := &Guard{TaskID: 7, Source: source, Target: target, Owner: "pod-a"}
+	if err := first.Acquire(context.Background()); err != nil {
+		t.Fatalf("first Acquire: %v", err)
+	}
+
+	// The same process, started again — a restarted pod keeps its name.
+	restarted := &Guard{TaskID: 7, Source: source, Target: target, Owner: "pod-a"}
+	if err := restarted.Acquire(context.Background()); err != nil {
+		t.Errorf("a restarted process was refused its own claim: %v", err)
+	}
+}
+
+// TestAProcessThatStoppedRefreshingIsNotInTheWay covers a genuine handover: the
+// other process has gone, so its claim should not hold the task hostage.
+func TestAProcessThatStoppedRefreshingIsNotInTheWay(t *testing.T) {
+	source, target := newStore("tokyo"), newStore("osaka")
+
+	stale := &Guard{
+		TaskID: 7, Source: source, Target: target, Owner: "pod-a",
+		Now: func() time.Time { return time.Now().Add(-10 * ConcurrentAfter) },
+	}
+	if err := stale.Acquire(context.Background()); err != nil {
+		t.Fatalf("first Acquire: %v", err)
+	}
+
+	taking := &Guard{TaskID: 7, Source: source, Target: target, Owner: "pod-b"}
+	if err := taking.Acquire(context.Background()); err != nil {
+		t.Errorf("a process was refused a claim nobody is refreshing: %v", err)
+	}
+}
+
+// TestADirectionConflictIsNotRetryable keeps the two kinds apart. A reversed
+// direction needs somebody to decide which side is authoritative; two processes
+// need one of them to exit.
+func TestADirectionConflictIsNotRetryable(t *testing.T) {
+	source, target := newStore("tokyo"), newStore("osaka")
+
+	// Something is replicating out of what this task wants to write to, which is
+	// what a promoted replica looks like.
+	promoted := &Guard{TaskID: 9, Source: target, Target: newStore("kobe"), Owner: "pod-x"}
+	if err := promoted.Acquire(context.Background()); err != nil {
+		t.Fatalf("set up the promoted side: %v", err)
+	}
+
+	guard := &Guard{TaskID: 7, Source: source, Target: target, Owner: "pod-a"}
+	err := guard.Acquire(context.Background())
+	if err == nil {
+		t.Fatal("writing to a promoted replica was allowed")
+	}
+	if IsConcurrent(err) {
+		t.Error("a reversed direction was marked as a concurrency conflict, so it " +
+			"would be retried for ever instead of being put in front of somebody")
 	}
 }

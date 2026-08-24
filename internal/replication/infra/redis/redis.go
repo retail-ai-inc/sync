@@ -136,6 +136,14 @@ func (r *RedisSyncer) Start(ctx context.Context) error {
 	if guardErr != nil {
 		// A reversed direction is not something a retry resolves: somebody has
 		// to decide which side is authoritative.
+		if directionlock.IsConcurrent(guardErr) {
+			// Another process is running this task. It resolves itself once that
+			// one exits, which is what a rolling update looks like from the new
+			// pod's side, so this is retried rather than blocked — being blocked
+			// would leave the new pod refusing to work after the old one had
+			// gone.
+			return fmt.Errorf("%w", guardErr)
+		}
 		return domain.Unrecoverable("%v", guardErr)
 	}
 	defer stopGuard()

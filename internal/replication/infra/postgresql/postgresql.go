@@ -130,6 +130,14 @@ func (s *PostgreSQLSyncer) Start(ctx context.Context) error {
 	// side with the older one.
 	releaseGuard, guardErr := s.claimDirection(ctx)
 	if guardErr != nil {
+		if directionlock.IsConcurrent(guardErr) {
+			// Another process is running this task. It resolves itself once that
+			// one exits, which is what a rolling update looks like from the new
+			// pod's side, so this is retried rather than blocked — being blocked
+			// would leave the new pod refusing to work after the old one had
+			// gone.
+			return fmt.Errorf("%w", guardErr)
+		}
 		return domain.Unrecoverable("%v", guardErr)
 	}
 	defer releaseGuard()

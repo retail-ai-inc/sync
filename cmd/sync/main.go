@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -21,6 +22,19 @@ import (
 	"github.com/retail-ai-inc/sync/internal/platform/webui"
 	"github.com/sirupsen/logrus"
 )
+
+// httpAddr is where the control plane listens, which SYNC_HTTP_ADDR overrides.
+//
+// It was hardcoded, so a second process on one host died on the bind before it
+// reached anything else — including the check that would have told it another
+// instance was already running this task. Two syncers on one host is a
+// reasonable thing to want when they carry different tasks.
+func httpAddr() string {
+	if addr := strings.TrimSpace(os.Getenv("SYNC_HTTP_ADDR")); addr != "" {
+		return addr
+	}
+	return ":8080"
+}
 
 func main() {
 	cfg, err := config.NewConfig()
@@ -80,7 +94,7 @@ func main() {
 	// nothing holds a goroutine and a file descriptor for as long as it likes,
 	// which is all it takes to exhaust the control plane from one host.
 	server := &http.Server{
-		Addr:              ":8080",
+		Addr:              httpAddr(),
 		Handler:           router,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
@@ -88,7 +102,7 @@ func main() {
 		IdleTimeout:       120 * time.Second,
 	}
 	go func() {
-		log.Info("UI is running at http://localhost:8080")
+		log.Infof("UI is running at http://localhost%s", httpAddr())
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Errorf("HTTP server error: %v", err)
 			cancel()

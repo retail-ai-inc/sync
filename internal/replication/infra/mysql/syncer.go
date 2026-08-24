@@ -15,6 +15,7 @@ import (
 	"github.com/retail-ai-inc/sync/internal/replication/app/pipeline"
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/checkpoint"
+	"github.com/retail-ai-inc/sync/internal/replication/infra/directionlock"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/security"
 )
 
@@ -141,6 +142,14 @@ func (s *Syncer) Start(ctx context.Context) error {
 	guard := &MySQLSyncer{cfg: s.cfg, logger: s.logger}
 	releaseGuard, guardErr := guard.claimDirection(ctx, targetDB)
 	if guardErr != nil {
+		if directionlock.IsConcurrent(guardErr) {
+			// Another process is running this task. It resolves itself once that
+			// one exits, which is what a rolling update looks like from the new
+			// pod's side, so this is retried rather than blocked — being blocked
+			// would leave the new pod refusing to work after the old one had
+			// gone.
+			return fmt.Errorf("%w", guardErr)
+		}
 		return domain.Unrecoverable("%v", guardErr)
 	}
 	defer releaseGuard()
