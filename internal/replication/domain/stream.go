@@ -2,6 +2,7 @@ package domain
 
 import (
 	"context"
+	"errors"
 	"time"
 )
 
@@ -164,6 +165,15 @@ type Applier interface {
 	// position afterwards, which is at-least-once and relies on idempotence.
 	Apply(ctx context.Context, runs [][]*Event, pos Position) (committed bool, err error)
 }
+
+// ErrWindowNotYet says the window is not known yet, but might be next time.
+//
+// It separates "cannot" from "not yet", and the difference matters because the
+// caller gives up permanently on the first refusal. A source that can never
+// answer — a sharded MongoDB seen through mongos — should be asked once. A source
+// that needs a second measurement before it can work out a rate should not be
+// written off for the lifetime of the process on the strength of the first one.
+var ErrWindowNotYet = errors.New("the retention window is not known yet")
 
 // Retention is a Reader that knows how far back the source's history reaches.
 //

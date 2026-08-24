@@ -583,6 +583,12 @@ func (r *Runner) reportRetention(ctx context.Context, now time.Time, lag float64
 	if r.windowAt.IsZero() || now.Sub(r.windowAt) >= retentionRefresh {
 		window, err := source.Window(ctx)
 		switch {
+		case errors.Is(err, domain.ErrWindowNotYet):
+			// Not an answer, but not a refusal either: some sources have to be
+			// measured twice before they can say. Asking again next time is the
+			// difference between the metric appearing a few minutes late and it
+			// never appearing at all.
+			return
 		case err != nil:
 			// Asked once, told no. Publishing a guess here would be worse than
 			// publishing nothing: the number is only read when somebody is

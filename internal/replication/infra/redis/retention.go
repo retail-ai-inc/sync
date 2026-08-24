@@ -8,6 +8,8 @@ import (
 	"time"
 
 	goredis "github.com/redis/go-redis/v9"
+
+	"github.com/retail-ai-inc/sync/internal/replication/domain"
 )
 
 // How long this shard could stay stopped.
@@ -33,7 +35,7 @@ func (r *Reader) Window(ctx context.Context) (time.Duration, error) {
 			"keeps; set the task's retention window instead", r.Shard)
 	}
 
-	backlog, err := backlogBytes(ctx, r.Node)
+	backlog, err := r.backlog(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -43,6 +45,25 @@ func (r *Reader) Window(ctx context.Context) (time.Duration, error) {
 	}
 	return time.Duration(float64(backlog) / rate * float64(time.Second)), nil
 }
+
+// backlog is how much history the source keeps, asked for occasionally.
+//
+// While the rate is still unknown this is called once a second, and the size of
+// a backlog is a setting rather than a measurement — so the answer is kept for a
+// while rather than fetched on every tick.
+func (r *Reader) backlog(ctx context.Context) (int64, error) {
+	if r.backlogBytes > 0 && time.Since(r.backlogAt) < backlogFreshFor {
+		return r.backlogBytes, nil
+	}
+	size, err := backlogBytes(ctx, r.Node)
+	if err != nil {
+		return 0, err
+	}
+	r.backlogBytes, r.backlogAt = size, time.Now()
+	return size, nil
+}
+
+const backlogFreshFor = 5 * time.Minute
 
 // rate is how many stream bytes a second the source is producing, measured from
 // how far the relay has read between two calls.
@@ -60,18 +81,22 @@ func (r *Reader) rate() (float64, error) {
 
 	if previousAt.IsZero() {
 		return 0, fmt.Errorf("shard %s has only been measured once, so how fast its "+
-			"stream is written is not known yet", r.Shard)
+			"stream is written is not known yet: %w", r.Shard, domain.ErrWindowNotYet)
 	}
 	elapsed := now.Sub(previousAt).Seconds()
 	if elapsed <= 0 {
-		return 0, fmt.Errorf("no time has passed since the last measurement")
+		return 0, fmt.Errorf("no time has passed since the last measurement: %w",
+			domain.ErrWindowNotYet)
 	}
 	bytes := float64(offset - previousOffset)
 	if bytes <= 0 {
 		// A source nobody is writing to has no rate, and dividing by it would
-		// report an unbounded window. Reporting nothing is the honest answer.
+		// report an unbounded window. Reporting nothing is the honest answer —
+		// and it is worth asking again, because the source may simply be quiet
+		// for a while rather than for ever.
 		return 0, fmt.Errorf("shard %s has had nothing written to it since the last "+
-			"measurement, so its backlog covers an unknown length of time", r.Shard)
+			"measurement, so its backlog covers an unknown length of time: %w",
+			r.Shard, domain.ErrWindowNotYet)
 	}
 	return bytes / elapsed, nil
 }

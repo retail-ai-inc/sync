@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -777,5 +778,86 @@ func TestWithoutStreamOrderTheBatchIsStillSplit(t *testing.T) {
 	}
 	if !split {
 		t.Error("two events on the same key were not split into separate runs")
+	}
+}
+
+// TestASourceThatCannotSayYetIsAskedAgain separates "not yet" from "cannot".
+//
+// The refusal path gives up for the lifetime of the process, which is right for
+// a source that can never answer and wrong for one that needs measuring twice
+// before it can work out a rate. Conflating them meant the headroom metric never
+// appeared at all for such a source: the very first question failed, by design,
+// and nothing asked again.
+func TestASourceThatCannotSayYetIsAskedAgain(t *testing.T) {
+	labels := metrics.Labels{"task": "headroom-not-yet"}
+	defer metrics.Default.Forget(labels)
+
+	now := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
+	source := &windowedReader{
+		fakeReader: &fakeReader{},
+		err:        fmt.Errorf("measured once: %w", domain.ErrWindowNotYet),
+	}
+	r := &Runner{
+		Reader: source,
+		clock:  func() time.Time { return now },
+		Opts:   Options{Labels: labels, ReportInterval: time.Millisecond, Logger: quietLogger()},
+	}
+
+	stop := r.report(context.Background())
+	time.Sleep(80 * time.Millisecond)
+	stop()
+
+	if source.calls < 2 {
+		t.Errorf("the source was asked %d time(s); a source that says 'not yet' has "+
+			"to be asked again, or the metric never appears", source.calls)
+	}
+	if _, ok := headroomOf(t, labels); ok {
+		t.Error("a headroom was published before the source could say what its window is")
+	}
+}
+
+// TestASourceThatSaysNotYetAndThenAnswersIsPublished covers the whole sequence.
+func TestASourceThatSaysNotYetAndThenAnswersIsPublished(t *testing.T) {
+	labels := metrics.Labels{"task": "headroom-eventually"}
+	defer metrics.Default.Forget(labels)
+
+	now := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
+	source := &windowedReader{
+		fakeReader: &fakeReader{},
+		err:        fmt.Errorf("measured once: %w", domain.ErrWindowNotYet),
+	}
+	r := &Runner{
+		Reader: source,
+		clock:  func() time.Time { return now },
+		Opts:   Options{Labels: labels, ReportInterval: time.Millisecond, Logger: quietLogger()},
+	}
+	r.mu.Lock()
+	r.lastReadAt = now.Add(-30 * time.Second)
+	r.mu.Unlock()
+
+	stop := r.report(context.Background())
+	time.Sleep(30 * time.Millisecond)
+
+	// The second measurement arrives.
+	source.err = nil
+	source.window = 2 * time.Hour
+
+	deadline := time.Now().Add(2 * time.Second)
+	var published bool
+	for time.Now().Before(deadline) {
+		if _, ok := headroomOf(t, labels); ok {
+			published = true
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	stop()
+
+	if !published {
+		t.Fatal("the headroom was never published after the source could answer")
+	}
+	got, _ := headroomOf(t, labels)
+	if want := (2 * time.Hour).Seconds() - 30; got != want {
+		t.Errorf("headroom = %v, want %v", got, want)
 	}
 }

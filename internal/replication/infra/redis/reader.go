@@ -46,6 +46,11 @@ type Reader struct {
 	// stream is being written, which is half of the retention window.
 	sampledAt     time.Time
 	sampledOffset int64
+	// backlogBytes is the source's remembered backlog size, and backlogAt when
+	// it was read. It is a setting rather than a measurement, so it is not worth
+	// a round trip every time the window is worked out.
+	backlogBytes int64
+	backlogAt    time.Time
 
 	// position is what was resumed from. Its phase decides whether a change is
 	// applied by replaying the command or by re-reading the key's value.
