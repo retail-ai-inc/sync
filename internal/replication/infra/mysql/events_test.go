@@ -15,6 +15,7 @@ import (
 	"github.com/go-mysql-org/go-mysql/schema"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/retail-ai-inc/sync/internal/platform/config"
+	"github.com/retail-ai-inc/sync/internal/replication/domain"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/checkpoint"
 	"github.com/sirupsen/logrus"
 )
@@ -44,6 +45,11 @@ func sqliteTarget(t *testing.T, schemaSQL string) *sql.DB {
 // the slash is read.
 const targetDSN = "u:p@tcp(127.0.0.1:3306)/main"
 
+// sourceSchema is the database on the source that the fixtures replicate from.
+// The table and query fixtures name it too, so a statement built by them counts
+// as one this task reads.
+const sourceSchema = "shop"
+
 func newHandler(t *testing.T, db *sql.DB, mappings []config.DatabaseMapping) *MyEventHandler {
 	t.Helper()
 
@@ -54,6 +60,7 @@ func newHandler(t *testing.T, db *sql.DB, mappings []config.DatabaseMapping) *My
 		mappings:         mappings,
 		logger:           logger,
 		TargetConnection: targetDSN,
+		sourceDatabase:   sourceSchema,
 		dialect:          dialectSQLite,
 	}
 }
@@ -403,67 +410,123 @@ func TestTheDeleteMatchesOnTheKeyAlone(t *testing.T) {
 	}
 }
 
-// TestAnUnknownActionIsIgnored records that the switch has no default, so an
-// action the reader invents is dropped without a log line.
-func TestAnUnknownActionIsIgnored(t *testing.T) {
+// TestAnUnknownActionStopsReplication covers an action this does not understand.
+//
+// It used to be a warning, so an action the library grew later was dropped with
+// a log line nobody reads and the two sides diverged from then on. A change that
+// cannot be replicated must not be reported as replicated.
+func TestAnUnknownActionStopsReplication(t *testing.T) {
 	db := sqliteTarget(t, ordersSchema)
 	h := newHandler(t, db, mapTable("orders", "orders"))
 
-	if err := apply(h, &canal.RowsEvent{
+	err := apply(h, &canal.RowsEvent{
 		Table:  sourceTable("orders", "id", "customer", "email"),
 		Action: "truncate",
 		Rows:   [][]interface{}{{"1", "Ada", "x"}},
-	}); err != nil {
-		t.Fatalf("OnRow: %v", err)
+	})
+
+	if !domain.IsUnrecoverable(err) {
+		t.Fatalf("OnRow returned %v, want an unrecoverable error", err)
 	}
 	if got := rows(t, db); len(got) != 0 {
-		t.Errorf("rows = %v", got)
+		t.Errorf("rows = %v, want nothing written", got)
 	}
 }
 
 // -------------------------------------------------------- keyless tables
 
-// TestAnUpdateWithNoPrimaryKeyIsSkipped records the guard against an
-// unqualified UPDATE: with no key columns the statement would rewrite every row,
-// so the change is dropped instead. A keyless source table therefore never
-// receives updates — silently, since the call reports nothing.
-func TestAnUpdateWithNoPrimaryKeyIsSkipped(t *testing.T) {
+// keylessTable describes the replicated table with no key columns.
+func keylessTable() *schema.Table {
+	table := sourceTable("orders", "id", "customer", "email")
+	table.PKColumns = nil
+	return table
+}
+
+// TestAnUpdateWithNoPrimaryKeyStopsReplication covers a table whose rows cannot
+// be addressed on the target.
+//
+// This used to be dropped with one warning: inserts arrived and updates did not,
+// so the target accumulated rows the source had since changed, and the row
+// counts agreed the whole time. MySQL's own answer is sql_require_primary_key,
+// and Group Replication refuses such a table outright. For payment data,
+// refusing is the right severity — a partial copy nobody is told about is worse
+// than a stopped task somebody is.
+func TestAnUpdateWithNoPrimaryKeyStopsReplication(t *testing.T) {
 	db := sqliteTarget(t, ordersSchema)
 	if _, err := db.Exec(`INSERT INTO orders VALUES ('1','Ada','x')`); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	h := newHandler(t, db, mapTable("orders", "orders"))
-	table := sourceTable("orders", "id", "customer", "email")
-	table.PKColumns = nil
 
-	if err := apply(h, &canal.RowsEvent{
-		Table: table, Action: canal.UpdateAction,
+	err := apply(h, &canal.RowsEvent{
+		Table: keylessTable(), Action: canal.UpdateAction,
 		Rows: [][]interface{}{{"1", "Ada", "x"}, {"1", "Grace", "y"}},
-	}); err != nil {
-		t.Fatalf("OnRow: %v", err)
+	})
+
+	if !domain.IsUnrecoverable(err) {
+		t.Fatalf("OnRow returned %v, want an unrecoverable error", err)
 	}
 	if got := rows(t, db); got[0] != "1|Ada|x" {
-		t.Errorf("rows = %v, want the update skipped", got)
+		t.Errorf("rows = %v, want the target untouched", got)
 	}
 }
 
-func TestADeleteWithNoPrimaryKeyIsSkipped(t *testing.T) {
+func TestADeleteWithNoPrimaryKeyStopsReplication(t *testing.T) {
 	db := sqliteTarget(t, ordersSchema)
 	if _, err := db.Exec(`INSERT INTO orders VALUES ('1','Ada','x')`); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	h := newHandler(t, db, mapTable("orders", "orders"))
-	table := sourceTable("orders", "id", "customer", "email")
-	table.PKColumns = nil
+
+	err := apply(h, &canal.RowsEvent{
+		Table: keylessTable(), Action: canal.DeleteAction,
+		Rows: [][]interface{}{{"1", "Ada", "x"}},
+	})
+
+	if !domain.IsUnrecoverable(err) {
+		t.Fatalf("OnRow returned %v, want an unrecoverable error", err)
+	}
+	if got := rows(t, db); len(got) != 1 {
+		t.Errorf("rows = %v, want the row still there", got)
+	}
+}
+
+// TestTheKeylessRefusalNamesTheTable is what makes the stop actionable: an
+// operator woken by it has to know which table to fix.
+func TestTheKeylessRefusalNamesTheTable(t *testing.T) {
+	h := newHandler(t, sqliteTarget(t, ordersSchema), mapTable("orders", "orders"))
+
+	err := apply(h, &canal.RowsEvent{
+		Table: keylessTable(), Action: canal.DeleteAction,
+		Rows: [][]interface{}{{"1", "Ada", "x"}},
+	})
+
+	if err == nil || !strings.Contains(err.Error(), "shop.orders") {
+		t.Errorf("error = %v, want it to name shop.orders", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "allowKeyless") {
+		t.Errorf("error = %v, want it to name the way out", err)
+	}
+}
+
+// TestAllowKeylessRestoresTheBestEffortCopy covers the deliberate opt-out. An
+// operator who accepts a half-replicated table gets one, having said so.
+func TestAllowKeylessRestoresTheBestEffortCopy(t *testing.T) {
+	db := sqliteTarget(t, ordersSchema)
+	if _, err := db.Exec(`INSERT INTO orders VALUES ('1','Ada','x')`); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	h := newHandler(t, db, mapTable("orders", "orders"))
+	h.allowKeyless = true
 
 	if err := apply(h, &canal.RowsEvent{
-		Table: table, Action: canal.DeleteAction,
+		Table: keylessTable(), Action: canal.DeleteAction,
 		Rows: [][]interface{}{{"1", "Ada", "x"}},
 	}); err != nil {
 		t.Fatalf("OnRow: %v", err)
 	}
 	if got := rows(t, db); len(got) != 1 {
-		t.Errorf("rows = %v, want the delete skipped", got)
+		t.Errorf("rows = %v, want the delete skipped rather than refused", got)
 	}
 }
 

@@ -115,6 +115,9 @@ func (s *MySQLSyncer) Start(ctx context.Context) error {
 	if err := s.checkRowImage(c); err != nil {
 		return domain.Unrecoverable("%v", err)
 	}
+	if err := s.checkRowMetadata(c); err != nil {
+		return domain.Unrecoverable("%v", err)
+	}
 
 	var targetDB *sql.DB
 	err = resilience.Retry(ctx, 5, 2*time.Second, 2.0, func() error {
@@ -179,6 +182,7 @@ func (s *MySQLSyncer) Start(ctx context.Context) error {
 		source:            dsn.Endpoint(s.cfg.Type, s.cfg.SourceConnection),
 		labels:            s.metricLabels(),
 		discovering:       discovering,
+		sourceDatabase:    sourceDBName,
 		checkpoints:       checkpoints,
 		checkpointEvery:   checkpointInterval(),
 	}
@@ -348,7 +352,12 @@ func (s *MySQLSyncer) snapshot(ctx context.Context, targetDB *sql.DB) *binlogChe
 	pinned.Source = dsn.Endpoint(s.cfg.Type, s.cfg.SourceConnection)
 	s.logger.Infof("[MySQL] Snapshot pinned at %+v", *pinned)
 
-	s.doInitialSync(ctx, conn, targetDB)
+	if err := s.doInitialSync(ctx, conn, targetDB); err != nil {
+		s.logger.Errorf("[MySQL] %v", err)
+		// Without coordinates the caller has nothing safe to resume from, which
+		// is exactly the situation an incomplete copy leaves.
+		return nil
+	}
 	return pinned
 }
 
@@ -422,10 +431,25 @@ func readBinlogStatus(ctx context.Context, conn *sql.Conn, stmt string) (*binlog
 	return &cp, nil
 }
 
-func (s *MySQLSyncer) doInitialSync(ctx context.Context, sourceDB *sql.Conn, targetDB *sql.DB) {
+// doInitialSync copies every mapped table, reporting what it could not copy.
+//
+// Every failure here used to be logged and stepped over, and the caller then
+// recorded the position as though the copy had finished. A table whose create
+// failed, or whose rows only half arrived, was therefore never copied again: the
+// stream carried on from a point that assumed a complete base, and the gap
+// stayed for good. The row counts of the tables that did copy looked right.
+//
+// A failure to copy one table no longer stops the others — copying what can be
+// copied is useful — but the caller is told, and must not record the position
+// for an incomplete copy.
+func (s *MySQLSyncer) doInitialSync(ctx context.Context, sourceDB *sql.Conn, targetDB *sql.DB) error {
 	s.logger.Info("[MySQL] Starting the initial full sync...")
 
 	const batchSize = 100
+	var failures []string
+	fail := func(format string, args ...interface{}) {
+		failures = append(failures, fmt.Sprintf(format, args...))
+	}
 	sourceDBName := dsn.GetDatabaseName(s.cfg.Type, s.cfg.SourceConnection)
 	targetDBName := dsn.GetDatabaseName(s.cfg.Type, s.cfg.TargetConnection)
 
@@ -433,7 +457,7 @@ func (s *MySQLSyncer) doInitialSync(ctx context.Context, sourceDB *sql.Conn, tar
 		for _, tableMap := range mapping.Tables {
 			exists, errExist := s.targetTableExists(ctx, targetDB, targetDBName, tableMap.TargetTable)
 			if errExist != nil {
-				s.logger.Errorf("[MySQL] Could not check if target table %s.%s exists: %v", targetDBName, tableMap.TargetTable, errExist)
+				fail("could not check whether %s.%s exists: %v", targetDBName, tableMap.TargetTable, errExist)
 				continue
 			}
 			if !exists {
@@ -448,7 +472,7 @@ func (s *MySQLSyncer) doInitialSync(ctx context.Context, sourceDB *sql.Conn, tar
 				}
 
 				if errCreate := s.createTargetTableAndIndexes(ctx, sourceDB, targetDB, sourceDBName, tableMap.SourceTable, targetDBName, tableMap.TargetTable); errCreate != nil {
-					s.logger.Errorf("[MySQL] Failed to create target table %s.%s: %v", targetDBName, tableMap.TargetTable, errCreate)
+					fail("could not create %s.%s: %v", targetDBName, tableMap.TargetTable, errCreate)
 					continue
 				}
 
@@ -476,7 +500,7 @@ func (s *MySQLSyncer) doInitialSync(ctx context.Context, sourceDB *sql.Conn, tar
 				targetCountQuery := fmt.Sprintf("SELECT COUNT(1) FROM %s.%s", targetDBName, tableMap.TargetTable)
 				var count int
 				if errC := targetDB.QueryRow(targetCountQuery).Scan(&count); errC != nil {
-					s.logger.Errorf("[MySQL] Could not check if table %s.%s is empty: %v", targetDBName, tableMap.TargetTable, errC)
+					fail("could not count the rows already in %s.%s: %v", targetDBName, tableMap.TargetTable, errC)
 					continue
 				}
 				if count > 0 {
@@ -489,14 +513,14 @@ func (s *MySQLSyncer) doInitialSync(ctx context.Context, sourceDB *sql.Conn, tar
 
 			cols, errCols := s.getTableColumns(ctx, sourceDB, sourceDBName, tableMap.SourceTable)
 			if errCols != nil {
-				s.logger.Errorf("[MySQL] get columns fail => %s.%s => %v", sourceDBName, tableMap.SourceTable, errCols)
+				fail("could not read the columns of %s.%s: %v", sourceDBName, tableMap.SourceTable, errCols)
 				continue
 			}
 
 			selectSQL := fmt.Sprintf("SELECT %s FROM %s.%s", strings.Join(cols, ","), sourceDBName, tableMap.SourceTable)
 			srcRows, errQ := sourceDB.QueryContext(ctx, selectSQL)
 			if errQ != nil {
-				s.logger.Errorf("[MySQL] query fail => %s.%s => %v", sourceDBName, tableMap.SourceTable, errQ)
+				fail("could not read %s.%s: %v", sourceDBName, tableMap.SourceTable, errQ)
 				continue
 			}
 
@@ -510,13 +534,13 @@ func (s *MySQLSyncer) doInitialSync(ctx context.Context, sourceDB *sql.Conn, tar
 					valuePtrs[i] = &rowValues[i]
 				}
 				if errScan := srcRows.Scan(valuePtrs...); errScan != nil {
-					s.logger.Errorf("[MySQL] scan row fail => %s.%s => %v", sourceDBName, tableMap.SourceTable, errScan)
+					fail("could not read a row of %s.%s: %v", sourceDBName, tableMap.SourceTable, errScan)
 					continue
 				}
 				batchRows = append(batchRows, rowValues)
 				if len(batchRows) == batchSize {
 					if errB := s.batchInsert(ctx, targetDB, targetDBName, tableMap.TargetTable, cols, batchRows); errB != nil {
-						s.logger.Errorf("[MySQL] batchInsert fail => %v", errB)
+						fail("could not write a batch of %s.%s: %v", targetDBName, tableMap.TargetTable, errB)
 					} else {
 						insertedCount += len(batchRows)
 					}
@@ -527,7 +551,7 @@ func (s *MySQLSyncer) doInitialSync(ctx context.Context, sourceDB *sql.Conn, tar
 
 			if len(batchRows) > 0 {
 				if errB2 := s.batchInsert(ctx, targetDB, targetDBName, tableMap.TargetTable, cols, batchRows); errB2 != nil {
-					s.logger.Errorf("[MySQL] batchInsert fail => %v", errB2)
+					fail("could not write the last batch of %s.%s: %v", targetDBName, tableMap.TargetTable, errB2)
 				} else {
 					insertedCount += len(batchRows)
 				}
@@ -536,6 +560,12 @@ func (s *MySQLSyncer) doInitialSync(ctx context.Context, sourceDB *sql.Conn, tar
 				sourceDBName, tableMap.SourceTable, targetDBName, tableMap.TargetTable, insertedCount)
 		}
 	}
+
+	if len(failures) > 0 {
+		return fmt.Errorf("the initial copy is incomplete, so the stream must not start "+
+			"from it: %s", strings.Join(failures, "; "))
+	}
+	return nil
 }
 
 func (s *MySQLSyncer) targetTableExists(ctx context.Context, db *sql.DB, dbName, tableName string) (bool, error) {
@@ -957,6 +987,10 @@ type MyEventHandler struct {
 	// discovering means the task listed no tables, so every table it sees is
 	// replicated under its own name.
 	discovering bool
+	// sourceDatabase is the database on the source this task reads. DDL names a
+	// database of its own, and without this there was nothing to compare it
+	// against: see replicatesSchema.
+	sourceDatabase string
 	// sourceEventAt is when the source made the change the buffer is holding.
 	// The applied lag is measured from it, which is the number a
 	// disaster-recovery setup is judged on.
@@ -964,6 +998,16 @@ type MyEventHandler struct {
 	// dialect is the flavour the target speaks. The zero value is MySQL, so a
 	// handler built without naming one behaves as production does.
 	dialect dialect
+	// sink diverts the statements this handler builds instead of buffering them
+	// for its own flush. The single-stream reader sets it so that one piece of
+	// conversion code serves both the old path and the pipeline.
+	sink func(*statement) error
+	// allowKeyless lets a table with no primary key be replicated on a
+	// best-effort basis: inserts arrive, updates and deletes do not. It is off
+	// by default because the two sides then drift apart silently, which is not a
+	// thing payment data may do. An operator who knows what they are accepting
+	// turns it on deliberately.
+	allowKeyless bool
 }
 
 // flavour reports the dialect to render statements in, defaulting to MySQL.
@@ -1014,11 +1058,21 @@ func (h *MyEventHandler) OnRow(e *canal.RowsEvent) error {
 	// Every mapping that names this table, not just the first. A table listed
 	// twice — the way a fan-out to two targets is spelled — used to stop at the
 	// first match, so the second target silently received nothing.
+	// build renders one statement and hands it on, keeping the first failure.
+	build := func(op, targetTable string, newRow, oldRow []interface{}) {
+		stmt, err := h.buildStatement(op, targetDBName, targetTable, columnNames, table, newRow, oldRow)
+		if err != nil {
+			fail(err)
+			return
+		}
+		fail(h.enqueue(stmt))
+	}
+
 	for _, targetTableName := range targets {
 		switch e.Action {
 		case canal.InsertAction:
 			for _, row := range e.Rows {
-				fail(h.enqueue(h.buildStatement("INSERT", targetDBName, targetTableName, columnNames, table, row, nil)))
+				build("INSERT", targetTableName, row, nil)
 			}
 		case canal.UpdateAction:
 			// An update event carries the rows in before/after pairs. Reading
@@ -1029,19 +1083,21 @@ func (h *MyEventHandler) OnRow(e *canal.RowsEvent) error {
 					"is not a whole number of before/after pairs", sourceDB, tableName, len(e.Rows))
 			}
 			for i := 0; i+1 < len(e.Rows); i += 2 {
-				oldRow := e.Rows[i]
-				newRow := e.Rows[i+1]
-				fail(h.enqueue(h.buildStatement("UPDATE", targetDBName, targetTableName, columnNames, table, newRow, oldRow)))
+				build("UPDATE", targetTableName, e.Rows[i+1], e.Rows[i])
 			}
 		case canal.DeleteAction:
 			for _, row := range e.Rows {
-				fail(h.enqueue(h.buildStatement("DELETE", targetDBName, targetTableName, columnNames, table, row, nil)))
+				build("DELETE", targetTableName, row, nil)
 			}
 		default:
-			// Nothing used to be said here at all, so an action the library grew
-			// later would be dropped in silence.
-			h.logger.Warnf("[MySQL] Ignoring a %q event on %s.%s: this only knows "+
-				"inserts, updates and deletes", e.Action, sourceDB, tableName)
+			// This used to be a warning, so an action the library grew later was
+			// dropped with a log line nobody reads and the two sides diverged.
+			// A change this does not understand is a change it must not claim to
+			// have replicated.
+			return domain.Unrecoverable(
+				"a %q event on %s.%s is not one this knows how to replicate; it knows "+
+					"inserts, updates and deletes. Replication has stopped rather than "+
+					"skip a change", e.Action, sourceDB, tableName)
 		}
 	}
 	return firstErr
@@ -1097,7 +1153,7 @@ func (h *MyEventHandler) buildStatement(
 	table *schema.Table,
 	newRow []interface{},
 	oldRow []interface{},
-) *statement {
+) (*statement, error) {
 	tableSecurity := security.FindTableSecurityFromMappings(tgtTable, h.mappings)
 	secured := tableSecurity.SecurityEnabled && len(tableSecurity.FieldSecurity) > 0
 
@@ -1123,12 +1179,15 @@ func (h *MyEventHandler) buildStatement(
 		return &statement{
 			query: upsertStatement(h.flavour(), tgtDB, tgtTable, cols, 1),
 			args:  process(newRow),
-		}
+		}, nil
 
 	case "UPDATE":
 		if len(table.PKColumns) == 0 {
+			if !h.allowKeyless {
+				return nil, h.refuseKeyless(table.Schema, table.Name)
+			}
 			h.warnAboutMissingKey(tgtDB, tgtTable)
-			return nil
+			return nil, nil
 		}
 		setClauses := make([]string, len(cols))
 		for i, colName := range cols {
@@ -1146,12 +1205,15 @@ func (h *MyEventHandler) buildStatement(
 				strings.Join(setClauses, ", "),
 				strings.Join(whereClauses, " AND ")),
 			args: args,
-		}
+		}, nil
 
 	case "DELETE":
 		if len(table.PKColumns) == 0 {
+			if !h.allowKeyless {
+				return nil, h.refuseKeyless(table.Schema, table.Name)
+			}
 			h.warnAboutMissingKey(tgtDB, tgtTable)
-			return nil
+			return nil, nil
 		}
 		var whereClauses []string
 		var args []interface{}
@@ -1163,9 +1225,25 @@ func (h *MyEventHandler) buildStatement(
 			query: fmt.Sprintf("DELETE FROM %s.%s WHERE %s",
 				tgtDB, tgtTable, strings.Join(whereClauses, " AND ")),
 			args: args,
-		}
+		}, nil
 	}
-	return nil
+	return nil, nil
+}
+
+// refuseKeyless stops replication for a table whose rows cannot be addressed.
+//
+// Carrying on replicates the inserts and drops the updates and the deletes, so
+// the target accumulates rows the source has since changed or removed — and
+// nothing downstream can tell. The row counts even agree for a while. MySQL's
+// own answer to this is sql_require_primary_key, and Group Replication refuses
+// such a table outright; for payment data that is the right severity.
+func (h *MyEventHandler) refuseKeyless(db, table string) error {
+	return domain.Unrecoverable(
+		"%s.%s has no primary key, so its updates and deletes cannot be addressed on "+
+			"the target and the two sides would drift apart with nothing to show it. "+
+			"Add a primary key to the table. If a partial copy is genuinely acceptable, "+
+			"set allowKeyless on the task to replicate its inserts only",
+		db, table)
 }
 
 // warnAboutMissingKey reports a table whose rows cannot be addressed on the
@@ -1200,6 +1278,9 @@ func (h *MyEventHandler) warnAboutMissingKey(db, table string) {
 func (h *MyEventHandler) enqueue(stmt *statement) error {
 	if stmt == nil {
 		return nil
+	}
+	if h.sink != nil {
+		return h.sink(stmt)
 	}
 
 	h.mu.Lock()
@@ -1551,6 +1632,58 @@ func (s *MySQLSyncer) checkRowImage(c *canal.Canal) error {
 	}
 	image, _ := result.GetString(0, 1)
 	return requireFullRowImage(image)
+}
+
+// checkRowMetadata refuses a source whose binlog omits column names.
+//
+// A ROW event carries values and ordinal positions, never names. With
+// binlog_row_metadata=MINIMAL the names have to come from asking the source for
+// the table's current shape — and that is the wrong shape for any event older
+// than the last ALTER TABLE. Resuming from a position before a column was added
+// therefore decodes every row after it one column out of step: the amount lands
+// in the status field, no error is raised anywhere, and a reconciliation by row
+// count finds nothing.
+//
+// Debezium solves this by keeping a schema history and replaying the DDL up to
+// the position it is resuming from. FULL is the cheap half of the same
+// guarantee: the names travel with the event, so no historical schema is needed
+// to read it. It is available from MySQL 8.0.1 and MariaDB 10.5.
+func (s *MySQLSyncer) checkRowMetadata(c *canal.Canal) error {
+	if strings.EqualFold(s.cfg.Type, "mariadb") {
+		return nil
+	}
+
+	result, err := c.Execute(`SHOW GLOBAL VARIABLES LIKE 'binlog_row_metadata'`)
+	if err != nil {
+		// Servers before 8.0.1 have no such variable and always logged the
+		// minimal form. Saying so is better than refusing to start against a
+		// server the setting does not exist on.
+		s.logger.Warnf("[MySQL] Could not read binlog_row_metadata (%v). Column names "+
+			"will be taken from the source's current schema, which is the wrong shape "+
+			"for events older than its last schema change", err)
+		return nil
+	}
+	metadata, _ := result.GetString(0, 1)
+	return requireFullRowMetadata(metadata)
+}
+
+// requireFullRowMetadata reports why a binlog without column names cannot be
+// replicated from safely.
+func requireFullRowMetadata(metadata string) error {
+	switch {
+	case metadata == "":
+		// The variable is absent, which is every server before 8.0.1. There is
+		// nothing to set and nothing to refuse.
+		return nil
+	case strings.EqualFold(metadata, "FULL"):
+		return nil
+	default:
+		return fmt.Errorf("the source logs %s binlog row metadata, so its events carry "+
+			"no column names and they have to be taken from the table's current shape. "+
+			"Any event older than the source's last schema change would then be decoded "+
+			"one column out of step — silently, with the row counts still agreeing. "+
+			"Set binlog_row_metadata=FULL on the source", metadata)
+	}
 }
 
 // requireFullRowImage reports why a binlog row image cannot be replicated from.

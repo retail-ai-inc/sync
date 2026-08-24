@@ -183,6 +183,21 @@ func (p permanentURI) Permanent() bool { return true }
 //
 // The returned error is what the supervisor decides on: nil or a transient
 // failure means try again, an ErrUnrecoverable means stop and tell somebody.
+// Start is the previous streaming path and is no longer reached from the
+// supervisor: app.NewMongoDBSyncer builds a Syncer, which runs the shared
+// pipeline instead.
+//
+// What still lives on this type is what the pipeline reuses — the connections,
+// clusterTime, doInitialSync, claimDirection and the checkpoint store. The rest,
+// which is the change stream per collection and the on-disk buffer behind it
+// (buffer.go, batching.go, and the watch loop in changestream.go), is dead and
+// should be deleted once the pipeline has been verified against a sharded
+// deployment. It is left here rather than removed blind because deleting it
+// takes about three thousand lines with it, including the tests that cover the
+// paths the pipeline reuses.
+//
+// Do not extend it. Anything it does that the pipeline does not belongs in the
+// pipeline.
 func (s *MongoDBSyncer) Start(ctx context.Context) error {
 	if s.sourceClient == nil || s.targetClient == nil {
 		if isURIError(s.connectErr) {

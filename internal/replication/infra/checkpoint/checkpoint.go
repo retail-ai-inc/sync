@@ -117,6 +117,36 @@ func (s *SQLStore) Save(ctx context.Context, key, payload string) error {
 	return nil
 }
 
+// Execer is what SaveTx writes through: a *sql.Tx satisfies it, and so does a
+// *sql.DB for callers that have no transaction open.
+type Execer interface {
+	ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error)
+}
+
+// SaveTx records the position through a caller's transaction, so it commits with
+// whatever else that transaction is applying.
+//
+// This is how a MySQL replica keeps its own position honest: the applier
+// position lives in an InnoDB table and is written in the transaction that
+// applies the rows, so a crash cannot leave the two disagreeing. Saving through
+// a separate connection — which is what Save does — means the data commits at
+// one moment and the position at another, and every crash in between replays
+// the difference. Replaying is safe only because the writes are idempotent; on a
+// table with no primary key it is not safe at all.
+//
+// The table has to exist already: creating it here would be DDL inside the
+// caller's transaction, which MySQL commits implicitly and would break the
+// atomicity this exists to provide. Call Ensure once before streaming.
+func (s *SQLStore) SaveTx(ctx context.Context, tx Execer, key, payload string) error {
+	if _, err := tx.ExecContext(ctx, s.upsert(), s.TaskID, key, payload); err != nil {
+		return fmt.Errorf("write %s: %w", s.qualified(), err)
+	}
+	return nil
+}
+
+// Ensure creates the checkpoint table, so that SaveTx never has to.
+func (s *SQLStore) Ensure(ctx context.Context) error { return s.ensure(ctx) }
+
 // upsert renders the write. The two flavours spell it differently, which is why
 // this was a delete and an insert to begin with.
 //
@@ -172,6 +202,22 @@ func (s *MongoStore) Save(ctx context.Context, key, payload string) error {
 		return fmt.Errorf("write %s: %w", tableName, err)
 	}
 	return nil
+}
+
+// SaveIn records the position through a caller's session, so it commits with
+// whatever else that session's transaction is applying.
+//
+// A change stream applier writes several collections per batch and MongoDB gives
+// no atomicity across them outside a transaction. Recording the position in the
+// same transaction is what makes a batch all-or-nothing: without it the batch
+// can be half applied and the position can point either side of the gap, and the
+// target ends up in a state the source was never in — which is the one kind of
+// inconsistency a failover cannot recover from.
+//
+// The caller has to be inside mongo.SessionContext for this to join its
+// transaction; passed a plain context it is an ordinary write.
+func (s *MongoStore) SaveIn(ctx context.Context, key, payload string) error {
+	return s.Save(ctx, key, payload)
 }
 
 // ----------------------------------------------------------------- Redis

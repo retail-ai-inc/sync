@@ -15,7 +15,7 @@ import (
 func plan(t *testing.T, h *MyEventHandler, query string) ddlDecision {
 	t.Helper()
 
-	decisions, err := h.planDDL(query)
+	decisions, err := h.planDDL(sourceSchema, query)
 	if err != nil {
 		t.Fatalf("planDDL(%q): %v", query, err)
 	}
@@ -65,6 +65,57 @@ func TestTheTargetNameFromTheMappingIsUsed(t *testing.T) {
 	}
 }
 
+// TestALiteralDefaultSurvivesTheRewrite covers a statement carrying a literal.
+//
+// The parser needs a driver registered before it can build a literal value, and
+// without one every literal restored as nothing at all: a column declared
+// DEFAULT 'new' was rewritten as "DEFAULT" with no value. MySQL answered 1064,
+// the task stopped, and it stopped again on every restart, because the offset is
+// deliberately not advanced past a statement that failed to apply. A single
+// CREATE TABLE with a string default was enough to wedge replication for good.
+func TestALiteralDefaultSurvivesTheRewrite(t *testing.T) {
+	h := newHandler(t, nil, mapTable("orders", "orders"))
+
+	got := plan(t, h, "ALTER TABLE orders ADD COLUMN status VARCHAR(16) NOT NULL DEFAULT 'new'")
+
+	if got.action != ddlApply {
+		t.Fatalf("action = %v, want apply (%s)", got.action, got.reason)
+	}
+	if !strings.Contains(got.query, "DEFAULT 'new'") {
+		t.Errorf("statement = %q, want the default value kept", got.query)
+	}
+}
+
+// TestALiteralDefaultKeepsNoCharsetIntroducer covers how the literal is spelled.
+//
+// The driver renders a string as _UTF8MB4'new'. MySQL accepts that, but it makes
+// every rewritten statement differ from the one it came from, which is the first
+// thing anybody compares when a target's schema is doubted.
+func TestALiteralDefaultKeepsNoCharsetIntroducer(t *testing.T) {
+	h := newHandler(t, nil, mapTable("orders", "orders"))
+
+	got := plan(t, h, "ALTER TABLE orders ADD COLUMN status VARCHAR(16) NOT NULL DEFAULT 'new'")
+
+	if strings.Contains(strings.ToUpper(got.query), "_UTF8MB4") {
+		t.Errorf("statement = %q, want no charset introducer on the literal", got.query)
+	}
+}
+
+// TestANumericDefaultSurvivesTheRewrite covers the other literal kind, which the
+// missing driver dropped just as silently.
+func TestANumericDefaultSurvivesTheRewrite(t *testing.T) {
+	h := newHandler(t, nil, mapTable("orders", "orders"))
+
+	got := plan(t, h, "ALTER TABLE orders ADD COLUMN retries INT NOT NULL DEFAULT 3")
+
+	if got.action != ddlApply {
+		t.Fatalf("action = %v, want apply (%s)", got.action, got.reason)
+	}
+	if !strings.Contains(got.query, "DEFAULT 3") {
+		t.Errorf("statement = %q, want the default value kept", got.query)
+	}
+}
+
 func TestASchemaQualifiedStatementIsRewritten(t *testing.T) {
 	h := newHandler(t, nil, mapTable("orders", "orders"))
 
@@ -80,6 +131,100 @@ func TestASchemaQualifiedStatementIsRewritten(t *testing.T) {
 
 // TestADDLOnAnUnmappedTableIsSkipped is what keeps a shared source server from
 // dragging its other schema changes into the replica.
+// planFrom runs one statement through the planner as though the source had
+// issued it against defaultSchema, which is what the binlog event carries.
+func planFrom(t *testing.T, h *MyEventHandler, defaultSchema, query string) ddlDecision {
+	t.Helper()
+
+	decisions, err := h.planDDL(defaultSchema, query)
+	if err != nil {
+		t.Fatalf("planDDL(%q): %v", query, err)
+	}
+	if len(decisions) != 1 {
+		t.Fatalf("planDDL(%q) produced %d decisions, want 1", query, len(decisions))
+	}
+	return decisions[0]
+}
+
+// TestADDLInAnotherDatabaseIsSkipped covers a source server hosting more than
+// one database, which is the ordinary case.
+//
+// The table reference used to be matched on its name alone and its database
+// thrown away, so this statement — which has nothing to do with the task — was
+// rewritten as one against the target and applied. The schema of the
+// disaster-recovery copy could be changed by any database on the source that
+// happened to hold a table of the same name.
+func TestADDLInAnotherDatabaseIsSkipped(t *testing.T) {
+	h := newHandler(t, nil, mapTable("orders", "orders"))
+
+	got := plan(t, h, "ALTER TABLE warehouse.orders ADD COLUMN bin VARCHAR(20)")
+
+	if got.action != ddlSkip {
+		t.Fatalf("action = %v, want skip; statement = %q", got.action, got.query)
+	}
+	if !strings.Contains(got.reason, "warehouse") {
+		t.Errorf("reason = %q, want the database named", got.reason)
+	}
+}
+
+// TestAnUnqualifiedDDLFromAnotherDatabaseIsSkipped covers the same statement
+// without the qualifier: the source resolves it against the database the
+// session was using, and so must this.
+func TestAnUnqualifiedDDLFromAnotherDatabaseIsSkipped(t *testing.T) {
+	h := newHandler(t, nil, mapTable("orders", "orders"))
+
+	got := planFrom(t, h, "warehouse", "ALTER TABLE orders ADD COLUMN bin VARCHAR(20)")
+
+	if got.action != ddlSkip {
+		t.Fatalf("action = %v, want skip; statement = %q", got.action, got.query)
+	}
+}
+
+// TestAnUnqualifiedDDLFromTheReplicatedDatabaseIsApplied is the other side of
+// it. Nearly every statement in a binlog is unqualified, so a filter that
+// refused them would stop schema changes reaching the target altogether.
+func TestAnUnqualifiedDDLFromTheReplicatedDatabaseIsApplied(t *testing.T) {
+	h := newHandler(t, nil, mapTable("orders", "orders"))
+
+	got := planFrom(t, h, sourceSchema, "ALTER TABLE orders ADD COLUMN email VARCHAR(100)")
+
+	if got.action != ddlApply {
+		t.Fatalf("action = %v, want apply (%s)", got.action, got.reason)
+	}
+	if !strings.Contains(got.query, "`main`.`orders`") {
+		t.Errorf("statement = %q, want the target named", got.query)
+	}
+}
+
+// TestDiscoveryDoesNotReachIntoAnotherDatabase covers the task that lists no
+// tables. It replicates every table it sees — every table of one database, not
+// of the server.
+func TestDiscoveryDoesNotReachIntoAnotherDatabase(t *testing.T) {
+	h := newHandler(t, nil, nil)
+	h.discovering = true
+
+	got := plan(t, h, "ALTER TABLE warehouse.pallets ADD COLUMN bin VARCHAR(20)")
+
+	if got.action != ddlSkip {
+		t.Fatalf("action = %v, want skip; statement = %q", got.action, got.query)
+	}
+}
+
+// TestWithNoSourceDatabaseTheNameStillMatches pins the fallback down. A handler
+// built without a source database cannot tell one from another, and refusing
+// every statement there would be a worse failure than the one being fixed: the
+// target's schema would silently stop tracking the source's.
+func TestWithNoSourceDatabaseTheNameStillMatches(t *testing.T) {
+	h := newHandler(t, nil, mapTable("orders", "orders"))
+	h.sourceDatabase = ""
+
+	got := plan(t, h, "ALTER TABLE warehouse.orders ADD COLUMN bin VARCHAR(20)")
+
+	if got.action != ddlApply {
+		t.Fatalf("action = %v, want apply (%s)", got.action, got.reason)
+	}
+}
+
 func TestADDLOnAnUnmappedTableIsSkipped(t *testing.T) {
 	h := newHandler(t, nil, mapTable("orders", "orders"))
 
@@ -154,7 +299,7 @@ func TestAnAdditiveIndexIsApplied(t *testing.T) {
 func TestAnUnparseableStatementIsReported(t *testing.T) {
 	h := newHandler(t, nil, mapTable("orders", "orders"))
 
-	if _, err := h.planDDL("this is not sql"); err == nil {
+	if _, err := h.planDDL(sourceSchema, "this is not sql"); err == nil {
 		t.Error("planDDL accepted a statement it cannot have parsed")
 	}
 }

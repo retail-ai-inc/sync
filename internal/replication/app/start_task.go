@@ -24,12 +24,17 @@ func StopTask(id string) error { return infra.SetEnable(id, false) }
 
 // The four engine adapters, constructed by the process entry point once per
 // configured task.
-func NewMongoDBSyncer(cfg config.SyncConfig, globalConfig *config.Config, logger *logrus.Logger) *mongodb.MongoDBSyncer {
-	return mongodb.NewMongoDBSyncer(cfg, globalConfig, logger)
+//
+// MySQL and MongoDB run through the shared pipeline: one stream per source
+// server, batches cut only on source transaction boundaries, each batch applied
+// atomically with the position that points past it. PostgreSQL and Redis still
+// carry their own loops.
+func NewMongoDBSyncer(cfg config.SyncConfig, globalConfig *config.Config, logger *logrus.Logger) *mongodb.Syncer {
+	return mongodb.NewSyncer(cfg, globalConfig, logger)
 }
 
-func NewMySQLSyncer(cfg config.SyncConfig, logger *logrus.Logger) *mysql.MySQLSyncer {
-	return mysql.NewMySQLSyncer(cfg, logger)
+func NewMySQLSyncer(cfg config.SyncConfig, logger *logrus.Logger) *mysql.Syncer {
+	return mysql.NewSyncer(cfg, logger)
 }
 
 func NewPostgreSQLSyncer(cfg config.SyncConfig, logger *logrus.Logger) *postgresql.PostgreSQLSyncer {

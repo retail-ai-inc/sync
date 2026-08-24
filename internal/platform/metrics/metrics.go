@@ -377,6 +377,49 @@ const (
 )
 
 // SetDeadLettered records how much this task could not apply.
+// Stream health. A replication task that is reading nothing looks exactly like
+// one that is up to date, so these three say which it is.
+const (
+	// LastEventAgeSeconds is how long since anything at all arrived from the
+	// source, heartbeats included.
+	//
+	// The applied lag cannot answer this. It is measured from the events that
+	// arrive, so a stream that has stopped delivering leaves it frozen at
+	// whatever it last was — and an alert on a frozen gauge never fires. This
+	// one grows whenever the link is silent, which is the condition worth
+	// waking somebody for.
+	LastEventAgeSeconds = "sync_source_last_event_age_seconds"
+	helpLastEventAge    = "Seconds since any event, heartbeat included, arrived from the source"
+
+	// QueueUsed is how much of the reader's hand-off queue is occupied. It
+	// filling up is what back pressure looks like from outside.
+	QueueUsed  = "sync_reader_queue_used"
+	helpQueue  = "Events read from the source and not yet applied"
+	QueueTotal = "sync_reader_queue_capacity"
+	helpQueueT = "Capacity of the queue between the reader and the applier"
+
+	// DisconnectsTotal counts how often the source stream had to be reopened.
+	// A climbing count is the shape of a link about to fail for good.
+	DisconnectsTotal = "sync_source_disconnects_total"
+	helpDisconnects  = "Times the source stream was reopened after an error"
+)
+
+// SetLastEventAge records how long the source has been silent.
+func SetLastEventAge(labels Labels, seconds float64) {
+	Default.SetGauge(LastEventAgeSeconds, helpLastEventAge, labels, seconds)
+}
+
+// SetQueue records the reader hand-off queue's depth and capacity.
+func SetQueue(labels Labels, used, capacity int) {
+	Default.SetGauge(QueueUsed, helpQueue, labels, float64(used))
+	Default.SetGauge(QueueTotal, helpQueueT, labels, float64(capacity))
+}
+
+// CountDisconnect records one reopening of the source stream.
+func CountDisconnect(labels Labels) {
+	Default.AddCounter(DisconnectsTotal, helpDisconnects, labels, 1)
+}
+
 func SetDeadLettered(labels Labels, count float64) {
 	Default.SetGauge(DeadLettered, helpDeadLettered, labels, count)
 }

@@ -12,6 +12,12 @@ import (
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/format"
 	"github.com/pingcap/tidb/pkg/parser/model"
+	// The parser builds literal values through a driver that has to be
+	// registered. Without one every literal restores as nothing at all, so a
+	// column declared DEFAULT 'new' was rewritten for the target as "DEFAULT"
+	// with no value — a syntax error that stopped replication on the first
+	// schema change and could not be got past without editing the source.
+	_ "github.com/pingcap/tidb/pkg/parser/test_driver"
 
 	"github.com/retail-ai-inc/sync/internal/platform/dsn"
 	"github.com/retail-ai-inc/sync/internal/platform/resilience"
@@ -102,9 +108,33 @@ func isDestructive(stmt ast.StmtNode) (bool, string) {
 	return false, ""
 }
 
+// replicatesSchema reports whether a database a DDL statement names is the one
+// this task reads.
+//
+// A table reference used to be matched on its name alone, with the database it
+// named discarded and overwritten with the target's. A source server hosting
+// more than one database was all it took: an ALTER TABLE run against some other
+// database that happened to hold a table of the same name was rewritten and
+// applied to the replication target, changing the schema of the disaster-
+// recovery copy from a statement that had nothing to do with it. The row path
+// never had this problem — canal filters row events on database and table both.
+func (h *MyEventHandler) replicatesSchema(schema string) bool {
+	if h.sourceDatabase == "" || schema == "" {
+		// There is nothing to compare against: either the handler was built
+		// without a source database, or the statement is unqualified and its
+		// event carried no default schema. Falling back to the name-only match
+		// keeps propagating what was propagated before; refusing here would
+		// silently stop replicating schema changes altogether, which is the
+		// failure this whole path exists to prevent.
+		return true
+	}
+	return strings.EqualFold(schema, h.sourceDatabase)
+}
+
 // targetTableFor reports the target name a source table is replicated to, and
 // whether the task replicates it at all. The lookup matches on the table name
-// alone, which is what the row path does.
+// alone; the database the name was qualified with is checked separately, by
+// replicatesSchema.
 func (h *MyEventHandler) targetTableFor(source string) (string, bool) {
 	for _, mapping := range h.mappings {
 		for _, table := range mapping.Tables {
@@ -129,7 +159,7 @@ func (h *MyEventHandler) targetTableFor(source string) (string, bool) {
 // decides. Everything else is rewritten with the target's database and table
 // names and applied, so a column added at the source exists on the target
 // before the first row that uses it arrives.
-func (h *MyEventHandler) planDDL(query string) ([]ddlDecision, error) {
+func (h *MyEventHandler) planDDL(defaultSchema, query string) ([]ddlDecision, error) {
 	stmts, _, err := parser.New().Parse(query, "", "")
 	if err != nil {
 		return nil, fmt.Errorf("parse %q: %w", query, err)
@@ -149,7 +179,19 @@ func (h *MyEventHandler) planDDL(query string) ([]ddlDecision, error) {
 		}
 
 		replicated := false
+		elsewhere := ""
 		for _, ref := range refs {
+			// An unqualified name means the database the event was issued
+			// against, which is what the source server itself would resolve it
+			// to.
+			schema := ref.Schema.O
+			if schema == "" {
+				schema = defaultSchema
+			}
+			if !h.replicatesSchema(schema) {
+				elsewhere = schema
+				continue
+			}
 			if target, ok := h.targetTableFor(ref.Name.O); ok {
 				replicated = true
 				ref.Schema = model.NewCIStr(targetDBName)
@@ -157,10 +199,11 @@ func (h *MyEventHandler) planDDL(query string) ([]ddlDecision, error) {
 			}
 		}
 		if !replicated {
-			decisions = append(decisions, ddlDecision{
-				action: ddlSkip,
-				reason: "names no replicated table",
-			})
+			reason := "names no replicated table"
+			if elsewhere != "" {
+				reason = fmt.Sprintf("names a table in %s, which this task does not read", elsewhere)
+			}
+			decisions = append(decisions, ddlDecision{action: ddlSkip, reason: reason})
 			continue
 		}
 
@@ -170,7 +213,10 @@ func (h *MyEventHandler) planDDL(query string) ([]ddlDecision, error) {
 		}
 
 		var sb strings.Builder
-		ctx := format.NewRestoreCtx(format.DefaultRestoreFlags, &sb)
+		// RestoreStringWithoutCharset keeps the introducer off the literal:
+		// the driver renders _UTF8MB4'new', which MySQL accepts but which
+		// makes every rewritten statement differ from the one it came from.
+		ctx := format.NewRestoreCtx(format.DefaultRestoreFlags|format.RestoreStringWithoutCharset, &sb)
 		if err := stmt.Restore(ctx); err != nil {
 			return nil, fmt.Errorf("rewrite %q for the target: %w", query, err)
 		}
@@ -195,7 +241,7 @@ func (h *MyEventHandler) OnDDL(_ *replication.EventHeader, _ mysql.Position, e *
 	}
 	query := string(e.Query)
 
-	decisions, err := h.planDDL(query)
+	decisions, err := h.planDDL(string(e.Schema), query)
 	if err != nil {
 		// The statement cannot be read, which is also true of the BEGIN and
 		// COMMIT markers that arrive as query events. Carrying on is right for
