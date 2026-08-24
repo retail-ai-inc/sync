@@ -11,19 +11,22 @@ import (
 	_ "github.com/mattn/go-sqlite3" // SQLite driver
 	"github.com/retail-ai-inc/sync/internal/platform/sqlite"
 	"github.com/sirupsen/logrus"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
-	"go.mongodb.org/mongo-driver/mongo/readpref"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 )
 
 // GetMongoClient establishes a MongoDB connection using the provided URI
 func GetMongoClient(ctx context.Context, uri string) (*mongo.Client, error) {
 	clientOptions := options.Client().ApplyURI(uri)
 	clientOptions.SetConnectTimeout(10 * time.Second)
-	clientOptions.SetSocketTimeout(30 * time.Second)
 	clientOptions.SetServerSelectionTimeout(10 * time.Second)
+	// The driver's v2 client has one timeout covering a whole operation rather
+	// than a separate socket timeout, which is what the socket timeout was being
+	// used to approximate.
+	clientOptions.SetTimeout(30 * time.Second)
 
-	client, err := mongo.Connect(ctx, clientOptions)
+	client, err := mongo.Connect(clientOptions)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to MongoDB: %w", err)
 	}

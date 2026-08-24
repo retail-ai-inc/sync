@@ -12,10 +12,9 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
 // SchemaRequest represents a request to get table structure
@@ -145,7 +144,7 @@ func getMongoDBSchema(c context.Context, req SchemaRequest) (SchemaResponse, err
 		SetServerSelectionTimeout(10 * time.Second).
 		SetDirect(true) // Direct mode, don't try to discover replica set
 
-	client, err := mongo.Connect(ctx, clientOptions)
+	client, err := mongo.Connect(clientOptions)
 	if err != nil {
 		return SchemaResponse{}, fmt.Errorf("failed to connect to MongoDB: %w", err)
 	}
@@ -243,35 +242,35 @@ const schemaSampleSize = 100
 //
 // The switch used to name none of the types the driver actually decodes BSON
 // into, so every one of them fell through and came back as a Go type name: an
-// _id was "primitive.ObjectID" and every array was "primitive.A", because the
-// array case matched a bare []interface{} and the driver produces primitive.A.
+// _id was "bson.ObjectID" and every array was "bson.A", because the
+// array case matched a bare []interface{} and the driver produces bson.A.
 // Every schema query therefore returned at least two type names the caller —
 // the interface that builds table mappings out of this — cannot map.
 func getMongoFieldType(value interface{}) string {
 	switch value.(type) {
-	case int, int32, int64, primitive.Timestamp:
+	case int, int32, int64, bson.Timestamp:
 		return "int"
 	case float32, float64:
 		return "float"
-	case primitive.Decimal128:
+	case bson.Decimal128:
 		return "decimal"
-	case string, primitive.Symbol, primitive.JavaScript:
+	case string, bson.Symbol, bson.JavaScript:
 		return "string"
 	case bool:
 		return "bool"
-	case time.Time, primitive.DateTime:
+	case time.Time, bson.DateTime:
 		return "date"
-	case primitive.ObjectID:
+	case bson.ObjectID:
 		return "objectId"
-	case primitive.Binary:
+	case bson.Binary:
 		return "binary"
-	case primitive.Regex:
+	case bson.Regex:
 		return "regex"
 	case bson.M, map[string]interface{}, bson.D:
 		return "object"
-	case []interface{}, primitive.A:
+	case []interface{}, bson.A:
 		return "array"
-	case nil, primitive.Null:
+	case nil, bson.Null:
 		return "null"
 	default:
 		return fmt.Sprintf("%T", value)

@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"time"
 
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/retail-ai-inc/sync/internal/replication/app/pipeline"
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
@@ -38,7 +38,7 @@ func (c *Chunks) NextChunk(ctx context.Context, ns domain.Namespace, after strin
 	defer session.EndSession(ctx)
 
 	var chunk pipeline.Chunk
-	err = mongo.WithSession(ctx, session, func(sc mongo.SessionContext) error {
+	err = mongo.WithSession(ctx, session, func(sc context.Context) error {
 		filter := bson.M{}
 		if after != "" {
 			id, err := decodeID(after)

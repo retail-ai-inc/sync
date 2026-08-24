@@ -7,10 +7,10 @@ import (
 	"strings"
 	"time"
 
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
-	"go.mongodb.org/mongo-driver/mongo/readconcern"
-	"go.mongodb.org/mongo-driver/mongo/writeconcern"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/mongo/readconcern"
+	"go.mongodb.org/mongo-driver/v2/mongo/writeconcern"
 
 	"github.com/sirupsen/logrus"
 
@@ -59,6 +59,11 @@ type Applier struct {
 	// a batch spanning shards is a two-phase commit, so the cost is real and
 	// worth measuring; the default is still the correct one.
 	NoTransaction bool
+
+	// bulk remembers whether the target has the cross-collection bulkWrite
+	// command, so a target without it is discovered once rather than on every
+	// batch.
+	bulk clientBulkSupport
 }
 
 // Apply writes every run of the batch, then the position.
@@ -108,7 +113,11 @@ func (a *Applier) Apply(ctx context.Context, runs [][]*domain.Event, pos domain.
 		SetReadConcern(readconcern.Snapshot()).
 		SetWriteConcern(writeconcern.Majority())
 
-	_, err = session.WithTransaction(ctx, func(sc mongo.SessionContext) (interface{}, error) {
+	// The callback is handed a context carrying the session, so every write it
+	// makes joins the transaction. In the driver's v1 this was a distinct
+	// SessionContext type; in v2 it is an ordinary context and the session is
+	// recovered from it when needed.
+	_, err = session.WithTransaction(ctx, func(sc context.Context) (interface{}, error) {
 		bodyStarted := time.Now()
 		written, err := a.write(sc, runs)
 		if err != nil {
@@ -177,6 +186,28 @@ func onlySchemaChange(runs [][]*domain.Event) (*domain.Event, bool) {
 // its operations may go out together; between runs they may not.
 func (a *Applier) write(ctx context.Context, runs [][]*domain.Event) (roundTrips int, err error) {
 	for _, run := range runs {
+		// One request for the whole run, whatever collections it touches. A
+		// batch spanning two collections cost two requests before, against a
+		// 7 ms round trip and a 30 ms batch — two thirds of the time a batch
+		// took was waiting for the network.
+		if !a.bulk.unsupported.Load() {
+			trips, err := a.writeRunAsOne(ctx, run)
+			if err == nil {
+				roundTrips += trips
+				continue
+			}
+			if !lacksClientBulkWrite(err) {
+				return roundTrips + trips, err
+			}
+			// The target has no bulkWrite command, which means it is older than
+			// 8.0. Noted once, and written per collection from here on.
+			a.bulk.unsupported.Store(true)
+			if a.Logger != nil {
+				a.Logger.Warnf("[MongoDB] The target has no bulkWrite command, so each "+
+					"collection in a batch takes its own request: %v", err)
+			}
+		}
+
 		for _, group := range groupByCollection(run) {
 			target := a.targetFor(group.collection)
 			collection := a.Client.Database(a.TargetDatabase).Collection(target)
@@ -184,10 +215,6 @@ func (a *Applier) write(ctx context.Context, runs [][]*domain.Event) (roundTrips
 			// Unordered: no document appears twice in a run, so the server is
 			// free to apply them in any order — which is the same freedom a
 			// secondary's writer threads get, and for the same reason.
-			//
-			// One request per object. MongoDB 8.0 has a command that writes
-			// several at once, which would collapse these into one; whether that
-			// is worth a driver upgrade is what the round trip count answers.
 			roundTrips++
 			if _, err := collection.BulkWrite(ctx, group.models, options.BulkWrite().SetOrdered(false)); err != nil {
 				return roundTrips, fmt.Errorf("write %d changes to %s.%s: %w",

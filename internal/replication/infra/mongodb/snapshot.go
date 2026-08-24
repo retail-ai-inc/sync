@@ -5,10 +5,9 @@ import (
 	"fmt"
 
 	"github.com/retail-ai-inc/sync/internal/platform/resilience"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
 // clusterTime reports the source's current cluster time.
@@ -18,11 +17,11 @@ import (
 // which is what happens with no start point at all — loses every write made
 // while the copy was running, and a first copy of a payment collection runs
 // for as long as it runs.
-func (s *MongoDBSyncer) clusterTime(ctx context.Context) (primitive.Timestamp, error) {
+func (s *MongoDBSyncer) clusterTime(ctx context.Context) (bson.Timestamp, error) {
 	raw, err := s.sourceClient.Database("admin").
 		RunCommand(ctx, bson.D{{Key: "hello", Value: 1}}).Raw()
 	if err != nil {
-		return primitive.Timestamp{}, fmt.Errorf("read cluster time: %w", err)
+		return bson.Timestamp{}, fmt.Errorf("read cluster time: %w", err)
 	}
 	return clusterTimeFrom(raw)
 }
@@ -30,18 +29,18 @@ func (s *MongoDBSyncer) clusterTime(ctx context.Context) (primitive.Timestamp, e
 // clusterTimeFrom picks the timestamp out of a hello reply. A replica set
 // answers with both $clusterTime and operationTime; a standalone with neither,
 // and a standalone cannot serve a change stream anyway.
-func clusterTimeFrom(raw bson.Raw) (primitive.Timestamp, error) {
+func clusterTimeFrom(raw bson.Raw) (bson.Timestamp, error) {
 	if v, err := raw.LookupErr("$clusterTime", "clusterTime"); err == nil {
 		if t, i, ok := v.TimestampOK(); ok {
-			return primitive.Timestamp{T: t, I: i}, nil
+			return bson.Timestamp{T: t, I: i}, nil
 		}
 	}
 	if v, err := raw.LookupErr("operationTime"); err == nil {
 		if t, i, ok := v.TimestampOK(); ok {
-			return primitive.Timestamp{T: t, I: i}, nil
+			return bson.Timestamp{T: t, I: i}, nil
 		}
 	}
-	return primitive.Timestamp{}, fmt.Errorf(
+	return bson.Timestamp{}, fmt.Errorf(
 		"the source reported no cluster time: change streams need a replica set")
 }
 

@@ -3,7 +3,7 @@ package mongodb
 import (
 	"time"
 
-	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 // idOf reports the _id of a document, or nil when it does not carry one.

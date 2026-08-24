@@ -16,9 +16,9 @@ import (
 	"github.com/retail-ai-inc/sync/internal/platform/dsn"
 
 	_ "github.com/go-sql-driver/mysql"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/retail-ai-inc/sync/test/harness"
 )
@@ -312,7 +312,7 @@ func openSchemaMongo(t *testing.T) *mongo.Client {
 	t.Helper()
 
 	uri := "mongodb://" + harness.MongoSource + "/?directConnection=true"
-	client, err := mongo.Connect(t.Context(), options.Client().ApplyURI(uri))
+	client, err := mongo.Connect(options.Client().ApplyURI(uri))
 	if err != nil {
 		t.Fatalf("connect %s: %v", harness.MongoSource, err)
 	}
@@ -466,7 +466,7 @@ func TestTheSampleReachesBeyondTheNewestFewDocuments(t *testing.T) {
 }
 
 // TestTheMongoIDTypeIsADatabaseType covers the field every document has. It was
-// reported as "primitive.ObjectID" — the Go type the driver decodes it into —
+// reported as "bson.ObjectID" — the Go type the driver decodes it into —
 // because the switch had no case for it, so every schema query returned at least
 // one type name the interface cannot map to a column type.
 func TestTheMongoIDTypeIsADatabaseType(t *testing.T) {
@@ -594,7 +594,7 @@ func TestMongoCredentialsAreIgnoredWithoutAPassword(t *testing.T) {
 
 // TestAnArrayIsReportedAsAnArray covers what the driver really produces. The
 // array case matched a bare []interface{} while the driver decodes a BSON array
-// into primitive.A, so the branch was dead for real documents and every array
+// into bson.A, so the branch was dead for real documents and every array
 // came back as the Go type name. The unit test that showed "array" passed only
 // because it built a plain []interface{} by hand.
 func TestAnArrayIsReportedAsAnArray(t *testing.T) {

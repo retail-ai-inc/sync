@@ -16,9 +16,9 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/lib/pq"
 	goredis "github.com/redis/go-redis/v9"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/retail-ai-inc/sync/internal/monitoring/infra"
 	"github.com/retail-ai-inc/sync/internal/platform/config"
@@ -64,7 +64,7 @@ func openMongo(t *testing.T, endpoint string) *mongo.Client {
 	t.Helper()
 
 	uri := "mongodb://" + endpoint + "/?directConnection=true"
-	client, err := mongo.Connect(t.Context(), options.Client().ApplyURI(uri))
+	client, err := mongo.Connect(options.Client().ApplyURI(uri))
 	if err != nil {
 		t.Fatalf("connect %s: %v", endpoint, err)
 	}

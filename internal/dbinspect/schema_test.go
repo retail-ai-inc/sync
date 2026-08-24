@@ -10,8 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 func TestGetMongoFieldType(t *testing.T) {
@@ -45,9 +44,9 @@ func TestGetMongoFieldType(t *testing.T) {
 
 // TestTheDriversTypesAreNamedAsDatabaseTypes covers what a caller receives. The
 // switch named none of the types the driver actually decodes BSON into, so every
-// one of them fell through to a Go type name — an _id was "primitive.ObjectID"
-// and every array was "primitive.A", because the array case matched a bare
-// []interface{} while the driver produces primitive.A. The interface builds
+// one of them fell through to a Go type name — an _id was "bson.ObjectID"
+// and every array was "bson.A", because the array case matched a bare
+// []interface{} while the driver produces bson.A. The interface builds
 // table mappings out of this, so every schema query returned at least two type
 // names it could not map.
 func TestTheDriversTypesAreNamedAsDatabaseTypes(t *testing.T) {
@@ -55,13 +54,13 @@ func TestTheDriversTypesAreNamedAsDatabaseTypes(t *testing.T) {
 		value interface{}
 		want  string
 	}{
-		{primitive.NewObjectID(), "objectId"},
-		{primitive.NewDateTimeFromTime(time.Now()), "date"},
-		{primitive.Decimal128{}, "decimal"},
+		{bson.NewObjectID(), "objectId"},
+		{bson.NewDateTimeFromTime(time.Now()), "date"},
+		{bson.Decimal128{}, "decimal"},
 		{bson.A{1, 2}, "array"},
 		{bson.D{{Key: "a", Value: 1}}, "object"},
-		{primitive.Binary{}, "binary"},
-		{primitive.Null{}, "null"},
+		{bson.Binary{}, "binary"},
+		{bson.Null{}, "null"},
 	}
 
 	for _, tc := range tests {

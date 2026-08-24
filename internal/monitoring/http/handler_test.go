@@ -3,15 +3,16 @@ package monitoringhttp
 import (
 	"database/sql"
 	"encoding/json"
-	"github.com/retail-ai-inc/sync/internal/platform/metrics"
-	"github.com/retail-ai-inc/sync/internal/platform/sqlite"
-	"github.com/retail-ai-inc/sync/internal/platform/sqlite/sqlitetest"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/retail-ai-inc/sync/internal/platform/metrics"
+	"github.com/retail-ai-inc/sync/internal/platform/sqlite"
+	"github.com/retail-ai-inc/sync/internal/platform/sqlite/sqlitetest"
 
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/mattn/go-sqlite3"

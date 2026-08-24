@@ -11,7 +11,7 @@ import (
 	"testing"
 
 	"github.com/retail-ai-inc/sync/internal/platform/config"
-	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 func enabled(fields ...FieldSecurityConfig) TableSecurity {

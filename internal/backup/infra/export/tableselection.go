@@ -8,10 +8,9 @@ import (
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/sirupsen/logrus"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
 // expandAndGroupTables Expand regex patterns and group tables for merging
@@ -104,7 +103,7 @@ func (e *BackupExecutor) getMongoDBCollections(ctx context.Context, config *Exec
 	connStr := buildMongoDBConnectionString(config.Database.URL, config.Database.Username, config.Database.Password)
 
 	// Connect to MongoDB
-	client, err := mongo.Connect(ctx, options.Client().ApplyURI(connStr))
+	client, err := mongo.Connect(options.Client().ApplyURI(connStr))
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to MongoDB: %w", err)
 	}
@@ -114,7 +113,7 @@ func (e *BackupExecutor) getMongoDBCollections(ctx context.Context, config *Exec
 	database := client.Database(config.Database.Database)
 
 	// List collections matching the pattern
-	filter := bson.M{"name": primitive.Regex{Pattern: pattern, Options: ""}}
+	filter := bson.M{"name": bson.Regex{Pattern: pattern, Options: ""}}
 	cursor, err := database.ListCollections(ctx, filter)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list collections: %w", err)

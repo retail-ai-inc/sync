@@ -3,12 +3,13 @@ package httpapi
 import (
 	"context"
 	"database/sql"
-	"github.com/retail-ai-inc/sync/internal/platform/sqlite"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/retail-ai-inc/sync/internal/platform/sqlite"
 
 	"github.com/go-chi/chi/v5"
 )

@@ -16,8 +16,8 @@ import (
 	"github.com/retail-ai-inc/sync/internal/replication/infra/discovery"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/verify"
 	"github.com/sirupsen/logrus"
-	"go.mongodb.org/mongo-driver/mongo"
-	mongooptions "go.mongodb.org/mongo-driver/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	mongooptions "go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
 // The metrics a comparison records.
@@ -295,14 +295,14 @@ func mysqlUpsert(schema, table string, columns []string) string {
 // ---------------------------------------------------------------- MongoDB
 
 func checkMongoTask(ctx context.Context, task config.SyncConfig, n notifier, log *logrus.Logger) {
-	source, err := mongo.Connect(ctx, mongooptions.Client().ApplyURI(task.SourceConnection))
+	source, err := mongo.Connect(mongooptions.Client().ApplyURI(task.SourceConnection))
 	if err != nil {
 		log.Errorf("[Verify] Task %d: connect to the source: %v", task.ID, err)
 		return
 	}
 	defer func() { _ = source.Disconnect(ctx) }()
 
-	target, err := mongo.Connect(ctx, mongooptions.Client().ApplyURI(task.TargetConnection))
+	target, err := mongo.Connect(mongooptions.Client().ApplyURI(task.TargetConnection))
 	if err != nil {
 		log.Errorf("[Verify] Task %d: connect to the target: %v", task.ID, err)
 		return

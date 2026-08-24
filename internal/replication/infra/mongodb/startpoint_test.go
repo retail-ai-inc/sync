@@ -4,8 +4,7 @@ import (
 	"fmt"
 	"testing"
 
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 // hello encodes the reply the source sends, so the reader can be exercised
@@ -23,7 +22,7 @@ func hello(t *testing.T, doc bson.M) bson.Raw {
 // ----------------------------------------------------------- cluster time
 
 func TestTheClusterTimeComesFromTheReply(t *testing.T) {
-	want := primitive.Timestamp{T: 1755800000, I: 7}
+	want := bson.Timestamp{T: 1755800000, I: 7}
 
 	got, err := clusterTimeFrom(hello(t, bson.M{
 		"ok":           1,
@@ -40,7 +39,7 @@ func TestTheClusterTimeComesFromTheReply(t *testing.T) {
 // TestTheOperationTimeIsTheFallback covers a deployment that answers with only
 // the one field.
 func TestTheOperationTimeIsTheFallback(t *testing.T) {
-	want := primitive.Timestamp{T: 1755800001, I: 2}
+	want := bson.Timestamp{T: 1755800001, I: 2}
 
 	got, err := clusterTimeFrom(hello(t, bson.M{"ok": 1, "operationTime": want}))
 	if err != nil {

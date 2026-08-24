@@ -12,6 +12,7 @@ import (
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/format"
 	"github.com/pingcap/tidb/pkg/parser/model"
+
 	// The parser builds literal values through a driver that has to be
 	// registered. Without one every literal restores as nothing at all, so a
 	// column declared DEFAULT 'new' was rewritten for the target as "DEFAULT"

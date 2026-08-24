@@ -6,8 +6,8 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
 // retryAttempts and retryDelay are what a database operation gets before its
@@ -77,7 +77,7 @@ func ReopenMongoConnection(ctx context.Context, logger logrus.FieldLogger, connU
 
 	err := Retry(ctx, 5, 2*time.Second, 2.0, func() error {
 		var connErr error
-		client, connErr = mongo.Connect(ctx, options.Client().ApplyURI(connURI))
+		client, connErr = mongo.Connect(options.Client().ApplyURI(connURI))
 		if connErr != nil {
 			return permanentUnless(connErr)
 		}

@@ -14,9 +14,9 @@ import (
 	"github.com/retail-ai-inc/sync/internal/platform/config"
 	"github.com/retail-ai-inc/sync/internal/platform/dsn"
 	"github.com/sirupsen/logrus"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
 // CountAndLogMongoDB obtains document counts for MongoDB collections
@@ -401,14 +401,14 @@ func LogYesterdayMongoDBVolume(ctx context.Context, sc config.SyncConfig, log *l
 func connectBothMongo(
 	ctx context.Context, sc config.SyncConfig, log *logrus.Logger, purpose string,
 ) (source, target *mongo.Client, disconnect func(), ok bool) {
-	source, err := mongo.Connect(ctx, options.Client().ApplyURI(sc.SourceConnection))
+	source, err := mongo.Connect(options.Client().ApplyURI(sc.SourceConnection))
 	if err != nil {
 		log.WithError(err).WithField("db_type", "MONGODB").
 			Errorf("[Monitor] Failed to connect to source%s", purpose)
 		return nil, nil, nil, false
 	}
 
-	target, err = mongo.Connect(ctx, options.Client().ApplyURI(sc.TargetConnection))
+	target, err = mongo.Connect(options.Client().ApplyURI(sc.TargetConnection))
 	if err != nil {
 		_ = source.Disconnect(ctx)
 		log.WithError(err).WithField("db_type", "MONGODB").

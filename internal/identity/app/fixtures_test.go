@@ -2,11 +2,12 @@ package app
 
 import (
 	"database/sql"
-	"github.com/retail-ai-inc/sync/internal/platform/sqlite"
-	"github.com/retail-ai-inc/sync/internal/platform/sqlite/sqlitetest"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/retail-ai-inc/sync/internal/platform/sqlite"
+	"github.com/retail-ai-inc/sync/internal/platform/sqlite/sqlitetest"
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/retail-ai-inc/sync/internal/identity/infra"

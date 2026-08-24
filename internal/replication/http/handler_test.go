@@ -1,11 +1,12 @@
 package replicationhttp
 
 import (
-	"github.com/retail-ai-inc/sync/internal/platform/sqlite/sqlitetest"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/retail-ai-inc/sync/internal/platform/sqlite/sqlitetest"
 
 	_ "github.com/mattn/go-sqlite3"
 )

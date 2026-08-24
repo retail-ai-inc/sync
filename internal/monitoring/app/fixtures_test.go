@@ -2,9 +2,10 @@ package app
 
 import (
 	"database/sql"
-	"github.com/retail-ai-inc/sync/internal/platform/sqlite"
 	"path/filepath"
 	"testing"
+
+	"github.com/retail-ai-inc/sync/internal/platform/sqlite"
 
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/mattn/go-sqlite3"

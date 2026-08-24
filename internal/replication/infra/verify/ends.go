@@ -8,10 +8,9 @@ import (
 	"sort"
 	"strings"
 
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
 // --------------------------------------------------------------- MongoDB
@@ -196,13 +195,13 @@ func canonical(v interface{}) string {
 		}
 		return "[" + strings.Join(parts, ",") + "]"
 
-	case primitive.ObjectID:
+	case bson.ObjectID:
 		return "oid(" + value.Hex() + ")"
-	case primitive.DateTime:
+	case bson.DateTime:
 		return fmt.Sprintf("date(%d)", int64(value))
-	case primitive.Timestamp:
+	case bson.Timestamp:
 		return fmt.Sprintf("ts(%d.%d)", value.T, value.I)
-	case primitive.Binary:
+	case bson.Binary:
 		return "bin(" + hex.EncodeToString(value.Data) + ")"
 	case nil:
 		return "null"

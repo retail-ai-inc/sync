@@ -9,8 +9,8 @@ import (
 
 	"github.com/retail-ai-inc/sync/internal/monitoring/domain"
 	"github.com/sirupsen/logrus"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
 // deadMongo returns a client that resolves collection handles without dialling
@@ -19,10 +19,10 @@ import (
 func deadMongo(t *testing.T) *mongo.Client {
 	t.Helper()
 
-	client, err := mongo.Connect(context.Background(), options.Client().
+	client, err := mongo.Connect(options.Client().
 		ApplyURI("mongodb://127.0.0.1:1").
-		SetServerSelectionTimeout(10*time.Millisecond).
-		SetConnectTimeout(10*time.Millisecond))
+		SetServerSelectionTimeout(10 * time.Millisecond).
+		SetConnectTimeout(10 * time.Millisecond))
 	if err != nil {
 		t.Fatalf("Connect: %v", err)
 	}

@@ -3,11 +3,12 @@ package app
 import (
 	"context"
 	"database/sql"
-	"github.com/retail-ai-inc/sync/internal/platform/sqlite/sqlitetest"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/retail-ai-inc/sync/internal/platform/sqlite/sqlitetest"
 
 	_ "github.com/mattn/go-sqlite3"
 )

@@ -10,8 +10,7 @@ import (
 	"testing"
 
 	_ "github.com/mattn/go-sqlite3"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 // ordersEnd creates one side of a comparison over a table keyed by a single
@@ -836,7 +835,7 @@ func TestAReorderedArrayIsADifference(t *testing.T) {
 }
 
 func TestAnIdRoundTripsThroughItsKey(t *testing.T) {
-	id := primitive.NewObjectID()
+	id := bson.NewObjectID()
 	raw, err := bson.Marshal(bson.M{"_id": id, "v": 1})
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
@@ -863,7 +862,7 @@ func TestAnIdRoundTripsThroughItsKey(t *testing.T) {
 // TestTwoIdTypesDoNotShareAKey pins that the key captures the type: an ObjectId
 // and the string of its hex are different documents.
 func TestTwoIdTypesDoNotShareAKey(t *testing.T) {
-	id := primitive.NewObjectID()
+	id := bson.NewObjectID()
 
 	fromID, err := bson.Marshal(bson.M{"_id": id})
 	if err != nil {
@@ -929,7 +928,7 @@ func TestAKeyIsDescribedForAPerson(t *testing.T) {
 }
 
 func TestADocumentIdIsDescribedByItsValue(t *testing.T) {
-	id := primitive.NewObjectID()
+	id := bson.NewObjectID()
 	raw, err := bson.Marshal(bson.M{"_id": id})
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)

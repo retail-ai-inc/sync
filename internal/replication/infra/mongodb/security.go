@@ -2,7 +2,7 @@ package mongodb
 
 import (
 	"github.com/retail-ai-inc/sync/internal/replication/infra/security"
-	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 // A task can name fields to mask or encrypt, and on this engine nothing did it.

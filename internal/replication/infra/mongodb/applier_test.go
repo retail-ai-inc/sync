@@ -3,8 +3,8 @@ package mongodb
 import (
 	"testing"
 
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
 
 	"github.com/retail-ai-inc/sync/internal/platform/config"
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
@@ -111,3 +111,79 @@ func TestTheTransactionIsOnByDefault(t *testing.T) {
 		t.Error("the zero value skips the transaction; the default has to be the safe one")
 	}
 }
+
+// ------------------------------------------------- cross-collection writes
+
+// TestAReplaceIsCarriedAsACrossCollectionWrite covers the mapping the 8.0
+// bulkWrite command needs: the same write, addressed by a namespace given
+// alongside it rather than by the collection the call was made on.
+func TestAReplaceIsCarriedAsACrossCollectionWrite(t *testing.T) {
+	upsert := true
+	model := &mongo.ReplaceOneModel{
+		Filter:      bson.M{"_id": "a"},
+		Replacement: bson.M{"_id": "a", "amount": 1},
+		Upsert:      &upsert,
+	}
+
+	got, err := clientModelOf(model)
+	if err != nil {
+		t.Fatalf("clientModelOf: %v", err)
+	}
+	replace, ok := got.(*mongo.ClientReplaceOneModel)
+	if !ok {
+		t.Fatalf("clientModelOf returned %T, want a ClientReplaceOneModel", got)
+	}
+	if replace.Upsert == nil || !*replace.Upsert {
+		t.Error("the upsert was lost, so a change to a document the target lacks would be dropped")
+	}
+	if replace.Filter == nil || replace.Replacement == nil {
+		t.Error("the filter or the replacement was lost")
+	}
+}
+
+func TestEveryWriteShapeThisProducesCanBeCarried(t *testing.T) {
+	upsert := true
+	cases := []mongo.WriteModel{
+		&mongo.ReplaceOneModel{Filter: bson.M{"_id": "a"}, Replacement: bson.M{}, Upsert: &upsert},
+		&mongo.UpdateOneModel{Filter: bson.M{"_id": "a"}, Update: bson.M{"$set": bson.M{}}, Upsert: &upsert},
+		&mongo.DeleteOneModel{Filter: bson.M{"_id": "a"}},
+		&mongo.InsertOneModel{Document: bson.M{"_id": "a"}},
+	}
+	for _, model := range cases {
+		if _, err := clientModelOf(model); err != nil {
+			t.Errorf("clientModelOf(%T) = %v, want it carried", model, err)
+		}
+	}
+}
+
+// TestAnUnknownWriteShapeIsRefused keeps a write nobody asked for from being
+// guessed at.
+func TestAnUnknownWriteShapeIsRefused(t *testing.T) {
+	_, err := clientModelOf(&mongo.UpdateManyModel{Filter: bson.M{}, Update: bson.M{}})
+	if !domain.IsUnrecoverable(err) {
+		t.Fatalf("clientModelOf returned %v for an unexpected shape, want an unrecoverable error", err)
+	}
+}
+
+// TestAnOldTargetIsRecognisedOnce covers the fallback. A server before 8.0 has
+// no bulkWrite command, and that is a reason to write per collection rather than
+// a reason to stop.
+func TestAnOldTargetIsRecognisedOnce(t *testing.T) {
+	if lacksClientBulkWrite(nil) {
+		t.Error("no error was read as a missing command")
+	}
+	if !lacksClientBulkWrite(errNoSuchCommand{}) {
+		t.Error("a server reporting no such command was not recognised")
+	}
+	if lacksClientBulkWrite(errPlainFailure{}) {
+		t.Error("an ordinary write failure was read as a missing command")
+	}
+}
+
+type errNoSuchCommand struct{}
+
+func (errNoSuchCommand) Error() string { return "(CommandNotFound) no such command: 'bulkWrite'" }
+
+type errPlainFailure struct{}
+
+func (errPlainFailure) Error() string { return "E11000 duplicate key error" }

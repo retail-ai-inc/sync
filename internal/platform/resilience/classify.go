@@ -10,7 +10,7 @@ import (
 	"strings"
 	"syscall"
 
-	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo"
 )
 
 // Whether a failure is worth trying again is the one judgement this package

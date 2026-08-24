@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
 func quietFieldLogger() logrus.FieldLogger {
@@ -25,7 +25,7 @@ func TestCheckMongoConnectionIsJustAPing(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	client, err := mongo.Connect(ctx, options.Client().ApplyURI("mongodb://127.0.0.1:1/db"))
+	client, err := mongo.Connect(options.Client().ApplyURI("mongodb://127.0.0.1:1/db"))
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -39,10 +39,9 @@ func TestCheckMongoConnectionIsJustAPing(t *testing.T) {
 // TestCheckMongoConnectionHonoursACancelledContext records that a cancelled
 // context is reported at once rather than after the selection timeout.
 func TestCheckMongoConnectionHonoursACancelledContext(t *testing.T) {
-	connectCtx, connectCancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer connectCancel()
-
-	client, err := mongo.Connect(connectCtx, options.Client().ApplyURI("mongodb://127.0.0.1:1/db"))
+	// The driver's v2 Connect takes no context: it does not reach the server, so
+	// there was nothing for a timeout to bound.
+	client, err := mongo.Connect(options.Client().ApplyURI("mongodb://127.0.0.1:1/db"))
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}

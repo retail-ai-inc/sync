@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
 // deadClient returns a client that resolves handles without dialling and fails
@@ -16,10 +16,10 @@ import (
 func deadClient(t *testing.T) *mongo.Client {
 	t.Helper()
 
-	client, err := mongo.Connect(context.Background(), options.Client().
+	client, err := mongo.Connect(options.Client().
 		ApplyURI("mongodb://127.0.0.1:1").
-		SetServerSelectionTimeout(10*time.Millisecond).
-		SetConnectTimeout(10*time.Millisecond))
+		SetServerSelectionTimeout(10 * time.Millisecond).
+		SetConnectTimeout(10 * time.Millisecond))
 	if err != nil {
 		t.Fatalf("Connect: %v", err)
 	}

@@ -2,9 +2,10 @@ package infra
 
 import (
 	"errors"
-	"github.com/retail-ai-inc/sync/internal/platform/sqlite/sqlitetest"
 	"path/filepath"
 	"testing"
+
+	"github.com/retail-ai-inc/sync/internal/platform/sqlite/sqlitetest"
 
 	"github.com/retail-ai-inc/sync/internal/identity/domain"
 	"github.com/retail-ai-inc/sync/internal/platform/sqlite"

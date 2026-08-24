@@ -38,9 +38,9 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/retail-ai-inc/sync/internal/platform/config"
 	"github.com/retail-ai-inc/sync/internal/platform/dsn"
@@ -86,7 +86,7 @@ func stgConnect(t *testing.T, database string) *mongo.Client {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	client, err := mongo.Connect(ctx, options.Client().ApplyURI(stgDSN(t, database)))
+	client, err := mongo.Connect(options.Client().ApplyURI(stgDSN(t, database)))
 	if err != nil {
 		t.Fatalf("connect to %s: %v", stgEndpoint, err)
 	}

@@ -3,11 +3,12 @@ package infra
 import (
 	"context"
 	"database/sql"
-	"github.com/retail-ai-inc/sync/internal/platform/sqlite"
-	"github.com/retail-ai-inc/sync/internal/platform/sqlite/sqlitetest"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/retail-ai-inc/sync/internal/platform/sqlite"
+	"github.com/retail-ai-inc/sync/internal/platform/sqlite/sqlitetest"
 
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/mattn/go-sqlite3"

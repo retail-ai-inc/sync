@@ -2,12 +2,13 @@ package config
 
 import (
 	"database/sql"
-	"github.com/retail-ai-inc/sync/internal/platform/sqlite"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/retail-ai-inc/sync/internal/platform/sqlite"
 
 	_ "github.com/mattn/go-sqlite3"
 )

@@ -4,8 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/v2/bson"
 
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
 )
@@ -167,7 +166,7 @@ func TestTheSchemaChangeIsAppliedUnderTheMappedName(t *testing.T) {
 // task looked as though it were restarting for a transient reason. Nothing
 // caught it until the pipeline was pointed at a real cluster.
 func TestAPinnedClusterTimeIsRecognisedAsOne(t *testing.T) {
-	payload, err := encodeClusterTime(primitive.Timestamp{T: 1787547851, I: 13})
+	payload, err := encodeClusterTime(bson.Timestamp{T: 1787547851, I: 13})
 	if err != nil {
 		t.Fatalf("encodeClusterTime: %v", err)
 	}
@@ -217,5 +216,89 @@ func TestAPositionThatIsNeitherIsRefused(t *testing.T) {
 	}
 	if stored.Token != "" || stored.Cluster != 0 {
 		t.Fatal("a position holding neither kind decoded as though it held one")
+	}
+}
+
+// ------------------------------------------------------------ index keys
+
+// TestAnIndexKeyIsReadWhateverShapeItArrivesIn is the defect the driver upgrade
+// introduced and a real cluster showed.
+//
+// Asked to decode a document into an interface, the driver's v1 gave a bson.M
+// here and its v2 gives a bson.D. The code asserted the map, so every index
+// silently stopped being copied — one warning per index about a format it did
+// not recognise, and a failover target that would answer correctly and far too
+// slowly to serve.
+func TestAnIndexKeyIsReadWhateverShapeItArrivesIn(t *testing.T) {
+	shapes := map[string]interface{}{
+		"bson.D": bson.D{{Key: "customer", Value: int32(1)}},
+		"bson.M": bson.M{"customer": int32(1)},
+	}
+	for name, key := range shapes {
+		got, ok := indexKeyOf(key)
+		if !ok {
+			t.Errorf("%s: the key was not read", name)
+			continue
+		}
+		if len(got) != 1 || got[0].Key != "customer" {
+			t.Errorf("%s: key = %v, want customer", name, got)
+		}
+	}
+}
+
+// TestACompoundIndexKeepsItsFieldOrder is why the ordered form is preferred: an
+// index on (region, _id) is not the index on (_id, region), and a target built
+// from the wrong one answers the shard-key query with a scan.
+func TestACompoundIndexKeepsItsFieldOrder(t *testing.T) {
+	got, ok := indexKeyOf(bson.D{
+		{Key: "region", Value: int32(1)},
+		{Key: "_id", Value: int32(1)},
+	})
+	if !ok {
+		t.Fatal("the key was not read")
+	}
+	if len(got) != 2 || got[0].Key != "region" || got[1].Key != "_id" {
+		t.Errorf("key = %v, want region then _id", got)
+	}
+}
+
+// TestAnIndexDirectionFromJSONIsANumberAgain covers a key that has been through
+// a JSON round trip, where 1 and -1 arrive as strings or floats.
+func TestAnIndexDirectionFromJSONIsANumberAgain(t *testing.T) {
+	got, ok := indexKeyOf(bson.D{
+		{Key: "a", Value: "-1"},
+		{Key: "b", Value: float64(1)},
+	})
+	if !ok {
+		t.Fatal("the key was not read")
+	}
+	if got[0].Value != int32(-1) {
+		t.Errorf("a = %v (%T), want int32(-1)", got[0].Value, got[0].Value)
+	}
+	if got[1].Value != int32(1) {
+		t.Errorf("b = %v (%T), want int32(1)", got[1].Value, got[1].Value)
+	}
+}
+
+// TestANamedIndexKindIsPassedThrough keeps a text or 2dsphere index from being
+// turned into a direction.
+func TestANamedIndexKindIsPassedThrough(t *testing.T) {
+	got, ok := indexKeyOf(bson.D{{Key: "location", Value: "2dsphere"}})
+	if !ok {
+		t.Fatal("the key was not read")
+	}
+	if got[0].Value != "2dsphere" {
+		t.Errorf("location = %v, want 2dsphere", got[0].Value)
+	}
+}
+
+// TestAnUnreadableIndexKeyIsReported keeps a shape nobody expected from being
+// turned into an index nobody asked for.
+func TestAnUnreadableIndexKeyIsReported(t *testing.T) {
+	if _, ok := indexKeyOf("not a document"); ok {
+		t.Error("a string was accepted as an index key")
+	}
+	if _, ok := indexKeyOf(bson.D{}); ok {
+		t.Error("an empty key was accepted")
 	}
 }

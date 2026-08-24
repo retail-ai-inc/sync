@@ -15,9 +15,9 @@ import (
 	"github.com/retail-ai-inc/sync/internal/replication/infra/checkpoint"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/directionlock"
 	"github.com/sirupsen/logrus"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
 type MongoDBSyncer struct {
@@ -146,7 +146,7 @@ func connectMongo(ctx context.Context, uri string) (*mongo.Client, error) {
 
 	err := resilience.Retry(ctx, 5, 2*time.Second, 2.0, func() error {
 		var connErr error
-		client, connErr = mongo.Connect(ctx, options.Client().ApplyURI(uri))
+		client, connErr = mongo.Connect(options.Client().ApplyURI(uri))
 		if isURIError(connErr) {
 			return permanentURI{connErr}
 		}
@@ -238,24 +238,10 @@ func (s *MongoDBSyncer) copyIndexes(ctx context.Context, sourceColl, targetColl 
 			}
 		}
 
-		keyDoc := bson.D{}
-		if keys, ok := idx["key"].(bson.M); ok {
-			for field, direction := range keys {
-				fixedDirection := direction
-				if strVal, isString := direction.(string); isString {
-					if strVal == "1" {
-						fixedDirection = int32(1)
-					} else if strVal == "-1" {
-						fixedDirection = int32(-1)
-					}
-				} else if floatVal, isFloat := direction.(float64); isFloat {
-					fixedDirection = int32(floatVal)
-				}
-
-				keyDoc = append(keyDoc, bson.E{Key: field, Value: fixedDirection})
-			}
-		} else {
-			s.logger.Warnf("[MongoDB] Invalid index key format: %v", idx["key"])
+		keyDoc, ok := indexKeyOf(idx["key"])
+		if !ok {
+			s.logger.Warnf("[MongoDB] Cannot read the key of index %q, so it is not being "+
+				"copied: %v", name, idx["key"])
 			continue
 		}
 
@@ -295,6 +281,73 @@ func (s *MongoDBSyncer) copyIndexes(ctx context.Context, sourceColl, targetColl 
 		targetColl.Name(), indexesCreated, indexesSkipped)
 
 	return nil
+}
+
+// indexKeyOf reads an index's key specification, whatever shape the driver
+// decoded it into.
+//
+// The shape is not something to rely on. Asked to decode a document into an
+// interface, the driver's v1 gave a bson.M here and its v2 gives a bson.D — and
+// the code that assumed the map silently stopped copying every index, logging
+// one line per index about a format it did not recognise. Index copying is the
+// difference between a failover target that serves and one that answers too
+// slowly to be used, so it should not turn on a type assertion.
+//
+// Key order matters: a compound index on (a, b) is not the index on (b, a). A
+// bson.D keeps it and a bson.M does not, which is one more reason to read the
+// ordered form when there is one.
+func indexKeyOf(key interface{}) (bson.D, bool) {
+	direction := func(v interface{}) interface{} {
+		switch typed := v.(type) {
+		case string:
+			// "1" and "-1" reach here from a JSON round trip; a named kind —
+			// "2dsphere", "text", "hashed" — is passed through as it is.
+			switch typed {
+			case "1":
+				return int32(1)
+			case "-1":
+				return int32(-1)
+			}
+			return typed
+		case float64:
+			return int32(typed)
+		case int64:
+			return int32(typed)
+		case int:
+			return int32(typed)
+		}
+		return v
+	}
+
+	switch typed := key.(type) {
+	case bson.D:
+		out := make(bson.D, 0, len(typed))
+		for _, e := range typed {
+			out = append(out, bson.E{Key: e.Key, Value: direction(e.Value)})
+		}
+		return out, len(out) > 0
+	case bson.M:
+		out := make(bson.D, 0, len(typed))
+		for field, v := range typed {
+			out = append(out, bson.E{Key: field, Value: direction(v)})
+		}
+		return out, len(out) > 0
+	case bson.Raw:
+		elements, err := typed.Elements()
+		if err != nil {
+			return nil, false
+		}
+		out := make(bson.D, 0, len(elements))
+		for _, e := range elements {
+			var v interface{}
+			if err := e.Value().Unmarshal(&v); err != nil {
+				return nil, false
+			}
+			out = append(out, bson.E{Key: e.Key(), Value: direction(v)})
+		}
+		return out, len(out) > 0
+	}
+	return nil, false
 }
 
 func (s *MongoDBSyncer) findTableAdvancedSettings(collName string) config.AdvancedSettings {

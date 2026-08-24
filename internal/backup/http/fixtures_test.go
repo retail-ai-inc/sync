@@ -3,10 +3,11 @@ package backuphttp
 import (
 	"database/sql"
 	"encoding/json"
-	"github.com/retail-ai-inc/sync/internal/platform/sqlite"
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
+
+	"github.com/retail-ai-inc/sync/internal/platform/sqlite"
 
 	_ "github.com/mattn/go-sqlite3"
 )

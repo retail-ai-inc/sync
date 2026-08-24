@@ -8,10 +8,9 @@ import (
 	"sync"
 	"time"
 
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/sirupsen/logrus"
 
@@ -122,7 +121,7 @@ func (r *Reader) Open(ctx context.Context, from domain.Position) error {
 			// snapshot pinned before it copied. Starting there replays the writes
 			// made while the copy was running, which the copy itself could not
 			// see. Starting from now instead would lose that window silently.
-			at := primitive.Timestamp{T: stored.Cluster, I: stored.Increment}
+			at := bson.Timestamp{T: stored.Cluster, I: stored.Increment}
 			r.Logger.Infof("[MongoDB] Starting the stream at the snapshot's cluster "+
 				"time %d.%d", at.T, at.I)
 			opts.SetStartAtOperationTime(&at)
@@ -566,7 +565,7 @@ func encodeToken(token bson.Raw) (string, error) {
 }
 
 // encodeClusterTime stores a pinned cluster time as a position.
-func encodeClusterTime(at primitive.Timestamp) (string, error) {
+func encodeClusterTime(at bson.Timestamp) (string, error) {
 	return checkpoint.Encode(streamPosition{Cluster: at.T, Increment: at.I})
 }
 
