@@ -159,31 +159,108 @@ func TestTheOperationIsReadOffTheEvent(t *testing.T) {
 // deployment-wide stream safe: it sees everything and carries only the mapped
 // collections.
 func TestOneStreamStillOnlyReplicatesWhatTheTaskNames(t *testing.T) {
-	r := &Reader{Config: config.SyncConfig{Mappings: []config.DatabaseMapping{
-		{Tables: []config.TableMapping{{SourceTable: "orders"}, {SourceTable: "payments"}}},
-	}}}
-	r.mapped = r.mappedCollections()
+	r := readerFor([]config.DatabaseMapping{{
+		SourceDatabase: "shop",
+		Tables:         []config.TableMapping{{SourceTable: "orders"}, {SourceTable: "payments"}},
+	}})
 
-	if !r.replicates("orders") || !r.replicates("payments") {
+	if !r.replicates(ns("shop", "orders")) || !r.replicates(ns("shop", "payments")) {
 		t.Error("a mapped collection was filtered out")
 	}
-	if r.replicates("audit_log") {
+	if r.replicates(ns("shop", "audit_log")) {
 		t.Error("an unmapped collection was let through")
+	}
+}
+
+// ns is shorthand for a namespace in the tests below.
+func ns(db, object string) domain.Namespace {
+	return domain.Namespace{DB: db, Object: object}
+}
+
+// readerFor builds a reader with its filters settled, the way Open does.
+func readerFor(mappings []config.DatabaseMapping) *Reader {
+	r := &Reader{Config: config.SyncConfig{
+		Type:             "mongodb",
+		SourceConnection: "mongodb://u:p@h:27017/shop",
+		Mappings:         mappings,
+	}}
+	r.mapped = r.mappedCollections()
+	r.databases = r.mappedDatabaseSet()
+	return r
+}
+
+// TestAnotherDatabaseIsNotReplicated is the defect a real cluster found within
+// seconds of the chunk migration test being pointed at it.
+//
+// A deployment-level change stream sees every database on the cluster. Matching
+// on the collection name alone therefore replicated the target's own writes back
+// over themselves when source and target were two databases on one cluster —
+// and, worse, would have replicated any other database's collection of the same
+// name into the disaster-recovery copy of a payment database. On a cluster
+// hosting twenty-odd databases, a name like "orders" colliding is an
+// expectation, not a possibility.
+func TestAnotherDatabaseIsNotReplicated(t *testing.T) {
+	r := readerFor([]config.DatabaseMapping{{
+		SourceDatabase: "shop",
+		Tables:         []config.TableMapping{{SourceTable: "orders"}},
+	}})
+
+	if !r.replicates(ns("shop", "orders")) {
+		t.Fatal("the mapped namespace was filtered out")
+	}
+	if r.replicates(ns("warehouse", "orders")) {
+		t.Error("another tenant's collection of the same name was let through")
+	}
+	if r.replicates(ns("shop_dst", "orders")) {
+		t.Error("the target's own writes were let through, so the syncer reads back " +
+			"what it just wrote")
+	}
+}
+
+// TestTheServerIsAskedToFilterTheDatabasesToo keeps the whole cluster's traffic
+// from being pulled across the wire only to be dropped here.
+func TestTheServerIsAskedToFilterTheDatabasesToo(t *testing.T) {
+	r := readerFor([]config.DatabaseMapping{
+		{SourceDatabase: "shop", Tables: []config.TableMapping{{SourceTable: "orders"}}},
+		{SourceDatabase: "ledger", Tables: []config.TableMapping{{SourceTable: "entries"}}},
+	})
+
+	dbs := r.mappedDatabases()
+	if len(dbs) != 2 {
+		t.Fatalf("the server filter names %v, want both databases", dbs)
+	}
+}
+
+// TestAMappingWithoutADatabaseUsesTheConnections covers the shape a
+// single-database task has always had, so upgrading does not silently start
+// filtering everything out.
+func TestAMappingWithoutADatabaseUsesTheConnections(t *testing.T) {
+	r := readerFor([]config.DatabaseMapping{
+		{Tables: []config.TableMapping{{SourceTable: "orders"}}},
+	})
+
+	if !r.replicates(ns("shop", "orders")) {
+		t.Error("the database from the connection string was not used")
+	}
+	if r.replicates(ns("warehouse", "orders")) {
+		t.Error("another database was let through")
 	}
 }
 
 // TestATaskThatNamesNothingReplicatesEverything covers discovery, and that it
 // stops short of the syncer's own bookkeeping — replicating the checkpoint
 // collection would write the target's position back over itself.
-func TestATaskThatNamesNothingReplicatesEverything(t *testing.T) {
-	r := &Reader{Config: config.SyncConfig{}}
-	r.mapped = r.mappedCollections()
+func TestATaskThatNamesNothingReplicatesEverythingInItsDatabase(t *testing.T) {
+	r := readerFor([]config.DatabaseMapping{{SourceDatabase: "shop"}})
 
-	if !r.replicates("orders") {
+	if !r.replicates(ns("shop", "orders")) {
 		t.Error("discovery filtered out an ordinary collection")
 	}
+	if r.replicates(ns("warehouse", "orders")) {
+		t.Error("discovery reached into another database")
+	}
 	for _, internal := range []string{"_sync_checkpoint", "_sync_direction", "system.views"} {
-		if r.replicates(internal) {
+		if r.replicates(ns("shop", internal)) {
 			t.Errorf("%s was let through; it is the syncer's own bookkeeping", internal)
 		}
 	}
@@ -204,9 +281,9 @@ func txEvent(t *testing.T, coll, id, session string, number int64) bson.Raw {
 
 func bufferingReader(t *testing.T) *Reader {
 	t.Helper()
-	r := &Reader{Config: config.SyncConfig{}, Logger: quietLog()}
+	r := readerFor([]config.DatabaseMapping{{SourceDatabase: "shop"}})
+	r.Logger = quietLog()
 	r.conv = &MongoDBSyncer{cfg: r.Config, logger: r.Logger}
-	r.mapped = r.mappedCollections()
 	return r
 }
 

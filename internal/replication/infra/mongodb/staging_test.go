@@ -668,3 +668,176 @@ func TestTheTargetIsShardedLikeTheSource(t *testing.T) {
 	}
 	t.Logf("the target's documents are spread over %d shards", len(stats))
 }
+
+// TestAChunkMigrationIsNotReplicated is the one behaviour in this design that
+// was asserted from documentation and never tested.
+//
+// The balancer moves a chunk by inserting the documents on the destination shard
+// and deleting them on the source. Both go to the oplog, so a change stream that
+// carried them would deliver a delete and an insert per document — work that
+// achieves nothing, and a window in which the document is absent from the
+// target. MongoDB marks such oplog entries fromMigrate and a change stream drops
+// them, but that is a claim about somebody else's code, and the balancer is on in
+// every cluster this will run against.
+//
+// The end state cannot catch it: a delete followed by an insert of the same
+// document leaves the collection exactly as it was. What has to be checked is
+// that the applier was given nothing at all, which is what the event counter is
+// for.
+func TestAChunkMigrationIsNotReplicated(t *testing.T) {
+	name, source, target := stgCollection(t, "orders_migrating")
+	ctx := context.Background()
+
+	const seeded = 400
+	docs := make([]interface{}, 0, seeded)
+	for i := 0; i < seeded; i++ {
+		docs = append(docs, payment(i))
+	}
+	if _, err := source.InsertMany(ctx, docs); err != nil {
+		t.Fatalf("seed the source: %v", err)
+	}
+
+	cfg := stgTask(t, name)
+	stgStart(t, cfg)
+	labels := metrics.Labels{"task": fmt.Sprint(cfg.ID), "engine": "mongodb"}
+	t.Cleanup(func() { metrics.Default.Forget(labels) })
+
+	harness.Eventually(t, 3*time.Minute, func() error {
+		if n := stgCount(t, target); n != seeded {
+			return fmt.Errorf("the target holds %d of %d documents", n, seeded)
+		}
+		return nil
+	})
+
+	// The copy is done and the stream is following. Everything from here on is
+	// the migration's doing.
+	appliedBefore := counter(t, metrics.BatchEvents, labels)
+
+	client := stgConnect(t, stgSourceDB)
+	moved, err := moveOneChunk(ctx, client, stgSourceDB+"."+name)
+	if err != nil {
+		t.Fatalf("move a chunk of %s: %v", name, err)
+	}
+	t.Logf("moved a chunk from %s to %s", moved.from, moved.to)
+
+	// Long enough for the events to have arrived if they were going to.
+	time.Sleep(20 * time.Second)
+
+	if applied := counter(t, metrics.BatchEvents, labels); applied != appliedBefore {
+		t.Errorf("the applier was given %v changes by a chunk migration, want none. "+
+			"Every document in the chunk is being deleted and re-inserted on the "+
+			"target for no reason, and is absent from it in between",
+			applied-appliedBefore)
+	}
+	if n := stgCount(t, target); n != seeded {
+		t.Errorf("the target holds %d of %d documents after the migration", n, seeded)
+	}
+
+	// And the stream is still working, rather than having been quietly broken by
+	// the migration — which would look identical to the migration being filtered.
+	probe := bson.M{"_id": "after-the-migration", "amount": 1}
+	if _, err := source.InsertOne(ctx, probe); err != nil {
+		t.Fatalf("write the probe: %v", err)
+	}
+	harness.Eventually(t, time.Minute, func() error {
+		if n := stgCount(t, target); n != seeded+1 {
+			return fmt.Errorf("the probe written after the migration has not arrived")
+		}
+		return nil
+	})
+	if applied := counter(t, metrics.BatchEvents, labels); applied != appliedBefore+1 {
+		t.Errorf("the applier was given %v changes for one document written after the "+
+			"migration", applied-appliedBefore)
+	}
+}
+
+// movedChunk records where a chunk went.
+type movedChunk struct{ from, to string }
+
+// moveOneChunk moves one chunk of a collection to another shard, splitting the
+// collection first when it is still in one piece.
+func moveOneChunk(ctx context.Context, client *mongo.Client, ns string) (movedChunk, error) {
+	admin := client.Database("admin")
+	config := client.Database("config")
+
+	var collection struct {
+		UUID interface{} `bson:"uuid"`
+	}
+	if err := config.Collection("collections").FindOne(ctx, bson.M{"_id": ns}).
+		Decode(&collection); err != nil {
+		return movedChunk{}, fmt.Errorf("read the collection's routing entry: %w", err)
+	}
+
+	chunks, err := config.Collection("chunks").Find(ctx, bson.M{"uuid": collection.UUID})
+	if err != nil {
+		return movedChunk{}, fmt.Errorf("list the chunks: %w", err)
+	}
+	var found []struct {
+		Shard string   `bson:"shard"`
+		Min   bson.Raw `bson:"min"`
+	}
+	if err := chunks.All(ctx, &found); err != nil {
+		return movedChunk{}, fmt.Errorf("read the chunks: %w", err)
+	}
+	if len(found) == 0 {
+		return movedChunk{}, fmt.Errorf("%s has no chunks", ns)
+	}
+
+	var shards struct {
+		Shards []struct {
+			ID string `bson:"_id"`
+		} `bson:"shards"`
+	}
+	if err := admin.RunCommand(ctx, bson.D{{Key: "listShards", Value: 1}}).
+		Decode(&shards); err != nil {
+		return movedChunk{}, fmt.Errorf("list the shards: %w", err)
+	}
+
+	from := found[0].Shard
+	to := ""
+	for _, s := range shards.Shards {
+		if s.ID != from {
+			to = s.ID
+			break
+		}
+	}
+	if to == "" {
+		return movedChunk{}, fmt.Errorf("the cluster has only one shard, so nothing can move")
+	}
+
+	if err := admin.RunCommand(ctx, bson.D{
+		{Key: "moveChunk", Value: ns},
+		{Key: "bounds", Value: bson.A{found[0].Min, nextChunkBound(found, 0)}},
+		{Key: "to", Value: to},
+	}).Err(); err != nil {
+		return movedChunk{}, fmt.Errorf("moveChunk: %w", err)
+	}
+	return movedChunk{from: from, to: to}, nil
+}
+
+// nextChunkBound reports the upper bound of the nth chunk, which is the lower
+// bound of the one after it.
+func nextChunkBound(chunks []struct {
+	Shard string   `bson:"shard"`
+	Min   bson.Raw `bson:"min"`
+}, n int) bson.Raw {
+	if n+1 < len(chunks) {
+		return chunks[n+1].Min
+	}
+	// The last chunk runs to MaxKey, which is what the routing table records as
+	// the next bound of the highest chunk.
+	raw, _ := bson.Marshal(bson.D{{Key: "_id", Value: bson.MaxKey{}}})
+	return bson.Raw(raw)
+}
+
+// counter reads one counter's current value for a label set, zero when it has
+// not been recorded yet.
+func counter(t *testing.T, name string, labels metrics.Labels) float64 {
+	t.Helper()
+	for _, sample := range metrics.Default.Snapshot(name) {
+		if sample.Labels.Key() == labels.Key() {
+			return sample.Value
+		}
+	}
+	return 0
+}

@@ -15,6 +15,7 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/retail-ai-inc/sync/internal/platform/config"
+	"github.com/retail-ai-inc/sync/internal/platform/dsn"
 	"github.com/retail-ai-inc/sync/internal/platform/metrics"
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/checkpoint"
@@ -41,8 +42,11 @@ type Reader struct {
 
 	stream *mongo.ChangeStream
 	// mapped names the collections to replicate, empty when the task lists none
-	// and everything is replicated.
+	// and every collection of a mapped database is replicated.
 	mapped map[string]bool
+	// databases names the source databases to read. Anything outside them is
+	// another tenant's data, or the target's own.
+	databases map[string]bool
 
 	// open holds the events of the transaction currently being delivered, and
 	// openID identifies it. A change stream reports every event of a
@@ -83,16 +87,21 @@ func (r *Reader) Open(ctx context.Context, from domain.Position) error {
 	}
 	r.conv = &MongoDBSyncer{cfg: r.Config, logger: r.Logger}
 	r.mapped = r.mappedCollections()
+	r.databases = r.mappedDatabaseSet()
 
 	// The schema changes are asked for as well as the rows. An index added at
 	// the source used never to reach the target — indexes were copied once, by
 	// the snapshot — so the moment the target most needed an index was exactly
 	// the moment it did not have it.
-	pipeline := mongo.Pipeline{
-		{{Key: "$match", Value: bson.D{
-			{Key: "operationType", Value: bson.M{"$in": watchedOperations}},
-		}}},
+	match := bson.D{{Key: "operationType", Value: bson.M{"$in": watchedOperations}}}
+	if dbs := r.mappedDatabases(); len(dbs) > 0 {
+		// Filtered on the server as well as here. A deployment-level stream sees
+		// every database on the cluster — including the target's, when the two
+		// are on one cluster, and including any other database that happens to
+		// hold a collection of the same name.
+		match = append(match, bson.E{Key: "ns.db", Value: bson.M{"$in": dbs}})
 	}
+	pipeline := mongo.Pipeline{{{Key: "$match", Value: match}}}
 
 	opts := options.ChangeStream().
 		SetFullDocument(options.UpdateLookup).
@@ -271,7 +280,7 @@ func (r *Reader) take(raw bson.Raw) error {
 	if !ok {
 		return nil
 	}
-	if !r.replicates(ns.Object) {
+	if !r.replicates(ns) {
 		return nil
 	}
 
@@ -419,16 +428,39 @@ func (r *Reader) Close() error {
 	return err
 }
 
-// replicates reports whether a collection is one this task carries.
-func (r *Reader) replicates(collection string) bool {
-	if len(r.mapped) == 0 {
-		// The task lists nothing, so everything is replicated under its own
-		// name — apart from the syncer's own bookkeeping.
-		return !isInternal(collection)
+// replicates reports whether a namespace is one this task carries.
+//
+// The database is part of the answer, and leaving it out was a defect a real
+// cluster found within seconds. A deployment-level change stream sees every
+// database on the cluster, so matching on the collection name alone let through:
+//
+//   - the target's own writes, when source and target are two databases on one
+//     cluster. The syncer read back what it had just written and applied it
+//     again — idempotent, so it converged, but doing twice the work and
+//     replicating its own bookkeeping.
+//   - any other database's collection of the same name. On a cluster hosting
+//     twenty-odd databases, a name like "orders" colliding is not a possibility
+//     but an expectation, and those changes would be written into the
+//     disaster-recovery copy of a payment database.
+//
+// This is the same defect as matching a DDL statement on its table name and
+// discarding the database it named, which was fixed on the MySQL side. It was
+// then written again here, for row events.
+func (r *Reader) replicates(ns domain.Namespace) bool {
+	if !r.databases[strings.ToLower(ns.DB)] {
+		return false
 	}
-	return r.mapped[strings.ToLower(collection)]
+	if len(r.mapped) == 0 {
+		// The task lists no collections, so every collection of a mapped
+		// database is replicated under its own name — apart from the syncer's
+		// own bookkeeping.
+		return !isInternal(ns.Object)
+	}
+	return r.mapped[strings.ToLower(ns.Object)]
 }
 
+// mappedCollections lists the collections the task names, empty when it names
+// none and replicates whatever it finds.
 func (r *Reader) mappedCollections() map[string]bool {
 	mapped := map[string]bool{}
 	for _, mapping := range r.Config.Mappings {
@@ -437,6 +469,39 @@ func (r *Reader) mappedCollections() map[string]bool {
 		}
 	}
 	return mapped
+}
+
+// mappedDatabaseSet lists the source databases the task reads, for the check
+// above.
+func (r *Reader) mappedDatabaseSet() map[string]bool {
+	dbs := map[string]bool{}
+	for _, name := range r.mappedDatabases() {
+		dbs[strings.ToLower(name)] = true
+	}
+	return dbs
+}
+
+// mappedDatabases lists the source databases the task reads, in the spelling the
+// server uses, for the server-side filter.
+func (r *Reader) mappedDatabases() []string {
+	seen := map[string]bool{}
+	var dbs []string
+	fallback := dsn.GetDatabaseName(r.Config.Type, r.Config.SourceConnection)
+	for _, mapping := range r.Config.Mappings {
+		name := mapping.SourceDatabase
+		if name == "" {
+			name = fallback
+		}
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		dbs = append(dbs, name)
+	}
+	if len(dbs) == 0 && fallback != "" {
+		dbs = append(dbs, fallback)
+	}
+	return dbs
 }
 
 // ------------------------------------------------------------- event reading
