@@ -235,12 +235,7 @@ func (l *link) acknowledge(ctx context.Context, stream *Stream) {
 	}
 }
 
-func (l *link) log() logrus.FieldLogger {
-	if l.logger != nil {
-		return l.logger
-	}
-	return logrus.StandardLogger()
-}
+func (l *link) log() logrus.FieldLogger { return orDefault(l.logger) }
 
 // failure reports why the connection stopped, or nil if it has not.
 func (l *link) failure() (error, bool) {

@@ -136,12 +136,7 @@ func repairsIn(jobs []work) int {
 	return total
 }
 
-func (a *Applier) logger() logrus.FieldLogger {
-	if a.Logger != nil {
-		return a.Logger
-	}
-	return logrus.StandardLogger()
-}
+func (a *Applier) logger() logrus.FieldLogger { return orDefault(a.Logger) }
 
 // Skipped is how many commands were dropped as already applied.
 func (a *Applier) Skipped() int {

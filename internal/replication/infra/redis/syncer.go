@@ -88,7 +88,7 @@ func (s *Syncer) Start(ctx context.Context) error {
 		return err
 	}
 
-	shards, err := s.shards(ctx, source)
+	shards, err := shardsOf(ctx, source, dsn.Endpoint("redis", s.cfg.SourceConnection))
 	if err != nil {
 		return err
 	}
@@ -133,12 +133,17 @@ type shard struct {
 	addr string
 }
 
-// shards finds the masters of the source.
-func (s *Syncer) shards(ctx context.Context, source goredis.UniversalClient) ([]shard, error) {
+// shardsOf finds the masters of a source.
+//
+// A shard is named by the slots it owns rather than by its address, so that a
+// shard which fails over to another node keeps its position. The tests use this
+// too: the identity a position is filed under has to be the same one in both
+// places, or a test would be exercising a shard naming that production does not.
+func shardsOf(ctx context.Context, source goredis.UniversalClient, single string) ([]shard, error) {
 	cluster, ok := source.(*goredis.ClusterClient)
 	if !ok {
 		// One server, one stream.
-		return []shard{{id: "0", addr: dsn.Endpoint("redis", s.cfg.SourceConnection)}}, nil
+		return []shard{{id: "0", addr: single}}, nil
 	}
 
 	slots, err := cluster.ClusterSlots(ctx).Result()
@@ -151,15 +156,12 @@ func (s *Syncer) shards(ctx context.Context, source goredis.UniversalClient) ([]
 		if len(slot.Nodes) == 0 {
 			continue
 		}
-		master := slot.Nodes[0]
-		// Named by the slot range rather than by the address, so a shard that
-		// fails over to another node keeps its position.
 		id := strconv.Itoa(int(slot.Start)) + "-" + strconv.Itoa(int(slot.End))
 		if seen[id] {
 			continue
 		}
 		seen[id] = true
-		found = append(found, shard{id: id, addr: master.Addr})
+		found = append(found, shard{id: id, addr: slot.Nodes[0].Addr})
 	}
 	if len(found) == 0 {
 		return nil, fmt.Errorf("the source reported no shards")

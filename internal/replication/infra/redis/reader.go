@@ -107,12 +107,7 @@ func (r *Reader) Open(ctx context.Context, from domain.Position) error {
 	return nil
 }
 
-func (r *Reader) logger() logrus.FieldLogger {
-	if r.Logger != nil {
-		return r.Logger
-	}
-	return logrus.StandardLogger()
-}
+func (r *Reader) logger() logrus.FieldLogger { return orDefault(r.Logger) }
 
 // Next hands over the next event.
 func (r *Reader) Next(ctx context.Context) (*domain.Event, error) {

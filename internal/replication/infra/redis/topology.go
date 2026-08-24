@@ -44,12 +44,7 @@ func (w *topologyWatcher) every() time.Duration {
 	return defaultTopologyInterval
 }
 
-func (w *topologyWatcher) logger() logrus.FieldLogger {
-	if w.Logger != nil {
-		return w.Logger
-	}
-	return logrus.StandardLogger()
-}
+func (w *topologyWatcher) logger() logrus.FieldLogger { return orDefault(w.Logger) }
 
 // Run watches until the context is cancelled.
 func (w *topologyWatcher) Run(ctx context.Context) {

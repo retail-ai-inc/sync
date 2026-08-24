@@ -78,12 +78,7 @@ func (r *Reconciler) batch() int {
 	return defaultReconcileBatch
 }
 
-func (r *Reconciler) logger() logrus.FieldLogger {
-	if r.Logger != nil {
-		return r.Logger
-	}
-	return logrus.StandardLogger()
-}
+func (r *Reconciler) logger() logrus.FieldLogger { return orDefault(r.Logger) }
 
 // Run compares the two sides until the context is cancelled.
 //
@@ -175,32 +170,16 @@ func (r *Reconciler) compare(ctx context.Context, keys []string) (int, error) {
 		return 0, nil
 	}
 
-	// The serialised value is compared rather than the value itself, because it
-	// is one comparison for every type — a string, a hash with per-field
-	// expiries, a stream, a module type. Two servers of the same version that
-	// were given the same changes produce the same serialisation; if they ever do
-	// not, this reports a difference that repairing does not settle, and the
-	// metric will say so rather than the difference going unseen.
-	fromSource, err := readValues(ctx, r.Source, wanted)
+	found, err := r.differing(ctx, wanted)
 	if err != nil {
 		return 0, err
 	}
-	fromTarget, err := readValues(ctx, r.Target, wanted)
-	if err != nil {
-		return 0, err
-	}
-
-	var suspect [][]byte
-	for i := range fromSource {
-		if i >= len(fromTarget) {
-			break
-		}
-		if string(fromSource[i].payload) != string(fromTarget[i].payload) {
-			suspect = append(suspect, fromSource[i].key)
-		}
-	}
-	if len(suspect) == 0 {
+	if len(found) == 0 {
 		return 0, nil
+	}
+	suspect := make([][]byte, 0, len(found))
+	for _, value := range found {
+		suspect = append(suspect, value.key)
 	}
 
 	// Look again before believing it.
@@ -243,6 +222,19 @@ func (r *Reconciler) confirm(ctx context.Context, keys [][]byte) ([]*repairedVal
 	case <-time.After(r.settle()):
 	}
 
+	return r.differing(ctx, keys)
+}
+
+// differing reads both sides and reports the keys they disagree about, with the
+// source's value ready to write over the target's.
+//
+// The serialised value is compared rather than the value itself, because it is
+// one comparison for every type — a string, a hash with per-field expiries, a
+// stream, a module type. Two servers of the same version that were given the
+// same changes produce the same serialisation; if they ever do not, this reports
+// a difference that repairing does not settle, and the metric says so rather
+// than the difference going unseen.
+func (r *Reconciler) differing(ctx context.Context, keys [][]byte) ([]*repairedValue, error) {
 	fromSource, err := readValues(ctx, r.Source, keys)
 	if err != nil {
 		return nil, err
@@ -252,16 +244,16 @@ func (r *Reconciler) confirm(ctx context.Context, keys [][]byte) ([]*repairedVal
 		return nil, err
 	}
 
-	var differing []*repairedValue
+	var found []*repairedValue
 	for i := range fromSource {
 		if i >= len(fromTarget) {
 			break
 		}
 		if string(fromSource[i].payload) != string(fromTarget[i].payload) {
-			differing = append(differing, fromSource[i])
+			found = append(found, fromSource[i])
 		}
 	}
-	return differing, nil
+	return found, nil
 }
 
 // settle is how long to wait before looking again, which has to be longer than
@@ -304,20 +296,9 @@ func (r *Reconciler) ghosts(ctx context.Context, limit *rateLimiter) (int, error
 		}
 
 		// Ask the source which of them it still has.
-		pipe := r.Source.Pipeline()
-		exists := make([]*goredis.IntCmd, len(mine))
-		for i, key := range mine {
-			exists[i] = pipe.Exists(ctx, key)
-		}
-		if _, err := pipe.Exec(ctx); err != nil && err != goredis.Nil {
-			return fmt.Errorf("check %d keys against the source: %w", len(mine), err)
-		}
-
-		var suspect []string
-		for i, check := range exists {
-			if count, err := check.Result(); err == nil && count == 0 {
-				suspect = append(suspect, mine[i])
-			}
+		suspect, err := absentFrom(ctx, r.Source, mine)
+		if err != nil {
+			return err
 		}
 		if len(suspect) == 0 {
 			return nil
@@ -360,22 +341,27 @@ func (r *Reconciler) confirmGone(ctx context.Context, keys []string) ([]string, 
 	case <-time.After(r.settle()):
 	}
 
-	pipe := r.Source.Pipeline()
+	return absentFrom(ctx, r.Source, keys)
+}
+
+// absentFrom reports which of the keys a server does not have.
+func absentFrom(ctx context.Context, client goredis.UniversalClient, keys []string) ([]string, error) {
+	pipe := client.Pipeline()
 	exists := make([]*goredis.IntCmd, len(keys))
 	for i, key := range keys {
 		exists[i] = pipe.Exists(ctx, key)
 	}
 	if _, err := pipe.Exec(ctx); err != nil && err != goredis.Nil {
-		return nil, fmt.Errorf("re-check %d keys against the source: %w", len(keys), err)
+		return nil, fmt.Errorf("check %d keys against the source: %w", len(keys), err)
 	}
 
-	var gone []string
+	var absent []string
 	for i, check := range exists {
 		if count, err := check.Result(); err == nil && count == 0 {
-			gone = append(gone, keys[i])
+			absent = append(absent, keys[i])
 		}
 	}
-	return gone, nil
+	return absent, nil
 }
 
 // ownedSlots is the set of slots this shard's master serves, or nil when the

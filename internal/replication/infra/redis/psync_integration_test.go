@@ -5,7 +5,6 @@ package redis
 import (
 	"context"
 	"fmt"
-	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -14,28 +13,19 @@ import (
 	goredis "github.com/redis/go-redis/v9"
 )
 
-// sourceAddr is the Redis to replicate from in these tests.
-//
-// Set SYNC_REDIS_SOURCE to a cluster-enabled instance owning every slot; a
-// single node with CLUSTER ADDSLOTSRANGE 0 16383 is enough, and is what makes
-// the same-slot rules for MULTI apply.
-func sourceAddr(t *testing.T) string {
+// These tests speak the protocol directly rather than through the pipeline, so
+// they need one address and one plain client. Set SYNC_REDIS_SOURCE to a
+// cluster-enabled instance owning every slot; a single node with
+// CLUSTER ADDSLOTSRANGE 0 16383 is enough.
+func oneSource(t *testing.T) (string, *goredis.Client) {
 	t.Helper()
-	addr := os.Getenv("SYNC_REDIS_SOURCE")
-	if addr == "" {
-		t.Skip("set SYNC_REDIS_SOURCE to a Redis to replicate from")
-	}
-	return addr
-}
-
-func sourceClient(t *testing.T, addr string) *goredis.Client {
-	t.Helper()
+	addr := addrsFrom(t, "SYNC_REDIS_SOURCE")[0]
 	client := goredis.NewClient(&goredis.Options{Addr: addr})
 	t.Cleanup(func() { client.Close() })
 	if err := client.Ping(context.Background()).Err(); err != nil {
 		t.Fatalf("ping %s: %v", addr, err)
 	}
-	return client
+	return addr, client
 }
 
 // masterOffset reads what the source thinks its own offset is.
@@ -69,8 +59,7 @@ func masterOffset(t *testing.T, client *goredis.Client) int64 {
 // acknowledgements are lies — and both failures are silent. So: replicate a real
 // master, apply real commands, and check the two counts match exactly.
 func TestTheOffsetAgreesWithARealMaster(t *testing.T) {
-	addr := sourceAddr(t)
-	client := sourceClient(t, addr)
+	addr, client := oneSource(t)
 	ctx := context.Background()
 
 	stream, err := Dial(ctx, StreamOptions{Addr: addr, IdleTimeout: 15 * time.Second})
@@ -156,8 +145,7 @@ func TestTheOffsetAgreesWithARealMaster(t *testing.T) {
 // The offset has to continue rather than restart, and nothing may be delivered
 // twice or skipped. This is the property that makes the buffer worth having.
 func TestAPartialResyncPicksUpExactlyWhereItStopped(t *testing.T) {
-	addr := sourceAddr(t)
-	client := sourceClient(t, addr)
+	addr, client := oneSource(t)
 	ctx := context.Background()
 
 	// Give the master room to hold history across the disconnect.

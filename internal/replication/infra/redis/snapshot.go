@@ -63,12 +63,7 @@ func (s *Snapshotter) batch() int {
 	return defaultCopyBatch
 }
 
-func (s *Snapshotter) logger() logrus.FieldLogger {
-	if s.Logger != nil {
-		return s.Logger
-	}
-	return logrus.StandardLogger()
-}
+func (s *Snapshotter) logger() logrus.FieldLogger { return orDefault(s.Logger) }
 
 // Pin opens the replication connection, which is what fixes the point the copy
 // is taken against.
