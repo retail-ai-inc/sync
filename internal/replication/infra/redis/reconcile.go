@@ -44,6 +44,12 @@ type Reconciler struct {
 	// what to do while finding out whether the comparison itself is right.
 	Repair bool
 
+	// Now asks for a comparison before the timer would. The source's shape
+	// changing is what sends one: a slot moving between shards can leave a key
+	// missing from the target with nothing to show it, and waiting an hour to
+	// find that out is an hour of a disaster-recovery copy being wrong.
+	Now <-chan string
+
 	Logger logrus.FieldLogger
 	Labels metrics.Labels
 }
@@ -87,10 +93,21 @@ func (r *Reconciler) Run(ctx context.Context) {
 	defer ticker.Stop()
 
 	for {
+		var because string
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+		case reason, ok := <-r.Now:
+			if !ok {
+				r.Now = nil
+				continue
+			}
+			because = reason
+		}
+		if because != "" {
+			r.logger().Infof("[Redis] Comparing shard %s now, because %s",
+				r.Shard, because)
 		}
 
 		started := time.Now()

@@ -94,11 +94,31 @@ func (s *Syncer) Start(ctx context.Context) error {
 	}
 	s.logger.Infof("[Redis] Replicating %d shard(s)", len(shards))
 
+	// One watcher for the task, fanning out to every shard's comparison.
+	triggers := make([]chan string, len(shards))
+	for i := range triggers {
+		triggers[i] = make(chan string, 1)
+	}
+	watcher := &topologyWatcher{
+		Source: source,
+		Logger: s.logger,
+		OnChange: func(what string) {
+			for _, trigger := range triggers {
+				// Never block: a comparison already queued is as good as two.
+				select {
+				case trigger <- what:
+				default:
+				}
+			}
+		},
+	}
+	go watcher.Run(ctx)
+
 	group, groupCtx := errgroup.WithContext(ctx)
-	for _, shard := range shards {
-		shard := shard
+	for i, shard := range shards {
+		shard, trigger := shard, triggers[i]
 		group.Go(func() error {
-			return s.runShard(groupCtx, shard, source, target, commands)
+			return s.runShard(groupCtx, shard, source, target, commands, trigger)
 		})
 	}
 	return group.Wait()
@@ -149,7 +169,7 @@ func (s *Syncer) shards(ctx context.Context, source goredis.UniversalClient) ([]
 
 // runShard replicates one shard until it stops.
 func (s *Syncer) runShard(ctx context.Context, sh shard, source, target goredis.UniversalClient,
-	commands *commandTable) error {
+	commands *commandTable, compareNow <-chan string) error {
 
 	labels := s.labels()
 	labels["shard"] = sh.id
@@ -243,6 +263,7 @@ func (s *Syncer) runShard(ctx context.Context, sh shard, source, target goredis.
 			Interval: s.cfg.RedisReconcileInterval,
 			ReadRate: s.cfg.RedisSourceReadRate,
 			Repair:   true,
+			Now:      compareNow,
 			Logger:   s.logger,
 			Labels:   labels,
 		}
