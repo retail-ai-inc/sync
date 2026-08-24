@@ -3,6 +3,7 @@ package redis
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	goredis "github.com/redis/go-redis/v9"
@@ -134,17 +135,32 @@ func (s *Snapshotter) Copy(ctx context.Context) error {
 }
 
 // scanAll walks every key of a source, whether it is one server or a cluster.
+//
+// The callback is called one page at a time, never twice at once. That matters
+// because ForEachMaster runs its callback against every master in parallel, and
+// every caller here accumulates something across pages — a count, a list of
+// keys. Leaving the callers to discover that would mean each of them racing on
+// its own accumulator, and the symptom is not a crash but a scan that quietly
+// returns fewer keys than the server holds, which reads as data missing from the
+// source.
 func scanAll(ctx context.Context, client goredis.UniversalClient, batch int,
 	page func(keys []string) error) error {
 
-	if cluster, ok := client.(*goredis.ClusterClient); ok {
-		// A cluster has no cursor that spans nodes: each master holds its own
-		// slots, so each is walked separately.
-		return cluster.ForEachMaster(ctx, func(ctx context.Context, node *goredis.Client) error {
-			return scanOne(ctx, node, batch, page)
-		})
+	cluster, ok := client.(*goredis.ClusterClient)
+	if !ok {
+		return scanOne(ctx, client, batch, page)
 	}
-	return scanOne(ctx, client, batch, page)
+
+	// A cluster has no cursor that spans nodes: each master holds its own slots,
+	// so each is walked separately.
+	var mu sync.Mutex
+	return cluster.ForEachMaster(ctx, func(ctx context.Context, node *goredis.Client) error {
+		return scanOne(ctx, node, batch, func(keys []string) error {
+			mu.Lock()
+			defer mu.Unlock()
+			return page(keys)
+		})
+	})
 }
 
 func scanOne(ctx context.Context, client goredis.UniversalClient, batch int,

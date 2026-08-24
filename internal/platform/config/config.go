@@ -61,10 +61,15 @@ type SyncConfig struct {
 	PGPublicationNames     string
 	RedisPositionPath      string
 	// RedisReconcileInterval is how often the Redis keyspace is fully compared
-	// against the source. Keyspace notifications are published with no
-	// acknowledgement and no replay, so the comparison is what makes the target
-	// eventually correct after a dropped subscription. Zero means the default;
-	// a negative value turns it off.
+	// against the source.
+	//
+	// It is no longer the mechanism that makes the target correct — the
+	// replication stream is — but the backstop for that mechanism being wrong
+	// somewhere nobody thought of. It also finds keys the target has and the
+	// source does not, which nothing else looks for and which after a failover
+	// are records nobody can account for.
+	//
+	// Zero means the default; a negative value turns it off.
 	RedisReconcileInterval time.Duration
 	Status                 string
 	TaskName               string

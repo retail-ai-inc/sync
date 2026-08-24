@@ -122,7 +122,18 @@ func (a *Applier) Apply(ctx context.Context, runs [][]*domain.Event, pos domain.
 	}
 
 	metrics.ObserveBatch(a.Labels, time.Since(started), 0, len(jobs), len(jobs), len(events))
+	metrics.SetAppliedOffset(a.Labels, batchEnd)
+	metrics.CountValueRepairs(a.Labels, repairsIn(jobs))
 	return true, nil
+}
+
+// repairsIn counts the keys a batch copied whole rather than by replaying.
+func repairsIn(jobs []work) int {
+	total := 0
+	for _, job := range jobs {
+		total += len(job.repairs)
+	}
+	return total
 }
 
 func (a *Applier) logger() logrus.FieldLogger {

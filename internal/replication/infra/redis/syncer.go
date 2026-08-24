@@ -181,16 +181,28 @@ func (s *Syncer) runShard(ctx context.Context, sh shard, source, target goredis.
 	}
 	defer connection.close()
 
+	// A plain connection to this shard's master, used only to ask how much
+	// history it keeps. The replication connection cannot answer: once it is a
+	// replica link it takes no ordinary commands.
+	node := goredis.NewClient(&goredis.Options{
+		Addr:     sh.addr,
+		Username: username,
+		Password: password,
+	})
+	defer node.Close()
+
 	positions := &Checkpoints{Target: target, TaskID: s.cfg.ID, Shard: sh.id}
 
 	runner := &pipeline.Runner{
 		Reader: &Reader{
-			Shard:    sh.id,
-			Link:     connection,
-			Target:   target,
-			Commands: commands,
-			Logger:   s.logger,
-			Labels:   labels,
+			Shard:      sh.id,
+			Link:       connection,
+			Target:     target,
+			Commands:   commands,
+			Node:       node,
+			Configured: s.cfg.RetentionWindow,
+			Logger:     s.logger,
+			Labels:     labels,
 		},
 		Applier: &Applier{
 			Target:    target,
@@ -218,6 +230,23 @@ func (s *Syncer) runShard(ctx context.Context, sh shard, source, target goredis.
 			Logger:      s.logger,
 			Engine:      "Redis",
 		},
+	}
+
+	// The comparison runs alongside, and its failures do not stop replication:
+	// a gap in assurance is not a reason to create a gap in the copy.
+	if s.cfg.RedisReconcileInterval >= 0 {
+		reconciler := &Reconciler{
+			Node:     node,
+			Source:   source,
+			Target:   target,
+			Shard:    sh.id,
+			Interval: s.cfg.RedisReconcileInterval,
+			ReadRate: s.cfg.RedisSourceReadRate,
+			Repair:   true,
+			Logger:   s.logger,
+			Labels:   labels,
+		}
+		go reconciler.Run(ctx)
 	}
 
 	s.logger.Infof("[Redis] Shard %s: replicating %s", sh.id, sh.addr)

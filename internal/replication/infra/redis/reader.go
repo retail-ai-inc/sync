@@ -32,8 +32,20 @@ type Reader struct {
 	// Commands is the key specification table, read from the target.
 	Commands *commandTable
 
+	// Node is a plain connection to this shard's master, for asking how much
+	// history it keeps. It is not used to read the stream.
+	Node goredis.UniversalClient
+	// Configured is the retention window the task was told, for a source that
+	// cannot be asked. Zero means measure it.
+	Configured time.Duration
+
 	Logger logrus.FieldLogger
 	Labels metrics.Labels
+
+	// sampledAt and sampledOffset are the previous measurement of how fast the
+	// stream is being written, which is half of the retention window.
+	sampledAt     time.Time
+	sampledOffset int64
 
 	// position is what was resumed from. Its phase decides whether a change is
 	// applied by replaying the command or by re-reading the key's value.

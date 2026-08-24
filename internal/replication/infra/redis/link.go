@@ -197,6 +197,7 @@ func (l *link) pump(ctx context.Context, stream *Stream) error {
 				unsynced = false
 			}
 			l.durable.Store(cmd.End)
+			metrics.SetStreamOffset(l.labels, cmd.End, l.buffer.Held())
 		default:
 		}
 	}

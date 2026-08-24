@@ -399,6 +399,33 @@ const (
 	RetentionHeadroomSeconds = "sync_source_retention_headroom_seconds"
 	helpRetentionHeadroom    = "Seconds a stopped task has left before its position falls out of the source's log"
 
+	// The Redis relay measures its progress in stream bytes rather than in time,
+	// because a Redis replication stream carries no timestamps.
+	//
+	// The applied lag is therefore StreamOffsetBytes minus AppliedOffsetBytes,
+	// computed where the metrics are read: the two are published by different
+	// parts of the pipeline, and joining them here would mean one waiting for the
+	// other. sync_replication_lag_seconds still exists for Redis, but it measures
+	// from when the relay read a change rather than from when the source made it,
+	// so it does not include the time spent crossing the region.
+	StreamOffsetBytes  = "sync_redis_stream_offset_bytes"
+	helpStreamOffset   = "Replication stream offset the relay has received and written to disk"
+	AppliedOffsetBytes = "sync_redis_applied_offset_bytes"
+	helpAppliedOffset  = "Replication stream offset applied to the target"
+	// BufferHeldBytes is how much of the stream is on disk, which is what turns a
+	// briefly unavailable target into a partial resync instead of a full one.
+	BufferHeldBytes = "sync_redis_buffer_held_bytes"
+	helpBufferHeld  = "Bytes of the replication stream held on disk"
+	// ValueRepairsTotal counts keys copied whole rather than by replaying a
+	// command. A rate above zero outside the first copy means something is being
+	// repaired, which is worth knowing about.
+	ValueRepairsTotal = "sync_redis_value_repairs_total"
+	helpValueRepairs  = "Keys copied by value instead of by replaying a command"
+	// ReconcileDifference is what the last full comparison found. It is the
+	// backstop for everything else in this package being wrong.
+	ReconcileDifference = "sync_redis_reconcile_difference"
+	helpReconcileDiff   = "Keys found to differ by the last full comparison"
+
 	// QueueUsed is how much of the reader's hand-off queue is occupied. It
 	// filling up is what back pressure looks like from outside.
 	QueueUsed  = "sync_reader_queue_used"
@@ -418,6 +445,29 @@ func SetLastEventAge(labels Labels, seconds float64) {
 }
 
 // SetQueue records the reader hand-off queue's depth and capacity.
+// SetStreamOffset publishes how far the relay has received and written to disk.
+func SetStreamOffset(labels Labels, offset, held int64) {
+	Default.SetGauge(StreamOffsetBytes, helpStreamOffset, labels, float64(offset))
+	Default.SetGauge(BufferHeldBytes, helpBufferHeld, labels, float64(held))
+}
+
+// SetAppliedOffset publishes how far the target has been written.
+func SetAppliedOffset(labels Labels, offset int64) {
+	Default.SetGauge(AppliedOffsetBytes, helpAppliedOffset, labels, float64(offset))
+}
+
+// CountValueRepairs records keys copied whole.
+func CountValueRepairs(labels Labels, n int) {
+	if n > 0 {
+		Default.AddCounter(ValueRepairsTotal, helpValueRepairs, labels, float64(n))
+	}
+}
+
+// SetReconcileDifference publishes what the last full comparison found.
+func SetReconcileDifference(labels Labels, keys float64) {
+	Default.SetGauge(ReconcileDifference, helpReconcileDiff, labels, keys)
+}
+
 // SetRetention publishes how much source history is left to fall back on.
 //
 // Headroom is the window less the lag: with a day of binlog kept and a minute

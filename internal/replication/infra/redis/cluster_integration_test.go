@@ -403,10 +403,11 @@ func TestAClusterIsReplicatedExactlyOnceAcrossCrashes(t *testing.T) {
 	if !same {
 		t.Fatalf("the two clusters differ after %d crashes:\n%s", crashes, difference)
 	}
-	if skipped == 0 {
-		t.Error("no command was skipped as already applied, so the crashes never " +
-			"produced a replay")
-	}
+	// Whether a crash produces a replay depends on where it landed: a kill
+	// between batches leaves the floor exactly where the markers are, and there
+	// is nothing to re-read. So this is reported rather than required, and the
+	// replay itself is tested deliberately in
+	// TestReplayingAnAppliedRangeChangesNothing.
 	t.Logf("%d commands skipped as already applied", skipped)
 }
 
@@ -460,11 +461,9 @@ func compareClusters(t *testing.T, source, target *goredis.ClusterClient) (bool,
 	ctx := context.Background()
 
 	var keys []string
-	err := source.ForEachMaster(ctx, func(ctx context.Context, node *goredis.Client) error {
-		return scanOne(ctx, node, 500, func(page []string) error {
-			keys = append(keys, page...)
-			return nil
-		})
+	err := scanAll(ctx, source, 500, func(page []string) error {
+		keys = append(keys, page...)
+		return nil
 	})
 	if err != nil {
 		return false, fmt.Sprintf("read the source's keys: %v", err)
@@ -492,16 +491,14 @@ func compareClusters(t *testing.T, source, target *goredis.ClusterClient) (bool,
 	for _, key := range keys {
 		present[key] = true
 	}
-	err = target.ForEachMaster(ctx, func(ctx context.Context, node *goredis.Client) error {
-		return scanOne(ctx, node, 500, func(page []string) error {
-			for _, key := range page {
-				if IsOffsetKey(key) || isMetaKey(key) || present[key] {
-					continue
-				}
-				problems = append(problems, "  "+key+" exists only on the target")
+	err = scanAll(ctx, target, 500, func(page []string) error {
+		for _, key := range page {
+			if IsOffsetKey(key) || isMetaKey(key) || present[key] {
+				continue
 			}
-			return nil
-		})
+			problems = append(problems, "  "+key+" exists only on the target")
+		}
+		return nil
 	})
 	if err != nil {
 		return false, fmt.Sprintf("read the target's keys: %v", err)
@@ -568,4 +565,245 @@ func clusterDigest(ctx context.Context, client *goredis.ClusterClient, key strin
 		return "hash:" + strings.Join(parts, ","), nil
 	}
 	return kind + ":<not compared>", nil
+}
+
+// TestTheComparisonFindsAndFixesADifference covers the backstop.
+//
+// It is the one thing in this package that does not share the assumptions of the
+// replication path, so it is what would catch a case nobody thought of. That
+// makes it worth testing directly rather than trusting it to be exercised by the
+// crash tests, where by construction there is nothing for it to find.
+func TestTheComparisonFindsAndFixesADifference(t *testing.T) {
+	source := clusterClient(t, clusterAddrs(t, "SYNC_REDIS_SOURCE_CLUSTER"))
+	target := clusterClient(t, clusterAddrs(t, "SYNC_REDIS_TARGET_CLUSTER"))
+	emptyCluster(t, source)
+	emptyCluster(t, target)
+	ctx := context.Background()
+
+	// Three shapes of difference, one of each kind that can happen.
+	if err := source.Set(ctx, "recon:right", "same", 0).Err(); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := target.Set(ctx, "recon:right", "same", 0).Err(); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := source.Set(ctx, "recon:wrong", "source-value", 0).Err(); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := target.Set(ctx, "recon:wrong", "stale-value", 0).Err(); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := source.Set(ctx, "recon:missing", "only-on-source", 0).Err(); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := target.Set(ctx, "recon:ghost", "only-on-target", 0).Err(); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// One reconciler per source master, as the syncer runs them.
+	slots, err := source.ClusterSlots(ctx).Result()
+	if err != nil {
+		t.Fatalf("ClusterSlots: %v", err)
+	}
+	quiet := logrus.New()
+	quiet.SetLevel(logrus.ErrorLevel)
+
+	total := 0
+	seen := map[string]bool{}
+	for _, slot := range slots {
+		if len(slot.Nodes) == 0 {
+			continue
+		}
+		id := fmt.Sprintf("%d-%d", slot.Start, slot.End)
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+
+		node := goredis.NewClient(&goredis.Options{Addr: slot.Nodes[0].Addr})
+		reconciler := &Reconciler{
+			Node: node, Source: source, Target: target, Shard: id,
+			Repair: true, Logger: quiet,
+			Labels: metrics.Labels{"task": "recon", "shard": id},
+		}
+		found, err := reconciler.pass(ctx)
+		node.Close()
+		if err != nil {
+			t.Fatalf("shard %s: %v", id, err)
+		}
+		total += found
+	}
+
+	if total < 3 {
+		t.Errorf("the comparison found %d differences, want at least 3 (a wrong "+
+			"value, a missing key and a ghost)", total)
+	}
+
+	for key, want := range map[string]string{
+		"recon:right":   "same",
+		"recon:wrong":   "source-value",
+		"recon:missing": "only-on-source",
+	} {
+		got, err := target.Get(ctx, key).Result()
+		if err != nil {
+			t.Errorf("%s was not repaired onto the target: %v", key, err)
+			continue
+		}
+		if got != want {
+			t.Errorf("%s reads %q on the target, want %q", key, got, want)
+		}
+	}
+	if _, err := target.Get(ctx, "recon:ghost").Result(); err != goredis.Nil {
+		t.Errorf("recon:ghost is still on the target (%v); a key the source does "+
+			"not have is the difference nothing else looks for", err)
+	}
+}
+
+// TestReplayingAnAppliedRangeChangesNothing tests the property directly instead
+// of hoping a crash produces it.
+//
+// The resume floor is written after each batch on a best-effort basis: losing
+// that write costs a longer replay next time and nothing else, which is the whole
+// reason it is allowed to fail. So rewinding it by hand is not an artificial
+// scenario — it is the scenario, arranged on purpose rather than waited for.
+//
+// The commands in the replayed range are INCR, RPUSH and ZINCRBY. If the skip
+// does not work, every one of them lands a second time and the two sides differ.
+func TestReplayingAnAppliedRangeChangesNothing(t *testing.T) {
+	source := clusterClient(t, clusterAddrs(t, "SYNC_REDIS_SOURCE_CLUSTER"))
+	target := clusterClient(t, clusterAddrs(t, "SYNC_REDIS_TARGET_CLUSTER"))
+	emptyCluster(t, source)
+	emptyCluster(t, target)
+	ctx := context.Background()
+
+	err := source.ForEachMaster(ctx, func(ctx context.Context, node *goredis.Client) error {
+		return node.ConfigSet(ctx, "repl-backlog-size", "67108864").Err()
+	})
+	if err != nil {
+		t.Fatalf("widen the backlogs: %v", err)
+	}
+	commands, err := loadCommandTable(ctx, target)
+	if err != nil {
+		t.Fatalf("loadCommandTable: %v", err)
+	}
+
+	root := t.TempDir()
+	for i := 0; i < 30; i++ {
+		if err := source.Set(ctx, fmt.Sprintf("seed:%d", i), i, 0).Err(); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+
+	runCtx, stop := context.WithCancel(ctx)
+	rig := buildClusterRig(t, source, target, root, commands)
+	done := rig.run(runCtx)
+
+	// Reach the command phase, then write the commands that must not be applied
+	// twice.
+	deadline := time.Now().Add(40 * time.Second)
+	for {
+		if time.Now().After(deadline) {
+			stop()
+			rig.stop()
+			t.Fatal("not every shard reached the command phase")
+		}
+		source.Set(ctx, "kick", time.Now().UnixNano(), 0)
+		time.Sleep(250 * time.Millisecond)
+		if allInCommandPhase(t, target, rig) {
+			break
+		}
+	}
+
+	const rounds = 40
+	for i := 0; i < rounds; i++ {
+		for k := 0; k < 5; k++ {
+			source.Incr(ctx, fmt.Sprintf("replay:count:%d", k))
+			source.RPush(ctx, fmt.Sprintf("replay:queue:%d", k), fmt.Sprintf("job-%d", i))
+			source.ZIncrBy(ctx, fmt.Sprintf("replay:score:%d", k), 1, "member")
+		}
+	}
+
+	// Wait for it all to land.
+	settled := time.Now().Add(40 * time.Second)
+	for time.Now().Before(settled) {
+		time.Sleep(300 * time.Millisecond)
+		if same, _ := compareClusters(t, source, target); same {
+			break
+		}
+	}
+	before, difference := compareClusters(t, source, target)
+	if !before {
+		stop()
+		rig.stop()
+		t.Fatalf("the two sides had not converged before the replay was arranged:\n%s",
+			difference)
+	}
+
+	// Stop, rewind every shard's floor, and let it read the range again.
+	stop()
+	for range rig.runners {
+		<-done
+	}
+	rig.stop()
+
+	rewound := 0
+	for i, runner := range rig.runners {
+		key := metaKey(2, runner.CheckpointKey)
+		payload, err := target.Get(ctx, key).Result()
+		if err != nil {
+			t.Fatalf("read the position of shard %s: %v", runner.CheckpointKey, err)
+		}
+		position, err := decodePosition(payload)
+		if err != nil {
+			t.Fatalf("decode the position of shard %s: %v", runner.CheckpointKey, err)
+		}
+		// Back to the start of what is still on disk, which is as far as a lost
+		// floor could ever put it. Any further and the buffer would refuse, which
+		// is a different behaviour with its own test.
+		oldest := rig.links[i].buffer.Oldest()
+		if oldest >= position.Offset {
+			t.Fatalf("shard %s holds nothing before offset %d, so there is nothing "+
+				"to re-read", runner.CheckpointKey, position.Offset)
+		}
+		position.Offset = oldest
+		encoded, err := position.encode()
+		if err != nil {
+			t.Fatalf("encode: %v", err)
+		}
+		if err := target.Set(ctx, key, encoded, 0).Err(); err != nil {
+			t.Fatalf("rewind the position of shard %s: %v", runner.CheckpointKey, err)
+		}
+		rewound++
+	}
+	t.Logf("rewound the resume floor of %d shard(s)", rewound)
+
+	replayCtx, stopReplay := context.WithCancel(ctx)
+	replay := buildClusterRig(t, source, target, root, commands)
+	replayDone := replay.run(replayCtx)
+
+	// Give it time to read the whole range again.
+	time.Sleep(6 * time.Second)
+	stopReplay()
+	for range replay.runners {
+		if err := <-replayDone; err != nil && !domain.IsUnrecoverable(err) {
+			continue
+		} else if err != nil {
+			t.Fatalf("a shard refused to re-read the range: %v", err)
+		}
+	}
+	skipped := replay.skipped()
+	replay.stop()
+
+	// The comparison first: it is the property, and a failure here is the one
+	// that says what actually went wrong.
+	after, difference := compareClusters(t, source, target)
+	if !after {
+		t.Fatalf("re-reading an already applied range changed the target:\n%s", difference)
+	}
+	if skipped == 0 {
+		t.Fatal("nothing was skipped after the floor was rewound, so the range was " +
+			"not actually re-read and this proves nothing")
+	}
+	t.Logf("re-read a range and skipped %d commands; the two sides are still identical",
+		skipped)
 }
