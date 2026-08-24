@@ -33,7 +33,13 @@ import (
 
 // Snapshotter takes one shard's first copy.
 type Snapshotter struct {
-	Link   *link
+	Link *link
+	// Node is this shard's master. The copy reads from it rather than from the
+	// cluster, because every shard runs its own copy: scanning the cluster from
+	// each of them would read the whole key space once per shard, and on a
+	// twelve-shard cluster that is twelve times the work and twelve times the
+	// load on a live payment database.
+	Node   goredis.UniversalClient
 	Source goredis.UniversalClient
 	Target goredis.UniversalClient
 
@@ -90,7 +96,11 @@ func (s *Snapshotter) Copy(ctx context.Context) error {
 		start  = time.Now()
 	)
 
-	err := scanAll(ctx, s.Source, s.batch(), func(keys []string) error {
+	from := s.Node
+	if from == nil {
+		from = s.Source
+	}
+	err := scanOne(ctx, from, s.batch(), func(keys []string) error {
 		if err := limit.wait(ctx, len(keys)); err != nil {
 			return err
 		}

@@ -237,7 +237,10 @@ func buildClusterRig(t *testing.T, source, target *goredis.ClusterClient, root s
 			},
 			Applier: applier,
 			Snapshotter: &Snapshotter{
-				Link: connection, Source: source, Target: target,
+				Link: connection, Node: goredis.NewClient(&goredis.Options{
+					Addr: slot.Nodes[0].Addr,
+				}),
+				Source: source, Target: target,
 				Logger: quiet, Labels: labels,
 			},
 			Checkpoints:   positions,

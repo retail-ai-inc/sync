@@ -35,6 +35,11 @@ func GetRedisClient(dsn string) (goredis.UniversalClient, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse redis DSN: %v", err)
 		}
+		// ParseClusterURL takes the whole authority as one address, commas and
+		// all, so a DSN naming three seeds becomes one host that resolves to
+		// nothing. Splitting it here is what makes a multi-node DSN work at all;
+		// without it the client dials "a:1,b:2,c:3" and reports no such host.
+		opt.Addrs = splitSeeds(opt.Addrs)
 		applySkipVerify(&opt.TLSConfig, skipVerify)
 		client = goredis.NewClusterClient(opt)
 	} else {
@@ -53,6 +58,24 @@ func GetRedisClient(dsn string) (goredis.UniversalClient, error) {
 		return nil, fmt.Errorf("failed to ping redis: %v", err)
 	}
 	return client, nil
+}
+
+// splitSeeds separates the comma-joined seeds a DSN carries.
+//
+// The DSN builder renders a cluster as one authority with the seeds joined by
+// commas, because a URL has room for exactly one host. Every seed is a way in to
+// the same cluster: the client asks whichever answers for the slot map and
+// connects to the rest itself.
+func splitSeeds(addrs []string) []string {
+	var seeds []string
+	for _, addr := range addrs {
+		for _, seed := range strings.Split(addr, ",") {
+			if seed = strings.TrimSpace(seed); seed != "" {
+				seeds = append(seeds, seed)
+			}
+		}
+	}
+	return seeds
 }
 
 // isClusterDSN reports whether a DSN names more than one host.

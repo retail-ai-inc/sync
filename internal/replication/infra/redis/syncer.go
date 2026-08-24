@@ -234,6 +234,7 @@ func (s *Syncer) runShard(ctx context.Context, sh shard, source, target goredis.
 		},
 		Snapshotter: &Snapshotter{
 			Link:     connection,
+			Node:     node,
 			Source:   source,
 			Target:   target,
 			Logger:   s.logger,

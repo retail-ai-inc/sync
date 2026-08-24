@@ -39,6 +39,10 @@ type Reconciler struct {
 	Batch int
 	// ReadRate caps keys read from the source per second. Zero means no limit.
 	ReadRate int
+	// Settle is how long to wait before re-reading a key that looked different.
+	// It has to be longer than replication takes, or a busy source reports
+	// differences that are only changes in flight. Zero means the default.
+	Settle time.Duration
 	// Repair writes the source's value over the target's when they differ. With
 	// it off, differences are counted and reported but not touched, which is
 	// what to do while finding out whether the comparison itself is right.
@@ -57,6 +61,7 @@ type Reconciler struct {
 const (
 	defaultReconcileInterval = time.Hour
 	defaultReconcileBatch    = 200
+	defaultReconcileSettle   = 2 * time.Second
 )
 
 func (r *Reconciler) interval() time.Duration {
@@ -185,22 +190,34 @@ func (r *Reconciler) compare(ctx context.Context, keys []string) (int, error) {
 		return 0, err
 	}
 
-	var differing []*repairedValue
+	var suspect [][]byte
 	for i := range fromSource {
 		if i >= len(fromTarget) {
 			break
 		}
 		if string(fromSource[i].payload) != string(fromTarget[i].payload) {
-			differing = append(differing, fromSource[i])
+			suspect = append(suspect, fromSource[i].key)
 		}
 	}
-	if len(differing) == 0 {
+	if len(suspect) == 0 {
 		return 0, nil
 	}
 
+	// Look again before believing it.
+	//
+	// Both sides are moving: a key can change on the source between the two reads
+	// and differ for no reason other than the replication being in flight. On a
+	// live source that happens routinely, and a metric that reports a difference
+	// every time anybody writes anything is a metric nobody reads. A difference
+	// that is still there a moment later is a difference.
+	differing, err := r.confirm(ctx, suspect)
+	if err != nil || len(differing) == 0 {
+		return 0, err
+	}
+
 	for _, value := range differing {
-		r.logger().Warnf("[Redis] Shard %s: %q differs from the source",
-			r.Shard, value.key)
+		r.logger().Warnf("[Redis] Shard %s: %q still differs from the source after "+
+			"a second look", r.Shard, value.key)
 	}
 	if !r.Repair {
 		return len(differing), nil
@@ -215,6 +232,45 @@ func (r *Reconciler) compare(ctx context.Context, keys []string) (int, error) {
 	}
 	metrics.CountValueRepairs(r.Labels, len(differing))
 	return len(differing), nil
+}
+
+// confirm re-reads the keys that looked different and reports the ones that
+// still are.
+func (r *Reconciler) confirm(ctx context.Context, keys [][]byte) ([]*repairedValue, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-time.After(r.settle()):
+	}
+
+	fromSource, err := readValues(ctx, r.Source, keys)
+	if err != nil {
+		return nil, err
+	}
+	fromTarget, err := readValues(ctx, r.Target, keys)
+	if err != nil {
+		return nil, err
+	}
+
+	var differing []*repairedValue
+	for i := range fromSource {
+		if i >= len(fromTarget) {
+			break
+		}
+		if string(fromSource[i].payload) != string(fromTarget[i].payload) {
+			differing = append(differing, fromSource[i])
+		}
+	}
+	return differing, nil
+}
+
+// settle is how long to wait before looking again, which has to be longer than
+// the replication takes.
+func (r *Reconciler) settle() time.Duration {
+	if r.Settle > 0 {
+		return r.Settle
+	}
+	return defaultReconcileSettle
 }
 
 // ghosts finds keys the target has and the source does not.
@@ -257,20 +313,28 @@ func (r *Reconciler) ghosts(ctx context.Context, limit *rateLimiter) (int, error
 			return fmt.Errorf("check %d keys against the source: %w", len(mine), err)
 		}
 
-		var gone []string
+		var suspect []string
 		for i, check := range exists {
 			if count, err := check.Result(); err == nil && count == 0 {
-				gone = append(gone, mine[i])
+				suspect = append(suspect, mine[i])
 			}
 		}
-		if len(gone) == 0 {
+		if len(suspect) == 0 {
 			return nil
+		}
+
+		// Same second look. A key deleted on the source a moment ago is still on
+		// the target until the delete arrives, and that is replication working
+		// rather than a ghost.
+		gone, err := r.confirmGone(ctx, suspect)
+		if err != nil || len(gone) == 0 {
+			return err
 		}
 		found += len(gone)
 
 		for _, key := range gone {
-			r.logger().Warnf("[Redis] Shard %s: %q is on the target and not on the "+
-				"source. After a failover that is a record nobody can account for.",
+			r.logger().Warnf("[Redis] Shard %s: %q is on the target and still not on "+
+				"the source. After a failover that is a record nobody can account for.",
 				r.Shard, key)
 		}
 		if !r.Repair {
@@ -286,6 +350,32 @@ func (r *Reconciler) ghosts(ctx context.Context, limit *rateLimiter) (int, error
 		return nil
 	})
 	return found, err
+}
+
+// confirmGone re-checks keys the source appeared not to have.
+func (r *Reconciler) confirmGone(ctx context.Context, keys []string) ([]string, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-time.After(r.settle()):
+	}
+
+	pipe := r.Source.Pipeline()
+	exists := make([]*goredis.IntCmd, len(keys))
+	for i, key := range keys {
+		exists[i] = pipe.Exists(ctx, key)
+	}
+	if _, err := pipe.Exec(ctx); err != nil && err != goredis.Nil {
+		return nil, fmt.Errorf("re-check %d keys against the source: %w", len(keys), err)
+	}
+
+	var gone []string
+	for i, check := range exists {
+		if count, err := check.Result(); err == nil && count == 0 {
+			gone = append(gone, keys[i])
+		}
+	}
+	return gone, nil
 }
 
 // ownedSlots is the set of slots this shard's master serves, or nil when the

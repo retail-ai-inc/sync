@@ -62,3 +62,38 @@ func TestThePasswordIsNotEchoedInTheError(t *testing.T) {
 		t.Errorf("the error echoed the password: %q", err)
 	}
 }
+
+// TestAMultiSeedClusterDSNReachesEverySeed covers the shape a real cluster is
+// configured with.
+//
+// A URL has room for one authority, so the builder joins the seeds with commas —
+// and go-redis takes that whole string as a single address. The result is a
+// client that dials "a:1,b:2,c:3" and reports no such host, which reads as the
+// cluster being unreachable rather than as the DSN being mangled.
+func TestAMultiSeedClusterDSNReachesEverySeed(t *testing.T) {
+	got := splitSeeds([]string{"127.0.0.1:7001,127.0.0.1:7002,127.0.0.1:7003"})
+	want := []string{"127.0.0.1:7001", "127.0.0.1:7002", "127.0.0.1:7003"}
+
+	if len(got) != len(want) {
+		t.Fatalf("splitSeeds gave %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("seed %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestASingleSeedIsLeftAlone(t *testing.T) {
+	got := splitSeeds([]string{"10.0.0.1:6379"})
+	if len(got) != 1 || got[0] != "10.0.0.1:6379" {
+		t.Errorf("splitSeeds gave %v, want one unchanged seed", got)
+	}
+}
+
+func TestBlankSeedsAreDropped(t *testing.T) {
+	got := splitSeeds([]string{"a:1, ,b:2,"})
+	if len(got) != 2 {
+		t.Errorf("splitSeeds gave %v, want the empty entries dropped", got)
+	}
+}
