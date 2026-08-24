@@ -5,6 +5,9 @@ import (
 	"testing"
 
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
+
+	"github.com/retail-ai-inc/sync/internal/replication/domain"
 )
 
 func schemaEvent(t *testing.T, kind string, description bson.D) bson.Raw {
@@ -149,5 +152,70 @@ func TestTheSchemaChangeIsAppliedUnderTheMappedName(t *testing.T) {
 	// mapped one, which is what this checks by walking the same path.
 	if change.Command[0].Value != "orders" {
 		t.Fatalf("planned command names %v, want the source collection", change.Command[0].Value)
+	}
+}
+
+// ---------------------------------------------------------- positions
+
+// TestAPinnedClusterTimeIsRecognisedAsOne is the handoff the unit tests used to
+// step straight over.
+//
+// The snapshot pins a cluster time and the reader opens the stream from the
+// stored position. Both sides used one opaque string and each assumed its own
+// format, so the pinned time was handed to the server as a resume token: "Bad
+// resume token: _data of missing or of wrong type", over and over, while the
+// task looked as though it were restarting for a transient reason. Nothing
+// caught it until the pipeline was pointed at a real cluster.
+func TestAPinnedClusterTimeIsRecognisedAsOne(t *testing.T) {
+	payload, err := encodeClusterTime(primitive.Timestamp{T: 1787547851, I: 13})
+	if err != nil {
+		t.Fatalf("encodeClusterTime: %v", err)
+	}
+
+	stored, err := decodePosition(domain.Position{Payload: payload})
+	if err != nil {
+		t.Fatalf("decodePosition: %v", err)
+	}
+	if stored.Token != "" {
+		t.Errorf("a pinned cluster time decoded as a resume token %q", stored.Token)
+	}
+	if stored.Cluster != 1787547851 || stored.Increment != 13 {
+		t.Errorf("cluster time = %d.%d, want 1787547851.13", stored.Cluster, stored.Increment)
+	}
+}
+
+// TestAResumeTokenIsRecognisedAsOne is the other half.
+func TestAResumeTokenIsRecognisedAsOne(t *testing.T) {
+	raw := rawEvent(t, bson.D{{Key: "_data", Value: "8264ABCDEF"}})
+	payload, err := encodeToken(raw)
+	if err != nil {
+		t.Fatalf("encodeToken: %v", err)
+	}
+
+	stored, err := decodePosition(domain.Position{Payload: payload})
+	if err != nil {
+		t.Fatalf("decodePosition: %v", err)
+	}
+	if stored.Cluster != 0 {
+		t.Errorf("a resume token decoded as cluster time %d", stored.Cluster)
+	}
+	token, err := stored.token()
+	if err != nil {
+		t.Fatalf("token: %v", err)
+	}
+	if got, _ := token.Lookup("_data").StringValueOK(); got != "8264ABCDEF" {
+		t.Errorf("token carries _data %q, want the one it was built from", got)
+	}
+}
+
+// TestAPositionThatIsNeitherIsRefused keeps a corrupted or hand-edited position
+// from being handed to the server as though it meant something.
+func TestAPositionThatIsNeitherIsRefused(t *testing.T) {
+	stored, err := decodePosition(domain.Position{Payload: `{"something":"else"}`})
+	if err != nil {
+		t.Fatalf("decodePosition: %v", err)
+	}
+	if stored.Token != "" || stored.Cluster != 0 {
+		t.Fatal("a position holding neither kind decoded as though it held one")
 	}
 }

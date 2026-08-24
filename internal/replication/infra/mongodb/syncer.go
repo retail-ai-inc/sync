@@ -40,7 +40,7 @@ func (s *Snapshotter) Pin(ctx context.Context) (domain.Position, error) {
 	if err != nil {
 		return domain.Position{}, fmt.Errorf("pin the snapshot's cluster time: %w", err)
 	}
-	payload, err := checkpoint.Encode(startPosition{Cluster: at.T, Increment: at.I})
+	payload, err := encodeClusterTime(at)
 	if err != nil {
 		return domain.Position{}, fmt.Errorf("encode the pinned cluster time: %w", err)
 	}
@@ -112,13 +112,6 @@ func (s *Snapshotter) Copy(ctx context.Context) error {
 	return nil
 }
 
-// startPosition is a pinned cluster time, stored the way the change stream
-// resumes from one.
-type startPosition struct {
-	Cluster   uint32 `json:"cluster"`
-	Increment uint32 `json:"increment"`
-}
-
 // Syncer replicates one MongoDB deployment through the shared pipeline.
 type Syncer struct {
 	cfg    config.SyncConfig
@@ -186,6 +179,7 @@ func (s *Syncer) Start(ctx context.Context) error {
 			Mappings:       s.cfg.Mappings,
 			Checkpoints:    store,
 			Logger:         s.logger,
+			Labels:         labels,
 			NoTransaction:  noTransaction(),
 		},
 		Snapshotter: &Snapshotter{

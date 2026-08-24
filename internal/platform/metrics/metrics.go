@@ -21,6 +21,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Kind is how a value changes: a gauge moves in both directions, a counter only
@@ -376,7 +377,6 @@ const (
 	helpDeadLettered = "Operations that could not be applied to the target and are held for retry"
 )
 
-// SetDeadLettered records how much this task could not apply.
 // Stream health. A replication task that is reading nothing looks exactly like
 // one that is up to date, so these three say which it is.
 const (
@@ -420,6 +420,55 @@ func CountDisconnect(labels Labels) {
 	Default.AddCounter(DisconnectsTotal, helpDisconnects, labels, 1)
 }
 
+// SetDeadLettered records how much this task could not apply.
 func SetDeadLettered(labels Labels, count float64) {
 	Default.SetGauge(DeadLettered, helpDeadLettered, labels, count)
+}
+
+// Batch shape and cost. These exist so that two decisions can be made from
+// numbers rather than from opinion: whether applying batches concurrently would
+// help, and whether one request per object is costing anything worth removing.
+const (
+	// BatchApplySeconds over BatchApplyCount is the mean time to apply a batch.
+	BatchApplySeconds   = "sync_batch_apply_seconds_sum"
+	helpBatchApply      = "Total seconds spent applying batches"
+	BatchApplyCount     = "sync_batch_apply_count"
+	helpBatchApplyCount = "Batches applied"
+
+	// BatchCommitSeconds is the part of that spent committing rather than
+	// writing.
+	//
+	// On a sharded target a batch spanning shards commits through a two-phase
+	// protocol. If that is where the time goes, applying batches concurrently
+	// would make several two-phase commits contend with each other rather than
+	// make anything faster — so this is the number that decides it.
+	BatchCommitSeconds = "sync_batch_commit_seconds_sum"
+	helpBatchCommit    = "Total seconds spent committing batches, of the time spent applying them"
+
+	// BatchRoundTrips is how many requests a batch takes: one per object, plus
+	// one for the position. If the mean is near one there is nothing to be gained
+	// from a command that writes several objects at once.
+	BatchRoundTrips     = "sync_batch_round_trips_sum"
+	helpBatchRoundTrips = "Total requests sent to the target while applying batches"
+
+	// BatchNamespaces is how many objects a batch touches. It decides whether a
+	// cross-object write would save anything, and on a sharded target it is also
+	// what decides how often a commit has to span shards.
+	BatchNamespaces     = "sync_batch_namespaces_sum"
+	helpBatchNamespaces = "Total distinct objects touched by applied batches"
+
+	// BatchEvents is how many changes a batch carries, so the means above can be
+	// read per change as well as per batch.
+	BatchEvents     = "sync_batch_events_sum"
+	helpBatchEvents = "Total changes carried by applied batches"
+)
+
+// ObserveBatch records what one applied batch cost, and what shape it was.
+func ObserveBatch(labels Labels, apply, commit time.Duration, roundTrips, namespaces, events int) {
+	Default.AddCounter(BatchApplySeconds, helpBatchApply, labels, apply.Seconds())
+	Default.AddCounter(BatchApplyCount, helpBatchApplyCount, labels, 1)
+	Default.AddCounter(BatchCommitSeconds, helpBatchCommit, labels, commit.Seconds())
+	Default.AddCounter(BatchRoundTrips, helpBatchRoundTrips, labels, float64(roundTrips))
+	Default.AddCounter(BatchNamespaces, helpBatchNamespaces, labels, float64(namespaces))
+	Default.AddCounter(BatchEvents, helpBatchEvents, labels, float64(events))
 }

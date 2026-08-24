@@ -169,6 +169,7 @@ func (s *Syncer) Start(ctx context.Context) error {
 			DB:          targetDB,
 			Checkpoints: store,
 			Logger:      s.logger,
+			Labels:      labels,
 		},
 		Snapshotter: &Snapshotter{Config: s.cfg, Target: targetDB, Logger: s.logger},
 		Checkpoints: store,

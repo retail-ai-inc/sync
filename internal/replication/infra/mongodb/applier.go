@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -14,6 +15,7 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/retail-ai-inc/sync/internal/platform/config"
+	"github.com/retail-ai-inc/sync/internal/platform/metrics"
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/checkpoint"
 )
@@ -46,6 +48,7 @@ type Applier struct {
 	Checkpoints   *checkpoint.MongoStore
 	CheckpointKey string
 	Logger        logrus.FieldLogger
+	Labels        metrics.Labels
 
 	// NoTransaction applies the batch as bare bulk writes.
 	//
@@ -73,10 +76,15 @@ func (a *Applier) Apply(ctx context.Context, runs [][]*domain.Event, pos domain.
 		return false, a.applySchemaChange(ctx, schema)
 	}
 
+	started := time.Now()
+	events, namespaces := shapeOf(runs)
+
 	if a.NoTransaction {
-		if err := a.write(ctx, runs); err != nil {
+		trips, err := a.write(ctx, runs)
+		if err != nil {
 			return false, err
 		}
+		metrics.ObserveBatch(a.Labels, time.Since(started), 0, trips, namespaces, events)
 		return false, nil
 	}
 
@@ -87,6 +95,13 @@ func (a *Applier) Apply(ctx context.Context, runs [][]*domain.Event, pos domain.
 	defer session.EndSession(ctx)
 
 	committed := false
+	trips := 0
+	// writing is the time inside the transaction's body. What is left of the
+	// total is the commit, which on a sharded target is a two-phase protocol
+	// when the batch spans shards — the number that decides whether applying
+	// batches concurrently could help or would only make commits contend.
+	var writing time.Duration
+
 	// Majority on both sides: a batch acknowledged by less than a majority can
 	// be rolled back by an election, and this target exists to survive one.
 	txOpts := options.Transaction().
@@ -94,15 +109,20 @@ func (a *Applier) Apply(ctx context.Context, runs [][]*domain.Event, pos domain.
 		SetWriteConcern(writeconcern.Majority())
 
 	_, err = session.WithTransaction(ctx, func(sc mongo.SessionContext) (interface{}, error) {
-		if err := a.write(sc, runs); err != nil {
+		bodyStarted := time.Now()
+		written, err := a.write(sc, runs)
+		if err != nil {
 			return nil, err
 		}
+		trips = written
 		if a.Checkpoints != nil && !pos.IsZero() {
 			if err := a.Checkpoints.SaveIn(sc, a.CheckpointKey, pos.Payload); err != nil {
 				return nil, err
 			}
+			trips++
 			committed = true
 		}
+		writing = time.Since(bodyStarted)
 		return nil, nil
 	}, txOpts)
 	if err != nil {
@@ -112,7 +132,28 @@ func (a *Applier) Apply(ctx context.Context, runs [][]*domain.Event, pos domain.
 		// land — so it is reset here.
 		return false, fmt.Errorf("apply the batch: %w", err)
 	}
+
+	total := time.Since(started)
+	commit := total - writing
+	if commit < 0 {
+		commit = 0
+	}
+	metrics.ObserveBatch(a.Labels, total, commit, trips, namespaces, events)
 	return committed, nil
+}
+
+// shapeOf reports how many changes a batch carries and how many objects they
+// touch. The second number is what decides whether a write that spans objects
+// would save a round trip, and how often a sharded commit spans shards.
+func shapeOf(runs [][]*domain.Event) (events, namespaces int) {
+	seen := map[string]bool{}
+	for _, run := range runs {
+		for _, event := range run {
+			events++
+			seen[event.NS.String()] = true
+		}
+	}
+	return events, len(seen)
 }
 
 // onlySchemaChange reports the batch's single schema change, when that is all it
@@ -134,7 +175,7 @@ func onlySchemaChange(runs [][]*domain.Event) (*domain.Event, bool) {
 
 // write applies the runs in order. Within a run no document appears twice, so
 // its operations may go out together; between runs they may not.
-func (a *Applier) write(ctx context.Context, runs [][]*domain.Event) error {
+func (a *Applier) write(ctx context.Context, runs [][]*domain.Event) (roundTrips int, err error) {
 	for _, run := range runs {
 		for _, group := range groupByCollection(run) {
 			target := a.targetFor(group.collection)
@@ -143,14 +184,18 @@ func (a *Applier) write(ctx context.Context, runs [][]*domain.Event) error {
 			// Unordered: no document appears twice in a run, so the server is
 			// free to apply them in any order — which is the same freedom a
 			// secondary's writer threads get, and for the same reason.
-			_, err := collection.BulkWrite(ctx, group.models, options.BulkWrite().SetOrdered(false))
-			if err != nil {
-				return fmt.Errorf("write %d changes to %s.%s: %w",
+			//
+			// One request per object. MongoDB 8.0 has a command that writes
+			// several at once, which would collapse these into one; whether that
+			// is worth a driver upgrade is what the round trip count answers.
+			roundTrips++
+			if _, err := collection.BulkWrite(ctx, group.models, options.BulkWrite().SetOrdered(false)); err != nil {
+				return roundTrips, fmt.Errorf("write %d changes to %s.%s: %w",
 					len(group.models), a.TargetDatabase, target, err)
 			}
 		}
 	}
-	return nil
+	return roundTrips, nil
 }
 
 // collectionGroup is the operations of one run that belong to one collection.

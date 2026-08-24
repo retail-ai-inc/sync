@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/retail-ai-inc/sync/internal/platform/config"
 	"github.com/retail-ai-inc/sync/internal/platform/metrics"
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
+	"github.com/retail-ai-inc/sync/internal/replication/infra/checkpoint"
 )
 
 // Reader turns one MongoDB deployment's change stream into a stream of events.
@@ -43,12 +45,23 @@ type Reader struct {
 	// and everything is replicated.
 	mapped map[string]bool
 
-	// tx buffers the events of one source transaction. A change stream reports
-	// every event of a multi-document transaction with the same lsid and
-	// txnNumber, so they can be handed over together and a batch can never be
-	// cut inside one.
-	tx     []*domain.Event
-	txID   string
+	// open holds the events of the transaction currently being delivered, and
+	// openID identifies it. A change stream reports every event of a
+	// multi-document transaction with the same lsid and txnNumber, so a
+	// transaction's events are held together and a batch can never be cut inside
+	// one.
+	//
+	// ready holds complete units — a finished transaction, a standalone change, a
+	// schema change, a heartbeat — waiting to be handed over.
+	//
+	// The two used to be one list, with "the transaction has ended" judged by an
+	// event arriving that belonged to no transaction. Fifty transactions
+	// back-to-back therefore delivered nothing at all: every event extended the
+	// buffer, the condition was never met, and the reader span reading a hundred
+	// documents it never passed on.
+	open   []*domain.Event
+	openID string
+	ready  []*domain.Event
 	lastAt time.Time
 
 	closeOnce sync.Once
@@ -91,11 +104,33 @@ func (r *Reader) Open(ctx context.Context, from domain.Position) error {
 		SetMaxAwaitTime(idleHeartbeat)
 
 	if !from.IsZero() {
-		token, err := decodeToken(from)
+		stored, err := decodePosition(from)
 		if err != nil {
 			return err
 		}
-		opts.SetResumeAfter(token)
+		switch {
+		case stored.Token != "":
+			// The stream has delivered something before, so resume exactly after
+			// it.
+			token, err := stored.token()
+			if err != nil {
+				return err
+			}
+			opts.SetResumeAfter(token)
+		case stored.Cluster != 0:
+			// Nothing has been delivered yet: this is the cluster time the
+			// snapshot pinned before it copied. Starting there replays the writes
+			// made while the copy was running, which the copy itself could not
+			// see. Starting from now instead would lose that window silently.
+			at := primitive.Timestamp{T: stored.Cluster, I: stored.Increment}
+			r.Logger.Infof("[MongoDB] Starting the stream at the snapshot's cluster "+
+				"time %d.%d", at.T, at.I)
+			opts.SetStartAtOperationTime(&at)
+		default:
+			return domain.Unrecoverable(
+				"the stored position holds neither a resume token nor a cluster time, so "+
+					"there is nowhere to resume from: %q", from.Payload)
+		}
 	}
 
 	stream, err := r.Client.Watch(ctx, pipeline, opts)
@@ -121,9 +156,9 @@ func (r *Reader) Open(ctx context.Context, from domain.Position) error {
 // cut inside one.
 func (r *Reader) Next(ctx context.Context) (*domain.Event, error) {
 	for {
-		if len(r.tx) > 0 {
-			event := r.tx[0]
-			r.tx = r.tx[1:]
+		if len(r.ready) > 0 {
+			event := r.ready[0]
+			r.ready = r.ready[1:]
 			return event, nil
 		}
 
@@ -141,7 +176,7 @@ func (r *Reader) fill(ctx context.Context) error {
 			if err := r.take(r.stream.Current); err != nil {
 				return err
 			}
-			if r.settled() {
+			if len(r.ready) > 0 {
 				return nil
 			}
 			continue
@@ -161,22 +196,19 @@ func (r *Reader) fill(ctx context.Context) error {
 			return err
 		}
 
-		// TryNext returned nothing and the stream is healthy. If a transaction
-		// is open it is still being delivered, so keep reading; otherwise this
-		// is the quiet the heartbeat exists for.
-		if len(r.tx) > 0 {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			default:
-			}
-			continue
-		}
-
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
+		}
+
+		// TryNext returned nothing and the stream is healthy, so the cursor is
+		// exhausted. A change stream delivers a committed transaction's events
+		// contiguously, so an open transaction with nothing behind it is
+		// complete and may be handed over.
+		if len(r.open) > 0 {
+			r.seal()
+			return nil
 		}
 
 		token := r.stream.ResumeToken()
@@ -198,12 +230,12 @@ func (r *Reader) fill(ctx context.Context) error {
 			r.Logger.Warnf("[MongoDB] Could not read the source's cluster time for a "+
 				"heartbeat: %v", clockErr)
 		}
-		r.tx = []*domain.Event{{
+		r.ready = append(r.ready, &domain.Event{
 			Heartbeat:       true,
 			EndsTransaction: true,
 			Pos:             domain.Position{Payload: payload},
 			SourceTime:      at,
-		}}
+		})
 		return nil
 	}
 }
@@ -222,17 +254,16 @@ func (r *Reader) sourceClock(ctx context.Context) (time.Time, error) {
 	return time.Unix(int64(at.T), 0), nil
 }
 
-// settled reports whether the buffered events form a complete transaction.
-//
-// A change stream delivers an event at a time. Everything outside a transaction
-// is its own boundary; inside one, the boundary is where the lsid and txnNumber
-// stop matching — which is only visible once the next event arrives, so a
-// transaction is held until something that is not part of it turns up.
-func (r *Reader) settled() bool {
-	if len(r.tx) == 0 {
-		return false
+// seal closes the open transaction and moves it to the events waiting to be
+// handed over, marking its last event as the boundary a batch may be cut at.
+func (r *Reader) seal() {
+	if len(r.open) == 0 {
+		return
 	}
-	return r.txID == ""
+	r.open[len(r.open)-1].EndsTransaction = true
+	r.ready = append(r.ready, r.open...)
+	r.open = nil
+	r.openID = ""
 }
 
 // take converts one raw change stream document and buffers it.
@@ -274,7 +305,6 @@ func (r *Reader) take(raw bson.Raw) error {
 		metrics.SetReadLag(r.Labels, time.Since(at).Seconds())
 	}
 
-	txID := transactionOf(raw)
 	event := &domain.Event{
 		NS:         ns,
 		Op:         opOf(raw),
@@ -285,16 +315,22 @@ func (r *Reader) take(raw bson.Raw) error {
 		SourceTime: at,
 	}
 
-	// The previous transaction ends where this event's identity differs from it.
-	if r.txID != "" && r.txID != txID && len(r.tx) > 0 {
-		r.tx[len(r.tx)-1].EndsTransaction = true
-	}
-	r.txID = txID
-	if txID == "" {
-		// Not part of a multi-document transaction, so it is its own boundary.
+	txID := transactionOf(raw)
+	switch {
+	case txID == "":
+		// Not part of a multi-document transaction, so whatever was open before
+		// it has ended, and this is its own boundary.
+		r.seal()
 		event.EndsTransaction = true
+		r.ready = append(r.ready, event)
+	case txID != r.openID:
+		// A different transaction, so the one before it has ended.
+		r.seal()
+		r.openID = txID
+		r.open = append(r.open, event)
+	default:
+		r.open = append(r.open, event)
 	}
-	r.tx = append(r.tx, event)
 	return nil
 }
 
@@ -360,11 +396,8 @@ func (r *Reader) takeSchemaChange(raw bson.Raw, ns domain.Namespace) error {
 	// A schema change is its own transaction boundary and gets a batch of its
 	// own: MongoDB's catalogue is not transactional, so it cannot share one with
 	// rows.
-	if len(r.tx) > 0 {
-		r.tx[len(r.tx)-1].EndsTransaction = true
-	}
-	r.txID = ""
-	r.tx = append(r.tx, &domain.Event{
+	r.seal()
+	r.ready = append(r.ready, &domain.Event{
 		NS:              ns,
 		Op:              domain.OpSchema,
 		Payload:         change,
@@ -491,6 +524,36 @@ func transactionOf(raw bson.Raw) string {
 
 // ------------------------------------------------------------------- tokens
 
+// streamPosition is how a MongoDB stream's position is stored.
+//
+// There are two kinds and they are not interchangeable, which is what this type
+// exists to stop anybody forgetting. Before the stream has delivered anything
+// the only thing to resume from is the cluster time the snapshot pinned; once it
+// has, the resume token is exact and is what should be used. Storing them in one
+// opaque string and guessing at the far end got as far as production-shaped
+// testing and no further: the server answered "Bad resume token: _data of
+// missing or of wrong type", over and over, while the task looked like it was
+// restarting for a transient reason.
+type streamPosition struct {
+	// Token is a resume token as extended JSON, once the stream has delivered an
+	// event.
+	Token string `json:"token,omitempty"`
+	// Cluster and Increment are a pinned cluster time, set by the snapshot
+	// before the stream has delivered anything.
+	Cluster   uint32 `json:"cluster,omitempty"`
+	Increment uint32 `json:"increment,omitempty"`
+}
+
+// token reads the resume token back.
+func (p streamPosition) token() (bson.Raw, error) {
+	var token bson.Raw
+	if err := bson.UnmarshalExtJSON([]byte(p.Token), true, &token); err != nil {
+		return nil, fmt.Errorf("read the stored resume token: %w", err)
+	}
+	return token, nil
+}
+
+// encodeToken stores a resume token as a position.
 func encodeToken(token bson.Raw) (string, error) {
 	if token == nil {
 		return "", nil
@@ -499,15 +562,21 @@ func encodeToken(token bson.Raw) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("encode the resume token: %w", err)
 	}
-	return string(encoded), nil
+	return checkpoint.Encode(streamPosition{Token: string(encoded)})
 }
 
-func decodeToken(pos domain.Position) (bson.Raw, error) {
-	var token bson.Raw
-	if err := bson.UnmarshalExtJSON([]byte(pos.Payload), true, &token); err != nil {
-		return nil, fmt.Errorf("read the stored resume token: %w", err)
+// encodeClusterTime stores a pinned cluster time as a position.
+func encodeClusterTime(at primitive.Timestamp) (string, error) {
+	return checkpoint.Encode(streamPosition{Cluster: at.T, Increment: at.I})
+}
+
+// decodePosition reads either kind back.
+func decodePosition(pos domain.Position) (streamPosition, error) {
+	var stored streamPosition
+	if _, err := checkpoint.Decode(pos.Payload, &stored); err != nil {
+		return streamPosition{}, fmt.Errorf("read the stored position: %w", err)
 	}
-	return token, nil
+	return stored, nil
 }
 
 // isInternal reports whether a collection is the syncer's own bookkeeping,

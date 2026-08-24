@@ -4,9 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"time"
 
 	"github.com/sirupsen/logrus"
 
+	"github.com/retail-ai-inc/sync/internal/platform/metrics"
 	"github.com/retail-ai-inc/sync/internal/platform/resilience"
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/checkpoint"
@@ -37,6 +39,7 @@ type Applier struct {
 	// CheckpointKey names this task's position.
 	CheckpointKey string
 	Logger        logrus.FieldLogger
+	Labels        metrics.Labels
 }
 
 // Apply writes every run of the batch, then the position, then commits.
@@ -49,29 +52,50 @@ func (a *Applier) Apply(ctx context.Context, runs [][]*domain.Event, pos domain.
 		return false, nil
 	}
 
+	started := time.Now()
+	namespaces := namespacesOf(runs)
+
 	committed := false
+	var trips int
+	var commit time.Duration
 	err := resilience.RetryDBOperation(ctx, a.Logger,
 		fmt.Sprintf("apply %d changes", total),
 		func() error {
 			var attemptErr error
-			committed, attemptErr = a.once(ctx, runs, pos)
+			committed, trips, commit, attemptErr = a.once(ctx, runs, pos)
 			return attemptErr
 		})
 	if err != nil {
 		return false, err
 	}
+	metrics.ObserveBatch(a.Labels, time.Since(started), commit, trips, namespaces, total)
 	return committed, nil
 }
 
+// namespacesOf reports how many distinct tables a batch touches. One request per
+// statement is what MySQL costs either way, so this is here for the same reason
+// as on the other engine: to say whether a batch is one table's worth of work or
+// several, which is what decides how much a commit has to coordinate.
+func namespacesOf(runs [][]*domain.Event) int {
+	seen := map[string]bool{}
+	for _, run := range runs {
+		for _, event := range run {
+			seen[event.NS.String()] = true
+		}
+	}
+	return len(seen)
+}
+
 // once is one attempt: begin, write, commit or roll all of it back.
-func (a *Applier) once(ctx context.Context, runs [][]*domain.Event, pos domain.Position) (bool, error) {
+func (a *Applier) once(ctx context.Context, runs [][]*domain.Event, pos domain.Position) (bool, int, time.Duration, error) {
 	if a.DB == nil {
-		return false, fmt.Errorf("no target connection")
+		return false, 0, 0, fmt.Errorf("no target connection")
 	}
 
+	trips := 0
 	tx, err := a.DB.BeginTx(ctx, nil)
 	if err != nil {
-		return false, err
+		return false, trips, 0, err
 	}
 	// A rollback after a successful commit is a no-op, so this needs no
 	// bookkeeping to decide whether it should run.
@@ -83,26 +107,29 @@ func (a *Applier) once(ctx context.Context, runs [][]*domain.Event, pos domain.P
 			if !ok {
 				// Not a transient failure, and retrying would produce it again.
 				// Rolling back is right: half a batch is worse than none of it.
-				return false, domain.Unrecoverable(
+				return false, trips, 0, domain.Unrecoverable(
 					"a %s event for %s carries a %T rather than a statement, so the batch "+
 						"cannot be applied", event.Op, event.NS, event.Payload)
 			}
+			trips++
 			if _, err := tx.ExecContext(ctx, stmt.query, stmt.args...); err != nil {
-				return false, fmt.Errorf("%s: %w", stmt.query, err)
+				return false, trips, 0, fmt.Errorf("%s: %w", stmt.query, err)
 			}
 		}
 	}
 
 	committed := false
 	if a.Checkpoints != nil && !pos.IsZero() {
+		trips++
 		if err := a.Checkpoints.SaveTx(ctx, tx, a.CheckpointKey, pos.Payload); err != nil {
-			return false, err
+			return false, trips, 0, err
 		}
 		committed = true
 	}
 
+	commitStarted := time.Now()
 	if err := tx.Commit(); err != nil {
-		return false, err
+		return false, trips, 0, err
 	}
-	return committed, nil
+	return committed, trips, time.Since(commitStarted), nil
 }

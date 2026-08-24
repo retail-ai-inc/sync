@@ -487,3 +487,36 @@ func TestAStoredPositionSkipsTheSnapshot(t *testing.T) {
 		t.Errorf("opened the stream at %q, want the stored position", reader.opened.Payload)
 	}
 }
+
+// TestAQuietSourceDoesNotLookLikeALag covers a defect the real cluster showed.
+//
+// The applied lag was measured from the last change applied, so a source nobody
+// had written to for an hour reported an hour of lag while being perfectly up to
+// date. Alerting on that pages somebody every quiet Sunday, and an alert that
+// cries wolf is worse than none. When there is nothing waiting the lag is
+// measured from the newest thing the stream has reported — which heartbeats keep
+// fresh precisely so that this works.
+func TestAQuietSourceDoesNotLookLikeALag(t *testing.T) {
+	labels := metrics.Labels{"task": t.Name()}
+	// One change from long ago, applied; then a heartbeat from just now, which
+	// is what a quiet but healthy stream looks like.
+	old := time.Now().Add(-time.Hour)
+	reader := &fakeReader{events: []*domain.Event{
+		{NS: domain.Namespace{DB: "shop", Object: "orders"}, Op: domain.OpInsert, Key: "1",
+			Pos: domain.Position{Payload: "p1"}, SourceTime: old, EndsTransaction: true},
+		{Heartbeat: true, EndsTransaction: true, SourceTime: time.Now()},
+	}}
+
+	r := newRunner(t, reader, &fakeApplier{}, newStore())
+	r.Opts.Labels = labels
+	defer metrics.Default.Forget(labels)
+
+	if err := runFor(t, r, 150*time.Millisecond); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if got := gauge(t, metrics.LagSeconds, labels); got > 60 {
+		t.Errorf("lag = %.0fs for a quiet but caught-up stream; the last change being "+
+			"an hour old is not a lag", got)
+	}
+}

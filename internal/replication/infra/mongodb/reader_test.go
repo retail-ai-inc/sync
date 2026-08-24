@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sirupsen/logrus"
+
 	"go.mongodb.org/mongo-driver/bson"
 
 	"github.com/retail-ai-inc/sync/internal/platform/config"
@@ -185,4 +187,156 @@ func TestATaskThatNamesNothingReplicatesEverything(t *testing.T) {
 			t.Errorf("%s was let through; it is the syncer's own bookkeeping", internal)
 		}
 	}
+}
+
+// ------------------------------------------------------- transaction buffering
+
+// txEvent renders one event of a multi-document transaction.
+func txEvent(t *testing.T, coll, id, session string, number int64) bson.Raw {
+	t.Helper()
+	doc := changeDoc("shop", coll, "insert", bson.D{{Key: "_id", Value: id}})
+	doc = append(doc,
+		bson.E{Key: "fullDocument", Value: bson.D{{Key: "_id", Value: id}}},
+		bson.E{Key: "lsid", Value: bson.D{{Key: "id", Value: session}}},
+		bson.E{Key: "txnNumber", Value: number})
+	return rawEvent(t, doc)
+}
+
+func bufferingReader(t *testing.T) *Reader {
+	t.Helper()
+	r := &Reader{Config: config.SyncConfig{}, Logger: quietLog()}
+	r.conv = &MongoDBSyncer{cfg: r.Config, logger: r.Logger}
+	r.mapped = r.mappedCollections()
+	return r
+}
+
+// TestBackToBackTransactionsAreHandedOver is the defect a real workload found.
+//
+// A transaction's end used to be judged by an event arriving that belonged to no
+// transaction. Fifty transactions back-to-back therefore handed over nothing at
+// all: every event extended one buffer, the condition was never met, and the
+// reader span having read a hundred documents it never passed on. Nothing in the
+// unit tests fed it two consecutive transactions, so nothing caught it.
+func TestBackToBackTransactionsAreHandedOver(t *testing.T) {
+	r := bufferingReader(t)
+
+	// Transaction one: an order and its payment.
+	if err := r.take(txEvent(t, "orders", "o1", "s1", 1)); err != nil {
+		t.Fatalf("take: %v", err)
+	}
+	if err := r.take(txEvent(t, "payments", "p1", "s1", 1)); err != nil {
+		t.Fatalf("take: %v", err)
+	}
+	if len(r.ready) != 0 {
+		t.Error("an open transaction was handed over before it ended")
+	}
+
+	// Transaction two starts, which is what proves the first has ended.
+	if err := r.take(txEvent(t, "orders", "o2", "s1", 2)); err != nil {
+		t.Fatalf("take: %v", err)
+	}
+
+	if len(r.ready) != 2 {
+		t.Fatalf("handed over %d events, want the two of the finished transaction", len(r.ready))
+	}
+	if !r.ready[1].EndsTransaction {
+		t.Error("the finished transaction's last event is not marked as the boundary")
+	}
+	if r.ready[0].EndsTransaction {
+		t.Error("the first event of a transaction was marked as a boundary, so a batch could be cut inside it")
+	}
+	if len(r.open) != 1 {
+		t.Errorf("the new transaction holds %d events, want 1", len(r.open))
+	}
+}
+
+// TestAnIdleStreamSealsTheOpenTransaction is the other half: the last
+// transaction of a run has nothing behind it to prove it ended, and a change
+// stream delivers a committed transaction's events contiguously — so an
+// exhausted cursor means it is complete.
+func TestAnIdleStreamSealsTheOpenTransaction(t *testing.T) {
+	r := bufferingReader(t)
+	if err := r.take(txEvent(t, "orders", "o1", "s1", 1)); err != nil {
+		t.Fatalf("take: %v", err)
+	}
+	if len(r.ready) != 0 {
+		t.Fatal("an open transaction was handed over early")
+	}
+
+	r.seal()
+
+	if len(r.ready) != 1 || !r.ready[0].EndsTransaction {
+		t.Errorf("sealing left %d events ready, want one marked as the boundary", len(r.ready))
+	}
+	if len(r.open) != 0 || r.openID != "" {
+		t.Error("sealing left the transaction open")
+	}
+}
+
+// TestAStandaloneChangeClosesAnOpenTransaction covers the mixed stream: an
+// ordinary write after a transaction proves the transaction ended.
+func TestAStandaloneChangeClosesAnOpenTransaction(t *testing.T) {
+	r := bufferingReader(t)
+	if err := r.take(txEvent(t, "orders", "o1", "s1", 1)); err != nil {
+		t.Fatalf("take: %v", err)
+	}
+
+	standalone := rawEvent(t, append(
+		changeDoc("shop", "orders", "insert", bson.D{{Key: "_id", Value: "x1"}}),
+		bson.E{Key: "fullDocument", Value: bson.D{{Key: "_id", Value: "x1"}}}))
+	if err := r.take(standalone); err != nil {
+		t.Fatalf("take: %v", err)
+	}
+
+	if len(r.ready) != 2 {
+		t.Fatalf("handed over %d events, want the transaction plus the standalone change", len(r.ready))
+	}
+	if !r.ready[0].EndsTransaction {
+		t.Error("the transaction's last event is not marked as the boundary")
+	}
+	if !r.ready[1].EndsTransaction {
+		t.Error("a standalone change is its own boundary and was not marked as one")
+	}
+	if len(r.open) != 0 {
+		t.Error("the transaction was left open")
+	}
+}
+
+// TestEveryEventOfOneTransactionSharesItsBatch is the guarantee all of this
+// exists for: the order and the payment written as one act reach the target as
+// one act.
+func TestEveryEventOfOneTransactionSharesItsBatch(t *testing.T) {
+	r := bufferingReader(t)
+	for _, e := range []bson.Raw{
+		txEvent(t, "orders", "o1", "s1", 7),
+		txEvent(t, "payments", "p1", "s1", 7),
+		txEvent(t, "accounts", "a1", "s1", 7),
+	} {
+		if err := r.take(e); err != nil {
+			t.Fatalf("take: %v", err)
+		}
+	}
+	r.seal()
+
+	boundaries := 0
+	for _, e := range r.ready {
+		if e.EndsTransaction {
+			boundaries++
+		}
+	}
+	if len(r.ready) != 3 {
+		t.Fatalf("handed over %d events, want 3", len(r.ready))
+	}
+	if boundaries != 1 {
+		t.Errorf("%d of the three events are batch boundaries, want exactly the last one", boundaries)
+	}
+	if !r.ready[2].EndsTransaction {
+		t.Error("the boundary is not the last event")
+	}
+}
+
+func quietLog() *logrus.Logger {
+	l := logrus.New()
+	l.SetLevel(logrus.PanicLevel)
+	return l
 }

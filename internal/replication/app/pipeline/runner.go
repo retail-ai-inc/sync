@@ -487,13 +487,25 @@ func (r *Runner) report(ctx context.Context) (stop func()) {
 				r.mu.Lock()
 				oldest := r.oldestPending
 				applied := r.lastAppliedAt
+				read := r.lastReadAt
 				heard := r.lastHeardAt
 				used := r.queueUsed
 				r.mu.Unlock()
 
+				// Behind: measured from the oldest change still waiting, so the
+				// number climbs for exactly as long as the task is stuck.
+				//
+				// Caught up: measured from the newest thing the stream has
+				// reported, heartbeats included. Measuring from the last change
+				// applied instead made the lag climb whenever the source was
+				// merely quiet — a database nobody had written to for an hour
+				// reported an hour of lag while being perfectly up to date, which
+				// is how a quiet Sunday pages somebody.
 				switch {
 				case !oldest.IsZero():
 					metrics.SetLag(r.Opts.Labels, now.Sub(oldest).Seconds())
+				case !read.IsZero():
+					metrics.SetLag(r.Opts.Labels, now.Sub(read).Seconds())
 				case !applied.IsZero():
 					metrics.SetLag(r.Opts.Labels, now.Sub(applied).Seconds())
 				}
