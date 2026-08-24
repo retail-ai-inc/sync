@@ -12,6 +12,7 @@ import (
 	"github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/replication"
 	mysqldriver "github.com/go-sql-driver/mysql"
+	"github.com/pingcap/tidb/pkg/parser"
 	"github.com/sirupsen/logrus"
 
 	"github.com/retail-ai-inc/sync/internal/platform/config"
@@ -54,6 +55,15 @@ type Reader struct {
 	source string
 	flavor string
 
+	// resumed says the stream started from a stored position rather than from
+	// the end of the log, which is what puts rows written before a schema change
+	// at risk of being decoded against the shape that change produced.
+	resumed bool
+	// appliedSince names the tables that have had rows handed over since this
+	// reader opened. A reordering statement arriving after them means those rows
+	// were read against the wrong shape.
+	appliedSince map[string]bool
+
 	closeOnce sync.Once
 	stop      func()
 }
@@ -84,6 +94,8 @@ func (r *Reader) Open(ctx context.Context, from domain.Position) error {
 	r.source = dsn.Endpoint(r.Config.Type, r.Config.SourceConnection)
 
 	r.conv = r.converter()
+	r.resumed = !from.IsZero()
+	r.appliedSince = map[string]bool{}
 	r.out = make(chan *domain.Event, 1)
 	r.fail = make(chan error, 1)
 	c.SetEventHandler(r)
@@ -296,6 +308,9 @@ func (r *Reader) OnRow(e *canal.RowsEvent) error {
 		r.tx[i].SourceTime = at
 		r.tx[i].Key = rowKey(e, i-before)
 	}
+	if len(r.tx) > before {
+		r.appliedSince[ns.String()] = true
+	}
 	return nil
 }
 
@@ -312,6 +327,10 @@ func (r *Reader) OnDDL(header *replication.EventHeader, pos mysql.Position, e *r
 	if e == nil {
 		return nil
 	}
+	if err := r.checkReordering(string(e.Schema), string(e.Query)); err != nil {
+		return err
+	}
+
 	decisions, err := r.conv.planDDL(string(e.Schema), string(e.Query))
 	if err != nil {
 		// BEGIN and COMMIT markers arrive as query events and do not parse.
@@ -345,6 +364,52 @@ func (r *Reader) OnDDL(header *replication.EventHeader, pos mysql.Position, e *r
 		}
 	}
 	return r.handOver(pos, nil, header)
+}
+
+// checkReordering stops the task when a statement that moves a column arrives
+// after rows for that table have already been handed over in this run.
+//
+// Those rows were read against the shape this statement produced rather than the
+// one they were written under, because the column names come from asking the
+// source for its current schema and not from the binlog. They wrote cleanly and
+// they are wrong, and the row counts agree — see reorder.go for why this is the
+// one case that is neither loud nor harmless.
+func (r *Reader) checkReordering(defaultSchema, query string) error {
+	if !r.resumed || len(r.appliedSince) == 0 {
+		// Nothing was read before this statement, so nothing was read against
+		// the wrong shape.
+		return nil
+	}
+
+	stmts, _, err := parser.New().Parse(query, "", "")
+	if err != nil {
+		// BEGIN and COMMIT markers arrive as query events and do not parse.
+		return nil
+	}
+	for _, stmt := range stmts {
+		if !reordersColumns(stmt) {
+			continue
+		}
+		for _, ref := range tableRefs(stmt) {
+			schemaName := ref.Schema.O
+			if schemaName == "" {
+				schemaName = defaultSchema
+			}
+			name := domain.Namespace{DB: schemaName, Object: ref.Name.O}.String()
+			if !r.appliedSince[name] {
+				continue
+			}
+			return domain.Unrecoverable(
+				"%s was reordered by %q, and rows written before that statement have "+
+					"already been applied in this run. Their column names came from the "+
+					"table's shape after the change rather than the one they were written "+
+					"under, so they were written to the target in the wrong columns — "+
+					"cleanly, with the row counts still agreeing. The correct values are "+
+					"only at the source: copy %s again",
+				name, query, name)
+		}
+	}
+	return nil
 }
 
 // OnPosSynced is canal's periodic report of where the stream stands.

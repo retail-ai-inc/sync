@@ -6,6 +6,8 @@ import (
 
 	"github.com/go-mysql-org/go-mysql/canal"
 	"github.com/go-mysql-org/go-mysql/schema"
+	"github.com/pingcap/tidb/pkg/parser"
+	"github.com/pingcap/tidb/pkg/parser/ast"
 
 	"github.com/retail-ai-inc/sync/internal/platform/config"
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
@@ -186,5 +188,98 @@ func TestTheOperationIsReadOffTheStatement(t *testing.T) {
 		if got := opOf(query); got != want {
 			t.Errorf("opOf(%q) = %v, want %v", query, got, want)
 		}
+	}
+}
+
+// ------------------------------------------------------- column reordering
+
+func parseOne(t *testing.T, query string) ast.StmtNode {
+	t.Helper()
+	stmts, _, err := parser.New().Parse(query, "", "")
+	if err != nil || len(stmts) != 1 {
+		t.Fatalf("parse %q: %v", query, err)
+	}
+	return stmts[0]
+}
+
+// TestAMoveIsRecognised covers the one schema change that corrupts rows without
+// saying anything.
+//
+// A ROW binlog event carries positions, not names, and the names come from
+// asking the source for its current shape. A statement that moves a column
+// without changing how many there are therefore makes every row read before it,
+// since the stream resumed, decode one or more columns out of place — and write
+// cleanly, with the row counts still agreeing afterwards.
+func TestAMoveIsRecognised(t *testing.T) {
+	moving := []string{
+		"ALTER TABLE orders MODIFY COLUMN amount DECIMAL(12,2) AFTER customer",
+		"ALTER TABLE orders CHANGE COLUMN amount total DECIMAL(12,2) FIRST",
+		"ALTER TABLE orders ADD COLUMN channel VARCHAR(16) AFTER customer",
+	}
+	for _, query := range moving {
+		if !reordersColumns(parseOne(t, query)) {
+			t.Errorf("%q was not recognised as moving a column", query)
+		}
+	}
+}
+
+// TestAChangeThatKeepsTheOrderIsNotAMove keeps the check from stopping tasks for
+// the statements that are already either loud or harmless.
+func TestAChangeThatKeepsTheOrderIsNotAMove(t *testing.T) {
+	harmless := []string{
+		// Appended at the end: the column count changes, so a row read before it
+		// fails to apply rather than applying wrongly.
+		"ALTER TABLE orders ADD COLUMN channel VARCHAR(16) NOT NULL DEFAULT 'web'",
+		// A rename leaves every value in the position it was read from.
+		"ALTER TABLE orders CHANGE COLUMN amount total DECIMAL(12,2)",
+		// A widened type, same position.
+		"ALTER TABLE orders MODIFY COLUMN customer VARCHAR(128)",
+		"ALTER TABLE orders ADD INDEX idx_customer (customer)",
+		"CREATE TABLE orders (id BIGINT PRIMARY KEY)",
+	}
+	for _, query := range harmless {
+		if reordersColumns(parseOne(t, query)) {
+			t.Errorf("%q was treated as moving a column", query)
+		}
+	}
+}
+
+// TestAMoveOnlyMattersAfterRowsHaveBeenApplied covers the condition that makes
+// it a problem: a stream that resumed, and rows already handed over.
+func TestAMoveOnlyMattersAfterRowsHaveBeenApplied(t *testing.T) {
+	r := &Reader{Config: config.SyncConfig{Type: "mysql", SourceConnection: "u:p@tcp(h:3306)/shop"}}
+	const move = "ALTER TABLE orders MODIFY COLUMN amount DECIMAL(12,2) AFTER customer"
+
+	// Started at the end of the log: nothing older than the statement was read.
+	r.resumed = false
+	r.appliedSince = map[string]bool{"shop.orders": true}
+	if err := r.checkReordering("shop", move); err != nil {
+		t.Errorf("a fresh stream was stopped: %v", err)
+	}
+
+	// Resumed, but nothing applied for that table yet.
+	r.resumed = true
+	r.appliedSince = map[string]bool{}
+	if err := r.checkReordering("shop", move); err != nil {
+		t.Errorf("a resumed stream with nothing applied was stopped: %v", err)
+	}
+
+	// Resumed, and rows for another table applied — not this one's problem.
+	r.appliedSince = map[string]bool{"shop.payments": true}
+	if err := r.checkReordering("shop", move); err != nil {
+		t.Errorf("another table's rows stopped this one: %v", err)
+	}
+
+	// Resumed, and rows for this table applied: those rows are wrong.
+	r.appliedSince = map[string]bool{"shop.orders": true}
+	err := r.checkReordering("shop", move)
+	if !domain.IsUnrecoverable(err) {
+		t.Fatalf("checkReordering returned %v, want an unrecoverable error", err)
+	}
+	if !strings.Contains(err.Error(), "shop.orders") {
+		t.Errorf("error = %v, want it to name the table that needs copying again", err)
+	}
+	if !strings.Contains(err.Error(), "copy") {
+		t.Errorf("error = %v, want it to say what to do", err)
 	}
 }

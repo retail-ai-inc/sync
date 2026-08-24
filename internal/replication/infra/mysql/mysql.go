@@ -115,9 +115,6 @@ func (s *MySQLSyncer) Start(ctx context.Context) error {
 	if err := s.checkRowImage(c); err != nil {
 		return domain.Unrecoverable("%v", err)
 	}
-	if err := s.checkRowMetadata(c); err != nil {
-		return domain.Unrecoverable("%v", err)
-	}
 
 	var targetDB *sql.DB
 	err = resilience.Retry(ctx, 5, 2*time.Second, 2.0, func() error {
@@ -1640,58 +1637,6 @@ func (s *MySQLSyncer) checkRowImage(c *canal.Canal) error {
 	}
 	image, _ := result.GetString(0, 1)
 	return requireFullRowImage(image)
-}
-
-// checkRowMetadata refuses a source whose binlog omits column names.
-//
-// A ROW event carries values and ordinal positions, never names. With
-// binlog_row_metadata=MINIMAL the names have to come from asking the source for
-// the table's current shape — and that is the wrong shape for any event older
-// than the last ALTER TABLE. Resuming from a position before a column was added
-// therefore decodes every row after it one column out of step: the amount lands
-// in the status field, no error is raised anywhere, and a reconciliation by row
-// count finds nothing.
-//
-// Debezium solves this by keeping a schema history and replaying the DDL up to
-// the position it is resuming from. FULL is the cheap half of the same
-// guarantee: the names travel with the event, so no historical schema is needed
-// to read it. It is available from MySQL 8.0.1 and MariaDB 10.5.
-func (s *MySQLSyncer) checkRowMetadata(c *canal.Canal) error {
-	if strings.EqualFold(s.cfg.Type, "mariadb") {
-		return nil
-	}
-
-	result, err := c.Execute(`SHOW GLOBAL VARIABLES LIKE 'binlog_row_metadata'`)
-	if err != nil {
-		// Servers before 8.0.1 have no such variable and always logged the
-		// minimal form. Saying so is better than refusing to start against a
-		// server the setting does not exist on.
-		s.logger.Warnf("[MySQL] Could not read binlog_row_metadata (%v). Column names "+
-			"will be taken from the source's current schema, which is the wrong shape "+
-			"for events older than its last schema change", err)
-		return nil
-	}
-	metadata, _ := result.GetString(0, 1)
-	return requireFullRowMetadata(metadata)
-}
-
-// requireFullRowMetadata reports why a binlog without column names cannot be
-// replicated from safely.
-func requireFullRowMetadata(metadata string) error {
-	switch {
-	case metadata == "":
-		// The variable is absent, which is every server before 8.0.1. There is
-		// nothing to set and nothing to refuse.
-		return nil
-	case strings.EqualFold(metadata, "FULL"):
-		return nil
-	default:
-		return fmt.Errorf("the source logs %s binlog row metadata, so its events carry "+
-			"no column names and they have to be taken from the table's current shape. "+
-			"Any event older than the source's last schema change would then be decoded "+
-			"one column out of step — silently, with the row counts still agreeing. "+
-			"Set binlog_row_metadata=FULL on the source", metadata)
-	}
 }
 
 // requireFullRowImage reports why a binlog row image cannot be replicated from.

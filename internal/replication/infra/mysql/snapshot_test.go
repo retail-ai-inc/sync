@@ -319,48 +319,6 @@ func TestOnlyFullRowImagesAreAccepted(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------- row metadata
-
-// TestOnlyFullRowMetadataIsAccepted is the guard against the other silent
-// corruption, and the worse of the two.
-//
-// A ROW event carries values and ordinal positions, never column names. With
-// MINIMAL the names have to come from asking the source for the table's current
-// shape, which is the wrong shape for any event older than the last ALTER TABLE.
-// Resuming from before a column was added then decodes every row after it one
-// column out of step: the amount lands in the status field, nothing errors, and
-// a reconciliation by row count finds nothing wrong.
-func TestOnlyFullRowMetadataIsAccepted(t *testing.T) {
-	for _, metadata := range []string{"FULL", "full", "Full"} {
-		if err := requireFullRowMetadata(metadata); err != nil {
-			t.Errorf("requireFullRowMetadata(%q) = %v, want it accepted", metadata, err)
-		}
-	}
-
-	for _, metadata := range []string{"MINIMAL", "minimal"} {
-		err := requireFullRowMetadata(metadata)
-		if err == nil {
-			t.Errorf("requireFullRowMetadata(%q) accepted it", metadata)
-			continue
-		}
-		if !strings.Contains(err.Error(), "binlog_row_metadata=FULL") {
-			t.Errorf("error = %v, want it to say what to set", err)
-		}
-		if !strings.Contains(err.Error(), "out of step") {
-			t.Errorf("error = %v, want it to say what goes wrong", err)
-		}
-	}
-}
-
-// TestAServerWithNoRowMetadataSettingIsAccepted covers MySQL before 8.0.1,
-// where the variable does not exist. There is nothing to set and so nothing to
-// refuse — the risk is real but a refusal an operator cannot act on is worse.
-func TestAServerWithNoRowMetadataSettingIsAccepted(t *testing.T) {
-	if err := requireFullRowMetadata(""); err != nil {
-		t.Errorf("requireFullRowMetadata(\"\") = %v, want it accepted", err)
-	}
-}
-
 // TestAServerWithNoRowImageSettingIsAccepted covers MySQL before 5.6, which has
 // no such variable and always logs whole rows.
 func TestAServerWithNoRowImageSettingIsAccepted(t *testing.T) {
