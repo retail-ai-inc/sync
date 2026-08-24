@@ -113,6 +113,30 @@ func (b *batch) take() []*domain.Event {
 	return events
 }
 
+// standsAlone reports whether an event has to be the only one in its batch.
+//
+// A schema change cannot share a batch with rows. On MongoDB it cannot run
+// inside a transaction at all — the catalogue is not transactional — so a batch
+// holding both could not be applied atomically, and applying the two halves
+// separately is exactly the torn batch the design forbids. On MySQL a DDL
+// commits implicitly, which has the same effect. Giving it a batch of its own
+// makes both engines honest about it.
+func standsAlone(e *domain.Event) bool {
+	return e != nil && e.Op == domain.OpSchema
+}
+
+// holdsSchemaChange reports whether the batch is a schema change rather than a
+// set of row changes, which decides whether the applier may open a transaction
+// for it.
+func holdsSchemaChange(events []*domain.Event) bool {
+	for _, e := range events {
+		if e.Op == domain.OpSchema {
+			return true
+		}
+	}
+	return false
+}
+
 // runKey identifies the record an event touches, across namespaces.
 func runKey(e *domain.Event) (string, bool) {
 	if e.Key == "" || e.Op == domain.OpSchema {

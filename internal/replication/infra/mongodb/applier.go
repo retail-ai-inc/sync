@@ -67,6 +67,12 @@ func (a *Applier) Apply(ctx context.Context, runs [][]*domain.Event, pos domain.
 		return false, nil
 	}
 
+	// A schema change stands alone in its batch and runs outside a transaction:
+	// MongoDB's catalogue is not transactional, so a DDL inside one is refused.
+	if schema, ok := onlySchemaChange(runs); ok {
+		return false, a.applySchemaChange(ctx, schema)
+	}
+
 	if a.NoTransaction {
 		if err := a.write(ctx, runs); err != nil {
 			return false, err
@@ -107,6 +113,23 @@ func (a *Applier) Apply(ctx context.Context, runs [][]*domain.Event, pos domain.
 		return false, fmt.Errorf("apply the batch: %w", err)
 	}
 	return committed, nil
+}
+
+// onlySchemaChange reports the batch's single schema change, when that is all it
+// holds. The pipeline gives a schema change a batch of its own, so anything else
+// alongside one is a bug worth failing on rather than guessing at.
+func onlySchemaChange(runs [][]*domain.Event) (*domain.Event, bool) {
+	var found *domain.Event
+	count := 0
+	for _, run := range runs {
+		for _, event := range run {
+			count++
+			if event.Op == domain.OpSchema {
+				found = event
+			}
+		}
+	}
+	return found, found != nil && count == 1
 }
 
 // write applies the runs in order. Within a run no document appears twice, so

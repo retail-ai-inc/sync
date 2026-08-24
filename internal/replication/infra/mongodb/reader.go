@@ -72,16 +72,20 @@ func (r *Reader) Open(ctx context.Context, from domain.Position) error {
 	r.conv = &MongoDBSyncer{cfg: r.Config, logger: r.Logger}
 	r.mapped = r.mappedCollections()
 
+	// The schema changes are asked for as well as the rows. An index added at
+	// the source used never to reach the target — indexes were copied once, by
+	// the snapshot — so the moment the target most needed an index was exactly
+	// the moment it did not have it.
 	pipeline := mongo.Pipeline{
 		{{Key: "$match", Value: bson.D{
-			{Key: "operationType", Value: bson.M{
-				"$in": []string{"insert", "update", "replace", "delete"},
-			}},
+			{Key: "operationType", Value: bson.M{"$in": watchedOperations}},
 		}}},
 	}
 
 	opts := options.ChangeStream().
 		SetFullDocument(options.UpdateLookup).
+		// MongoDB 6.0 and later report DDL on a stream that asks for it.
+		SetShowExpandedEvents(true).
 		// Without this the stream blocks for as long as the server likes, and a
 		// reader that never returns cannot report that it is alive.
 		SetMaxAwaitTime(idleHeartbeat)
@@ -183,13 +187,39 @@ func (r *Reader) fill(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		// The heartbeat carries the source's own clock, not just a token.
+		//
+		// It means "everything up to here has been delivered", which is what a
+		// re-copy needs in order to know the stream has passed the point its
+		// chunk was read at. Without it a quiet source leaves the stream's clock
+		// at zero and a re-copy waits for ever — which is how this was found.
+		at, clockErr := r.sourceClock(ctx)
+		if clockErr != nil {
+			r.Logger.Warnf("[MongoDB] Could not read the source's cluster time for a "+
+				"heartbeat: %v", clockErr)
+		}
 		r.tx = []*domain.Event{{
 			Heartbeat:       true,
 			EndsTransaction: true,
 			Pos:             domain.Position{Payload: payload},
+			SourceTime:      at,
 		}}
 		return nil
 	}
+}
+
+// sourceClock reads the source's own time, for a heartbeat to carry.
+func (r *Reader) sourceClock(ctx context.Context) (time.Time, error) {
+	raw, err := r.Client.Database("admin").
+		RunCommand(ctx, bson.D{{Key: "hello", Value: 1}}).Raw()
+	if err != nil {
+		return time.Time{}, err
+	}
+	at, err := clusterTimeFrom(raw)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return time.Unix(int64(at.T), 0), nil
 }
 
 // settled reports whether the buffered events form a complete transaction.
@@ -213,6 +243,10 @@ func (r *Reader) take(raw bson.Raw) error {
 	}
 	if !r.replicates(ns.Object) {
 		return nil
+	}
+
+	if isSchemaEvent(raw) {
+		return r.takeSchemaChange(raw, ns)
 	}
 
 	model, err := r.conv.convertRawBSONToWriteModel(raw, ns.DB, ns.Object)
@@ -261,6 +295,84 @@ func (r *Reader) take(raw bson.Raw) error {
 		event.EndsTransaction = true
 	}
 	r.tx = append(r.tx, event)
+	return nil
+}
+
+// watchedOperations are the change stream events this reader asks for.
+//
+// The four row operations, plus the schema changes that keep the target's shape
+// in step with the source's. "invalidate" is asked for because it is how the
+// server says the stream cannot continue — dropped unnoticed, the task would
+// look healthy and replicate nothing.
+var watchedOperations = []string{
+	"insert", "update", "replace", "delete",
+	"create", "modify", "createIndexes", "dropIndexes",
+	"drop", "dropDatabase", "rename",
+	"shardCollection", "reshardCollection", "refineCollectionShardKey",
+	"invalidate",
+}
+
+// rowOperations are the events that carry data rather than shape.
+var rowOperations = map[string]bool{
+	"insert": true, "update": true, "replace": true, "delete": true,
+}
+
+// isSchemaEvent reports whether an event changes the shape of the data rather
+// than the data.
+func isSchemaEvent(raw bson.Raw) bool {
+	kind, ok := raw.Lookup("operationType").StringValueOK()
+	if !ok {
+		return false
+	}
+	return !rowOperations[kind]
+}
+
+// takeSchemaChange decides what to do with one DDL event and buffers it.
+func (r *Reader) takeSchemaChange(raw bson.Raw, ns domain.Namespace) error {
+	kind, _ := raw.Lookup("operationType").StringValueOK()
+
+	if kind == "invalidate" {
+		// The stream is over: the collection or database it watched is gone. A
+		// resume token from an invalidated stream cannot be used, so carrying on
+		// is not possible and pretending otherwise replicates nothing quietly.
+		return domain.Unrecoverable(
+			"the change stream was invalidated, which means what it watched no longer " +
+				"exists. A fresh copy is needed: clear the stored checkpoint")
+	}
+
+	change, decision, reason := planSchemaChange(raw, ns.Object)
+	switch decision {
+	case ddlSkip:
+		r.Logger.Infof("[MongoDB][DDL] Not replicating a change to %s: it %s", ns, reason)
+		return nil
+	case ddlStop:
+		return domain.Unrecoverable(
+			"refusing to replicate a schema change to %s: it %s. Replication has stopped "+
+				"so the change can be made on the target deliberately", ns, reason)
+	}
+
+	token, err := encodeToken(raw.Lookup("_id").Document())
+	if err != nil {
+		return err
+	}
+	at, _ := eventClusterTime(raw)
+
+	// A schema change is its own transaction boundary and gets a batch of its
+	// own: MongoDB's catalogue is not transactional, so it cannot share one with
+	// rows.
+	if len(r.tx) > 0 {
+		r.tx[len(r.tx)-1].EndsTransaction = true
+	}
+	r.txID = ""
+	r.tx = append(r.tx, &domain.Event{
+		NS:              ns,
+		Op:              domain.OpSchema,
+		Payload:         change,
+		Bytes:           len(raw),
+		Pos:             domain.Position{Payload: token},
+		SourceTime:      at,
+		EndsTransaction: true,
+	})
 	return nil
 }
 

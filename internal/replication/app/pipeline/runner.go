@@ -82,6 +82,10 @@ type Runner struct {
 	// single position a single-stream task has, which is the normal case.
 	CheckpointKey string
 
+	// Resyncs re-copy one object each, alongside the stream, without stopping
+	// it. Empty is the normal case.
+	Resyncs []*Resync
+
 	Opts Options
 
 	// clock is time.Now, replaced in tests.
@@ -97,7 +101,11 @@ type Runner struct {
 	lastAppliedAt time.Time
 	// lastHeardAt is when anything last arrived, heartbeats included.
 	lastHeardAt time.Time
-	queueUsed   int
+	// lastReadAt is the source's own time of the newest change read from the
+	// stream. A re-copy holds each chunk until this has passed the moment the
+	// chunk was read, which is what orders the two against each other.
+	lastReadAt time.Time
+	queueUsed  int
 }
 
 func (r *Runner) now() time.Time {
@@ -146,16 +154,41 @@ func (r *Runner) Run(ctx context.Context) error {
 	readCtx, stopReading := context.WithCancel(ctx)
 	defer stopReading()
 
+	// The queue has more than one producer once a re-copy is running, so it is
+	// closed after all of them have finished rather than by whichever finishes
+	// first. Closing it from the reader alone was a data race, and worse than
+	// that: a re-copy still handing over a chunk would send on a closed channel
+	// and take the process down.
+	var producers sync.WaitGroup
+
 	readErr := make(chan error, 1)
+	producers.Add(1)
 	go func() {
-		defer close(queue)
+		defer producers.Done()
 		readErr <- r.read(readCtx, queue)
 	}()
 
 	stopReporting := r.report(readCtx)
 	defer stopReporting()
 
+	resyncErr := r.startResyncs(readCtx, queue, &producers)
+
+	go func() {
+		producers.Wait()
+		close(queue)
+	}()
+
 	applyErr := r.apply(ctx, queue)
+
+	// A re-copy that failed is worth reporting even when the stream ended
+	// cleanly: the object it was repairing is still wrong.
+	select {
+	case err := <-resyncErr:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			r.log().Errorf(r.tag("A re-copy stopped: %v"), err)
+		}
+	default:
+	}
 
 	// The reader is the one that knows why the stream ended, so its error is
 	// preferred: an applier that stops because its queue closed says nothing
@@ -170,6 +203,54 @@ func (r *Runner) Run(ctx context.Context) error {
 		r.log().Warn(r.tag("The source reader did not stop within five seconds"))
 	}
 	return applyErr
+}
+
+// startResyncs runs each re-copy alongside the stream, pushing its chunks onto
+// the same queue so the applier orders them against the stream's changes.
+func (r *Runner) startResyncs(ctx context.Context, queue chan<- *domain.Event, producers *sync.WaitGroup) <-chan error {
+	failed := make(chan error, len(r.Resyncs)+1)
+	if len(r.Resyncs) == 0 {
+		return failed
+	}
+
+	read := func() time.Time {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		return r.lastReadAt
+	}
+
+	for _, resync := range r.Resyncs {
+		resync := resync
+		producers.Add(1)
+		go func() {
+			defer producers.Done()
+			r.log().Infof(r.tag("Re-copying %s alongside the stream"), resync.NS)
+			err := resync.run(ctx, read, func(events []*domain.Event) error {
+				if len(events) == 0 {
+					return nil
+				}
+				// A chunk is its own batch: it carries no position, so applying
+				// it never moves the stream's offset, and its last event closes
+				// the batch so it is not held waiting for a boundary that will
+				// not come.
+				events[len(events)-1].EndsTransaction = true
+				for _, event := range events {
+					event.Pos = domain.Position{}
+					select {
+					case queue <- event:
+					case <-ctx.Done():
+						return ctx.Err()
+					}
+				}
+				return nil
+			})
+			if err == nil {
+				r.log().Infof(r.tag("Finished re-copying %s"), resync.NS)
+			}
+			failed <- err
+		}()
+	}
+	return failed
 }
 
 // startingPoint reads the stored position, taking a snapshot when there is none.
@@ -227,6 +308,9 @@ func (r *Runner) read(ctx context.Context, queue chan<- *domain.Event) error {
 		if !event.Heartbeat && r.oldestPending.IsZero() && !event.SourceTime.IsZero() {
 			r.oldestPending = event.SourceTime
 		}
+		if !event.SourceTime.IsZero() && event.SourceTime.After(r.lastReadAt) {
+			r.lastReadAt = event.SourceTime
+		}
 		r.mu.Unlock()
 
 		if !event.SourceTime.IsZero() {
@@ -283,9 +367,26 @@ func (r *Runner) apply(ctx context.Context, queue <-chan *domain.Event) error {
 				return nil
 			}
 
+			// A schema change gets a batch to itself: it cannot share a
+			// transaction with rows, so a batch holding both could not be
+			// applied atomically.
+			if standsAlone(event) && b.len() > 0 {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+
 			b.add(event)
 			if !event.Pos.IsZero() {
 				pending = event.Pos
+			}
+
+			if standsAlone(event) {
+				if err := flush(); err != nil {
+					return err
+				}
+				resetTimer(timer, r.Opts.flushInterval())
+				continue
 			}
 			r.mu.Lock()
 			r.queueUsed = len(queue)

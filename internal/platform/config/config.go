@@ -68,6 +68,17 @@ type SyncConfig struct {
 	RedisReconcileInterval time.Duration
 	Status                 string
 	TaskName               string
+	// Resync names the tables or collections to re-copy alongside the stream.
+	//
+	// A copy found not to match used to be repairable only by clearing the
+	// checkpoint, which throws away the position for everything and re-copies
+	// the lot — hours during which the target is further behind, not closer.
+	// Listing one object here re-copies that one while the rest keeps streaming.
+	//
+	// Editing it changes the task's fingerprint, which is what the supervisor
+	// already watches, so the edit is the trigger. Removing the name again stops
+	// the re-copy from being started on the next restart.
+	Resync []string
 }
 
 func (s *SyncConfig) PGReplicationSlot() string {
@@ -258,6 +269,7 @@ ORDER BY id ASC
 				RedisPositionPath      *string           `json:"redis_position_path"`
 				RedisReconcileInterval *string           `json:"redis_reconcile_interval"`
 				SecurityEnabled        *bool             `json:"securityEnabled"`
+				Resync                 []string          `json:"resync"`
 			}
 			if errJ := json.Unmarshal([]byte(js), &extra); errJ != nil {
 				log.Printf("[WARN] parse config_json for id=%d => %v", id, errJ)
@@ -299,6 +311,7 @@ ORDER BY id ASC
 				}
 
 				sc.Mappings = extra.Mappings
+				sc.Resync = extra.Resync
 
 				securityEnabled := false
 				if extra.SecurityEnabled != nil && *extra.SecurityEnabled {

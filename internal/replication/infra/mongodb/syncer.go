@@ -166,6 +166,7 @@ func (s *Syncer) Start(ctx context.Context) error {
 			targetDB: targetDBName,
 		},
 		Checkpoints: store,
+		Resyncs:     s.resyncs(inner, store, sourceDBName),
 		Opts: pipeline.Options{
 			Labels: labels,
 			Logger: s.logger,
@@ -175,4 +176,28 @@ func (s *Syncer) Start(ctx context.Context) error {
 
 	s.logger.Info("[MongoDB] Starting synchronization...")
 	return runner.Run(ctx)
+}
+
+// resyncs builds a re-copy for each object the task asks to have re-copied.
+//
+// Its progress is stored beside the position, on the target, so an interrupted
+// repair resumes rather than starting the object again.
+func (s *Syncer) resyncs(inner *MongoDBSyncer, store *checkpoint.MongoStore, sourceDB string) []*pipeline.Resync {
+	if len(s.cfg.Resync) == 0 {
+		return nil
+	}
+	chunks := &Chunks{Client: inner.sourceClient, Database: sourceDB, Masker: inner}
+
+	var out []*pipeline.Resync
+	for _, name := range s.cfg.Resync {
+		ns := domain.Namespace{DB: sourceDB, Object: name}
+		out = append(out, &pipeline.Resync{
+			NS:          ns,
+			Reader:      chunks,
+			Progress:    store,
+			ProgressKey: "resync:" + ns.String(),
+		})
+		s.logger.Infof("[MongoDB] %s is listed for a re-copy alongside the stream", ns)
+	}
+	return out
 }

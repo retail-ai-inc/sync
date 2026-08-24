@@ -172,6 +172,7 @@ func (s *Syncer) Start(ctx context.Context) error {
 		},
 		Snapshotter: &Snapshotter{Config: s.cfg, Target: targetDB, Logger: s.logger},
 		Checkpoints: store,
+		Resyncs:     s.resyncs(store),
 		Opts: pipeline.Options{
 			Labels: labels,
 			Logger: s.logger,
@@ -181,4 +182,45 @@ func (s *Syncer) Start(ctx context.Context) error {
 
 	s.logger.Info("[MySQL] Starting synchronization...")
 	return runner.Run(ctx)
+}
+
+// resyncs builds a re-copy for each table the task asks to have re-copied.
+func (s *Syncer) resyncs(store *checkpoint.SQLStore) []*pipeline.Resync {
+	if len(s.cfg.Resync) == 0 {
+		return nil
+	}
+	source, err := sql.Open("mysql", s.cfg.SourceConnection)
+	if err != nil {
+		s.logger.Errorf("[MySQL] Cannot open a second source connection for the "+
+			"re-copy, so nothing will be re-copied: %v", err)
+		return nil
+	}
+
+	sourceDB := dsn.GetDatabaseName(s.cfg.Type, s.cfg.SourceConnection)
+	targetDB := dsn.GetDatabaseName(s.cfg.Type, s.cfg.TargetConnection)
+	handler := &MyEventHandler{mappings: s.cfg.Mappings}
+	chunks := &Chunks{
+		Source:         source,
+		Database:       sourceDB,
+		TargetDatabase: targetDB,
+		TargetOf: func(table string) string {
+			if targets := handler.targetsFor(sourceDB, table); len(targets) > 0 {
+				return targets[0]
+			}
+			return table
+		},
+	}
+
+	var out []*pipeline.Resync
+	for _, name := range s.cfg.Resync {
+		ns := domain.Namespace{DB: sourceDB, Object: name}
+		out = append(out, &pipeline.Resync{
+			NS:          ns,
+			Reader:      chunks,
+			Progress:    store,
+			ProgressKey: "resync:" + ns.String(),
+		})
+		s.logger.Infof("[MySQL] %s is listed for a re-copy alongside the stream", ns)
+	}
+	return out
 }
