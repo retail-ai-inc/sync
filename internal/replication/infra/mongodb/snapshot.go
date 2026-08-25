@@ -62,6 +62,14 @@ func (s *MongoDBSyncer) doInitialSync(ctx context.Context, sourceColl, targetCol
 
 	s.logger.Infof("[MongoDB] Starting initial sync for %s.%s -> %s.%s", sourceDB, sourceColl.Name(), targetDB, targetColl.Name())
 
+	// How the target addresses these documents. A copy has no documentKey to
+	// take it from, so the shard key is read once here and its values are taken
+	// out of each document; without them a sharded target refuses every upsert.
+	address, err := addressOf(ctx, s.sourceClient, sourceDB+"."+sourceColl.Name())
+	if err != nil {
+		return fmt.Errorf("read how %s.%s is partitioned: %w", sourceDB, sourceColl.Name(), err)
+	}
+
 	cursor, err := sourceColl.Find(ctx, bson.M{})
 	if err != nil {
 		return fmt.Errorf("source find fail => %v", err)
@@ -79,7 +87,7 @@ func (s *MongoDBSyncer) doInitialSync(ctx context.Context, sourceColl, targetCol
 		}
 		batch = append(batch, s.maskDocument(sourceColl.Name(), doc))
 		if len(batch) >= batchSize {
-			written, err := s.copyBatch(ctx, targetColl, batch, targetDB)
+			written, err := s.copyBatch(ctx, targetColl, batch, targetDB, address)
 			if err != nil {
 				return err
 			}
@@ -92,7 +100,7 @@ func (s *MongoDBSyncer) doInitialSync(ctx context.Context, sourceColl, targetCol
 	}
 
 	if len(batch) > 0 {
-		written, err := s.copyBatch(ctx, targetColl, batch, targetDB)
+		written, err := s.copyBatch(ctx, targetColl, batch, targetDB, address)
 		if err != nil {
 			return err
 		}
@@ -111,18 +119,24 @@ func (s *MongoDBSyncer) doInitialSync(ctx context.Context, sourceColl, targetCol
 // stream that resumes from the pinned cluster time replays the writes made
 // while the copy was running. Neither may fail on a document that is already
 // there.
-func (s *MongoDBSyncer) copyBatch(ctx context.Context, targetColl *mongo.Collection, batch []bson.M, targetDB string) (int, error) {
+func (s *MongoDBSyncer) copyBatch(ctx context.Context, targetColl *mongo.Collection, batch []bson.M, targetDB string, address documentAddress) (int, error) {
 	models := make([]mongo.WriteModel, 0, len(batch))
 	for _, doc := range batch {
-		id, ok := doc["_id"]
-		if !ok {
-			// Nothing to address it by; an insert is the only option and a
-			// resumed copy will duplicate it.
-			models = append(models, mongo.NewInsertOneModel().SetDocument(doc))
-			continue
+		filter, err := address.filter(doc)
+		if err != nil {
+			if _, hasID := doc["_id"]; !hasID {
+				// Nothing to address it by; an insert is the only option and a
+				// resumed copy will duplicate it.
+				models = append(models, mongo.NewInsertOneModel().SetDocument(doc))
+				continue
+			}
+			// It has an _id but not the shard key, so the target cannot be told
+			// where to put it. Guessing would either broadcast the write or have
+			// it refused, and both are worse than saying so.
+			return 0, fmt.Errorf("copy to %s.%s: %w", targetDB, targetColl.Name(), err)
 		}
 		models = append(models, mongo.NewReplaceOneModel().
-			SetFilter(bson.M{"_id": id}).
+			SetFilter(filter).
 			SetReplacement(doc).
 			SetUpsert(true))
 	}

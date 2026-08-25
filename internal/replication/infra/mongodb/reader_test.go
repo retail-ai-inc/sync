@@ -1,12 +1,14 @@
 package mongodb
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/sirupsen/logrus"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
 
 	"github.com/retail-ai-inc/sync/internal/platform/config"
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
@@ -33,14 +35,18 @@ func changeDoc(db, coll, op string, key bson.D) bson.D {
 
 // ------------------------------------------------------------------ keys
 
-// TestTheDocumentKeyCarriesTheShardKey is the difference between a targeted
-// write and a broadcast one.
+// TestTheOrderingKeyCarriesTheShardKey is about how a batch is grouped, not how
+// it is written.
 //
-// On a sharded collection mongos needs the shard key to route an updateOne to a
-// single shard. Keying on the _id alone — which is what the old write path did —
-// leaves it no choice but to send the write to every shard: one wasted round
-// trip per shard, per document, for the life of the task.
-func TestTheDocumentKeyCarriesTheShardKey(t *testing.T) {
+// Two changes to one document may never be reordered against each other, and on
+// a sharded collection two documents can share an _id while differing in the
+// shard key. So the ordering key is the whole documentKey.
+//
+// It used to claim to be about routing, which is a property of the write filter
+// and not of this function at all — and the filter went on carrying only the
+// _id for a long time underneath a test that read as though it did not. The
+// filter has its own test now, below.
+func TestTheOrderingKeyCarriesTheShardKey(t *testing.T) {
 	raw := rawEvent(t, changeDoc("shop", "orders", "update", bson.D{
 		{Key: "_id", Value: "abc"},
 		{Key: "region", Value: "tokyo"},
@@ -416,4 +422,143 @@ func quietLog() *logrus.Logger {
 	l := logrus.New()
 	l.SetLevel(logrus.PanicLevel)
 	return l
+}
+
+// ------------------------------------------------- the write filter
+
+// TestTheWriteFilterCarriesTheShardKey is the difference between a write mongos
+// can route and one it refuses outright.
+//
+// Every write here is an upsert, because replication is replayed. An upsert on a
+// sharded collection has to name the whole shard key: without it the server
+// answers "could not extract exact shard key" and replication stops on the first
+// document. A deleteOne survives but is broadcast to every shard.
+//
+// This is the assertion that was missing while the reasoning for it sat on the
+// ordering key instead. The integration tests did not catch it because they
+// sharded on {_id: hashed}, where the shard key and the _id are the same field.
+func TestTheWriteFilterCarriesTheShardKey(t *testing.T) {
+	syncer := &MongoDBSyncer{logger: logrus.New()}
+
+	key := bson.D{
+		{Key: "_id", Value: "abc"},
+		{Key: "merchant_id", Value: 42},
+	}
+	events := map[string]bson.D{
+		"insert": append(changeDoc("shop", "orders", "insert", key),
+			bson.E{Key: "fullDocument", Value: bson.D{
+				{Key: "_id", Value: "abc"}, {Key: "merchant_id", Value: 42},
+			}}),
+		"replace": append(changeDoc("shop", "orders", "replace", key),
+			bson.E{Key: "fullDocument", Value: bson.D{
+				{Key: "_id", Value: "abc"}, {Key: "merchant_id", Value: 42},
+			}}),
+		"update": append(changeDoc("shop", "orders", "update", key),
+			bson.E{Key: "updateDescription", Value: bson.D{
+				{Key: "updatedFields", Value: bson.D{{Key: "amount", Value: 100}}},
+			}}),
+		"delete": changeDoc("shop", "orders", "delete", key),
+	}
+
+	for op, doc := range events {
+		t.Run(op, func(t *testing.T) {
+			raw := rawEvent(t, doc)
+
+			model, err := syncer.convertRawBSONToWriteModel(raw, "shop", "orders")
+			if err != nil {
+				t.Fatalf("convert: %v", err)
+			}
+			filter := filterIn(t, model)
+
+			if filter["_id"] != "abc" {
+				t.Errorf("filter = %v, want it to carry the _id", filter)
+			}
+			if got, ok := filter["merchant_id"]; !ok {
+				t.Errorf("filter = %v, want it to carry the shard key too — without it "+
+					"an upsert is refused and a delete is broadcast", filter)
+			} else if fmt.Sprint(got) != "42" {
+				t.Errorf("filter[merchant_id] = %v, want 42", got)
+			}
+		})
+	}
+}
+
+// TestAnUnshardedChangeIsStillFilteredByItsIDAlone keeps the common case as it
+// was: documentKey is just the _id there, so the filter is what it always was.
+func TestAnUnshardedChangeIsStillFilteredByItsIDAlone(t *testing.T) {
+	syncer := &MongoDBSyncer{logger: logrus.New()}
+
+	raw := rawEvent(t, changeDoc("shop", "orders", "delete", bson.D{
+		{Key: "_id", Value: "abc"},
+	}))
+	model, err := syncer.convertRawBSONToWriteModel(raw, "shop", "orders")
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+
+	filter := filterIn(t, model)
+	if len(filter) != 1 || filter["_id"] != "abc" {
+		t.Errorf("filter = %v, want just the _id", filter)
+	}
+}
+
+// filterIn reads the filter out of whichever write model was built.
+func filterIn(t *testing.T, model mongo.WriteModel) bson.M {
+	t.Helper()
+
+	var filter interface{}
+	switch m := model.(type) {
+	case *mongo.ReplaceOneModel:
+		filter = m.Filter
+	case *mongo.UpdateOneModel:
+		filter = m.Filter
+	case *mongo.DeleteOneModel:
+		filter = m.Filter
+	default:
+		t.Fatalf("model is a %T, which carries no filter", model)
+	}
+
+	out, ok := filter.(bson.M)
+	if !ok {
+		t.Fatalf("filter is a %T, want a bson.M", filter)
+	}
+	return out
+}
+
+// TestAnUpdateWithoutTheDocumentIsStillApplied covers the path taken when the
+// document was deleted between the update and the lookup that would have
+// fetched it: the change itself is in the event, so it can be applied without.
+//
+// It reads the shape the driver decodes into, which is what broke: the fields
+// were read with a type assertion to bson.M, and the driver's v2 hands back a
+// bson.D. Every update that took this path was refused, and a refused event
+// stops the task rather than being skipped — correctly, but the cause was a
+// type assertion nobody had revisited.
+func TestAnUpdateWithoutTheDocumentIsStillApplied(t *testing.T) {
+	syncer := &MongoDBSyncer{logger: logrus.New()}
+
+	raw := rawEvent(t, append(
+		changeDoc("shop", "orders", "update", bson.D{{Key: "_id", Value: "abc"}}),
+		bson.E{Key: "updateDescription", Value: bson.D{
+			{Key: "updatedFields", Value: bson.D{{Key: "amount", Value: 100}}},
+			{Key: "removedFields", Value: bson.A{"note"}},
+		}},
+	))
+
+	model, err := syncer.convertRawBSONToWriteModel(raw, "shop", "orders")
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+	update, ok := model.(*mongo.UpdateOneModel)
+	if !ok {
+		t.Fatalf("model is a %T, want an UpdateOneModel", model)
+	}
+
+	rendered := fmt.Sprint(update.Update)
+	if !strings.Contains(rendered, "amount") {
+		t.Errorf("update = %v, want the changed field in a $set", update.Update)
+	}
+	if !strings.Contains(rendered, "note") {
+		t.Errorf("update = %v, want the removed field in an $unset", update.Update)
+	}
 }

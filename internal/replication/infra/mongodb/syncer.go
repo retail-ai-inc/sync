@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/sirupsen/logrus"
+	"go.mongodb.org/mongo-driver/v2/mongo"
 
 	"github.com/retail-ai-inc/sync/internal/platform/config"
 	"github.com/retail-ai-inc/sync/internal/platform/dsn"
@@ -14,6 +15,7 @@ import (
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/checkpoint"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/directionlock"
+	"github.com/retail-ai-inc/sync/internal/replication/infra/discovery"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/security"
 )
 
@@ -59,50 +61,58 @@ func (s *Snapshotter) Copy(ctx context.Context) error {
 	source := s.Syncer.sourceClient.Database(s.sourceDB)
 	target := s.Syncer.targetClient.Database(s.targetDB)
 
+	tables, err := s.collections(ctx, source)
+	if err != nil {
+		return err
+	}
+
 	var failures []string
-	for _, mapping := range s.Config.Mappings {
-		for _, table := range mapping.Tables {
-			targetName := table.TargetTable
-			if targetName == "" {
-				targetName = table.SourceTable
-			}
+	for _, table := range tables {
+		targetName := table.TargetTable
+		if targetName == "" {
+			targetName = table.SourceTable
+		}
 
-			// The collection has to exist, be partitioned the way the source is,
-			// and carry the source's indexes — all before a document is copied.
-			//
-			// Sharding an empty collection is immediate; sharding one that
-			// already holds the copy is a migration. And a sharded source
-			// replicated into a collection that MongoDB auto-created on first
-			// insert lands unsharded, which gives the disaster-recovery copy one
-			// shard's capacity where the source had all of them. Nothing reports
-			// it: the documents are all there.
-			if err := s.Syncer.ensureCollectionExists(ctx, target, targetName); err != nil {
-				failures = append(failures,
-					fmt.Sprintf("%s.%s: could not create the target collection: %v",
-						s.targetDB, targetName, err))
-				continue
-			}
-			s.Syncer.matchSharding(ctx, s.sourceDB, table.SourceTable, s.targetDB, targetName)
+		// The collection has to exist, be partitioned the way the source is,
+		// and carry the source's indexes — all before a document is copied.
+		//
+		// Sharding an empty collection is immediate; sharding one that
+		// already holds the copy is a migration. And a sharded source
+		// replicated into a collection that MongoDB auto-created on first
+		// insert lands unsharded, which gives the disaster-recovery copy one
+		// shard's capacity where the source had all of them. Nothing reports
+		// it: the documents are all there.
+		if err := s.Syncer.ensureCollectionExists(ctx, target, targetName); err != nil {
+			failures = append(failures,
+				fmt.Sprintf("%s.%s: could not create the target collection: %v",
+					s.targetDB, targetName, err))
+			continue
+		}
+		if err := s.Syncer.matchSharding(ctx, s.sourceDB, table.SourceTable, s.targetDB, targetName); err != nil {
+			// Two sides partitioned differently is not a gap a retry closes,
+			// and not one the other collections make up for, so it stops the
+			// task rather than joining the list of things that went wrong.
+			return err
+		}
 
-			if table.AdvancedSettings.SyncIndexes {
-				if err := s.Syncer.copyIndexes(ctx,
-					source.Collection(table.SourceTable),
-					target.Collection(targetName)); err != nil {
-					// An index the target lacks makes it answer correctly and too
-					// slowly to serve, which at a failover is its own outage — but
-					// it is not a reason to leave the data uncopied.
-					s.Logger.Warnf("[MongoDB] Could not copy the indexes of %s.%s: %v",
-						s.sourceDB, table.SourceTable, err)
-				}
-			}
-
-			if err := s.Syncer.doInitialSync(ctx,
+		if table.AdvancedSettings.SyncIndexes {
+			if err := s.Syncer.copyIndexes(ctx,
 				source.Collection(table.SourceTable),
-				target.Collection(targetName),
-				s.sourceDB, s.targetDB); err != nil {
-				failures = append(failures,
-					fmt.Sprintf("%s.%s: %v", s.sourceDB, table.SourceTable, err))
+				target.Collection(targetName)); err != nil {
+				// An index the target lacks makes it answer correctly and too
+				// slowly to serve, which at a failover is its own outage — but
+				// it is not a reason to leave the data uncopied.
+				s.Logger.Warnf("[MongoDB] Could not copy the indexes of %s.%s: %v",
+					s.sourceDB, table.SourceTable, err)
 			}
+		}
+
+		if err := s.Syncer.doInitialSync(ctx,
+			source.Collection(table.SourceTable),
+			target.Collection(targetName),
+			s.sourceDB, s.targetDB); err != nil {
+			failures = append(failures,
+				fmt.Sprintf("%s.%s: %v", s.sourceDB, table.SourceTable, err))
 		}
 	}
 
@@ -111,6 +121,45 @@ func (s *Snapshotter) Copy(ctx context.Context) error {
 			"from it: %s", strings.Join(failures, "; "))
 	}
 	return nil
+}
+
+// collections reports what to copy, discovering it from the source when the task
+// names nothing.
+//
+// The two halves of this used to disagree. The reader takes "no collections
+// listed" to mean every collection of the database, which is what the MySQL side
+// means by it too; the copy took it to mean there was nothing to copy, and its
+// loop simply did not run. It reported success, the position was recorded, and
+// the stream started — so the target held whatever was written from that moment
+// on and none of what was there before. Nothing said so: no error, no warning,
+// no metric. Only a comparison would have found it, and comparisons are off
+// unless asked for.
+func (s *Snapshotter) collections(ctx context.Context, source *mongo.Database) ([]config.TableMapping, error) {
+	var listed []config.TableMapping
+	for _, mapping := range s.Config.Mappings {
+		listed = append(listed, mapping.Tables...)
+	}
+	if len(listed) > 0 {
+		return listed, nil
+	}
+
+	names, err := discovery.MongoCollections(ctx, source)
+	if err != nil {
+		return nil, fmt.Errorf("the task names no collections, so they have to be "+
+			"discovered from %s, and that failed: %w", s.sourceDB, err)
+	}
+	if len(names) == 0 {
+		s.Logger.Warnf("[MongoDB] %s holds no collections to copy", s.sourceDB)
+		return nil, nil
+	}
+
+	discovered := make([]config.TableMapping, 0, len(names))
+	for _, name := range names {
+		discovered = append(discovered, config.TableMapping{SourceTable: name, TargetTable: name})
+	}
+	s.Logger.Infof("[MongoDB] The task names no collections, so all %d in %s are "+
+		"being copied", len(discovered), s.sourceDB)
+	return discovered, nil
 }
 
 // Syncer replicates one MongoDB deployment through the shared pipeline.

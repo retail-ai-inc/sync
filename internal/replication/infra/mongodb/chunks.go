@@ -37,6 +37,14 @@ func (c *Chunks) NextChunk(ctx context.Context, ns domain.Namespace, after strin
 	}
 	defer session.EndSession(ctx)
 
+	// How the target addresses these documents. A copy has no documentKey to
+	// take it from, so the shard key is read once here and its values are taken
+	// out of each document; without them a sharded target refuses every upsert.
+	address, err := addressOf(ctx, c.Client, c.Database+"."+ns.Object)
+	if err != nil {
+		return pipeline.Chunk{}, fmt.Errorf("read how %s is partitioned: %w", ns, err)
+	}
+
 	var chunk pipeline.Chunk
 	err = mongo.WithSession(ctx, session, func(sc context.Context) error {
 		filter := bson.M{}
@@ -66,6 +74,11 @@ func (c *Chunks) NextChunk(ctx context.Context, ns domain.Namespace, after strin
 				return fmt.Errorf("a document of %s carries no _id, so a re-copy cannot "+
 					"address it on the target", ns)
 			}
+			where, err := address.filter(document)
+			if err != nil {
+				return fmt.Errorf("a document of %s cannot be addressed on the target: %w",
+					ns, err)
+			}
 			masked := c.Masker.maskDocument(ns.Object, document)
 
 			chunk.Events = append(chunk.Events, &domain.Event{
@@ -73,7 +86,7 @@ func (c *Chunks) NextChunk(ctx context.Context, ns domain.Namespace, after strin
 				Op:  domain.OpInsert,
 				Key: fmt.Sprintf("_id=%v\x00", id),
 				Payload: mongo.NewReplaceOneModel().
-					SetFilter(bson.M{"_id": id}).
+					SetFilter(where).
 					SetReplacement(masked).
 					SetUpsert(true),
 			})

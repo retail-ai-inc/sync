@@ -38,31 +38,30 @@ func (s *MongoDBSyncer) convertRawBSONToWriteModel(rawData bson.Raw, sourceDB, c
 				sourceDB, collectionName)
 		}
 		fullDoc = s.maskValue(collectionName, fullDoc)
-		id := idOf(fullDoc)
-		if id == nil {
-			if dk, ok := event["documentKey"].(bson.M); ok {
-				id = dk["_id"]
+		filter := filterOf(event)
+		if filter == nil {
+			if id := idOf(fullDoc); id != nil {
+				filter = bson.M{"_id": id}
 			}
 		}
-		if id == nil {
+		if filter == nil {
 			return mongo.NewInsertOneModel().SetDocument(fullDoc), nil
 		}
 		return mongo.NewReplaceOneModel().
-			SetFilter(bson.M{"_id": id}).
+			SetFilter(filter).
 			SetReplacement(fullDoc).
 			SetUpsert(true), nil
 
 	case "update", "replace":
-		dk, ok := event["documentKey"].(bson.M)
-		if !ok {
+		filter := filterOf(event)
+		if filter == nil {
 			return nil, fmt.Errorf("an %s event for %s.%s names no document",
 				opType, sourceDB, collectionName)
 		}
-		docID := dk["_id"]
 
 		if fullDoc, ok := event["fullDocument"]; ok {
 			return mongo.NewReplaceOneModel().
-				SetFilter(bson.M{"_id": docID}).
+				SetFilter(filter).
 				SetReplacement(s.maskValue(collectionName, fullDoc)).
 				SetUpsert(true), nil
 		}
@@ -82,7 +81,7 @@ func (s *MongoDBSyncer) convertRawBSONToWriteModel(rawData bson.Raw, sourceDB, c
 			}
 		}
 		return mongo.NewUpdateOneModel().
-			SetFilter(bson.M{"_id": docID}).
+			SetFilter(filter).
 			SetUpdate(update), nil
 
 	case "delete":
@@ -94,12 +93,12 @@ func (s *MongoDBSyncer) convertRawBSONToWriteModel(rawData bson.Raw, sourceDB, c
 			return nil, nil
 		}
 
-		dk, ok := event["documentKey"].(bson.M)
-		if !ok {
+		filter := filterOf(event)
+		if filter == nil {
 			return nil, fmt.Errorf("a delete event for %s.%s names no document",
 				sourceDB, collectionName)
 		}
-		return mongo.NewDeleteOneModel().SetFilter(bson.M{"_id": dk["_id"]}), nil
+		return mongo.NewDeleteOneModel().SetFilter(filter), nil
 	}
 
 	// Collection-level events — drop, rename, invalidate — are not replicated.
@@ -112,14 +111,14 @@ func (s *MongoDBSyncer) convertRawBSONToWriteModel(rawData bson.Raw, sourceDB, c
 // updateFromDescription builds the update an event describes, for the case
 // where the full document was not attached.
 func updateFromDescription(event bson.M) (bson.M, error) {
-	description, ok := event["updateDescription"].(bson.M)
-	if !ok {
+	description := documentOf(event["updateDescription"])
+	if description == nil {
 		return nil, fmt.Errorf("an update event carries neither the document nor a " +
 			"description of what changed")
 	}
 
 	update := bson.M{}
-	if set, ok := description["updatedFields"].(bson.M); ok && len(set) > 0 {
+	if set := documentOf(description["updatedFields"]); len(set) > 0 {
 		update["$set"] = set
 	}
 	if removed, ok := description["removedFields"].(bson.A); ok && len(removed) > 0 {
@@ -137,4 +136,69 @@ func updateFromDescription(event bson.M) (bson.M, error) {
 		return nil, fmt.Errorf("an update event describes no change")
 	}
 	return update, nil
+}
+
+// filterOf is how the target addresses the document a change touched.
+//
+// It is the whole documentKey, not just the _id. On a sharded collection
+// documentKey carries the shard key as well, and that is what mongos routes by:
+// a filter holding only the _id cannot be routed, so an updateOne or a deleteOne
+// is broadcast to every shard and an upsert — which is what a replayed insert
+// has to be — is refused outright with "could not extract exact shard key". A
+// collection sharded on anything but its _id would stop replication on the first
+// document.
+//
+// The reasoning was written down against keyOf, which orders a batch, and the
+// writes went on being addressed by the _id alone. The tests missed it because
+// they sharded on {_id: hashed}, where the two are the same thing.
+//
+// Both document shapes are accepted, and that is not defensiveness. Unmarshalling
+// into a bson.M gives nested documents as bson.M under the driver's v1 and as
+// bson.D under its v2, so the type assertion that read the documentKey stopped
+// matching the moment the driver was upgraded — and an event whose documentKey
+// cannot be read is refused, which stopped every update and delete. idOf next
+// door was already written to take either; this was not.
+func filterOf(event bson.M) bson.M {
+	key := documentOf(event["documentKey"])
+	if len(key) == 0 {
+		return nil
+	}
+	if _, hasID := key["_id"]; !hasID {
+		// Every documentKey carries an _id. One that does not is not something
+		// to guess at.
+		return nil
+	}
+	return key
+}
+
+// documentOf renders a nested BSON document as a map, whichever shape the driver
+// decoded it into.
+func documentOf(value interface{}) bson.M {
+	switch held := value.(type) {
+	case bson.M:
+		out := make(bson.M, len(held))
+		for field, v := range held {
+			out[field] = v
+		}
+		return out
+	case map[string]interface{}:
+		out := make(bson.M, len(held))
+		for field, v := range held {
+			out[field] = v
+		}
+		return out
+	case bson.D:
+		out := make(bson.M, len(held))
+		for _, element := range held {
+			out[element.Key] = element.Value
+		}
+		return out
+	case bson.Raw:
+		var out bson.M
+		if err := bson.Unmarshal(held, &out); err != nil {
+			return nil
+		}
+		return out
+	}
+	return nil
 }

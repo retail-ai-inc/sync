@@ -988,3 +988,32 @@ func TestAnUnreadableKeyIsStillDescribed(t *testing.T) {
 		t.Errorf("DescribeKey = %q, want it shortened", got)
 	}
 }
+
+// TestADocumentHashesTheSameWhicheverShapeItArrivedIn is a regression test for a
+// comparison that would have reported every document with a subdocument as
+// different from itself.
+//
+// Unmarshalling into a bson.M gives nested documents as bson.M under the MongoDB
+// driver's v1 and as bson.D under its v2. A bson.D had no case here, so it fell
+// to the branch that prints the value — and a printed bson.D carries the order
+// of its fields. Two identical documents whose subdocuments were written in a
+// different order would have compared as differing, on every pass, and repair
+// would have rewritten them for ever.
+func TestADocumentHashesTheSameWhicheverShapeItArrivedIn(t *testing.T) {
+	asMap := bson.M{"_id": 1, "customer": bson.M{"region": "tokyo", "tier": "gold"}}
+	asDoc := bson.M{"_id": 1, "customer": bson.D{
+		{Key: "region", Value: "tokyo"}, {Key: "tier", Value: "gold"},
+	}}
+	reversed := bson.M{"_id": 1, "customer": bson.D{
+		{Key: "tier", Value: "gold"}, {Key: "region", Value: "tokyo"},
+	}}
+
+	if canonical(asMap) != canonical(asDoc) {
+		t.Errorf("the two shapes of one document hash differently:\n  %s\n  %s",
+			canonical(asMap), canonical(asDoc))
+	}
+	if canonical(asDoc) != canonical(reversed) {
+		t.Errorf("the order of a subdocument's fields changed the hash:\n  %s\n  %s",
+			canonical(asDoc), canonical(reversed))
+	}
+}

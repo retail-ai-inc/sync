@@ -271,6 +271,15 @@ func asDocument(value interface{}) (map[string]interface{}, bool) {
 		return typed, true
 	case bson.M:
 		return map[string]interface{}(typed), true
+	case bson.D:
+		// The MongoDB driver's v2 decodes a nested document into a bson.D where
+		// its v1 gave a bson.M. Without this a subdocument stopped being
+		// recognised as one, so a rule naming a field inside it did nothing.
+		document := make(map[string]interface{}, len(typed))
+		for _, element := range typed {
+			document[element.Key] = element.Value
+		}
+		return document, true
 	}
 	return nil, false
 }
