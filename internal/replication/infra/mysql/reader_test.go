@@ -1,10 +1,14 @@
 package mysql
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-mysql-org/go-mysql/canal"
+	"github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/schema"
 	"github.com/pingcap/tidb/pkg/parser"
 	"github.com/pingcap/tidb/pkg/parser/ast"
@@ -281,5 +285,65 @@ func TestAMoveOnlyMattersAfterRowsHaveBeenApplied(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "copy") {
 		t.Errorf("error = %v, want it to say what to do", err)
+	}
+}
+
+// ------------------------------------------------- closing the stream
+
+// TestHandingOverAfterCloseDoesNotPanic is a regression test for a crash that
+// took the whole process down, every other task with it.
+//
+// canal.Close calls OnPosSynced one last time on its way out. The reader used to
+// close its event channel from the goroutine running the stream, and that
+// goroutine had usually got there first — so the final handover was a send on a
+// closed channel. Nothing caught it: no MySQL test went in through the syncer
+// the supervisor actually builds, so the shutdown path was never exercised.
+func TestHandingOverAfterCloseDoesNotPanic(t *testing.T) {
+	r := &Reader{Config: config.SyncConfig{
+		Type:             "mysql",
+		SourceConnection: "u:p@tcp(h:3306)/shop",
+	}}
+	r.out = make(chan *domain.Event, 1)
+	r.fail = make(chan error, 1)
+	r.done = make(chan struct{})
+	r.tx = []*domain.Event{{}, {}, {}}
+
+	if err := r.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Two handovers: the first may still fit in the buffered channel, the
+	// second cannot, so this reaches the case that used to block or panic.
+	for i := 0; i < 2; i++ {
+		r.tx = []*domain.Event{{}, {}, {}}
+		err := r.handOver(mysql.Position{Name: "binlog.000001", Pos: 4}, nil, nil)
+		if err != nil && !errors.Is(err, errReaderClosed) {
+			t.Fatalf("handOver after Close: %v, want errReaderClosed or nil", err)
+		}
+	}
+}
+
+// TestNextReportsAClosedReaderRatherThanBlocking is the other half: once the
+// reader is closed, a caller still waiting in Next has to be told, not left
+// there until its context expires.
+func TestNextReportsAClosedReaderRatherThanBlocking(t *testing.T) {
+	r := &Reader{}
+	r.out = make(chan *domain.Event, 1)
+	r.fail = make(chan error, 1)
+	r.done = make(chan struct{})
+
+	if err := r.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	event, err := r.Next(ctx)
+	if err == nil {
+		t.Fatalf("Next returned %v and no error after the reader was closed", event)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal("Next waited for its context instead of noticing the reader had closed")
 	}
 }

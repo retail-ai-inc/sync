@@ -3,6 +3,7 @@ package mysql
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -46,6 +47,11 @@ type Reader struct {
 
 	out  chan *domain.Event
 	fail chan error
+	// done is closed by Close, before the canal is, so an event the canal hands
+	// over on its way out has somewhere to go other than a channel nobody is
+	// reading. Closing out instead was a crash: canal.Close calls OnPosSynced
+	// one last time, and the goroutine below had usually closed out by then.
+	done chan struct{}
 
 	// tx holds the events of the source transaction being read. They are handed
 	// over together, at the boundary, so a batch can never be cut inside one.
@@ -98,6 +104,7 @@ func (r *Reader) Open(ctx context.Context, from domain.Position) error {
 	r.appliedSince = map[string]bool{}
 	r.out = make(chan *domain.Event, 1)
 	r.fail = make(chan error, 1)
+	r.done = make(chan struct{})
 	c.SetEventHandler(r)
 
 	streamCtx, stop := context.WithCancel(ctx)
@@ -109,7 +116,10 @@ func (r *Reader) Open(ctx context.Context, from domain.Position) error {
 	}
 
 	go func() {
-		defer close(r.out)
+		// out is deliberately not closed here. The stream ends by way of fail,
+		// which Next already waits on; closing out as well raced with the final
+		// OnPosSynced that canal.Close makes, and lost — a send on a closed
+		// channel takes the whole process down, every other task with it.
 		switch {
 		case from.IsZero():
 			// Nothing recorded: the caller has already made its copy and has no
@@ -138,10 +148,9 @@ func (r *Reader) Next(ctx context.Context) (*domain.Event, error) {
 			return nil, r.classify(err)
 		}
 		return nil, fmt.Errorf("the binlog stream ended without an error")
-	case event, ok := <-r.out:
-		if !ok {
-			return nil, fmt.Errorf("the binlog stream closed")
-		}
+	case <-r.done:
+		return nil, fmt.Errorf("the binlog stream was closed")
+	case event := <-r.out:
 		return event, nil
 	}
 }
@@ -149,6 +158,11 @@ func (r *Reader) Next(ctx context.Context) (*domain.Event, error) {
 // Close stops the stream. Calling it more than once is safe.
 func (r *Reader) Close() error {
 	r.closeOnce.Do(func() {
+		// Before the canal, so that the event it hands over as it closes is
+		// dropped rather than pushed at a pipeline that has stopped reading.
+		if r.done != nil {
+			close(r.done)
+		}
 		if r.stop != nil {
 			r.stop()
 		}
@@ -158,6 +172,11 @@ func (r *Reader) Close() error {
 	})
 	return nil
 }
+
+// errReaderClosed says an event arrived after the reader was closed. It is not
+// a failure: the position it belongs to was never recorded, so the event is
+// read again next time.
+var errReaderClosed = errors.New("the reader has been closed")
 
 // classify decides whether a stream failure is worth retrying.
 func (r *Reader) classify(err error) error {
@@ -467,6 +486,11 @@ func (r *Reader) handOver(pos mysql.Position, set mysql.GTIDSet, header *replica
 	for _, event := range events {
 		select {
 		case r.out <- event:
+		case <-r.done:
+			// Close was called, so nothing is reading any more. The position
+			// this event belongs to was never recorded, so it will be read
+			// again from the source: dropping it here loses nothing.
+			return errReaderClosed
 		case <-time.After(time.Minute):
 			// The applier has not taken an event for a minute, so the queue
 			// ahead of it is full and staying full. Closing the stream is

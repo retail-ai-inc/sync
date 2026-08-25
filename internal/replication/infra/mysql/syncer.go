@@ -157,6 +157,13 @@ func (s *Syncer) Start(ctx context.Context) error {
 	metrics.SetTaskUp(labels, true)
 	defer metrics.SetTaskUp(labels, false)
 
+	// What the source has to be set up to do, asked before the snapshot rather
+	// than after it: a source that cannot be replicated correctly should cost
+	// nothing to discover, and discovering it after the copy costs the copy.
+	if err := s.checkSource(ctx); err != nil {
+		return err
+	}
+
 	// The position lives on the target, which is the side that survives the
 	// outage this setup exists for, and it is written in the transaction that
 	// applies the data.
@@ -192,6 +199,22 @@ func (s *Syncer) Start(ctx context.Context) error {
 
 	s.logger.Info("[MySQL] Starting synchronization...")
 	return runner.Run(ctx)
+}
+
+// checkSource opens a short-lived connection to the source and runs the
+// preflight checks over it.
+//
+// It is its own connection because the stream's is canal's and the snapshot's is
+// pinned inside a consistent read; neither is available at this point, and both
+// are made after the answer here decides whether to carry on at all.
+func (s *Syncer) checkSource(ctx context.Context) error {
+	source, err := sql.Open("mysql", s.cfg.SourceConnection)
+	if err != nil {
+		return fmt.Errorf("open the source to check its settings: %w", err)
+	}
+	defer source.Close()
+
+	return preflight(ctx, source, s.cfg.Type, s.logger)
 }
 
 // resyncs builds a re-copy for each table the task asks to have re-copied.
