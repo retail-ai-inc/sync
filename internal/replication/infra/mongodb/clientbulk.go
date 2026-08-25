@@ -56,10 +56,21 @@ func (a *Applier) writeRunAsOne(ctx context.Context, run []*domain.Event) (int, 
 		return 0, nil
 	}
 
-	// Unordered for the same reason a collection-level bulk write is: no
-	// document appears twice in a run, so the server may apply them in any
-	// order. Order between runs is kept by applying the runs in sequence.
-	_, err := a.Client.BulkWrite(ctx, writes, options.ClientBulkWrite().SetOrdered(false))
+	// Ordered, because the order is the only one known to be correct.
+	//
+	// It used to be unordered, on the grounds that no document appears twice in
+	// a run so the server could apply them in any order. That reasoning holds
+	// for two changes to two documents and nothing else: two documents are not
+	// independent when a unique index relates them, and handing a unique value
+	// from one to another is an ordinary thing to do. Applied the wrong way
+	// round, the write that takes the value runs before the one that frees it —
+	// and because every write here is an upsert, the result is not an error but
+	// a document rewritten where it should have been inserted.
+	//
+	// The cost is that the server applies the batch in sequence rather than
+	// concurrently. It is not paid in round trips: a whole batch now goes in one
+	// request, where before it took one per run.
+	_, err := a.Client.BulkWrite(ctx, writes, options.ClientBulkWrite().SetOrdered(true))
 	if err != nil {
 		return 1, err
 	}

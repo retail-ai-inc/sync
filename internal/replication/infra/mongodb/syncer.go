@@ -250,14 +250,83 @@ func (s *Syncer) Start(ctx context.Context) error {
 		Checkpoints: store,
 		Resyncs:     s.resyncs(inner, store, sourceDBName),
 		Opts: pipeline.Options{
-			Labels: labels,
-			Logger: s.logger,
-			Engine: "MongoDB",
+			// The changes of a batch go to the target in the order the stream
+			// held them.
+			//
+			// The alternative splits a batch into runs that may be applied
+			// independently, deciding independence by the _id: two changes to
+			// one document keep their order, everything else may move. Two
+			// documents are not independent when a unique index relates them,
+			// and handing a unique value from one to another is an ordinary
+			// thing for an application to do. Applied the wrong way round the
+			// write that takes the value runs first, and because every write
+			// here is an upsert the result is not an error — it is a document
+			// rewritten where it should have been inserted, and a later change
+			// that then matches nothing.
+			//
+			// Keeping the order costs the concurrency the server had inside a
+			// batch. It costs nothing in round trips: the whole batch is one
+			// run, so it goes in one request where it used to take one per run.
+			StreamOrder: true,
+			Labels:      labels,
+			Logger:      s.logger,
+			Engine:      "MongoDB",
 		},
 	}
 
+	// A task that names its collections means it, so nothing here widens the
+	// scope. What it does is say which collections are not in the copy, because
+	// the alternative is finding out during a failover.
+	go s.warnAboutUnlistedCollections(ctx, inner, sourceDBName, labels)
+
 	s.logger.Info("[MongoDB] Starting synchronization...")
 	return runner.Run(ctx)
+}
+
+// warnAboutUnlistedCollections reports the collections the source has and this
+// task does not replicate.
+//
+// A task that lists nothing replicates the database as a whole, so there is
+// nothing to report; one that lists its collections has a gap whenever the
+// source grows another, and the gap is invisible. Every count agrees, every
+// check passes, and the collection is simply not in the disaster-recovery copy
+// — which for a payment schema that grows a collection for a new settlement
+// type is the worst way to find out.
+func (s *Syncer) warnAboutUnlistedCollections(ctx context.Context, inner *MongoDBSyncer,
+	sourceDB string, labels metrics.Labels) {
+
+	listed := map[string]bool{}
+	for _, mapping := range s.cfg.Mappings {
+		for _, table := range mapping.Tables {
+			if table.SourceTable != "" {
+				listed[strings.ToLower(table.SourceTable)] = true
+			}
+		}
+	}
+	if len(listed) == 0 {
+		return // the task replicates the database as a whole
+	}
+
+	database := inner.sourceClient.Database(sourceDB)
+	warned := map[string]bool{}
+
+	discovery.Poll(ctx, unlistedScanEvery, func() {
+		names, err := discovery.MongoCollections(ctx, database)
+		if err != nil {
+			s.logger.Debugf("[MongoDB] Could not list the collections in %s: %v",
+				sourceDB, err)
+			return
+		}
+		missing := discovery.Unlisted(listed, warned, names)
+		if len(missing) == 0 {
+			return
+		}
+		s.logger.Warnf("[MongoDB] %s holds %d collections this task does not "+
+			"replicate: %v. They are not in the disaster-recovery copy. Add them to "+
+			"the task, or remove every collection from it to replicate the database "+
+			"as a whole.", sourceDB, len(missing), missing)
+		metrics.SetUnreplicated(labels, float64(len(warned)))
+	})
 }
 
 // resyncs builds a re-copy for each object the task asks to have re-copied.

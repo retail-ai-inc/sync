@@ -212,11 +212,11 @@ func (a *Applier) write(ctx context.Context, runs [][]*domain.Event) (roundTrips
 			target := a.targetFor(group.collection)
 			collection := a.Client.Database(a.TargetDatabase).Collection(target)
 
-			// Unordered: no document appears twice in a run, so the server is
-			// free to apply them in any order — which is the same freedom a
-			// secondary's writer threads get, and for the same reason.
+			// Ordered, for the reason writeRunAsOne is: two documents are not
+			// independent when a unique index relates them, so the order they
+			// were read in is the only one known to be correct.
 			roundTrips++
-			if _, err := collection.BulkWrite(ctx, group.models, options.BulkWrite().SetOrdered(false)); err != nil {
+			if _, err := collection.BulkWrite(ctx, group.models, options.BulkWrite().SetOrdered(true)); err != nil {
 				return roundTrips, fmt.Errorf("write %d changes to %s.%s: %w",
 					len(group.models), a.TargetDatabase, target, err)
 			}
@@ -231,28 +231,35 @@ type collectionGroup struct {
 	models     []mongo.WriteModel
 }
 
-// groupByCollection splits a run by collection, keeping the order the
-// collections first appeared in.
+// groupByCollection splits a run into consecutive stretches of one collection.
 //
 // BulkWrite addresses one collection, so a run spanning several needs one call
-// each. Order between the calls is kept because a run may hold a change to a
-// document in one collection that a change in another depends on having landed.
+// each, and the calls are made in sequence.
+//
+// The stretches have to be consecutive. Gathering every change to a collection
+// into one group, wherever in the run it appeared, reorders the run: all of one
+// collection's writes go before all of another's. That was harmless while a run
+// held at most one change per document and the batch was split into runs that
+// separated them; it is not harmless now that a run is the whole batch, in the
+// order it was read. A payment and the order it belongs to live in different
+// collections, and which lands first is the difference between a target that
+// was never in a state the source was not.
+//
+// The cost is a request per stretch rather than per collection, and only where
+// a batch interleaves them. The path this feeds is itself the fallback, for a
+// target older than 8.0; a current one sends the whole run in one request.
 func groupByCollection(run []*domain.Event) []collectionGroup {
 	var groups []collectionGroup
-	index := map[string]int{}
 
 	for _, event := range run {
 		model, ok := event.Payload.(mongo.WriteModel)
 		if !ok || model == nil {
 			continue
 		}
-		at, seen := index[event.NS.Object]
-		if !seen {
-			index[event.NS.Object] = len(groups)
+		if len(groups) == 0 || groups[len(groups)-1].collection != event.NS.Object {
 			groups = append(groups, collectionGroup{collection: event.NS.Object})
-			at = len(groups) - 1
 		}
-		groups[at].models = append(groups[at].models, model)
+		groups[len(groups)-1].models = append(groups[len(groups)-1].models, model)
 	}
 	return groups
 }

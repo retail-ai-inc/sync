@@ -562,3 +562,39 @@ func TestAnUpdateWithoutTheDocumentIsStillApplied(t *testing.T) {
 		t.Errorf("update = %v, want the removed field in an $unset", update.Update)
 	}
 }
+
+// TestANullFullDocumentFallsBackToTheDescription is the case the fallback was
+// written for, and could not reach.
+//
+// The stream is opened with fullDocument=updateLookup. When the document was
+// deleted between the update and the lookup, the server sends the field as null
+// rather than leaving it out — so testing only whether the key was present took
+// that null for a document, and asked the driver to replace one with nothing.
+// The batch failed with "document is nil" and the task stopped; the fallback
+// below it never ran.
+func TestANullFullDocumentFallsBackToTheDescription(t *testing.T) {
+	syncer := &MongoDBSyncer{logger: logrus.New()}
+
+	raw := rawEvent(t, append(
+		changeDoc("shop", "orders", "update", bson.D{{Key: "_id", Value: 1}}),
+		bson.E{Key: "fullDocument", Value: nil},
+		bson.E{Key: "updateDescription", Value: bson.D{
+			{Key: "updatedFields", Value: bson.D{{Key: "n", Value: 1}}},
+		}},
+	))
+
+	model, err := syncer.convertRawBSONToWriteModel(raw, "shop", "orders")
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+	if replace, ok := model.(*mongo.ReplaceOneModel); ok {
+		t.Fatalf("built a replacement of %v from a null document", replace.Replacement)
+	}
+	update, ok := model.(*mongo.UpdateOneModel)
+	if !ok {
+		t.Fatalf("model is a %T, want an UpdateOneModel from the description", model)
+	}
+	if !strings.Contains(fmt.Sprint(update.Update), "n") {
+		t.Errorf("update = %v, want the changed field", update.Update)
+	}
+}

@@ -22,14 +22,47 @@ func writeEvent(collection, id string) *domain.Event {
 	}
 }
 
-// TestARunIsGroupedByCollection covers the consequence of one stream carrying
-// every collection: a single ordering group now spans them, and BulkWrite
-// addresses one collection at a time.
-func TestARunIsGroupedByCollection(t *testing.T) {
+// TestARunIsSplitIntoConsecutiveStretchesOfOneCollection is the grouping that
+// keeps the run in order.
+//
+// BulkWrite addresses one collection, so a run spanning several needs one call
+// each. Gathering every change to a collection into one group — which is what
+// this used to do — puts all of one collection's writes before all of another's,
+// and that is a reordering of the run. It was harmless while a run held at most
+// one change per document and the batch was split into runs that separated
+// them. It is not harmless now that a run is the whole batch, in the order it
+// was read: a payment and the order it belongs to live in different
+// collections, and which lands first decides whether the target is ever in a
+// state the source was not.
+func TestARunIsSplitIntoConsecutiveStretchesOfOneCollection(t *testing.T) {
 	groups := groupByCollection([]*domain.Event{
 		writeEvent("orders", "a"),
 		writeEvent("payments", "b"),
 		writeEvent("orders", "c"),
+	})
+
+	if len(groups) != 3 {
+		t.Fatalf("groups = %d, want 3 — the second change to orders comes after "+
+			"the one to payments and has to stay there", len(groups))
+	}
+	for i, want := range []string{"orders", "payments", "orders"} {
+		if groups[i].collection != want {
+			t.Errorf("group %d = %s, want %s", i, groups[i].collection, want)
+		}
+		if len(groups[i].models) != 1 {
+			t.Errorf("group %d holds %d models, want 1", i, len(groups[i].models))
+		}
+	}
+}
+
+// TestConsecutiveChangesToOneCollectionShareARequest is the other half: the
+// split is by stretch, not by event, so a batch that does not interleave still
+// costs one request per collection.
+func TestConsecutiveChangesToOneCollectionShareARequest(t *testing.T) {
+	groups := groupByCollection([]*domain.Event{
+		writeEvent("orders", "a"),
+		writeEvent("orders", "c"),
+		writeEvent("payments", "b"),
 	})
 
 	if len(groups) != 2 {
@@ -38,10 +71,6 @@ func TestARunIsGroupedByCollection(t *testing.T) {
 	if groups[0].collection != "orders" || len(groups[0].models) != 2 {
 		t.Errorf("first group = %s with %d models, want orders with 2",
 			groups[0].collection, len(groups[0].models))
-	}
-	if groups[1].collection != "payments" || len(groups[1].models) != 1 {
-		t.Errorf("second group = %s with %d models, want payments with 1",
-			groups[1].collection, len(groups[1].models))
 	}
 }
 

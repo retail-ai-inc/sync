@@ -1,7 +1,7 @@
 # Test-only stack. Ports are shifted so this can run alongside whatever already
 # occupies the defaults on the host (a native mongod holds 27017).
 #
-#   mongo  source 27117 (single-node replica set rs0)  target 27118 (standalone)
+#   mongo  source 27117 (single-node replica set rs0)  target 27118 (rs1)
 #   redis  source 6479  (keyspace notifications on)    target 6480
 #
 # MySQL and MariaDB are not included: the containers from docker-compose.yml are
@@ -22,6 +22,11 @@ services:
   mongo_test_target:
     image: mongo:6.0
     container_name: mongo_test_target
+    # A replica set, not a standalone. The applier writes a batch inside a
+    # transaction so the batch and its position land together, and a standalone
+    # refuses one outright — so the path production takes could not be run here
+    # at all, and the suite only ever exercised the fallback.
+    command: ["mongod", "--replSet", "rs1", "--bind_ip_all"]
     ports:
       - "127.0.0.1:27118:27017"
     healthcheck:

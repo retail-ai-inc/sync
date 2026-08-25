@@ -59,18 +59,23 @@ func (s *MongoDBSyncer) convertRawBSONToWriteModel(rawData bson.Raw, sourceDB, c
 				opType, sourceDB, collectionName)
 		}
 
-		if fullDoc, ok := event["fullDocument"]; ok {
+		// The stream is opened with fullDocument=updateLookup, so the document
+		// is normally attached. It is not when the document was deleted between
+		// the update and the lookup — and the server says so by sending the
+		// field as null rather than by leaving it out. Testing only whether the
+		// key was present therefore took that null for a document and asked the
+		// driver to replace one with nothing, which fails the batch with
+		// "document is nil" and stops the task. The fallback below, written for
+		// exactly this case, was unreachable.
+		if fullDoc, ok := event["fullDocument"]; ok && fullDoc != nil {
 			return mongo.NewReplaceOneModel().
 				SetFilter(filter).
 				SetReplacement(s.maskValue(collectionName, fullDoc)).
 				SetUpsert(true), nil
 		}
 
-		// The stream is opened with fullDocument=updateLookup, so the document
-		// is normally attached. It is not when the document was deleted between
-		// the update and the lookup — and it used to be dropped there, silently,
-		// leaving the target on the older revision. The change itself is in the
-		// event, so it can be applied without the lookup.
+		// The change itself is in the event, so it can be applied without the
+		// lookup.
 		update, err := updateFromDescription(event)
 		if err != nil {
 			return nil, fmt.Errorf("%s.%s: %w", sourceDB, collectionName, err)
