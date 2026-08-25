@@ -37,6 +37,17 @@ type link struct {
 	// durable is the offset written to disk, and so the offset it is honest to
 	// acknowledge. Read by the acknowledging goroutine, written by the pump.
 	durable atomic.Int64
+	// received is how far the stream has been read and written to the buffer.
+	received atomic.Int64
+	// applied is how far the target has been written, stored by the applier.
+	//
+	// It lives here so that it and durable can be published from one place at
+	// one instant. Publishing them separately, at the rates their own code
+	// happens to run at, makes their difference meaningless: the applier writes
+	// a batch every few tens of milliseconds and the pump reported once a
+	// second, so the applied offset routinely appeared *ahead* of the received
+	// one and the byte lag came out negative.
+	applied atomic.Int64
 
 	pumping   sync.WaitGroup
 	pumpErr   chan error
@@ -132,6 +143,10 @@ func (l *link) start(ctx context.Context, from streamPosition) (streamPosition, 
 	// Acknowledgements report what is on disk, which is where the connection was
 	// resumed from rather than what has been applied.
 	l.durable.Store(l.buffer.Newest())
+	l.received.Store(l.buffer.Newest())
+	if at.Offset > 0 {
+		l.applied.Store(at.Offset)
+	}
 
 	pumpCtx, stop := context.WithCancel(ctx)
 	l.stopPump = stop
@@ -184,6 +199,10 @@ func (l *link) pump(ctx context.Context, stream *Stream) error {
 			return err
 		}
 		unsynced = true
+		// Recorded per command, not per flush. It is what the acknowledgement
+		// reports, and a value up to a second stale would have the source keep
+		// history this side no longer needs.
+		l.received.Store(cmd.End)
 
 		select {
 		case <-ticker.C:
@@ -197,7 +216,6 @@ func (l *link) pump(ctx context.Context, stream *Stream) error {
 				unsynced = false
 			}
 			l.durable.Store(cmd.End)
-			metrics.SetStreamOffset(l.labels, cmd.End, l.buffer.Held())
 		default:
 		}
 	}
@@ -226,6 +244,11 @@ func (l *link) acknowledge(ctx context.Context, stream *Stream) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			// Both numbers from one place at one instant, so that subtracting
+			// them means something.
+			metrics.SetStreamOffset(l.labels, l.received.Load(), l.buffer.Held())
+			metrics.SetAppliedOffset(l.labels, l.applied.Load())
+
 			if err := stream.Ack(l.durable.Load()); err != nil {
 				// The pump will report the connection going away; there is
 				// nothing useful to add from here.

@@ -229,6 +229,7 @@ func (s *Syncer) runShard(ctx context.Context, sh shard, source, target goredis.
 		Applier: &Applier{
 			Target:    target,
 			Source:    source,
+			Link:      connection,
 			Positions: positions,
 			Commands:  commands,
 			Logger:    s.logger,

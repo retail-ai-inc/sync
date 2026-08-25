@@ -149,7 +149,7 @@ func newRig(t *testing.T, source, target goredis.UniversalClient, root string,
 		node := goredis.NewClient(&goredis.Options{Addr: sh.addr})
 		positions := &Checkpoints{Target: target, TaskID: taskID, Shard: sh.id}
 		applier := &Applier{
-			Target: target, Source: source, Positions: positions,
+			Target: target, Source: source, Link: connection, Positions: positions,
 			Commands: commands, Logger: quiet, Labels: labels,
 		}
 

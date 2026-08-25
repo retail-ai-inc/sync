@@ -39,8 +39,12 @@ type Applier struct {
 
 	Positions *Checkpoints
 	Commands  *commandTable
-	Logger    logrus.FieldLogger
-	Labels    metrics.Labels
+	// Link is the connection this shard reads through. The applied offset is
+	// recorded on it so that it and the received offset are published together;
+	// see link.applied.
+	Link   *link
+	Logger logrus.FieldLogger
+	Labels metrics.Labels
 
 	// Concurrency bounds how many slot transactions are in flight at once. Zero
 	// means the default.
@@ -122,7 +126,9 @@ func (a *Applier) Apply(ctx context.Context, runs [][]*domain.Event, pos domain.
 	}
 
 	metrics.ObserveBatch(a.Labels, time.Since(started), 0, len(jobs), len(jobs), len(events))
-	metrics.SetAppliedOffset(a.Labels, batchEnd)
+	if a.Link != nil {
+		a.Link.applied.Store(batchEnd)
+	}
 	metrics.CountValueRepairs(a.Labels, repairsIn(jobs))
 	return true, nil
 }
