@@ -191,9 +191,23 @@ func (s *Syncer) Start(ctx context.Context) error {
 		Checkpoints: store,
 		Resyncs:     s.resyncs(store),
 		Opts: pipeline.Options{
-			Labels: labels,
-			Logger: s.logger,
-			Engine: "MySQL",
+			// The statements of a batch go to the target in the order the
+			// binlog held them.
+			//
+			// Splitting a batch into runs exists to let an applier work on
+			// several at once, and this one does not: it executes every run,
+			// and every statement in it, one after another inside a single
+			// transaction. So the split bought nothing here and cost the one
+			// property that matters — it can move a later change ahead of an
+			// earlier one whenever the two address different rows, and two
+			// rows are not independent when a unique index or a foreign key
+			// relates them. A DELETE that frees a unique value, reordered
+			// after the INSERT that takes it, is a duplicate-key error; and
+			// because the split is deterministic, retrying produces it again.
+			StreamOrder: true,
+			Labels:      labels,
+			Logger:      s.logger,
+			Engine:      "MySQL",
 		},
 	}
 
