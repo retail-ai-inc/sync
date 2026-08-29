@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -25,9 +26,10 @@ type Checkpoints interface {
 // Options configure one run.
 type Options struct {
 	Limits Limits
-	// FlushInterval is how long a partly filled batch waits. It is the syncer's
-	// own contribution to the recovery point, paid on every change that arrives
-	// more slowly than a batch fills.
+	// FlushInterval is the longest a partly filled batch waits. It is an upper
+	// bound rather than a cost paid on every batch: a batch with nothing behind
+	// it in the queue is sent at once, so this only bounds the case where events
+	// keep arriving but too slowly to fill one.
 	FlushInterval time.Duration
 	// QueueCapacity bounds how far the reader may run ahead of the applier.
 	// Reaching it stops the reader, which is what back pressure is: the source
@@ -419,6 +421,27 @@ func (r *Runner) apply(ctx context.Context, queue <-chan *domain.Event) error {
 			r.queueUsed = len(queue)
 			r.mu.Unlock()
 
+			// Nothing else is waiting, so holding this batch back can only add
+			// latency. A batch exists to spread the cost of a round trip over
+			// several events; with an empty queue there are no further events to
+			// spread it over, and the wait is paid for nothing.
+			//
+			// This is what every mature pipeline does by default — Kafka's
+			// linger.ms is 0, a change stream's getMore returns as soon as it has
+			// anything, MySQL's group commit delay is 0. Batching is meant to be
+			// what a busy pipeline falls into, not a toll an idle one pays. It
+			// needs no configuration to get right: under load the queue is rarely
+			// empty and batches fill as before, while an idle task now sends at
+			// once. flush() still refuses to cut inside a source transaction, so
+			// the atomicity this pipeline is built on is untouched.
+			if len(queue) == 0 {
+				if err := flush(); err != nil {
+					return err
+				}
+				resetTimer(timer, r.Opts.flushInterval())
+				continue
+			}
+
 			if b.overrunning(r.Opts.Limits) {
 				return domain.Unrecoverable(
 					"a single source transaction has produced more than %d events, which is "+
@@ -444,6 +467,132 @@ func (r *Runner) apply(ctx context.Context, queue <-chan *domain.Event) error {
 	}
 }
 
+// refreshApplied asks the checkpoint store to re-read what the target holds, for
+// stores that can. One that cannot is left alone: it is then no worse off than
+// it was before retrying existed.
+func (r *Runner) refreshApplied(ctx context.Context) error {
+	type refreshable interface {
+		Refresh(ctx context.Context) error
+	}
+	if store, ok := r.Checkpoints.(refreshable); ok {
+		return store.Refresh(ctx)
+	}
+	return nil
+}
+
+// applyWithRetry writes one batch, waiting for a target that is not ready
+// rather than ending the run.
+//
+// Returning the error used to end Run, which stopped the reader with it. That
+// is the wrong shape for this pipeline: the reader is what keeps the source's
+// replication log from rolling past the position, and on Memorystore that log
+// is a fixed ring of tens of kilobytes. Ending the run over a target that was
+// briefly unavailable therefore cost a full re-copy — measured at 30 KB of
+// source writes, which at 12,000 ops/s is twenty milliseconds of downtime.
+//
+// A reader that keeps reading turns that into what the on-disk buffer was built
+// for: the outage costs buffer space, and the buffer filling is its own loud
+// failure. This is the shape MySQL replication has always had, where the I/O
+// thread keeps filling the relay log while the SQL thread is stuck, and the one
+// Debezium gets from writing into Kafka rather than into the target itself.
+//
+// An error that retrying cannot fix is still returned, and wrapped as
+// unrecoverable so the supervisor stops the task and says so rather than
+// restarting it forever. A poisoned event must not be quietly stepped over: the
+// position does not move, because this returns before the caller records it.
+func (r *Runner) applyWithRetry(ctx context.Context, runs [][]*domain.Event,
+	pos domain.Position, count int) (bool, error) {
+
+	const (
+		firstWait = 500 * time.Millisecond
+		maxWait   = 15 * time.Second
+	)
+	wait := firstWait
+	for attempt := 1; ; attempt++ {
+		committed, err := r.Applier.Apply(ctx, runs, pos)
+		if err == nil {
+			if attempt > 1 {
+				r.log().Infof(r.tag("The target accepted the batch again after %d attempts"), attempt)
+			}
+			return committed, nil
+		}
+		metrics.Failed(r.Opts.Labels, count)
+
+		if ctx.Err() != nil {
+			return false, fmt.Errorf("apply %d changes: %w", count, err)
+		}
+		if domain.IsUnrecoverable(err) {
+			return false, fmt.Errorf("apply %d changes: %w", count, err)
+		}
+		if permanentApplyFailure(err) {
+			// Retrying will fail identically for as long as anybody lets it, and
+			// stepping over it would leave the target permanently different from
+			// the source with nothing blocked and nothing alarming.
+			return false, domain.Unrecoverable(
+				"applying %d changes failed in a way retrying cannot fix: %v. "+
+					"The position has not moved, so nothing has been skipped; "+
+					"this needs somebody to look at the event and the target",
+				count, err)
+		}
+
+		if attempt == 1 {
+			r.log().Warnf(r.tag("The target would not take a batch (%v); holding the "+
+				"batch and reading on, so the source's log is not left to roll past us"), err)
+		}
+
+		// Before trying the same batch again, ask the target what it actually
+		// holds. A failure is not proof the write did not happen: a timeout can
+		// arrive after the transaction landed, and re-applying it then repeats a
+		// command that is not idempotent — measured as an RPUSH landing three
+		// times too often under packet loss. Re-reading is what a task restart
+		// always did, and is what makes retrying in place as safe as restarting.
+		if err := r.refreshApplied(ctx); err != nil {
+			return false, fmt.Errorf("apply %d changes: %w", count, err)
+		}
+		select {
+		case <-ctx.Done():
+			return false, fmt.Errorf("apply %d changes: %w", count, err)
+		case <-time.After(wait):
+		}
+		if wait *= 2; wait > maxWait {
+			wait = maxWait
+		}
+	}
+}
+
+// permanentApplyFailure reports whether the target refused a write for a reason
+// that will refuse it again — a poisoned event rather than a target that is
+// merely unavailable.
+func permanentApplyFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToUpper(err.Error())
+	for _, permanent := range []string{
+		"WRONGTYPE",        // the key holds another type on the target
+		"ERR VALUE IS NOT", // an increment against something that is not a number
+		"ERR SYNTAX",
+		"ERR UNKNOWN COMMAND",
+		"BUSYGROUP",
+		// The target is missing the table, column or database the event needs.
+		// Retrying cannot conjure one, and holding the batch forever blocks
+		// every later event behind it while the task still reports itself up —
+		// measured against a table that existed only on the source, where the
+		// pipeline sat retrying "Table 'bench.nopk' doesn't exist", task_up
+		// stayed 1, task_blocked stayed 0, and nothing downstream was applied.
+		"ERROR 1146", // table does not exist
+		"ERROR 1054", // unknown column
+		"ERROR 1049", // unknown database
+		"DOESN'T EXIST",
+		"UNKNOWN COLUMN",
+	} {
+		if strings.Contains(text, permanent) {
+			return true
+		}
+	}
+	return false
+}
+
 // applyBatch writes one batch and records where it got to.
 //
 // The whole batch goes to the applier at once, already split into runs, so it
@@ -460,10 +609,9 @@ func (r *Runner) applyBatch(ctx context.Context, events []*domain.Event, pos dom
 		if !r.Opts.StreamOrder {
 			runs = orderedRuns(writable)
 		}
-		committed, err := r.Applier.Apply(ctx, runs, pos)
+		committed, err := r.applyWithRetry(ctx, runs, pos, len(writable))
 		if err != nil {
-			metrics.Failed(r.Opts.Labels, len(writable))
-			return fmt.Errorf("apply %d changes: %w", len(writable), err)
+			return err
 		}
 		committedByApplier = committed
 		metrics.Applied(r.Opts.Labels, len(writable))

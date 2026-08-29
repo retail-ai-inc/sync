@@ -206,6 +206,29 @@ func (c *Checkpoints) Save(ctx context.Context, _, payload string) error {
 
 // markersFor hands the applier the cache, loading a fresh one if Load was never
 // called.
+// Refresh forgets the in-memory slot markers so the next batch reads them from
+// the target again.
+//
+// The markers are advanced in memory as each slot lands, which is what lets a
+// batch that failed part way be re-applied without repeating the slots that
+// did land. That reasoning holds only while a failure means the write did not
+// happen. A timeout does not mean that: the transaction can land on the target
+// and the reply be lost, leaving the target ahead of what this process believes
+// it wrote. Replaying then repeats a command that is not idempotent — measured
+// as an RPUSH landing three times too often under packet loss.
+//
+// The target holds the truth, because the marker is written in the same
+// transaction as the data. Re-reading it is what a task restart always did, and
+// is what makes retrying in place as safe as restarting.
+func (c *Checkpoints) Refresh(ctx context.Context) error {
+	c.mu.Lock()
+	c.loaded = false
+	c.markers = nil
+	c.mu.Unlock()
+	_, err := c.Load(ctx, "")
+	return err
+}
+
 func (c *Checkpoints) markersFor(start int64) []int64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()

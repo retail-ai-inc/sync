@@ -56,6 +56,9 @@ type fakeApplier struct {
 	err error
 	// block, when non-nil, is waited on before the first batch is applied.
 	block chan struct{}
+	// onApply, when non-nil, is called on every batch, so a test can assert on
+	// when a batch arrives rather than only that it did.
+	onApply func()
 }
 
 func (f *fakeApplier) Apply(_ context.Context, runs [][]*domain.Event, pos domain.Position) (bool, error) {
@@ -69,6 +72,9 @@ func (f *fakeApplier) Apply(_ context.Context, runs [][]*domain.Event, pos domai
 	}
 	f.batches = append(f.batches, runs)
 	f.positions = append(f.positions, pos)
+	if f.onApply != nil {
+		f.onApply()
+	}
 	return f.commits, nil
 }
 
@@ -859,5 +865,233 @@ func TestASourceThatSaysNotYetAndThenAnswersIsPublished(t *testing.T) {
 	got, _ := headroomOf(t, labels)
 	if want := (2 * time.Hour).Seconds() - 30; got != want {
 		t.Errorf("headroom = %v, want %v", got, want)
+	}
+}
+
+// TestAnIdleBatchIsSentWithoutWaitingForTheWindow covers the flush that happens
+// because nothing else is queued.
+//
+// The window used to be paid on every batch that did not fill, which is every
+// batch on a quiet source. Measured against Memorystore across regions at 500
+// writes a second, it put 263 ms of the 500 ms window into the recovery point
+// for a target that was idle at one percent of a core — latency bought nothing,
+// because there was no second event to amortise the round trip over.
+//
+// The assertion has to be about *when* the batch arrives, not that it arrives:
+// cancelling the context flushes what is whole, so any batch is applied
+// eventually. The window here is 30s and the deadline 500ms, so only an
+// immediate send can pass.
+func TestAnIdleBatchIsSentWithoutWaitingForTheWindow(t *testing.T) {
+	applied := make(chan struct{}, 1)
+	reader := &fakeReader{events: []*domain.Event{event("orders", "1", "p1")}}
+	applier := &fakeApplier{onApply: func() {
+		select {
+		case applied <- struct{}{}:
+		default:
+		}
+	}}
+
+	runner := newRunner(t, reader, applier, newStore())
+	// Far longer than the deadline below: reaching it would mean the batch waited.
+	runner.Opts.FlushInterval = 30 * time.Second
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- runner.Run(ctx) }()
+
+	select {
+	case <-applied:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("the batch was still waiting after 500ms: an idle queue must be flushed at once")
+	}
+	cancel()
+	<-done
+}
+
+// TestAnIdleFlushStillWillNotCutInsideATransaction is the guard on the one
+// above: sending early must not become a way to show the target half a source
+// transaction.
+func TestAnIdleFlushStillWillNotCutInsideATransaction(t *testing.T) {
+	applied := make(chan struct{}, 1)
+	reader := &fakeReader{events: []*domain.Event{
+		event("orders", "1", "p1", midTransaction),
+		event("orders", "2", "p2", midTransaction),
+	}}
+	applier := &fakeApplier{onApply: func() {
+		select {
+		case applied <- struct{}{}:
+		default:
+		}
+	}}
+
+	runner := newRunner(t, reader, applier, newStore())
+	runner.Opts.FlushInterval = 30 * time.Second
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- runner.Run(ctx) }()
+
+	select {
+	case <-applied:
+		t.Fatal("applied a batch that ends inside a source transaction")
+	case <-time.After(300 * time.Millisecond):
+	}
+	cancel()
+	<-done
+}
+
+// TestATargetThatIsNotReadyDoesNotStopTheReader covers the decoupling.
+//
+// Ending the run over a failed write also stopped the reader, and the reader is
+// what keeps the source's replication log from rolling past the position. On
+// Memorystore that log is a fixed ring measured at 10–30 KB, so a target that
+// was briefly away cost a full re-copy of the whole keyspace.
+func TestATargetThatIsNotReadyDoesNotStopTheReader(t *testing.T) {
+	// onApply only fires on a successful write, so receiving from this channel
+	// means the batch that was refused earlier was retried and got through.
+	applied := make(chan struct{}, 1)
+	applier := &fakeApplier{onApply: func() {
+		select {
+		case applied <- struct{}{}:
+		default:
+		}
+	}}
+	// Fail the first two attempts the way an unreachable target does.
+	applier.err = errors.New("dial tcp 10.0.0.1:6379: i/o timeout")
+	reader := &fakeReader{events: []*domain.Event{event("orders", "1", "p1")}}
+
+	runner := newRunner(t, reader, applier, newStore())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- runner.Run(ctx) }()
+
+	// Let it fail twice, then let the target come back.
+	time.Sleep(700 * time.Millisecond)
+	applier.mu.Lock()
+	applier.err = nil
+	applier.mu.Unlock()
+
+	select {
+	case <-applied:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the batch was never retried: a target that is not ready must not end the run")
+	}
+	if reader.closed {
+		t.Error("the reader was closed while the target was unavailable")
+	}
+	cancel()
+	<-done
+}
+
+// TestAPoisonedEventBlocksTheTaskRatherThanBeingSteppedOver covers the other
+// half: retrying forever is only right for a target that might come back.
+//
+// A WRONGTYPE will be refused identically for as long as anybody retries it,
+// and stepping over it leaves the target permanently different from the source
+// with nothing blocked and nothing alarming — which is what was measured.
+func TestAPoisonedEventBlocksTheTaskRatherThanBeingSteppedOver(t *testing.T) {
+	applier := &fakeApplier{err: errors.New(
+		"write slot 3030: WRONGTYPE Operation against a key holding the wrong kind of value")}
+	store := newStore()
+	reader := &fakeReader{events: []*domain.Event{event("orders", "1", "p1")}}
+
+	err := runFor(t, newRunner(t, reader, applier, store), 900*time.Millisecond)
+	if !domain.IsUnrecoverable(err) {
+		t.Fatalf("Run returned %v, want an unrecoverable error so the task is blocked", err)
+	}
+	if got := store.value(""); got != "" {
+		t.Errorf("recorded position %q, want none: a failed event must not be stepped over", got)
+	}
+}
+
+// TestARetryAsksTheTargetWhatItHoldsFirst covers the duplicate that retrying
+// in place would otherwise create.
+//
+// A failure is not proof the write did not happen: a timeout can arrive after
+// the transaction landed. Re-applying then repeats a command that is not
+// idempotent, which was measured as an RPUSH landing three times too often
+// under packet loss. Restarting the task always re-read the target; retrying in
+// place has to do the same.
+func TestARetryAsksTheTargetWhatItHoldsFirst(t *testing.T) {
+	store := &refreshingStore{fakeStore: newStore()}
+	applied := make(chan struct{}, 1)
+	applier := &fakeApplier{onApply: func() {
+		select {
+		case applied <- struct{}{}:
+		default:
+		}
+	}}
+	applier.err = errors.New("read tcp 10.0.0.1:6379: i/o timeout")
+	reader := &fakeReader{events: []*domain.Event{event("orders", "1", "p1")}}
+
+	runner := newRunner(t, reader, applier, store)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- runner.Run(ctx) }()
+
+	time.Sleep(700 * time.Millisecond)
+	applier.mu.Lock()
+	applier.err = nil
+	applier.mu.Unlock()
+
+	select {
+	case <-applied:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the batch was never retried")
+	}
+	cancel()
+	<-done
+
+	if got := store.refreshes(); got == 0 {
+		t.Error("the target was never re-read before retrying, so a landed write " +
+			"would be applied twice")
+	}
+}
+
+// refreshingStore is a checkpoint store that counts how often it was asked to
+// re-read the target.
+type refreshingStore struct {
+	*fakeStore
+	mu sync.Mutex
+	n  int
+}
+
+func (s *refreshingStore) Refresh(context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.n++
+	return nil
+}
+
+func (s *refreshingStore) refreshes() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.n
+}
+
+// TestATargetMissingTheTableBlocksRatherThanRetryingForever covers the other
+// half of the retry: waiting is only right for a target that might come back.
+//
+// A table that does not exist on the target will not appear by being asked
+// again, and holding the batch forever blocks every later event behind it while
+// the task still reports itself up. Measured against a table that existed only
+// on the source: the pipeline sat retrying "Table 'bench.nopk' doesn't exist",
+// task_up stayed 1, task_blocked stayed 0, and nothing downstream was applied.
+func TestATargetMissingTheTableBlocksRatherThanRetryingForever(t *testing.T) {
+	applier := &fakeApplier{err: errors.New(
+		"apply 1 changes: Error 1146 (42S02): Table 'bench.nopk' doesn't exist")}
+	store := newStore()
+	reader := &fakeReader{events: []*domain.Event{event("nopk", "1", "p1")}}
+
+	err := runFor(t, newRunner(t, reader, applier, store), 900*time.Millisecond)
+	if !domain.IsUnrecoverable(err) {
+		t.Fatalf("Run returned %v, want an unrecoverable error so the task is blocked", err)
+	}
+	if got := store.value(""); got != "" {
+		t.Errorf("recorded position %q, want none", got)
 	}
 }
