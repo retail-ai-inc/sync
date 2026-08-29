@@ -1095,3 +1095,58 @@ func TestATargetMissingTheTableBlocksRatherThanRetryingForever(t *testing.T) {
 		t.Errorf("recorded position %q, want none", got)
 	}
 }
+
+// TestAConstraintTheTargetAloneHoldsBlocksTheTask covers the other permanent
+// refusal the target can produce.
+//
+// A foreign key that exists on the target and not on the source refuses the row
+// every time it is offered. Measured against one: the pipeline retried "Cannot
+// add or update a child row" on a backoff for as long as it was left running,
+// with task_up at 1 and task_blocked at 0, so nothing said the replication had
+// stopped making progress.
+func TestAConstraintTheTargetAloneHoldsBlocksTheTask(t *testing.T) {
+	applier := &fakeApplier{err: errors.New(
+		"apply 1 changes: Error 1452 (23000): Cannot add or update a child row: " +
+			"a foreign key constraint fails")}
+	store := newStore()
+	reader := &fakeReader{events: []*domain.Event{event("fk_child", "1", "p1")}}
+
+	err := runFor(t, newRunner(t, reader, applier, store), 900*time.Millisecond)
+	if !domain.IsUnrecoverable(err) {
+		t.Fatalf("Run returned %v, want an unrecoverable error so the task is blocked", err)
+	}
+	if got := store.value(""); got != "" {
+		t.Errorf("recorded position %q, want none", got)
+	}
+}
+
+// TestPermanentApplyFailureIsDecidedBySQLState pins the classification down to
+// the two SQLSTATE classes that never become applicable by being retried,
+// rather than to the error numbers that happened to be met so far.
+func TestPermanentApplyFailureIsDecidedBySQLState(t *testing.T) {
+	permanent := []string{
+		"Error 1452 (23000): Cannot add or update a child row",
+		"Error 1062 (23000): Duplicate entry '5' for key 'uk'",
+		"Error 1048 (23000): Column 'c' cannot be null",
+		"Error 1146 (42S02): Table 'bench.nopk' doesn't exist",
+		"Error 1054 (42S22): Unknown column 'gone' in 'field list'",
+		"Error 1142 (42000): INSERT command denied to user",
+	}
+	for _, text := range permanent {
+		if !permanentApplyFailure(errors.New(text)) {
+			t.Errorf("permanentApplyFailure(%q) = false, want true", text)
+		}
+	}
+
+	transient := []string{
+		"dial tcp 10.0.0.1:3306: i/o timeout",
+		"Error 1205 (HY000): Lock wait timeout exceeded",
+		"Error 1213 (40001): Deadlock found when trying to get lock",
+		"invalid connection",
+	}
+	for _, text := range transient {
+		if permanentApplyFailure(errors.New(text)) {
+			t.Errorf("permanentApplyFailure(%q) = true, want false: retrying may well work", text)
+		}
+	}
+}

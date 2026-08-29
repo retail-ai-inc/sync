@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -563,28 +564,42 @@ func (r *Runner) applyWithRetry(ctx context.Context, runs [][]*domain.Event,
 // permanentApplyFailure reports whether the target refused a write for a reason
 // that will refuse it again — a poisoned event rather than a target that is
 // merely unavailable.
+//
+// The MySQL side is decided by SQLSTATE rather than by a list of error numbers.
+// Two classes never become applicable by being retried:
+//
+//	23xxx  an integrity constraint the target holds — a foreign key, a unique
+//	       index, a NOT NULL, a CHECK. The row is refused every time it is
+//	       offered.
+//	42xxx  the target does not have the table, the column or the privilege the
+//	       event needs. None of those appear by asking again.
+//
+// Deciding this one error number at a time did not hold up: a missing table was
+// added after the pipeline sat retrying "Table 'bench.nopk' doesn't exist" with
+// task_up at 1, and a foreign key was added after it did the same with "Cannot
+// add or update a child row". Both are the same shape, and so is every other
+// member of those two classes.
 func permanentApplyFailure(err error) bool {
 	if err == nil {
 		return false
 	}
 	text := strings.ToUpper(err.Error())
+
+	// MySQL reports SQLSTATE in parentheses after the error number, as in
+	// "Error 1452 (23000): ...".
+	if m := sqlStatePattern.FindStringSubmatch(text); m != nil {
+		switch m[1][:2] {
+		case "23", "42":
+			return true
+		}
+	}
+
 	for _, permanent := range []string{
 		"WRONGTYPE",        // the key holds another type on the target
 		"ERR VALUE IS NOT", // an increment against something that is not a number
 		"ERR SYNTAX",
 		"ERR UNKNOWN COMMAND",
 		"BUSYGROUP",
-		// The target is missing the table, column or database the event needs.
-		// Retrying cannot conjure one, and holding the batch forever blocks
-		// every later event behind it while the task still reports itself up —
-		// measured against a table that existed only on the source, where the
-		// pipeline sat retrying "Table 'bench.nopk' doesn't exist", task_up
-		// stayed 1, task_blocked stayed 0, and nothing downstream was applied.
-		"ERROR 1146", // table does not exist
-		"ERROR 1054", // unknown column
-		"ERROR 1049", // unknown database
-		"DOESN'T EXIST",
-		"UNKNOWN COLUMN",
 	} {
 		if strings.Contains(text, permanent) {
 			return true
@@ -592,6 +607,9 @@ func permanentApplyFailure(err error) bool {
 	}
 	return false
 }
+
+// sqlStatePattern finds the SQLSTATE a MySQL driver puts after the error number.
+var sqlStatePattern = regexp.MustCompile(`\(([0-9A-Z]{5})\)`)
 
 // applyBatch writes one batch and records where it got to.
 //
