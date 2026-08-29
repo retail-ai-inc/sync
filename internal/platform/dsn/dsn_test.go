@@ -137,3 +137,26 @@ func TestAnUnreadableDSNHasNoEndpoint(t *testing.T) {
 		}
 	}
 }
+
+func TestHostPortDropsTheDatabase(t *testing.T) {
+	// A Redis DSN carries the database in the path, and a caller that needs an
+	// address to dial must not receive it: "10.0.0.1:6379/0" is not resolvable.
+	if got := HostPort("redis", "redis://10.0.0.1:6379/0"); got != "10.0.0.1:6379" {
+		t.Fatalf("HostPort = %q, want 10.0.0.1:6379", got)
+	}
+	if got := Endpoint("redis", "redis://10.0.0.1:6379/0"); got != "10.0.0.1:6379/0" {
+		t.Fatalf("Endpoint = %q, want it to keep naming the database", got)
+	}
+}
+
+func TestHostPortKeepsWorkingWithoutADatabase(t *testing.T) {
+	if got := HostPort("redis", "redis://10.0.0.1:6379"); got != "10.0.0.1:6379" {
+		t.Fatalf("HostPort = %q, want 10.0.0.1:6379", got)
+	}
+}
+
+func TestHostPortCarriesNoCredentials(t *testing.T) {
+	if got := HostPort("redis", "redis://user:secret@10.0.0.1:6379/2"); got != "10.0.0.1:6379" {
+		t.Fatalf("HostPort = %q, want the address alone", got)
+	}
+}

@@ -4,10 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	goredis "github.com/redis/go-redis/v9"
 	"github.com/sirupsen/logrus"
 
 	"github.com/retail-ai-inc/sync/internal/platform/metrics"
@@ -31,6 +34,11 @@ type link struct {
 	logger logrus.FieldLogger
 	labels metrics.Labels
 
+	// node is a plain connection to the same master, used only to read its own
+	// write offset. The replication connection cannot answer: once it is a
+	// replica link it takes no ordinary commands.
+	node goredis.UniversalClient
+
 	mu     sync.Mutex
 	stream *Stream
 
@@ -39,6 +47,10 @@ type link struct {
 	durable atomic.Int64
 	// received is how far the stream has been read and written to the buffer.
 	received atomic.Int64
+	// lagTicks counts acknowledgement ticks, so the source is asked for its own
+	// offset every few of them rather than every one.
+	lagTicks int
+
 	// applied is how far the target has been written, stored by the applier.
 	//
 	// It lives here so that it and durable can be published from one place at
@@ -248,6 +260,7 @@ func (l *link) acknowledge(ctx context.Context, stream *Stream) {
 			// them means something.
 			metrics.SetStreamOffset(l.labels, l.received.Load(), l.buffer.Held())
 			metrics.SetAppliedOffset(l.labels, l.applied.Load())
+			l.publishSourceLag(ctx)
 
 			if err := stream.Ack(l.durable.Load()); err != nil {
 				// The pump will report the connection going away; there is
@@ -305,4 +318,57 @@ func (l *link) close() {
 		}
 		l.pumping.Wait()
 	})
+}
+
+// sourceLagPeriod is how often the source is asked for its own offset. The
+// acknowledgement runs every second and this does not need to be that often.
+const sourceLagPeriod = 5
+
+// publishSourceLag reports how far the target is behind the source's own write
+// offset, which is the only lag that keeps growing while this process is stuck.
+//
+// The difference between what this process received and what it applied only
+// describes the part of the backlog it is already holding. A target that will
+// not take writes stops the applier, which stops the reader, which freezes both
+// of those numbers and their difference with them — measured against a blocked
+// target they sat at 0.4 MB while the true distance passed 21 MB.
+func (l *link) publishSourceLag(ctx context.Context) {
+	if l.node == nil {
+		return
+	}
+	l.lagTicks++
+	if l.lagTicks%sourceLagPeriod != 0 {
+		return
+	}
+	offset, err := masterOffset(ctx, l.node)
+	if err != nil {
+		// The source not answering is itself reported by the connection
+		// counters; a lag of "unknown" must not be published as zero.
+		return
+	}
+	if applied := l.applied.Load(); offset >= applied {
+		metrics.SetSourceLag(l.labels, offset-applied)
+	}
+}
+
+// masterOffset reads the source's own replication offset.
+func masterOffset(ctx context.Context, node goredis.UniversalClient) (int64, error) {
+	info, err := node.Info(ctx, "replication").Result()
+	if err != nil {
+		return 0, err
+	}
+	return parseMasterOffset(info)
+}
+
+// parseMasterOffset reads master_repl_offset out of an INFO replication reply.
+func parseMasterOffset(info string) (int64, error) {
+	for _, line := range strings.Split(info, "\n") {
+		line = strings.TrimSpace(line)
+		rest, found := strings.CutPrefix(line, "master_repl_offset:")
+		if !found {
+			continue
+		}
+		return strconv.ParseInt(rest, 10, 64)
+	}
+	return 0, fmt.Errorf("the source did not report master_repl_offset")
 }

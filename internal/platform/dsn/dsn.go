@@ -103,6 +103,16 @@ func Endpoint(dbType, connection string) string {
 	return host + "/" + database
 }
 
+// HostPort reports just the host and port a DSN addresses, with no database.
+//
+// Endpoint is for describing a connection to a person; this is for opening one.
+// The two were the same function once, and a caller that needed an address to
+// dial took the description instead: a Redis source with a database configured
+// became "host:port/0", which is not a thing net.Dial can resolve.
+func HostPort(dbType, connection string) string {
+	return extractHost(dbType, connection)
+}
+
 // extractHost reports the host and port a DSN addresses.
 func extractHost(dbType, connection string) string {
 	// An empty DSN must not be described as an endpoint: the MySQL parser reads

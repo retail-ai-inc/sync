@@ -411,7 +411,21 @@ const (
 	StreamOffsetBytes  = "sync_redis_stream_offset_bytes"
 	helpStreamOffset   = "Replication stream offset the relay has received and written to disk"
 	AppliedOffsetBytes = "sync_redis_applied_offset_bytes"
-	helpAppliedOffset  = "Replication stream offset applied to the target"
+
+	// SourceLagBytes is how far the target is behind the source's own write
+	// offset, read from the source rather than derived from what this process
+	// has managed to receive.
+	//
+	// StreamOffsetBytes minus AppliedOffsetBytes only measures the part of the
+	// backlog this process is already holding. When the target goes away the
+	// reader stops too, so both of those freeze and their difference freezes
+	// with them: measured against a blocked target, they held steady at 0.4 MB
+	// while the real distance grew past 21 MB. This one is taken from the
+	// source's master_repl_offset, so it keeps climbing for as long as the
+	// source keeps writing, which is the whole point of a lag alarm.
+	SourceLagBytes    = "sync_redis_source_lag_bytes"
+	helpAppliedOffset = "Replication stream offset applied to the target"
+	helpSourceLag     = "How far the target is behind the source's own write offset, in bytes."
 	// BufferHeldBytes is how much of the stream is on disk, which is what turns a
 	// briefly unavailable target into a partial resync instead of a full one.
 	BufferHeldBytes = "sync_redis_buffer_held_bytes"
@@ -449,6 +463,11 @@ func SetLastEventAge(labels Labels, seconds float64) {
 func SetStreamOffset(labels Labels, offset, held int64) {
 	Default.SetGauge(StreamOffsetBytes, helpStreamOffset, labels, float64(offset))
 	Default.SetGauge(BufferHeldBytes, helpBufferHeld, labels, float64(held))
+}
+
+// SetSourceLag publishes how far behind the source's own offset the target is.
+func SetSourceLag(labels Labels, lag int64) {
+	Default.SetGauge(SourceLagBytes, helpSourceLag, labels, float64(lag))
 }
 
 // SetAppliedOffset publishes how far the target has been written.

@@ -88,7 +88,7 @@ func (s *Syncer) Start(ctx context.Context) error {
 		return err
 	}
 
-	shards, err := shardsOf(ctx, source, dsn.Endpoint("redis", s.cfg.SourceConnection))
+	shards, err := shardsOf(ctx, source, s.sourceAddr())
 	if err != nil {
 		return err
 	}
@@ -137,6 +137,17 @@ type shard struct {
 //
 // A shard is named by the slots it owns rather than by its address, so that a
 // shard which fails over to another node keeps its position. The tests use this
+// sourceAddr is the address a single-server source is dialled at.
+//
+// It must be host:port and nothing else. dsn.Endpoint appends the database,
+// which is right for a log line and wrong for a dial: a standalone source with
+// a database configured stopped the task on every attempt with "lookup
+// tcp/6379/0: unknown port". A cluster never showed it, because there the
+// addresses come from CLUSTER SLOTS rather than from the configuration.
+func (s *Syncer) sourceAddr() string {
+	return dsn.HostPort("redis", s.cfg.SourceConnection)
+}
+
 // too: the identity a position is filed under has to be the same one in both
 // places, or a test would be exercising a shard naming that production does not.
 func shardsOf(ctx context.Context, source goredis.UniversalClient, single string) ([]shard, error) {
@@ -212,6 +223,10 @@ func (s *Syncer) runShard(ctx context.Context, sh shard, source, target goredis.
 		Password: password,
 	})
 	defer node.Close()
+
+	// The link reports the lag against the source's own offset, which needs a
+	// connection that still takes ordinary commands.
+	connection.node = node
 
 	positions := &Checkpoints{Target: target, TaskID: s.cfg.ID, Shard: sh.id}
 
