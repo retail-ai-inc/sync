@@ -75,6 +75,19 @@ type Reader struct {
 	// left that position pointing at nothing.
 	lastGTID string
 
+	// inTransaction says a GTID event has opened a transaction whose end has not
+	// been seen yet, so no position reported in the meantime is a boundary.
+	//
+	// canal reports a position at the BEGIN of every transaction, and the GTID
+	// set it carries already counts that transaction as done: go-mysql adds the
+	// GTID to the set when it reads the GTID event, which comes before the rows.
+	// Recording that position hands a restart a checkpoint that points past rows
+	// this process has not read yet, and they are then never read at all. It
+	// needs a crash in the window to show, which is why it survived every clean
+	// stop: measured under 1,000 tx/s with kills every 15s, a handful of rows per
+	// run reached the source and never the target, with nothing logged.
+	inTransaction bool
+
 	// resumed says the stream started from a stored position rather than from
 	// the end of the log, which is what puts rows written before a schema change
 	// at risk of being decoded against the shape that change produced.
@@ -128,6 +141,10 @@ func (r *Reader) Open(ctx context.Context, from domain.Position) error {
 	if _, err := checkpoint.Decode(from.Payload, stored); err != nil {
 		return fmt.Errorf("read the stored position: %w", err)
 	}
+
+	// A stream that is starting begins outside any transaction, whatever the
+	// one before it was in the middle of when it stopped.
+	r.inTransaction = false
 
 	go func() {
 		// out is deliberately not closed here. The stream ends by way of fail,
@@ -341,7 +358,6 @@ func (r *Reader) OnRow(e *canal.RowsEvent) error {
 	if err := r.conv.OnRow(e); err != nil {
 		return err
 	}
-
 	// The namespace, key and source time are the same for every statement the
 	// event produced, and the converter does not know about events.
 	ns := domain.Namespace{DB: e.Table.Schema, Object: e.Table.Name}
@@ -363,7 +379,18 @@ func (r *Reader) OnRow(e *canal.RowsEvent) error {
 // OnXID marks the end of a source transaction, which is the only place a batch
 // may be cut. The whole transaction is handed over here, together.
 func (r *Reader) OnXID(header *replication.EventHeader, pos mysql.Position) error {
+	r.inTransaction = false
 	return r.handOver(pos, nil, header)
+}
+
+// OnGTID marks the start of a source transaction.
+//
+// It carries no rows of its own; what it establishes is that everything until
+// the matching XID belongs to one transaction, and so is not a place a position
+// may be recorded.
+func (r *Reader) OnGTID(_ *replication.EventHeader, _ mysql.BinlogGTIDEvent) error {
+	r.inTransaction = true
+	return nil
 }
 
 // OnDDL turns a schema change into an event of its own. A DDL is its own
@@ -466,7 +493,14 @@ func (r *Reader) checkReordering(defaultSchema, query string) error {
 // a restart does not re-read a stretch of log that held nothing.
 func (r *Reader) OnPosSynced(header *replication.EventHeader, pos mysql.Position, set mysql.GTIDSet, _ bool) error {
 	if len(r.tx) > 0 {
+		r.inTransaction = false
 		return r.handOver(pos, set, header)
+	}
+	if r.inTransaction {
+		// Between the BEGIN and the rows. The position offered here already
+		// counts this transaction as read, and nothing of it has been handed
+		// over, so recording it would step over the whole transaction.
+		return nil
 	}
 	return r.handOver(pos, set, header, heartbeatOnly)
 }

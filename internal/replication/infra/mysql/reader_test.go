@@ -385,3 +385,59 @@ func TestACheckpointWithoutAGTIDKeepsTheOneBefore(t *testing.T) {
 		t.Errorf("second checkpoint = %s, want the newer file offset", second)
 	}
 }
+
+// TestAPositionInsideATransactionIsNotHandedOver is the silent row loss this
+// package existed with until it was measured.
+//
+// canal reports a position at the BEGIN of every transaction, and go-mysql has
+// already added that transaction's GTID to the set by then — it adds it when it
+// reads the GTID event, which comes before the rows. With nothing accumulated
+// yet the reader used to hand that over as a heartbeat, so a checkpoint saying
+// the transaction was done reached the target before a single one of its rows
+// did. A clean stop never showed it, because the rows followed a moment later.
+// A kill did: the restart resumed past a transaction the target never got, and
+// no amount of comparing counts afterwards would say which rows were gone.
+// Measured at 1,000 tx/s with a kill every 15s, a handful of rows per run.
+func TestAPositionInsideATransactionIsNotHandedOver(t *testing.T) {
+	r := &Reader{
+		source: "10.0.0.1:3306/bench", flavor: "mysql",
+		out: make(chan *domain.Event, 4), done: make(chan struct{}),
+	}
+
+	set, err := mysql.ParseGTIDSet("mysql", "e67b8f4b-a2d6-11f1-9406-42010a400002:1-624")
+	if err != nil {
+		t.Fatalf("ParseGTIDSet: %v", err)
+	}
+
+	// The GTID event opens transaction 624. Its rows have not been read.
+	if err := r.OnGTID(nil, nil); err != nil {
+		t.Fatalf("OnGTID: %v", err)
+	}
+	// The BEGIN that follows it, carrying a set that already counts 624.
+	if err := r.OnPosSynced(nil, mysql.Position{Name: "mysql-bin.000005", Pos: 100}, set, false); err != nil {
+		t.Fatalf("OnPosSynced: %v", err)
+	}
+
+	select {
+	case e := <-r.out:
+		t.Fatalf("handed over %+v from inside a transaction; a restart would resume "+
+			"past rows it never read", e)
+	default:
+	}
+
+	// The transaction ends, and now the position may move.
+	if err := r.OnXID(nil, mysql.Position{Name: "mysql-bin.000005", Pos: 400}); err != nil {
+		t.Fatalf("OnXID: %v", err)
+	}
+	if err := r.OnPosSynced(nil, mysql.Position{Name: "mysql-bin.000005", Pos: 400}, set, false); err != nil {
+		t.Fatalf("OnPosSynced after the transaction: %v", err)
+	}
+	select {
+	case e := <-r.out:
+		if !e.Heartbeat {
+			t.Fatalf("event after the transaction = %+v, want the heartbeat", e)
+		}
+	default:
+		t.Fatal("nothing handed over after the transaction ended, so the position never moves")
+	}
+}
