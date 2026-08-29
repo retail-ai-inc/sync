@@ -347,3 +347,41 @@ func TestNextReportsAClosedReaderRatherThanBlocking(t *testing.T) {
 		t.Fatal("Next waited for its context instead of noticing the reader had closed")
 	}
 }
+
+// TestACheckpointWithoutAGTIDKeepsTheOneBefore covers the position degrading
+// from GTID to file and offset.
+//
+// canal does not carry a GTID set on every position it reports. Recording only
+// what the current call carried meant one such call overwrote the stored GTID
+// with nothing; the next restart then resumed from file and offset, which canal
+// does not track GTIDs for, so every later checkpoint lost it too. Measured on
+// Cloud SQL, the stored position after a few restarts was
+// {"Name":"mysql-bin.000037","Pos":41017161} with no GTID at all — a position
+// local to one server, useless the moment it fails over.
+func TestACheckpointWithoutAGTIDKeepsTheOneBefore(t *testing.T) {
+	r := &Reader{source: "10.0.0.1:3306/bench", flavor: "mysql"}
+
+	set, err := mysql.ParseGTIDSet("mysql", "e67b8f4b-a2d6-11f1-9406-42010a400002:1-624")
+	if err != nil {
+		t.Fatalf("ParseGTIDSet: %v", err)
+	}
+	first, err := r.encode(mysql.Position{Name: "mysql-bin.000005", Pos: 100}, set)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if !strings.Contains(first, "1-624") {
+		t.Fatalf("first checkpoint = %s, want it to carry the GTID", first)
+	}
+
+	// The same stream, one position later, reported without a GTID set.
+	second, err := r.encode(mysql.Position{Name: "mysql-bin.000005", Pos: 900}, nil)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if !strings.Contains(second, "1-624") {
+		t.Errorf("second checkpoint = %s, want it to keep the GTID it already had", second)
+	}
+	if !strings.Contains(second, "900") {
+		t.Errorf("second checkpoint = %s, want the newer file offset", second)
+	}
+}

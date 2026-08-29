@@ -61,6 +61,20 @@ type Reader struct {
 	source string
 	flavor string
 
+	// lastGTID is the newest GTID set the stream has reported, kept so a
+	// checkpoint written without one does not throw away the one before it.
+	//
+	// canal does not carry a GTID set on every position it reports. Recording
+	// only what the current call carried meant one such call overwrote the
+	// stored GTID with nothing, and a restart then resumed from file and offset
+	// instead — which canal in turn does not track GTIDs for, so every later
+	// checkpoint lost it too. Measured on Cloud SQL: the first start logged
+	// "start sync binlog at GTID set", and after a few restarts the stored
+	// position was {"Name":"mysql-bin.000037","Pos":41017161} with no GTID at
+	// all. File and offset are local to one server, so a failover would have
+	// left that position pointing at nothing.
+	lastGTID string
+
 	// resumed says the stream started from a stored position rather than from
 	// the end of the log, which is what puts rows written before a schema change
 	// at risk of being decoded against the shape that change produced.
@@ -128,8 +142,21 @@ func (r *Reader) Open(ctx context.Context, from domain.Position) error {
 		case stored.gtidSet() != nil:
 			// Preferred: the transactions themselves, which stay meaningful
 			// across a failover to a different server.
+			r.lastGTID = stored.GTID
 			r.fail <- c.StartFromGTID(stored.gtidSet())
 		default:
+			// File and offset name a place on one server and nowhere else. A
+			// source that keeps GTIDs and a position that does not is a task
+			// that will not survive its next failover, and nothing else says
+			// so — the task looks healthy right up until the position is
+			// meaningless. It cannot be repaired from here: canal reports no
+			// GTID for a stream it did not start by GTID, so the position stays
+			// this way until the shard is copied again.
+			r.Logger.Warnf("[MySQL] Resuming from a file and offset rather than a " +
+				"GTID. That position names a place on this server and nowhere else, " +
+				"so a failover leaves it pointing at nothing and this shard has to be " +
+				"copied again. It cannot be repaired from here: a stream that did not " +
+				"start by GTID reports none, so the position stays this way.")
 			r.fail <- c.RunFrom(stored.position())
 		}
 		_ = streamCtx
@@ -508,7 +535,17 @@ func (r *Reader) handOver(pos mysql.Position, set mysql.GTIDSet, header *replica
 func (r *Reader) encode(pos mysql.Position, set mysql.GTIDSet) (string, error) {
 	cp := binlogCheckpoint{Name: pos.Name, Pos: pos.Pos, Source: r.source}
 	if set != nil {
-		cp.GTID = set.String()
+		if text := set.String(); text != "" {
+			r.lastGTID = text
+		}
+	}
+	// Keeping the previous GTID is right even though it names an earlier point
+	// than the file and offset beside it: resuming from it replays a little,
+	// and every write here is an upsert, so replaying is free. Dropping it is
+	// not free — it turns a position that survives a failover into one that
+	// does not.
+	if r.lastGTID != "" {
+		cp.GTID = r.lastGTID
 		cp.Flavor = r.flavor
 	}
 	return checkpoint.Encode(cp)
