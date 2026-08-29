@@ -130,6 +130,20 @@ type Runner struct {
 	// windowFailed stops a source that cannot answer from being asked, and
 	// logged about, on every refresh.
 	windowFailed bool
+
+	// events counts what the stream carried, split by operation. It is built
+	// once because counting happens per event.
+	events *metrics.EventCounters
+	// queueBytes is how much unapplied change data the batch is holding.
+	queueBytes int64
+}
+
+// counters prepares the per-operation counters on first use.
+func (r *Runner) counters() *metrics.EventCounters {
+	if r.events == nil {
+		r.events = metrics.NewEventCounters(r.Opts.Labels)
+	}
+	return r.events
 }
 
 // retentionRefresh is how often the source is asked how far its log reaches.
@@ -298,10 +312,27 @@ func (r *Runner) startingPoint(ctx context.Context) (domain.Position, error) {
 		return domain.Position{}, nil
 	}
 
+	// snapshotDone separates "finished" from "gave up" for the deferred report
+	// below: a copy that returns an error must not be recorded as completed.
+	snapshotDone := false
+
 	// The position is pinned before a row is copied and stored only once the
 	// copy has finished. Pinning afterwards loses every write made while the
 	// copy ran; storing before it finishes means an interrupted copy resumes
 	// from a point it never reached.
+	// The snapshot context, in Debezium's terms. Until now an initial copy was
+	// invisible from outside: it either finished or the task looked stuck, with
+	// no way to tell how far it had got or whether it had given up. That
+	// mattered the first time a Redis shard had to be re-copied because the
+	// source's backlog had rolled past its position.
+	started := r.now()
+	metrics.SnapshotStarted(r.Opts.Labels, 0)
+	defer func() {
+		if !snapshotDone {
+			metrics.SnapshotFinished(r.Opts.Labels, false, r.now().Sub(started).Seconds())
+		}
+	}()
+
 	pinned, err := r.Snapshotter.Pin(ctx)
 	if err != nil {
 		return domain.Position{}, fmt.Errorf("pin the snapshot's starting point: %w", err)
@@ -314,6 +345,8 @@ func (r *Runner) startingPoint(ctx context.Context) (domain.Position, error) {
 	if err := r.Checkpoints.Save(ctx, r.CheckpointKey, pinned.Payload); err != nil {
 		return domain.Position{}, fmt.Errorf("record the snapshot's starting point: %w", err)
 	}
+	snapshotDone = true
+	metrics.SnapshotFinished(r.Opts.Labels, true, r.now().Sub(started).Seconds())
 	r.log().Infof(r.tag("Copy finished; streaming from the pinned point"))
 	return pinned, nil
 }
@@ -420,6 +453,7 @@ func (r *Runner) apply(ctx context.Context, queue <-chan *domain.Event) error {
 			}
 			r.mu.Lock()
 			r.queueUsed = len(queue)
+			r.queueBytes = int64(b.bytes)
 			r.mu.Unlock()
 
 			// Nothing else is waiting, so holding this batch back can only add
@@ -619,6 +653,38 @@ var sqlStatePattern = regexp.MustCompile(`\(([0-9A-Z]{5})\)`)
 // design exists to prevent.
 func (r *Runner) applyBatch(ctx context.Context, events []*domain.Event, pos domain.Position) error {
 	writable := applicable(events)
+
+	// What the stream carried, in Debezium's terms: events by operation, and
+	// source transactions carried through. The pair is what catches a whole
+	// transaction going missing — the defect this pipeline shipped with, where
+	// a checkpoint moved past a transaction whose rows were never read. Neither
+	// number alone would have shown it.
+	counters := r.counters()
+	transactions := 0
+	filtered := 0
+	for _, e := range events {
+		if e.Heartbeat {
+			continue
+		}
+		if e.EndsTransaction {
+			transactions++
+		}
+	}
+	for _, e := range writable {
+		counters.Count(e.Op.String(), 1)
+	}
+	if n := len(events) - len(writable); n > 0 {
+		// Read but not applicable: heartbeats and anything no mapping covers.
+		for _, e := range events {
+			if e.Heartbeat {
+				n--
+			}
+		}
+		filtered = n
+	}
+	metrics.CountFiltered(r.Opts.Labels, filtered)
+	metrics.CountTransaction(r.Opts.Labels, transactions)
+
 	newest := newestSourceTime(events)
 	committedByApplier := false
 
@@ -629,6 +695,9 @@ func (r *Runner) applyBatch(ctx context.Context, events []*domain.Event, pos dom
 		}
 		committed, err := r.applyWithRetry(ctx, runs, pos, len(writable))
 		if err != nil {
+			// The whole batch was rolled back, so every source transaction in
+			// it is a transaction the target does not have.
+			metrics.CountRolledBack(r.Opts.Labels, transactions)
 			return err
 		}
 		committedByApplier = committed
@@ -686,6 +755,7 @@ func (r *Runner) report(ctx context.Context) (stop func()) {
 				read := r.lastReadAt
 				heard := r.lastHeardAt
 				used := r.queueUsed
+				held := r.queueBytes
 				r.mu.Unlock()
 
 				// Behind: measured from the oldest change still waiting, so the
@@ -706,6 +776,7 @@ func (r *Runner) report(ctx context.Context) (stop func()) {
 					metrics.SetLastEventAge(r.Opts.Labels, now.Sub(heard).Seconds())
 				}
 				metrics.SetQueue(r.Opts.Labels, used, r.Opts.queueCapacity())
+				metrics.SetQueueBytes(r.Opts.Labels, held)
 			}
 		}
 	}()

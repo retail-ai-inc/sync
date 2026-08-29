@@ -151,6 +151,7 @@ func (l *link) start(ctx context.Context, from streamPosition) (streamPosition, 
 	l.mu.Lock()
 	l.stream = stream
 	l.mu.Unlock()
+	metrics.SetConnected(l.labels, true)
 
 	// Acknowledgements report what is on disk, which is where the connection was
 	// resumed from rather than what has been applied.
@@ -203,6 +204,7 @@ func (l *link) pump(ctx context.Context, stream *Stream) error {
 				return nil
 			}
 			metrics.CountDisconnect(l.labels)
+			metrics.SetConnected(l.labels, false)
 			l.log().Warnf("[Redis] Shard %s lost its replication connection at "+
 				"offset %d: %v", l.shard, l.buffer.Newest(), err)
 			return err
@@ -260,6 +262,10 @@ func (l *link) acknowledge(ctx context.Context, stream *Stream) {
 			// them means something.
 			metrics.SetStreamOffset(l.labels, l.received.Load(), l.buffer.Held())
 			metrics.SetAppliedOffset(l.labels, l.applied.Load())
+			// The same numbers under the engine-neutral names, so one dashboard
+			// panel covers every engine instead of one panel per engine.
+			metrics.SetSourcePosition(l.labels, l.received.Load())
+			metrics.SetQueueBytes(l.labels, l.buffer.Held())
 			l.publishSourceLag(ctx)
 
 			if err := stream.Ack(l.durable.Load()); err != nil {

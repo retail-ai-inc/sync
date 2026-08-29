@@ -1150,3 +1150,112 @@ func TestPermanentApplyFailureIsDecidedBySQLState(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------- what the stream carried
+
+// counter reads a counter series the way a scrape would.
+func counter(t *testing.T, name string, labels metrics.Labels) float64 {
+	t.Helper()
+	for _, s := range metrics.Default.Snapshot(name) {
+		if s.Labels.Key() == labels.Key() {
+			return s.Value
+		}
+	}
+	return 0
+}
+
+// TestTheStreamsEventsAreCountedByOperation is the Debezium split this pipeline
+// had no answer for. "10,000 changes applied" hides the case where every one of
+// them was a delete, which is exactly what a botched migration looks like from
+// outside.
+func TestTheStreamsEventsAreCountedByOperation(t *testing.T) {
+	reader := &fakeReader{events: []*domain.Event{
+		{NS: domain.Namespace{DB: "shop", Object: "orders"}, Op: domain.OpInsert, Payload: "a"},
+		{NS: domain.Namespace{DB: "shop", Object: "orders"}, Op: domain.OpInsert, Payload: "b"},
+		{NS: domain.Namespace{DB: "shop", Object: "orders"}, Op: domain.OpUpdate, Payload: "c", EndsTransaction: true,
+			Pos: domain.Position{Payload: "p1"}},
+	}}
+	r := newRunner(t, reader, &fakeApplier{}, newStore())
+	labels := r.Opts.Labels
+	defer metrics.Default.Forget(labels)
+	defer metrics.Default.Forget(metrics.Labels{"task": t.Name(), "op": "insert"})
+	defer metrics.Default.Forget(metrics.Labels{"task": t.Name(), "op": "update"})
+
+	if err := runFor(t, r, 150*time.Millisecond); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	inserts := metrics.Labels{"task": t.Name(), "op": "insert"}
+	updates := metrics.Labels{"task": t.Name(), "op": "update"}
+	if got := counter(t, metrics.EventsTotal, inserts); got != 2 {
+		t.Errorf("insert events = %v, want 2", got)
+	}
+	if got := counter(t, metrics.EventsTotal, updates); got != 1 {
+		t.Errorf("update events = %v, want 1", got)
+	}
+}
+
+// TestSourceTransactionsAreCounted is the other half of the pair that catches a
+// transaction going missing.
+//
+// The defect this pipeline shipped with moved a checkpoint past a transaction
+// whose rows were never read. The applied count looked healthy — everything
+// that arrived was applied. Counting transactions carried through gives the
+// number to compare against the source's own, and the comparison is what makes
+// the loss visible instead of leaving it to a reconciliation pass hours later.
+func TestSourceTransactionsAreCounted(t *testing.T) {
+	reader := &fakeReader{events: []*domain.Event{
+		{NS: domain.Namespace{DB: "shop", Object: "orders"}, Op: domain.OpInsert, Payload: "a", EndsTransaction: true,
+			Pos: domain.Position{Payload: "p1"}},
+		{NS: domain.Namespace{DB: "shop", Object: "orders"}, Op: domain.OpInsert, Payload: "b", EndsTransaction: true,
+			Pos: domain.Position{Payload: "p2"}},
+	}}
+	r := newRunner(t, reader, &fakeApplier{}, newStore())
+	labels := r.Opts.Labels
+	defer metrics.Default.Forget(labels)
+	defer metrics.Default.Forget(metrics.Labels{"task": t.Name(), "op": "insert"})
+
+	if err := runFor(t, r, 150*time.Millisecond); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if got := counter(t, metrics.TransactionsCommittedTotal, labels); got != 2 {
+		t.Errorf("committed transactions = %v, want 2", got)
+	}
+}
+
+// TestABatchThatRollsBackCountsItsTransactionsAsRolledBack keeps refused work
+// visible. The applied counter only ever counts what succeeded, so without this
+// a batch that failed leaves no trace on any graph.
+func TestABatchThatRollsBackCountsItsTransactionsAsRolledBack(t *testing.T) {
+	reader := &fakeReader{events: []*domain.Event{
+		{NS: domain.Namespace{DB: "shop", Object: "orders"}, Op: domain.OpInsert, Payload: "a", EndsTransaction: true,
+			Pos: domain.Position{Payload: "p1"}},
+	}}
+	applier := &fakeApplier{err: domain.Unrecoverable("the target refused it")}
+	r := newRunner(t, reader, applier, newStore())
+	labels := r.Opts.Labels
+	defer metrics.Default.Forget(labels)
+	defer metrics.Default.Forget(metrics.Labels{"task": t.Name(), "op": "insert"})
+
+	if err := runFor(t, r, 150*time.Millisecond); err == nil {
+		t.Fatal("Run returned no error although the target refused the batch")
+	}
+
+	if got := counter(t, metrics.TransactionsRolledBackTotal, labels); got != 1 {
+		t.Errorf("rolled back transactions = %v, want 1", got)
+	}
+}
+
+// TestTheQueueReportsTheBytesItHolds: a queue can be shallow in events and huge
+// in bytes. One large document filling the buffer and a hundred thousand small
+// ones need different answers, and an event count alone cannot tell them apart.
+func TestTheQueueReportsTheBytesItHolds(t *testing.T) {
+	labels := metrics.Labels{"task": t.Name()}
+	defer metrics.Default.Forget(labels)
+
+	metrics.SetQueueBytes(labels, 2048)
+	if got := gauge(t, metrics.QueueBytes, labels); got != 2048 {
+		t.Errorf("queue bytes = %v, want 2048", got)
+	}
+}

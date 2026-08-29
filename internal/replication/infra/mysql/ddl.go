@@ -3,6 +3,7 @@ package mysql
 import (
 	"context"
 	"fmt"
+	"github.com/retail-ai-inc/sync/internal/platform/metrics"
 	"strings"
 	"sync/atomic"
 
@@ -255,15 +256,22 @@ func (h *MyEventHandler) OnDDL(_ *replication.EventHeader, _ mysql.Position, e *
 	for _, decision := range decisions {
 		switch decision.action {
 		case ddlSkip:
+			metrics.CountSchemaRefused(h.labels, "skipped")
 			h.logger.Debugf("[MySQL][DDL] Skipping %q: %s", query, decision.reason)
 
 		case ddlBlock:
+			// A refusal is a decision, and a decision nobody can see is a
+			// decision nobody can audit. This is the path a TRUNCATE or a DROP
+			// takes, so it is the one that has to be counted.
+			metrics.CountSchemaRefused(h.labels, "blocked")
 			atomic.StoreInt32(&h.lastExecError, 1)
 			return fmt.Errorf("refusing to replicate %q: it %s. Replication has "+
 				"stopped so the change can be made on the target deliberately; "+
 				"clear the stored position to resume", query, decision.reason)
 
 		case ddlApply:
+			metrics.CountSchemaChange(h.labels, 1)
+			metrics.SetSchemaChangeAge(h.labels, 0)
 			h.logger.Infof("[MySQL][DDL] Applying %q", decision.query)
 			if err := h.execDDL(decision.query); err != nil {
 				atomic.StoreInt32(&h.lastExecError, 1)

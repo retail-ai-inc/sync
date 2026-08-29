@@ -458,7 +458,15 @@ func (s *MySQLSyncer) doInitialSync(ctx context.Context, sourceDB *sql.Conn, tar
 	sourceDBName := dsn.GetDatabaseName(s.cfg.Type, s.cfg.SourceConnection)
 	targetDBName := dsn.GetDatabaseName(s.cfg.Type, s.cfg.TargetConnection)
 
-	for _, mapping := range s.resolveMappings(ctx, sourceDB, sourceDBName) {
+	mappings := s.resolveMappings(ctx, sourceDB, sourceDBName)
+	remainingTables := 0
+	for _, mapping := range mappings {
+		remainingTables += len(mapping.Tables)
+	}
+	copyStarted := time.Now()
+	metrics.SnapshotStarted(s.metricLabels(), remainingTables)
+
+	for _, mapping := range mappings {
 		for _, tableMap := range mapping.Tables {
 			exists, errExist := s.targetTableExists(ctx, targetDB, targetDBName, tableMap.TargetTable)
 			if errExist != nil {
@@ -548,6 +556,11 @@ func (s *MySQLSyncer) doInitialSync(ctx context.Context, sourceDB *sql.Conn, tar
 						fail("could not write a batch of %s.%s: %v", targetDBName, tableMap.TargetTable, errB)
 					} else {
 						insertedCount += len(batchRows)
+						// Debezium: RowsScanned. Reported per batch rather than
+						// per table, so a copy of one very large table still
+						// shows movement instead of looking hung.
+						metrics.SnapshotProgress(s.metricLabels(), len(batchRows),
+							remainingTables, time.Since(copyStarted).Seconds())
 					}
 					batchRows = batchRows[:0]
 				}
@@ -561,6 +574,9 @@ func (s *MySQLSyncer) doInitialSync(ctx context.Context, sourceDB *sql.Conn, tar
 					insertedCount += len(batchRows)
 				}
 			}
+			remainingTables--
+			metrics.SnapshotProgress(s.metricLabels(), 0, remainingTables,
+				time.Since(copyStarted).Seconds())
 			s.logger.Infof("[MySQL] initial sync => %s.%s => %s.%s inserted=%d rows",
 				sourceDBName, tableMap.SourceTable, targetDBName, tableMap.TargetTable, insertedCount)
 		}

@@ -75,6 +75,14 @@ type Reader struct {
 	// left that position pointing at nothing.
 	lastGTID string
 
+	// lastSchemaChange is when a schema change was last carried through, so its
+	// age can be published without a timer of its own.
+	lastSchemaChange time.Time
+
+	// lastLogFile is the source log file the info series was last published
+	// for, so that series is written when it changes rather than per event.
+	lastLogFile string
+
 	// inTransaction says a GTID event has opened a transaction whose end has not
 	// been seen yet, so no position reported in the meantime is a boundary.
 	//
@@ -145,6 +153,9 @@ func (r *Reader) Open(ctx context.Context, from domain.Position) error {
 	// A stream that is starting begins outside any transaction, whatever the
 	// one before it was in the middle of when it stopped.
 	r.inTransaction = false
+
+	metrics.SetConnected(r.Labels, true)
+	metrics.SetCapturedTables(r.Labels, r.capturedTables())
 
 	go func() {
 		// out is deliberately not closed here. The stream ends by way of fail,
@@ -217,6 +228,19 @@ func (r *Reader) Close() error {
 	return nil
 }
 
+// capturedTables counts the objects this task watches.
+//
+// Debezium: CapturedTables. It is worth publishing because the number changing
+// on its own is how a mapping edit that dropped a table shows up — the table
+// stops being replicated, and nothing else says so.
+func (r *Reader) capturedTables() int {
+	n := 0
+	for _, mapping := range r.Config.Mappings {
+		n += len(mapping.Tables)
+	}
+	return n
+}
+
 // errReaderClosed says an event arrived after the reader was closed. It is not
 // a failure: the position it belongs to was never recorded, so the event is
 // read again next time.
@@ -228,6 +252,7 @@ func (r *Reader) classify(err error) error {
 		return nil
 	}
 	metrics.CountDisconnect(r.Labels)
+	metrics.SetConnected(r.Labels, false)
 	// A purged binlog cannot be waited out: the position no longer exists, so
 	// every attempt fails the same way and a fresh copy is the only way forward.
 	if reason, purged := positionNoLongerAvailable(err); purged {
@@ -358,6 +383,13 @@ func (r *Reader) OnRow(e *canal.RowsEvent) error {
 	if err := r.conv.OnRow(e); err != nil {
 		return err
 	}
+	if len(r.tx) == before {
+		// The converter produced nothing, so no mapping covers this table.
+		// Debezium: NumberOfEventsFiltered.
+		metrics.CountFiltered(r.Labels, len(e.Rows))
+		return nil
+	}
+
 	// The namespace, key and source time are the same for every statement the
 	// event produced, and the converter does not know about events.
 	ns := domain.Namespace{DB: e.Table.Schema, Object: e.Table.Name}
@@ -421,12 +453,20 @@ func (r *Reader) OnDDL(header *replication.EventHeader, pos mysql.Position, e *r
 	for _, decision := range decisions {
 		switch decision.action {
 		case ddlSkip:
+			metrics.CountSchemaRefused(r.Labels, "skipped")
 			r.Logger.Debugf("[MySQL][DDL] Skipping %q: %s", e.Query, decision.reason)
 		case ddlBlock:
+			// A refusal is a decision, and a decision nobody can see is a
+			// decision nobody can audit. Debezium has no equivalent because it
+			// propagates whatever it is told to.
+			metrics.CountSchemaRefused(r.Labels, "blocked")
 			return domain.Unrecoverable(
 				"refusing to replicate %q: it %s. Replication has stopped so the change "+
 					"can be made on the target deliberately", e.Query, decision.reason)
 		case ddlApply:
+			metrics.CountSchemaChange(r.Labels, 1)
+			metrics.SetSchemaChangeAge(r.Labels, 0)
+			r.lastSchemaChange = time.Now()
 			r.tx = append(r.tx, &domain.Event{
 				NS:         domain.Namespace{DB: string(e.Schema)},
 				Op:         domain.OpSchema,
@@ -515,6 +555,21 @@ func (r *Reader) handOver(pos mysql.Position, set mysql.GTIDSet, header *replica
 	payload, err := r.encode(pos, set)
 	if err != nil {
 		return err
+	}
+
+	// Where the stream has got to. The offset is a number so it can be graphed;
+	// the file name goes on an info series because it changes every few hours
+	// rather than every transaction. Publishing the GTID set here instead would
+	// make one series per transaction and take the scrape down with it.
+	metrics.SetSourcePosition(r.Labels, int64(pos.Pos))
+	if !r.lastSchemaChange.IsZero() {
+		// Refreshed on every hand-over, heartbeats included, so the age climbs
+		// while nothing is happening instead of freezing at whatever it was.
+		metrics.SetSchemaChangeAge(r.Labels, time.Since(r.lastSchemaChange).Seconds())
+	}
+	if pos.Name != r.lastLogFile {
+		r.lastLogFile = pos.Name
+		metrics.SetSourceInfo(r.Labels, pos.Name, r.source)
 	}
 
 	events := r.tx

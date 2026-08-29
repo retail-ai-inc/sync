@@ -125,6 +125,11 @@ func (s *Snapshotter) Copy(ctx context.Context) error {
 			return fmt.Errorf("write %d copied keys: %w", len(values), err)
 		}
 		copied += len(values)
+		// Debezium: RowsScanned. A first copy of a live key space has no total
+		// to count down from — SCAN gives no cardinality — so the progress a
+		// shard can honestly report is how much it has done and how long it has
+		// been at it.
+		metrics.SnapshotProgress(s.Labels, len(values), 1, time.Since(start).Seconds())
 		return nil
 	})
 	if err != nil {

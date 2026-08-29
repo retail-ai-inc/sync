@@ -14,6 +14,7 @@ import (
 	"github.com/pingcap/tidb/pkg/parser/ast"
 
 	"github.com/retail-ai-inc/sync/internal/platform/config"
+	"github.com/retail-ai-inc/sync/internal/platform/metrics"
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
 )
 
@@ -439,5 +440,65 @@ func TestAPositionInsideATransactionIsNotHandedOver(t *testing.T) {
 		}
 	default:
 		t.Fatal("nothing handed over after the transaction ended, so the position never moves")
+	}
+}
+
+// TestTheCapturedTableCountIsPublished is Debezium's CapturedTables. It catches
+// the change nothing else reports: a mapping edit that quietly drops a table.
+// Replication stays healthy-looking — lag zero, task up — and that table simply
+// stops being copied, which is only discovered after a failover.
+func TestTheCapturedTableCountIsPublished(t *testing.T) {
+	r := readerFor([]config.DatabaseMapping{
+		{Tables: []config.TableMapping{
+			{SourceTable: "orders", TargetTable: "orders"},
+			{SourceTable: "users", TargetTable: "users"},
+		}},
+		{Tables: []config.TableMapping{
+			{SourceTable: "payments", TargetTable: "payments"},
+		}},
+	}, "root:pw@tcp(10.0.0.1:3306)/bench")
+
+	if got := r.capturedTables(); got != 3 {
+		t.Errorf("capturedTables() = %d, want 3 across both mappings", got)
+	}
+}
+
+// TestTheSourceInfoIsPublishedOnlyWhenTheLogFileChanges is the cardinality
+// guard. The offset moves with every transaction and is published as a number;
+// the file name moves every few hours and is published as a label. Publishing
+// the file on every hand-over would be harmless, but publishing anything that
+// moves per transaction as a label would make one series per transaction and
+// take the scrape target down with it — so the code tracks the last file it
+// published, and this pins that behaviour.
+func TestTheSourceInfoIsPublishedOnlyWhenTheLogFileChanges(t *testing.T) {
+	r := &Reader{
+		source: "10.0.0.1:3306/bench", flavor: "mysql",
+		out: make(chan *domain.Event, 8), done: make(chan struct{}),
+		Labels: metrics.Labels{"task": t.Name()},
+	}
+	defer metrics.Default.Forget(r.Labels)
+
+	first := mysql.Position{Name: "mysql-bin.000005", Pos: 100}
+	if err := r.OnPosSynced(nil, first, nil, false); err != nil {
+		t.Fatalf("OnPosSynced: %v", err)
+	}
+	if r.lastLogFile != "mysql-bin.000005" {
+		t.Fatalf("lastLogFile = %q, want the file just published", r.lastLogFile)
+	}
+
+	// The same file, a later offset: nothing new to publish about the file.
+	if err := r.OnPosSynced(nil, mysql.Position{Name: "mysql-bin.000005", Pos: 900}, nil, false); err != nil {
+		t.Fatalf("OnPosSynced: %v", err)
+	}
+	if r.lastLogFile != "mysql-bin.000005" {
+		t.Errorf("lastLogFile = %q, want it unchanged", r.lastLogFile)
+	}
+
+	// A rotation is the case worth publishing again.
+	if err := r.OnPosSynced(nil, mysql.Position{Name: "mysql-bin.000006", Pos: 4}, nil, false); err != nil {
+		t.Fatalf("OnPosSynced: %v", err)
+	}
+	if r.lastLogFile != "mysql-bin.000006" {
+		t.Errorf("lastLogFile = %q, want the rotated file", r.lastLogFile)
 	}
 }

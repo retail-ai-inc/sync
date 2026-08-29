@@ -598,3 +598,36 @@ func TestANullFullDocumentFallsBackToTheDescription(t *testing.T) {
 		t.Errorf("update = %v, want the changed field", update.Update)
 	}
 }
+
+// TestTheCapturedCollectionCountIsPublished is Debezium's CapturedTables, and
+// it earns its place by catching the change nothing else reports: a mapping
+// edit that quietly drops a collection. Replication carries on looking healthy
+// — the lag is zero, the task is up — and the collection simply stops being
+// copied. The count falling is the only signal.
+func TestTheCapturedCollectionCountIsPublished(t *testing.T) {
+	r := &Reader{Config: config.SyncConfig{
+		Mappings: []config.DatabaseMapping{
+			{Tables: []config.TableMapping{
+				{SourceTable: "orders", TargetTable: "orders"},
+				{SourceTable: "users", TargetTable: "users"},
+			}},
+			{Tables: []config.TableMapping{
+				{SourceTable: "payments", TargetTable: "payments"},
+			}},
+		},
+	}}
+
+	if got := r.capturedCollections(); got != 3 {
+		t.Errorf("capturedCollections() = %d, want 3 across both mappings", got)
+	}
+}
+
+// TestATaskWithNoMappingsCapturesNothing keeps the count honest rather than
+// convenient: zero is the right answer and it is worth alerting on.
+func TestATaskWithNoMappingsCapturesNothing(t *testing.T) {
+	r := &Reader{Config: config.SyncConfig{}}
+
+	if got := r.capturedCollections(); got != 0 {
+		t.Errorf("capturedCollections() = %d, want 0", got)
+	}
+}

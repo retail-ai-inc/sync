@@ -1,6 +1,7 @@
 package redis
 
 import (
+	"strings"
 	"time"
 
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
@@ -24,6 +25,25 @@ type command struct {
 	// offset is the stream offset after this command. It is what the slot's
 	// marker records, and what decides whether the command has been applied.
 	offset int64
+}
+
+// operation says whether the command removes the key or writes it.
+//
+// Redis cannot tell an insert from an update without reading the target first
+// — a SET creates or overwrites and the stream does not say which — so every
+// write is an update here. A removal is knowable, and it is the one worth
+// separating: a delete rate that climbs on its own is the shape of an eviction
+// storm or a mistaken FLUSH, and counting it in with the writes hides exactly
+// that.
+func (c *command) operation() domain.Op {
+	if len(c.args) == 0 {
+		return domain.OpUpdate
+	}
+	switch strings.ToUpper(string(c.args[0])) {
+	case "DEL", "UNLINK":
+		return domain.OpDelete
+	}
+	return domain.OpUpdate
 }
 
 // arguments renders the command for the client.
@@ -65,7 +85,7 @@ type valueRepair struct {
 func commandEvent(cmd *command, key []byte, at time.Time, endsBlock bool) *domain.Event {
 	return &domain.Event{
 		NS:              domain.Namespace{DB: "0"},
-		Op:              domain.OpUpdate,
+		Op:              cmd.operation(),
 		Key:             string(key),
 		Payload:         cmd,
 		Bytes:           cmd.bytes(),

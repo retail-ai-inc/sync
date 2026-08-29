@@ -153,6 +153,8 @@ func (r *Reader) Open(ctx context.Context, from domain.Position) error {
 		return fmt.Errorf("open the change stream: %w", err)
 	}
 	r.stream = stream
+	metrics.SetConnected(r.Labels, true)
+	metrics.SetCapturedTables(r.Labels, r.capturedCollections())
 	return nil
 }
 
@@ -195,6 +197,7 @@ func (r *Reader) fill(ctx context.Context) error {
 				return ctx.Err()
 			}
 			metrics.CountDisconnect(r.Labels)
+			metrics.SetConnected(r.Labels, false)
 			if positionLost(err) {
 				return domain.Unrecoverable(
 					"the change stream cannot continue from the position this task holds "+
@@ -246,6 +249,18 @@ func (r *Reader) fill(ctx context.Context) error {
 		})
 		return nil
 	}
+}
+
+// capturedCollections counts the objects this task watches.
+//
+// Debezium: CapturedTables. The number changing on its own is how a mapping
+// edit that dropped a collection shows up; nothing else says so.
+func (r *Reader) capturedCollections() int {
+	n := 0
+	for _, mapping := range r.Config.Mappings {
+		n += len(mapping.Tables)
+	}
+	return n
 }
 
 // sourceClock reads the source's own time, for a heartbeat to carry.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/sirupsen/logrus"
 	"go.mongodb.org/mongo-driver/v2/mongo"
@@ -28,6 +29,7 @@ type Snapshotter struct {
 	Syncer *MongoDBSyncer
 	Config config.SyncConfig
 	Logger logrus.FieldLogger
+	Labels metrics.Labels
 
 	sourceDB string
 	targetDB string
@@ -65,6 +67,12 @@ func (s *Snapshotter) Copy(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+
+	// Debezium's snapshot context: how many objects the copy covers and how
+	// many are left. MongoDB is the one engine here that knows both up front.
+	started := time.Now()
+	metrics.SnapshotStarted(s.Labels, len(tables))
+	remaining := len(tables)
 
 	var failures []string
 	for _, table := range tables {
@@ -114,6 +122,8 @@ func (s *Snapshotter) Copy(ctx context.Context) error {
 			failures = append(failures,
 				fmt.Sprintf("%s.%s: %v", s.sourceDB, table.SourceTable, err))
 		}
+		remaining--
+		metrics.SnapshotProgress(s.Labels, 0, remaining, time.Since(started).Seconds())
 	}
 
 	if len(failures) > 0 {
@@ -244,6 +254,7 @@ func (s *Syncer) Start(ctx context.Context) error {
 			Syncer:   inner,
 			Config:   s.cfg,
 			Logger:   s.logger,
+			Labels:   labels,
 			sourceDB: sourceDBName,
 			targetDB: targetDBName,
 		},
