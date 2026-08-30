@@ -63,13 +63,14 @@ func (s *Syncer) Start(ctx context.Context) error {
 	// the older one.
 	stopGuard, err := s.claimDirection(ctx, source, target)
 	if err != nil {
-		if directionlock.IsConcurrent(err) {
-			// Another process is running this task. That resolves itself when
-			// the other one exits, which is what a rolling update looks like
-			// from the new pod's side, so it is retried rather than refused.
-			return fmt.Errorf("%w", err)
+		if directionlock.IsBlocking(err) {
+			return domain.Unrecoverable("%v", err)
 		}
-		return domain.Unrecoverable("%v", err)
+		// Anything else is transient and the task is restarted for it: another
+		// process still finishing its shutdown, or an endpoint that is briefly
+		// unreachable — the guard reads its claims from the databases, so an
+		// outage on either side fails it while the outage lasts.
+		return fmt.Errorf("%w", err)
 	}
 	defer stopGuard()
 

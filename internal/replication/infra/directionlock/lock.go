@@ -190,6 +190,21 @@ func IsConcurrent(err error) bool {
 	return errors.As(err, &conflict) && conflict.Concurrent
 }
 
+// IsBlocking reports whether a failure is a direction conflict that no amount of
+// retrying resolves, and so must stop the task rather than restart it.
+//
+// Everything else a guard can fail with is transient. The endpoint being
+// unreachable is the important one: reading a claim needs the very database the
+// outage took away, so a target that restarts fails the guard for as long as it
+// is down. Treating that as permanent stopped replication for good the first
+// time Osaka bounced — the opposite of what a claim on the target is for.
+//
+// A concurrent claim is transient too: it clears when the other process exits.
+func IsBlocking(err error) bool {
+	var conflict *Conflict
+	return errors.As(err, &conflict) && !conflict.Concurrent
+}
+
 // ConcurrentAfter is how recently another process must have refreshed its claim
 // for this one to treat it as still running.
 //

@@ -677,3 +677,83 @@ func TestADirectionConflictIsNotRetryable(t *testing.T) {
 			"would be retried for ever instead of being put in front of somebody")
 	}
 }
+
+// TestAnUnreachableEndpointIsRetryable is the defect a 120-second outage of the
+// Osaka mongos exposed: the guard reads its claims out of the databases, so
+// while the target is down every Acquire fails, and the caller classified any
+// non-concurrent failure as needing intervention. Replication stopped for good
+// the first time the target bounced, which is precisely the outage the claim on
+// the target exists to survive.
+func TestAnUnreachableEndpointIsRetryable(t *testing.T) {
+	unreachable := errors.New("server selection error: context deadline exceeded")
+
+	for _, tc := range []struct {
+		name           string
+		source, target *memoryStore
+	}{
+		{
+			name:   "target is down",
+			source: newStore("tokyo"),
+			target: &memoryStore{address: "osaka", claims: map[int]Claim{}, readErr: unreachable},
+		},
+		{
+			name:   "source is down",
+			source: &memoryStore{address: "tokyo", claims: map[int]Claim{}, readErr: unreachable},
+			target: newStore("osaka"),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			guard := &Guard{TaskID: 7, Source: tc.source, Target: tc.target, Owner: "pod-a"}
+			err := guard.Acquire(context.Background())
+			if err == nil {
+				t.Fatal("Acquire succeeded while an endpoint was unreachable")
+			}
+			if IsBlocking(err) {
+				t.Errorf("error = %v, want it left retryable: the endpoint comes back, "+
+					"and stopping the task permanently for it needs an operator to "+
+					"restart replication after every target restart", err)
+			}
+		})
+	}
+}
+
+// TestABlockedDirectionStaysBlocked is the other half: the conflicts that no
+// amount of retrying resolves must still stop the task.
+func TestABlockedDirectionStaysBlocked(t *testing.T) {
+	source, target := newStore("tokyo"), newStore("osaka")
+
+	promoted := &Guard{TaskID: 9, Source: target, Target: newStore("kobe"), Owner: "pod-x"}
+	if err := promoted.Acquire(context.Background()); err != nil {
+		t.Fatalf("set up the promoted side: %v", err)
+	}
+
+	guard := &Guard{TaskID: 7, Source: source, Target: target, Owner: "pod-a"}
+	err := guard.Acquire(context.Background())
+	if err == nil {
+		t.Fatal("writing to a promoted replica was allowed")
+	}
+	if !IsBlocking(err) {
+		t.Errorf("error = %v, want it blocking: writing to a promoted replica "+
+			"overwrites everything taken since the promotion", err)
+	}
+}
+
+// TestAConcurrentClaimIsNotBlocking keeps the rolling-update case retryable.
+func TestAConcurrentClaimIsNotBlocking(t *testing.T) {
+	source, target := newStore("tokyo"), newStore("osaka")
+
+	first := &Guard{TaskID: 7, Source: source, Target: target, Owner: "pod-a"}
+	if err := first.Acquire(context.Background()); err != nil {
+		t.Fatalf("the first process could not claim: %v", err)
+	}
+
+	second := &Guard{TaskID: 7, Source: source, Target: target, Owner: "pod-b"}
+	err := second.Acquire(context.Background())
+	if err == nil {
+		t.Fatal("a second process running the same task was allowed to start")
+	}
+	if IsBlocking(err) {
+		t.Errorf("error = %v, want it retryable: the old pod exits and the claim "+
+			"clears on its own", err)
+	}
+}
