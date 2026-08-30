@@ -41,6 +41,10 @@ type Reader struct {
 	conv *MongoDBSyncer
 
 	stream *mongo.ChangeStream
+	// nudge keeps the source's idle shards advancing so mongos can release
+	// events instead of holding them for the server's no-op writer. Nil on a
+	// replica set, where nothing merges and nothing is held.
+	nudge *nudger
 	// mapped names the collections to replicate, empty when the task lists none
 	// and every collection of a mapped database is replicated.
 	mapped map[string]bool
@@ -153,6 +157,9 @@ func (r *Reader) Open(ctx context.Context, from domain.Position) error {
 		return fmt.Errorf("open the change stream: %w", err)
 	}
 	r.stream = stream
+	if r.nudge == nil {
+		r.nudge = startNudging(ctx, r.Client, r.Logger)
+	}
 	metrics.SetConnected(r.Labels, true)
 	metrics.SetCapturedTables(r.Labels, r.capturedCollections())
 	return nil
@@ -436,6 +443,7 @@ func (r *Reader) takeSchemaChange(raw bson.Raw, ns domain.Namespace) error {
 func (r *Reader) Close() error {
 	var err error
 	r.closeOnce.Do(func() {
+		r.nudge.Stop()
 		if r.stream != nil {
 			err = r.stream.Close(context.Background())
 		}
