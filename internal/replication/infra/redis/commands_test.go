@@ -1,0 +1,147 @@
+package redis
+
+import (
+	"context"
+	"strings"
+	"testing"
+
+	"github.com/retail-ai-inc/sync/internal/replication/domain"
+)
+
+// cmd builds a command the way the master would have sent it.
+func cmd(parts ...string) *Command {
+	args := make([][]byte, 0, len(parts))
+	for _, p := range parts {
+		args = append(args, []byte(p))
+	}
+	return &Command{Args: args}
+}
+
+// table is the command specification a server would have given us: SET and DEL
+// take their key first, EVAL works its keys out at runtime.
+func table() *commandTable {
+	return &commandTable{
+		keyAt:   map[string]int{"set": 1, "del": 1, "hset": 1, "eval": 0, "get": 1},
+		movable: map[string]bool{"eval": true},
+	}
+}
+
+// TestEmptyingTheSourceIsNeverReplicated is the single most consequential
+// decision this table makes.
+//
+// FLUSHALL on the source and FLUSHALL typed by mistake are indistinguishable
+// from here, and replicating it would mean one fat-fingered command in Tokyo
+// destroys the disaster-recovery copy in Osaka at the same moment. The task
+// stops instead and a human decides. Measured live: a source FLUSHALL cleared
+// 158,117 keys and the target kept every one of them.
+func TestEmptyingTheSourceIsNeverReplicated(t *testing.T) {
+	for _, name := range []string{"FLUSHALL", "flushall", "FLUSHDB", "SWAPDB"} {
+		t.Run(name, func(t *testing.T) {
+			class, key, err := table().classify(context.Background(), nil, cmd(name))
+			if err != nil {
+				t.Fatalf("classify: %v", err)
+			}
+			if class != classRefused {
+				t.Errorf("%s classified as %v, want refused — replicating it "+
+					"would empty the disaster-recovery copy", name, class)
+			}
+			if key != nil {
+				t.Errorf("%s produced key %q, want none", name, key)
+			}
+		})
+	}
+}
+
+// TestTheCommandsThatCarryNoDataAreRecognised keeps the stream's bookkeeping
+// out of the target. A PING is proof the link is alive; REPLCONF is the
+// protocol talking to itself; PUBLISH is not state at all — forwarding it would
+// deliver the message twice to anything listening in both regions.
+func TestTheCommandsThatCarryNoDataAreRecognised(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		want classification
+	}{
+		{"PING", classHeartbeat},
+		{"MULTI", classTransactionBegin},
+		{"EXEC", classTransactionEnd},
+		{"REPLCONF", classIgnored},
+		{"PUBLISH", classIgnored},
+		{"SPUBLISH", classIgnored},
+		{"SELECT", classIgnored},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			class, _, err := table().classify(context.Background(), nil, cmd(c.name, "x"))
+			if err != nil {
+				t.Fatalf("classify: %v", err)
+			}
+			if class != c.want {
+				t.Errorf("%s classified as %v, want %v", c.name, class, c.want)
+			}
+		})
+	}
+}
+
+// TestAWriteReportsTheKeyThatNamesItsSlot is what decides which slot's marker
+// moves. Getting the key wrong puts the position in the wrong slot, and the
+// resume after a restart then skips or repeats a different key's writes.
+func TestAWriteReportsTheKeyThatNamesItsSlot(t *testing.T) {
+	class, key, err := table().classify(context.Background(), nil, cmd("SET", "user:1", "v"))
+	if err != nil {
+		t.Fatalf("classify: %v", err)
+	}
+	if class != classWrite {
+		t.Errorf("SET classified as %v, want write", class)
+	}
+	if string(key) != "user:1" {
+		t.Errorf("key = %q, want user:1", key)
+	}
+}
+
+// TestACommandTheTargetDoesNotKnowIsRefusedLoudly: guessing which key an
+// unknown command touches would put its marker in the wrong slot, and applying
+// it would fail anyway. The two sides running different versions or different
+// modules is a real deployment mistake, and it has to be said out loud rather
+// than skipped.
+func TestACommandTheTargetDoesNotKnowIsRefusedLoudly(t *testing.T) {
+	class, _, err := table().classify(context.Background(), nil, cmd("JSON.SET", "doc", "$", "1"))
+	if class != classRefused {
+		t.Errorf("classified as %v, want refused", class)
+	}
+	if err == nil {
+		t.Fatal("an unknown command was refused silently")
+	}
+	if !domain.IsUnrecoverable(err) {
+		t.Errorf("error is %v, want an unrecoverable one — retrying cannot teach "+
+			"the target a command it does not have", err)
+	}
+	if !strings.Contains(err.Error(), "JSON.SET") {
+		t.Errorf("error %q does not name the command", err)
+	}
+}
+
+// TestACommandMissingItsKeyIsRefused guards against a truncated or malformed
+// command silently becoming a no-op.
+func TestACommandMissingItsKeyIsRefused(t *testing.T) {
+	class, _, err := table().classify(context.Background(), nil, cmd("SET"))
+	if class != classRefused {
+		t.Errorf("classified as %v, want refused", class)
+	}
+	if err == nil {
+		t.Fatal("a command with no key was accepted")
+	}
+}
+
+// TestAnEmptyCommandIsIgnored: the stream carries protocol noise, and an empty
+// command is not something to stop replication over.
+func TestAnEmptyCommandIsIgnored(t *testing.T) {
+	class, key, err := table().classify(context.Background(), nil, cmd())
+	if err != nil {
+		t.Fatalf("classify: %v", err)
+	}
+	if class != classIgnored {
+		t.Errorf("classified as %v, want ignored", class)
+	}
+	if key != nil {
+		t.Errorf("key = %q, want none", key)
+	}
+}
