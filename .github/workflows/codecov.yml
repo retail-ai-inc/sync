@@ -107,6 +107,23 @@ jobs:
             sleep 1
           done
         
+      - name: Form the Redis clusters
+        run: |
+          # The comparison and the per-slot transaction tests need real clusters,
+          # not a standalone pair: a slot marker only means anything where slots
+          # exist. Three nodes each is the smallest set that covers 16,384 slots.
+          for port in 7001 7002 7003 7004 7005 7006; do
+            for i in {1..30}; do
+              nc -z 127.0.0.1 $port && break
+              echo "Waiting for the cluster node on $port..."
+              sleep 1
+            done
+          done
+          docker exec redis_cluster_1 redis-cli --cluster create \
+            127.0.0.1:7001 127.0.0.1:7002 127.0.0.1:7003 --cluster-yes
+          docker exec redis_cluster_4 redis-cli --cluster create \
+            127.0.0.1:7004 127.0.0.1:7005 127.0.0.1:7006 --cluster-yes
+
       - name: Run tests
         run: |
           # -coverpkg=./... is required, not a nicety: the packages are split by
@@ -119,6 +136,19 @@ jobs:
           # used to be, every line that only a real database reaches counted as
           # uncovered — which is most of the replication engines, the part of
           # this repository where a defect loses data.
+          # The Redis integration suite skips itself unless it is told which
+          # servers to use and given leave to empty them — it flushes both ends,
+          # so it refuses to guess. Nobody had set these, so every Redis
+          # integration test had been skipping silently since they were written,
+          # and that package sat at 36% while the rest of the engines were near
+          # 80%. The tests that were being skipped cover the reader, the initial
+          # copy, the applier and the comparison: the parts where a defect loses
+          # data rather than availability.
+          export SYNC_REDIS_SOURCE=127.0.0.1:6479
+          export SYNC_REDIS_TARGET=127.0.0.1:6480
+          export SYNC_REDIS_ALLOW_FLUSH=1
+          export SYNC_REDIS_SOURCE_CLUSTER=127.0.0.1:7001,127.0.0.1:7002,127.0.0.1:7003
+          export SYNC_REDIS_TARGET_CLUSTER=127.0.0.1:7004,127.0.0.1:7005,127.0.0.1:7006
           go test -race -tags integration -timeout 30m -coverpkg=./... -coverprofile=coverage.raw -covermode=atomic ./...
           # -coverpkg emits one entry per test binary for every block in the
           # repository, which makes the profile 32x larger. Collapse it by keeping
@@ -126,7 +156,11 @@ jobs:
           # total either way.
           {
             echo "mode: atomic"
-  X
+            awk 'NR > 1 {
+              count[$1 " " $2] = ($1 " " $2 in count && count[$1 " " $2] > $3) \
+                ? count[$1 " " $2] : $3
+            }
+            END { for (block in count) print block, count[block] }' coverage.raw
           } > coverage.txt
 
       - name: Upload results to Codecov

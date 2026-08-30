@@ -48,3 +48,59 @@ services:
     command: ["redis-server", "--appendonly", "yes"]
     ports:
       - "127.0.0.1:6480:6379"
+
+  # Two three-node clusters. The comparison and the per-slot transaction tests
+  # need real clusters rather than the standalone pair above: a slot marker only
+  # means anything where slots exist, and a cluster client splits a cross-slot
+  # transaction silently, which is the behaviour the applier is built around.
+  #
+  # Host networking because a cluster advertises the addresses its nodes were
+  # told to use, and a bridged node would advertise one the test cannot reach.
+  redis_cluster_1:
+    image: redis:7.0
+    container_name: redis_cluster_1
+    network_mode: host
+    command: ["redis-server", "--port", "7001", "--cluster-enabled", "yes",
+              "--cluster-config-file", "/tmp/n7001.conf",
+              "--cluster-node-timeout", "5000", "--appendonly", "no"]
+
+  redis_cluster_2:
+    image: redis:7.0
+    container_name: redis_cluster_2
+    network_mode: host
+    command: ["redis-server", "--port", "7002", "--cluster-enabled", "yes",
+              "--cluster-config-file", "/tmp/n7002.conf",
+              "--cluster-node-timeout", "5000", "--appendonly", "no"]
+
+  redis_cluster_3:
+    image: redis:7.0
+    container_name: redis_cluster_3
+    network_mode: host
+    command: ["redis-server", "--port", "7003", "--cluster-enabled", "yes",
+              "--cluster-config-file", "/tmp/n7003.conf",
+              "--cluster-node-timeout", "5000", "--appendonly", "no"]
+
+  redis_cluster_4:
+    image: redis:7.0
+    container_name: redis_cluster_4
+    network_mode: host
+    command: ["redis-server", "--port", "7004", "--cluster-enabled", "yes",
+              "--cluster-config-file", "/tmp/n7004.conf",
+              "--cluster-node-timeout", "5000", "--appendonly", "no"]
+
+  redis_cluster_5:
+    image: redis:7.0
+    container_name: redis_cluster_5
+    network_mode: host
+    command: ["redis-server", "--port", "7005", "--cluster-enabled", "yes",
+              "--cluster-config-file", "/tmp/n7005.conf",
+              "--cluster-node-timeout", "5000", "--appendonly", "no"]
+
+  redis_cluster_6:
+    image: redis:7.0
+    container_name: redis_cluster_6
+    network_mode: host
+    command: ["redis-server", "--port", "7006", "--cluster-enabled", "yes",
+              "--cluster-config-file", "/tmp/n7006.conf",
+              "--cluster-node-timeout", "5000", "--appendonly", "no"]
+

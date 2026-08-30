@@ -5,6 +5,7 @@ package redis
 import (
 	"context"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -25,11 +26,93 @@ func oneSource(t *testing.T) (string, *goredis.Client) {
 	if err := client.Ping(context.Background()).Err(); err != nil {
 		t.Fatalf("ping %s: %v", addr, err)
 	}
+
+	// Start from an empty source.
+	//
+	// These tests take a full resync, which means the master dumps everything it
+	// holds before the stream begins. Run on their own they pass; run after the
+	// crash and cluster suites, which leave thousands of keys behind, the dump
+	// grows until the read deadline is hit and the failure reads as "the source
+	// said nothing" — a connection problem that is not one. The suite has to
+	// give each of these a clean server, and the flush guard is already required
+	// to run any of this.
+	emptyOne(t, client)
 	return addr, client
 }
 
+// emptyOne clears one server, refusing unless the caller has said it may.
+func emptyOne(t *testing.T, client *goredis.Client) {
+	t.Helper()
+	if os.Getenv("SYNC_REDIS_ALLOW_FLUSH") != "1" {
+		t.Skip("set SYNC_REDIS_ALLOW_FLUSH=1 to let these tests empty the server they run against")
+	}
+	if err := client.FlushAll(context.Background()).Err(); err != nil {
+		t.Fatalf("empty the source: %v", err)
+	}
+}
+
 // masterOffset reads what the source thinks its own offset is.
-func masterOffset(t *testing.T, client *goredis.Client) int64 {
+// keepAcking acknowledges on a ticker, the way the real relay does.
+//
+// A diskless full resync ends with the master saying "waiting for REPLCONF ACK
+// from slave to enable streaming": it will not send a single command until the
+// replica acknowledges. The client sends one acknowledgement as soon as it has
+// read the data set, and that one can arrive before the master has set the flag
+// it is meant to clear — after which the master waits for the next one. In the
+// relay there always is a next one, because it acknowledges on a ticker. A test
+// driving the Stream directly has to do the same or it waits for ever, which is
+// how these two tests failed: "the source said nothing for 15s", against a
+// master that had the data and was holding it back.
+func keepAcking(t *testing.T, stream *Stream) func() {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				_ = stream.Ack(stream.Offset())
+			}
+		}
+	}()
+	return func() { close(done) }
+}
+
+// waitOnline waits until the master counts this replica as caught up.
+//
+// A diskless full resync sends the data set without a length, so the master
+// only marks the replica online once it has acknowledged. Writing before that
+// happens leaves the commands buffered against a replica the master still
+// considers loading, and the read then times out with "the source said nothing"
+// — a connection failure that is not one. Two of these tests failed that way on
+// redis:7.0, where diskless sync is the default.
+func waitOnline(t *testing.T, client *goredis.Client) {
+	t.Helper()
+	ctx := context.Background()
+	for attempt := 0; attempt < 100; attempt++ {
+		info, err := client.Info(ctx, "replication").Result()
+		if err != nil {
+			t.Fatalf("read the source's replication state: %v", err)
+		}
+		if strings.Contains(info, "state=online") {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatal("the master never reported this replica online, so anything written " +
+		"now would be buffered rather than streamed")
+}
+
+// masterOffsetOf reads the source's own write offset.
+//
+// Named apart from the production masterOffset in link.go: the two do the same
+// thing for different callers, and having both in one package broke the
+// integration build from the commit that added the production one until this
+// one was renamed. Nobody saw it because the integration suite only runs in CI.
+func masterOffsetOf(t *testing.T, client *goredis.Client) int64 {
 	t.Helper()
 	info, err := client.Info(context.Background(), "replication").Result()
 	if err != nil {
@@ -78,6 +161,8 @@ func TestTheOffsetAgreesWithARealMaster(t *testing.T) {
 	if _, err := stream.SkipRDB(ctx); err != nil {
 		t.Fatalf("SkipRDB: %v", err)
 	}
+	defer keepAcking(t, stream)()
+	waitOnline(t, client)
 	t.Logf("full resync from %s at offset %d", got.ReplID, got.Offset)
 
 	// A mixture that includes the commands the master rewrites on its way out,
@@ -103,7 +188,7 @@ func TestTheOffsetAgreesWithARealMaster(t *testing.T) {
 		t.Fatalf("SPOP: %v", err)
 	}
 
-	want := masterOffset(t, client)
+	want := masterOffsetOf(t, client)
 
 	// Read until the stream reaches the master's offset. PINGs and the commands
 	// this test issued both count.
@@ -164,6 +249,8 @@ func TestAPartialResyncPicksUpExactlyWhereItStopped(t *testing.T) {
 	if _, err := first.SkipRDB(ctx); err != nil {
 		t.Fatalf("SkipRDB: %v", err)
 	}
+	stopAcking := keepAcking(t, first)
+	waitOnline(t, client)
 
 	for i := 0; i < 20; i++ {
 		if err := client.Set(ctx, fmt.Sprintf("resume:before:%d", i), i, 0).Err(); err != nil {
@@ -180,6 +267,7 @@ func TestAPartialResyncPicksUpExactlyWhereItStopped(t *testing.T) {
 		}
 		stopped = command.End
 	}
+	stopAcking()
 	first.Close()
 
 	// More happens while nothing is connected.
@@ -208,7 +296,7 @@ func TestAPartialResyncPicksUpExactlyWhereItStopped(t *testing.T) {
 	}
 
 	// What was written during the gap has to arrive, once each.
-	want := masterOffset(t, client)
+	want := masterOffsetOf(t, client)
 	seen := map[string]int{}
 	deadline := time.Now().Add(20 * time.Second)
 	for second.Offset() < want && time.Now().Before(deadline) {
