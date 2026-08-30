@@ -1259,3 +1259,41 @@ func TestTheQueueReportsTheBytesItHolds(t *testing.T) {
 		t.Errorf("queue bytes = %v, want 2048", got)
 	}
 }
+
+// TestADuplicateKeyOnMongoDBIsPermanent is the gap a sharded-cluster run found.
+//
+// MySQL had SQLSTATE classification and Redis had its own list of refusals;
+// MongoDB had neither, so every error it returned was treated as "the target is
+// briefly unavailable, try again". Measured against a real pair: a document
+// that collided with a unique index on the target held its batch and retried it
+// for ever, with task_blocked at 0 and task_up at 1. Nothing was lost — the
+// position does not move — but nothing was replicated either, and the only sign
+// was the lag climbing. That is the failure this classification exists to turn
+// into a stop with a reason attached.
+func TestADuplicateKeyOnMongoDBIsPermanent(t *testing.T) {
+	for _, text := range []string{
+		`bulk write exception: write errors: [E11000 duplicate key error collection: bench.orders index: uq_u dup key: { u: "conflict" }]`,
+		"E11001 duplicate key on update",
+		"DocumentValidationFailure: Document failed validation",
+		"BSONObjectTooLarge: object to insert exceeds cappedMaxSize",
+	} {
+		if !permanentApplyFailure(errors.New(text)) {
+			t.Errorf("not classified as permanent, so it would be retried for ever:\n  %s", text)
+		}
+	}
+}
+
+// TestAnOrdinaryMongoDBFailureStaysRetryable. The other half of the line: a
+// target that is merely unreachable has to be waited out, not stopped for.
+func TestAnOrdinaryMongoDBFailureStaysRetryable(t *testing.T) {
+	for _, text := range []string{
+		"server selection error: context deadline exceeded",
+		"connection() error occurred during connection handshake",
+		"(NotWritablePrimary) not primary",
+		"socket was unexpectedly closed",
+	} {
+		if permanentApplyFailure(errors.New(text)) {
+			t.Errorf("classified as permanent, so a passing outage would stop the task:\n  %s", text)
+		}
+	}
+}

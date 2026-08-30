@@ -628,6 +628,25 @@ func permanentApplyFailure(err error) bool {
 		}
 	}
 
+	// MongoDB reports its own codes in the message rather than as SQLSTATE.
+	// The same reasoning applies: an event the target refuses on its merits will
+	// be refused every time it is offered, and retrying it for ever leaves a
+	// task that looks alive while nothing moves. Measured on a sharded pair: a
+	// duplicate key against a unique index on the target held one batch and
+	// retried it indefinitely with task_blocked at 0, so the only sign was the
+	// lag climbing — the exact shape the SQLSTATE classification was added to
+	// stop on the MySQL side.
+	for _, permanent := range []string{
+		"E11000",                    // duplicate key against an index the target holds
+		"E11001",                    // the older spelling of the same thing
+		"DOCUMENTVALIDATIONFAILURE", // a validator the target has and the source does not
+		"BSONOBJECTTOOLARGE",        // the document cannot be written at any time
+	} {
+		if strings.Contains(text, permanent) {
+			return true
+		}
+	}
+
 	for _, permanent := range []string{
 		"WRONGTYPE",        // the key holds another type on the target
 		"ERR VALUE IS NOT", // an increment against something that is not a number
