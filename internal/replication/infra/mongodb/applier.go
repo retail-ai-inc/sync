@@ -294,3 +294,22 @@ func noTransaction() bool {
 	}
 	return false
 }
+
+// describeNoTransaction reports what setting the escape hatch costs, or "" when
+// it is not set.
+//
+// Separate from noTransaction so it can be tested without a cluster, and said at
+// startup rather than left to whoever reads the code: the variable is read once,
+// deep in here, and a task started with it set looked exactly like a task
+// without it.
+func describeNoTransaction(bare bool, taskID int) string {
+	if !bare {
+		return ""
+	}
+	return fmt.Sprintf("[MongoDB] Task %d: SYNC_MONGO_NO_TRANSACTION is set, so batches "+
+		"are applied as bare bulk writes. A batch interrupted part way is then applied "+
+		"in part while the position moves past it, so the target is quietly missing "+
+		"changes and the next consistency check is what finds them — if one is running. "+
+		"Unset it unless the two-phase commit cost has been measured on this cluster and "+
+		"traded away deliberately, and set SYNC_VERIFY_INTERVAL while it is set.", taskID)
+}

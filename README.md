@@ -223,6 +223,7 @@ loudly instead of filling the disk.
 | `SYNC_LAG_ALERT_SECONDS` | Replication lag, in seconds, past which a task is reported as alerting. |
 | `SYNC_MONGO_BUFFER_LIMIT_BYTES` | Cap on the MongoDB change buffer directory. |
 | `SYNC_MONGO_FLUSH_INTERVAL` | How long a partly filled batch of MongoDB changes waits before being applied, e.g. `200ms`. Default `500ms`. Lower is a tighter recovery point at the cost of more, smaller writes. |
+| `SYNC_MONGO_NO_TRANSACTION` | `1` applies each MongoDB batch as a bare bulk write rather than inside a transaction. A batch interrupted part way is then applied in part while the position moves past it, so the target is quietly missing changes. It exists because a batch spanning shards is a two-phase commit and that cost is a measurement, not an opinion — set it only once the cost has been measured on the cluster in question, and run the consistency check while it is set. Startup warns whenever it is on. |
 | `SYNC_VERIFY_INTERVAL` | How often to compare each table against its source, e.g. `1h`. Unset means never. |
 | `SYNC_VERIFY_REPAIR` | `true` to also repair the differences the comparison finds, rather than only report them. |
 | `SYNC_MYSQL_CHECKPOINT_INTERVAL` | How often the MySQL binlog position is recorded, e.g. `1s`. Default `200ms`; `0` records every transaction, which costs a round trip and an fsync on the target for each one. After an unclean stop, replication replays at most this interval. |

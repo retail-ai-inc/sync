@@ -238,6 +238,19 @@ func (s *Syncer) Start(ctx context.Context) error {
 	}
 	defer reader.Close()
 
+	// An environment variable can turn off the guarantee the rest of this
+	// pipeline is built on, so it says so where somebody will see it. A batch
+	// applied outside a transaction can be half applied, and the position is
+	// then recorded past changes the target does not have: the copy is quietly
+	// wrong, and the next consistency check is what finds it, if one is running.
+	//
+	// Nothing said this before. The variable is read once, deep in the applier,
+	// and a task started with it set looked exactly like a task without it.
+	bare := noTransaction()
+	if warning := describeNoTransaction(bare, s.cfg.ID); warning != "" {
+		s.logger.Warn(warning)
+	}
+
 	runner := &pipeline.Runner{
 		Reader: reader,
 		Applier: &Applier{
@@ -247,7 +260,7 @@ func (s *Syncer) Start(ctx context.Context) error {
 			Checkpoints:    store,
 			Logger:         s.logger,
 			Labels:         labels,
-			NoTransaction:  noTransaction(),
+			NoTransaction:  bare,
 		},
 		Snapshotter: &Snapshotter{
 			Syncer:   inner,

@@ -1,6 +1,7 @@
 package mongodb
 
 import (
+	"strings"
 	"testing"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -216,3 +217,48 @@ func (errNoSuchCommand) Error() string { return "(CommandNotFound) no such comma
 type errPlainFailure struct{}
 
 func (errPlainFailure) Error() string { return "E11000 duplicate key error" }
+
+// TestTheEscapeHatchSaysWhatItCosts covers the one environment variable that can
+// turn off the guarantee the rest of this pipeline is built on.
+//
+// It was read once, deep in the applier, and nothing anywhere said it was on: a
+// task applying batches without a transaction looked exactly like a task
+// applying them with one, right up until a batch was interrupted part way and
+// the position moved past changes the target did not hold.
+func TestTheEscapeHatchSaysWhatItCosts(t *testing.T) {
+	if got := describeNoTransaction(false, 7); got != "" {
+		t.Errorf("a task with the default settings warned about them: %q", got)
+	}
+
+	warning := describeNoTransaction(true, 7)
+	if warning == "" {
+		t.Fatal("nothing was said about a task running without transactions")
+	}
+	for _, want := range []string{
+		"SYNC_MONGO_NO_TRANSACTION", // what to unset
+		"Task 7",                    // which task
+		"SYNC_VERIFY_INTERVAL",      // what to turn on while it is set
+	} {
+		if !strings.Contains(warning, want) {
+			t.Errorf("the warning does not mention %q, so it does not say what to do "+
+				"about it: %q", want, warning)
+		}
+	}
+}
+
+// TestTheEscapeHatchIsOffUnlessItIsAskedFor guards the default. It is read from
+// the environment, so a typo must not be taken as consent.
+func TestTheEscapeHatchIsOffUnlessItIsAskedFor(t *testing.T) {
+	for _, value := range []string{"", "0", "no", "false", "off", "yes please", " "} {
+		t.Setenv("SYNC_MONGO_NO_TRANSACTION", value)
+		if noTransaction() {
+			t.Errorf("%q turned off batch atomicity; only an explicit yes may do that", value)
+		}
+	}
+	for _, value := range []string{"1", "true", "yes", " TRUE ", "Yes"} {
+		t.Setenv("SYNC_MONGO_NO_TRANSACTION", value)
+		if !noTransaction() {
+			t.Errorf("%q was not taken as asking for bare bulk writes", value)
+		}
+	}
+}
