@@ -1,29 +1,25 @@
-// The metric catalogue, modelled on Debezium's names and its three contexts —
-// snapshot, streaming, schema history — so an operator who has run Debezium
-// need not learn a second vocabulary. Two departures.
+// The metric catalogue, on Debezium's names and its three contexts — snapshot,
+// streaming, schema history. Two departures: durations are seconds, because
+// Prometheus expects base units; and Debezium's string attributes are not
+// labels, because a GTID set changes every transaction and would leak
+// cardinality.
 package metrics
 
 import "time"
 
-// Whether the task is running at all, and whether it is running because
-// somebody restarted it. Debezium answers this through Kafka Connect's
-// connector state rather than an MBean; the distinction between "stopped and
-// restarted" and "stopped and staying stopped" is the one an operator acts on,
-// so it is a metric here.
+// Whether the task is running, and whether it is running because somebody
+// restarted it. "Stopped and restarted" against "stopped and staying stopped"
+// is the distinction an operator acts on.
 const (
 	TaskUp = "sync_task_up"
-	// TaskBlocked is 1 while a task is stopped for a reason retrying cannot fix.
-	//
-	// No Debezium equivalent: a failed connector is FAILED whatever the cause,
-	// and the two need separate alerts. A blocked task needs somebody to look
-	// at one event; a task that is merely down needs the process restarted.
+	// TaskBlocked is 1 while a task is stopped for a reason retrying cannot fix. A
+	// blocked task needs somebody to look at one event; one merely down needs a
+	// restart.
 	TaskBlocked   = "sync_task_blocked"
 	RestartsTotal = "sync_task_restarts_total"
-	// Connected is 1 while the source stream is established.
-	//
-	// Debezium: Connected. It is not the same as TaskUp — a task can be up and
-	// disconnected while it retries, and that is exactly the window where the
-	// source's log is rolling past a position nobody is reading.
+	// Connected is 1 while the source stream is established. Not the same as
+	// TaskUp: a task can be up and disconnected while it retries, which is exactly
+	// when the source's log rolls past a position nobody is reading.
 	Connected = "sync_source_connected"
 
 	helpTaskUp    = "1 while the task is replicating, 0 once it has stopped"
@@ -52,58 +48,45 @@ func setBool(name, help string, labels Labels, on bool) {
 	Default.SetGauge(name, help, labels, v)
 }
 
-// What the stream is delivering and how far behind it is. This is the context
-// an operator watches once replication is steady.
+// What the stream is delivering and how far behind it is — the context an
+// operator watches once replication is steady.
 const (
-	// LagSeconds is how far behind the source the target is, measured from the
-	// timestamp the source put on the change.
-	//
-	// Debezium: MilliSecondsBehindSource, in seconds.
+	// LagSeconds is how far behind the target is, from the timestamp the source
+	// put on the change. Debezium: MilliSecondsBehindSource, in seconds.
 	LagSeconds = "sync_replication_lag_seconds"
-	// ReadLagSeconds is how old an event was when the syncer read it. The
-	// difference between this and LagSeconds is the syncer's own backlog rather
-	// than the source's or the network's.
+	// ReadLagSeconds is how old an event was when the syncer read it; the gap to
+	// LagSeconds is the syncer's own backlog rather than the source's.
 	ReadLagSeconds = "sync_source_event_age_seconds"
-	// LastEventAgeSeconds is how long since anything arrived, heartbeats
-	// included (Debezium: MilliSecondsSinceLastEvent). The applied lag cannot
-	// answer this: a stream that stops delivering leaves it frozen, and an alert
-	// on a frozen gauge never fires.
+	// LastEventAgeSeconds is how long since anything arrived, heartbeats included.
+	// The applied lag cannot answer this: it freezes when delivery stops, and an
+	// alert on a frozen gauge never fires.
 	LastEventAgeSeconds = "sync_source_last_event_age_seconds"
 
-	// EventsTotal counts source events by operation. Debezium keeps one
-	// attribute per operation; an op label is the Prometheus spelling of it.
+	// EventsTotal counts source events by operation; Debezium keeps one attribute
+	// per operation, and an op label is the Prometheus spelling of it.
 	EventsTotal = "sync_source_events_total"
-	// EventsFilteredTotal counts events dropped because nothing maps them.
-	//
-	// Debezium: NumberOfEventsFiltered.
+	// EventsFilteredTotal counts events dropped because nothing maps them
+	// (Debezium: NumberOfEventsFiltered).
 	EventsFilteredTotal = "sync_source_events_filtered_total"
-	// EventsSkippedTotal counts events the reader could not interpret and
-	// stepped over.
-	//
-	// Debezium: NumberOfSkippedEvents.
+	// EventsSkippedTotal counts events the reader could not interpret (Debezium:
+	// NumberOfSkippedEvents).
 	EventsSkippedTotal = "sync_source_events_skipped_total"
-	// TransactionsCommittedTotal counts source transactions carried through.
-	// Paired with EventsTotal it catches a whole transaction going missing —
-	// a checkpoint that moved past rows nobody read, which this shipped with.
+	// TransactionsCommittedTotal counts source transactions carried through. With
+	// EventsTotal it catches a whole transaction going missing, which this shipped
+	// with.
 	TransactionsCommittedTotal = "sync_source_transactions_committed_total"
-	// TransactionsRolledBackTotal counts source transactions rolled back.
-	//
-	// Debezium: NumberOfRolledBackTransactions.
+	// TransactionsRolledBackTotal counts source transactions rolled back
+	// (Debezium: NumberOfRolledBackTransactions).
 	TransactionsRolledBackTotal = "sync_source_transactions_rolled_back_total"
-	// CapturedTables is how many tables or collections the task is watching.
-	//
-	// Debezium: CapturedTables.
+	// CapturedTables is how many objects the task watches (Debezium:
+	// CapturedTables).
 	CapturedTables = "sync_captured_tables"
-	// DisconnectsTotal counts source stream drops.
-	//
-	// Debezium: NumberOfDisconnects.
+	// DisconnectsTotal counts source stream drops (Debezium: NumberOfDisconnects).
 	DisconnectsTotal = "sync_source_disconnects_total"
 
-	// AppliedTotal counts changes written to the target.
-	//
-	// No Debezium equivalent — it hands events to Kafka and the sink is
-	// somebody else's problem. Here the target is the point of the exercise, so
-	// what reached it is counted separately from what was read.
+	// AppliedTotal counts changes written to the target. No Debezium equivalent:
+	// it hands events to Kafka, whereas here the target is the point of the
+	// exercise.
 	AppliedTotal = "sync_changes_applied_total"
 	FailedTotal  = "sync_changes_failed_total"
 
@@ -121,17 +104,13 @@ const (
 	helpFailed       = "Changes the target refused"
 )
 
-// The op label uses the words the domain already uses — insert, update,
-// delete, schema. Debezium says "create" where this says "insert"; renaming to
-// match would leave the metric disagreeing with every log line and every error
-// message in this codebase, which is a worse kind of confusion than the one it
-// would fix.
+// The op label uses the domain's own words. Debezium says "create" for
+// "insert", and renaming would leave the metric disagreeing with every log line
+// here.
 
-// EventCounters holds one prepared label set per operation.
-//
-// Counting an event is on the hot path — a thousand a second is an ordinary
-// afternoon — and building a label map per event would allocate a map per
-// event. The label sets are built once, when the task starts.
+// EventCounters holds one prepared label set per operation, built at task
+// start: counting is on the hot path, and a label map per event would allocate
+// per event.
 type EventCounters struct {
 	byOp map[string]Labels
 	base Labels
@@ -151,10 +130,8 @@ func (c *EventCounters) Count(op string, n int) {
 	}
 	labels, ok := c.byOp[op]
 	if !ok {
-		// An operation nobody prepared for. Counting it under its own name
-		// costs one allocation and is still better than not counting it: an
-		// operation this code does not know about is exactly what somebody
-		// needs to see.
+		// An operation nobody prepared for, counted under its own name — one
+		// allocation, and an unknown operation is exactly what somebody needs to see.
 		labels = withLabel(c.base, "op", op)
 		c.byOp[op] = labels
 	}
@@ -171,9 +148,8 @@ func SetLastEventAge(labels Labels, seconds float64) {
 	Default.SetGauge(LastEventAgeSeconds, helpLastEventAge, labels, seconds)
 }
 
-// CountEvent counts source events of one operation, for callers that count
-// rarely enough not to care about the allocation. On a hot path use
-// EventCounters instead.
+// CountEvent counts events of one operation for callers that count rarely; on a
+// hot path use EventCounters.
 func CountEvent(labels Labels, op string, n int) {
 	if n == 0 {
 		return
@@ -217,8 +193,8 @@ func Applied(labels Labels, n int) { Default.AddCounter(AppliedTotal, helpApplie
 
 func Failed(labels Labels, n int) { Default.AddCounter(FailedTotal, helpFailed, labels, float64(n)) }
 
-// withLabel copies a label set with one more label, so a caller's map is never
-// mutated behind its back — the same map is usually held for the task's life.
+// withLabel copies a label set with one more label, so a caller's map — usually
+// held for the task's life — is never mutated behind its back.
 func withLabel(labels Labels, name, value string) Labels {
 	out := make(Labels, len(labels)+1)
 	for k, v := range labels {
@@ -229,21 +205,18 @@ func withLabel(labels Labels, name, value string) Labels {
 }
 
 // Where in the source's log the task has got to. Only a number can be graphed,
-// so the position is bytes; slow-changing strings go on an info series and the
-// GTID set stays in the logs, where it cannot leak cardinality.
+// so the position is bytes; slow strings go on an info series and the GTID set
+// stays in the logs.
 const (
-	// SourcePositionBytes is the offset read to inside the source's current log
-	// segment. It is not cumulative across segments, so it drops to near zero
-	// when MySQL rotates a binlog — the shape mysqld_exporter also publishes.
-	// Read it with SourceInfo's file label; alert on lag and retention instead.
+	// SourcePositionBytes is the offset read to inside the current log segment, so
+	// it drops to near zero when MySQL rotates a binlog — the shape
+	// mysqld_exporter publishes. Alert on lag and retention instead.
 	SourcePositionBytes = "sync_source_position_bytes"
-	// AppliedPositionBytes is the position the target has actually recorded.
-	// Within one log segment the gap between the two is the backlog in the
-	// units the source measures it in, which is what decides whether a stopped
-	// task can still resume.
+	// AppliedPositionBytes is the position the target recorded. Within one segment
+	// the gap between the two is the backlog in the source's own units.
 	AppliedPositionBytes = "sync_applied_position_bytes"
-	// SourceInfo is 1, carrying the slow-moving parts of the position as
-	// labels: the log file the stream is in and the server it came from.
+	// SourceInfo is 1, carrying the slow-moving parts of the position as labels:
+	// the log file and the server it came from.
 	SourceInfo = "sync_source_info"
 
 	helpSourcePosition  = "Byte offset read to within the source's current log segment"
@@ -259,34 +232,27 @@ func SetAppliedPosition(labels Labels, offset int64) {
 	Default.SetGauge(AppliedPositionBytes, helpAppliedPosition, labels, float64(offset))
 }
 
-// SetSourceInfo publishes the identity of the position being read.
-//
-// Only pass values that change on the order of hours — a log file name, a
-// server id. Anything that changes per transaction makes a new series every
-// time and leaks cardinality until the scrape fails.
+// SetSourceInfo publishes the identity of the position. Only values that change
+// on the order of hours: anything per-transaction makes a new series each time
+// and leaks cardinality until the scrape fails.
 func SetSourceInfo(labels Labels, file, server string) {
 	with := withLabel(withLabel(labels, "file", file), "server", server)
 	Default.SetGauge(SourceInfo, helpSourceInfo, with, 1)
 }
 
-// The reader's hand-off to the applier. Debezium exposes QueueTotalCapacity,
-// QueueRemainingCapacity, CurrentQueueSizeInBytes and MaxQueueSizeInBytes; a
-// queue that is persistently full is the signal that the target, not the
-// source, is the limit.
+// The reader's hand-off to the applier. A queue that is persistently full is
+// the signal that the target, not the source, is the limit.
 const (
 	QueueCapacityEvents = "sync_queue_capacity_events"
-	// QueueUsedEvents is how many it holds now. Debezium reports the remainder
-	// instead; used is the direction that reads as "pressure" on a graph, and
-	// the remainder is one subtraction away.
+	// QueueUsedEvents is how many it holds now. Debezium reports the remainder;
+	// used is the direction that reads as pressure on a graph.
 	QueueUsedEvents = "sync_queue_used_events"
-	// QueueBytes is how much unapplied change data is held, in memory and on
-	// disk together.
+	// QueueBytes is how much unapplied change data is held, in memory and on disk
+	// together.
 	QueueBytes = "sync_queue_bytes"
-	// BufferBytes is the part of that which is on local disk.
-	//
-	// No Debezium equivalent — it has no disk buffer, its queue is bounded and
-	// it applies backpressure to the source instead. Here the Redis path spools
-	// to disk, and disk that fills is an outage with no warning otherwise.
+	// BufferBytes is the part on local disk. No Debezium equivalent: its queue is
+	// bounded and it pushes back on the source, whereas the Redis path spools, and
+	// a full disk is an outage with no other warning.
 	BufferBytes = "sync_buffer_bytes"
 
 	helpQueueCapacity = "Events the reader-to-applier queue may hold"
@@ -304,18 +270,17 @@ func SetQueueBytes(labels Labels, bytes int64) {
 	Default.SetGauge(QueueBytes, helpQueueBytes, labels, float64(bytes))
 }
 
-// The initial copy. Debezium's snapshot context answers "is it running, how far
-// has it got, did it finish or give up" — questions this codebase could not
-// answer at all, which mattered the moment a Redis shard had to be re-copied
-// because the source's backlog had rolled past its position.
+// The initial copy: is it running, how far has it got, did it finish or give
+// up. None of it could be answered before, which mattered the first time a
+// Redis shard had to be re-copied.
 const (
 	SnapshotRunning          = "sync_snapshot_running"
 	SnapshotCompleted        = "sync_snapshot_completed"
 	SnapshotAborted          = "sync_snapshot_aborted"
 	SnapshotDurationSeconds  = "sync_snapshot_duration_seconds"
 	SnapshotRowsScannedTotal = "sync_snapshot_rows_scanned_total"
-	// SnapshotObjectsTotal is how many tables, collections or shards the copy
-	// covers, and SnapshotObjectsRemaining how many it has left.
+	// SnapshotObjectsTotal is how many objects the copy covers,
+	// SnapshotObjectsRemaining how many are left.
 	SnapshotObjectsTotal     = "sync_snapshot_objects_total"
 	SnapshotObjectsRemaining = "sync_snapshot_objects_remaining"
 
@@ -355,17 +320,15 @@ func SnapshotFinished(labels Labels, completed bool, elapsed float64) {
 	}
 }
 
-// Schema changes. Debezium's schema-history context reports what it has
-// recovered and applied; here the number that matters is how many DDL
-// statements have been carried to the target and when the last one landed,
-// because a schema change that did not arrive is how rows silently land in the
-// wrong columns.
+// Schema changes. What matters is how many DDL statements reached the target
+// and when the last one landed, because one that did not arrive is how rows
+// land in the wrong columns.
 const (
 	SchemaChangesTotal     = "sync_schema_changes_applied_total"
 	SchemaChangeAgeSeconds = "sync_schema_last_change_age_seconds"
-	// SchemaChangesRefusedTotal counts schema changes deliberately not carried —
-	// a DROP that would empty the target, a rename that would orphan it. A
-	// decision nobody can see is a decision nobody can audit.
+	// SchemaChangesRefusedTotal counts schema changes deliberately not carried — a
+	// DROP that would empty the target. A decision nobody can see cannot be
+	// audited.
 	SchemaChangesRefusedTotal = "sync_schema_changes_refused_total"
 
 	helpSchemaChanges = "Schema changes carried through to the target"
@@ -389,8 +352,8 @@ func CountSchemaRefused(labels Labels, reason string) {
 }
 
 // How long a stopped task has before its position is unusable. On Memorystore
-// the backlog measured five to twenty kilobytes — a fraction of a second at
-// load — so this decides whether a restart is routine or means a re-copy.
+// the backlog measured five to twenty kilobytes, a fraction of a second at
+// load.
 const (
 	RetentionWindowSeconds = "sync_source_retention_window_seconds"
 	// RetentionHeadroomSeconds is that window less the current lag: how long

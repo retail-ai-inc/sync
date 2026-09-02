@@ -23,20 +23,17 @@ import (
 	"github.com/retail-ai-inc/sync/internal/replication/infra/checkpoint"
 )
 
-// Reader turns one MySQL server's binlog into a stream of events. One stream
-// covers every database the task maps: the binlog is a single log per server,
-// so a reader per database opened several dump connections to the same bytes.
-//
-// It is a canal.EventHandler as well as a domain.Reader — canal calls it back on
-// its own goroutine, and Next hands the events over a channel.
+// Reader turns one MySQL server's binlog into a stream of events, covering
+// every database the task maps: the binlog is one log per server. It is a
+// canal.EventHandler too — canal calls it back on its own goroutine.
 type Reader struct {
 	canal.DummyEventHandler
 
 	Config config.SyncConfig
 	Logger logrus.FieldLogger
 	Labels metrics.Labels
-	// AllowKeyless replicates a table with no primary key on a best-effort
-	// basis rather than refusing it.
+	// AllowKeyless replicates a table with no primary key best-effort rather than
+	// refusing it.
 	AllowKeyless bool
 
 	canal *canal.Canal
@@ -44,65 +41,54 @@ type Reader struct {
 
 	out  chan *domain.Event
 	fail chan error
-	// done is closed by Close, before the canal is, so an event the canal hands
-	// over on its way out has somewhere to go other than a channel nobody is
-	// reading. Closing out instead was a crash: canal.Close calls OnPosSynced
-	// one last time, and the goroutine below had usually closed out by then.
+	// done is closed by Close before the canal is, so an event handed over on the
+	// way out has somewhere to go. Closing out instead crashed: canal.Close calls
+	// OnPosSynced once more.
 	done chan struct{}
 
-	// tx holds the events of the source transaction being read. They are handed
-	// over together, at the boundary, so a batch can never be cut inside one.
+	// tx holds the source transaction being read, handed over together at the
+	// boundary so a batch is never cut inside one.
 	tx []*domain.Event
 
 	// source names the server the positions belong to, without credentials.
 	source string
 	flavor string
 
-	// lastGTID is the newest GTID set the stream has reported, kept so a
-	// checkpoint written without one does not throw away the one before it.
-	// canal does not carry a GTID set on every position it reports. Recording
-	// only what the current call carried meant one such call overwrote the stored
-	// GTID with nothing, and a restart then resumed from file and offset instead
-	// — which canal in turn does not track GTIDs for, so every later checkpoint
-	// lost it too.
+	// lastGTID is the newest GTID set reported, kept because canal omits it on
+	// some positions: recording only the current call overwrote it with nothing,
+	// and the restart fell back to file and offset for good.
 	lastGTID string
 
-	// lastSchemaChange is when a schema change was last carried through, so its
-	// age can be published without a timer of its own.
+	// lastSchemaChange is when a schema change last went through, so its age needs
+	// no timer.
 	lastSchemaChange time.Time
 
-	// lastLogFile is the source log file the info series was last published
-	// for, so that series is written when it changes rather than per event.
+	// lastLogFile is the file the info series was last published for, so it is
+	// written on change rather than per event.
 	lastLogFile string
 
-	// inTransaction says a GTID event has opened a transaction whose end has not
-	// been seen yet, so no position reported in the meantime is a boundary.
-	// canal reports a position at the BEGIN of every transaction, and the GTID
-	// set it carries already counts that transaction as done: go-mysql adds the
-	// GTID to the set when it reads the GTID event, which comes before the rows.
-	// Recording that position hands a restart a checkpoint that points past rows
-	// this process has not read yet, and they are then never read at all.
+	// inTransaction says a GTID event opened a transaction whose end is unseen, so
+	// no position until then is a boundary: canal reports one at BEGIN whose GTID
+	// set already counts the transaction as done, and recording it steps over rows
+	// nobody read.
 	inTransaction bool
 
-	// resumed says the stream started from a stored position rather than from
-	// the end of the log, which is what puts rows written before a schema change
-	// at risk of being decoded against the shape that change produced.
+	// resumed says the stream started from a stored position, which is what puts
+	// rows written before a schema change at risk of being decoded against the new
+	// shape.
 	resumed bool
-	// appliedSince names the tables that have had rows handed over since this
-	// reader opened. A reordering statement arriving after them means those rows
-	// were read against the wrong shape.
+	// appliedSince names tables that have had rows handed over this run. A
+	// reordering statement arriving after them means those rows were read against
+	// the wrong shape.
 	appliedSince map[string]bool
 
 	closeOnce sync.Once
 	stop      func()
 }
 
-// heartbeatEvery is how often a stream with nothing to say says so. A reader
-// that delivers nothing looks exactly like one that is up to date, so
-// "replication has stopped" was the one condition the monitoring could not
-// see. canal reports a synced position on its own timer even when no rows are
-// changing, which is a liveness signal already in hand: turned into an event
-// it costs nothing and proves the link end to end.
+// heartbeatEvery is how often a silent stream says so, built from the position
+// canal reports on its own timer: without it "replication has stopped" was
+// invisible.
 const heartbeatEvery = 10 * time.Second
 
 // Open starts the binlog stream at a position, or at the current end when there
@@ -137,33 +123,31 @@ func (r *Reader) Open(ctx context.Context, from domain.Position) error {
 		return fmt.Errorf("read the stored position: %w", err)
 	}
 
-	// A stream that is starting begins outside any transaction, whatever the
-	// one before it was in the middle of when it stopped.
+	// A starting stream begins outside any transaction, whatever the last one was
+	// doing.
 	r.inTransaction = false
 
 	metrics.SetConnected(r.Labels, true)
 	metrics.SetCapturedTables(r.Labels, r.capturedTables())
 
 	go func() {
-		// out is deliberately not closed here. The stream ends by way of fail,
-		// which Next already waits on; closing out as well raced with the final
-		// OnPosSynced that canal.Close makes, and lost — a send on a closed
-		// channel takes the whole process down, every other task with it.
+		// out is deliberately not closed here: the stream ends by way of fail, and
+		// closing out raced with canal.Close's final OnPosSynced — a send on a closed
+		// channel takes the process down.
 		switch {
 		case from.IsZero():
-			// Nothing recorded: the caller has already made its copy and has no
-			// coordinates, so start where the log is now.
+			// Nothing recorded: the caller has made its copy and has no coordinates, so
+			// start where the log is now.
 			r.fail <- c.Run()
 		case stored.gtidSet() != nil:
-			// Preferred: the transactions themselves, which stay meaningful
-			// across a failover to a different server.
+			// Preferred: the transactions themselves, which survive a failover to
+			// another server.
 			r.lastGTID = stored.GTID
 			r.fail <- c.StartFromGTID(stored.gtidSet())
 		default:
-			// File and offset name a place on one server and nowhere else. A source
+			// File and offset name a place on one server and nowhere else, so a source
 			// that keeps GTIDs and a position that does not is a task that will not
-			// survive its next failover, and nothing else says so — the task looks
-			// healthy right up until the position is meaningless.
+			// survive its next failover.
 			r.Logger.Warnf("[MySQL] Resuming from a file and offset rather than a " +
 				"GTID. That position names a place on this server and nowhere else, " +
 				"so a failover leaves it pointing at nothing and this shard has to be " +
@@ -196,8 +180,8 @@ func (r *Reader) Next(ctx context.Context) (*domain.Event, error) {
 // Close stops the stream. Calling it more than once is safe.
 func (r *Reader) Close() error {
 	r.closeOnce.Do(func() {
-		// Before the canal, so that the event it hands over as it closes is
-		// dropped rather than pushed at a pipeline that has stopped reading.
+		// Before the canal, so the event it hands over as it closes is dropped rather
+		// than pushed at a pipeline that has stopped reading.
 		if r.done != nil {
 			close(r.done)
 		}
@@ -211,11 +195,9 @@ func (r *Reader) Close() error {
 	return nil
 }
 
-// capturedTables counts the objects this task watches.
-//
-// Debezium: CapturedTables. It is worth publishing because the number changing
-// on its own is how a mapping edit that dropped a table shows up — the table
-// stops being replicated, and nothing else says so.
+// capturedTables counts the objects this task watches (Debezium:
+// CapturedTables) — the number moving on its own is how a mapping edit that
+// dropped a table shows up.
 func (r *Reader) capturedTables() int {
 	n := 0
 	for _, mapping := range r.Config.Mappings {
@@ -224,9 +206,8 @@ func (r *Reader) capturedTables() int {
 	return n
 }
 
-// errReaderClosed says an event arrived after the reader was closed. It is not
-// a failure: the position it belongs to was never recorded, so the event is
-// read again next time.
+// errReaderClosed says an event arrived after Close. Not a failure: its
+// position was never recorded, so it is read again next time.
 var errReaderClosed = errors.New("the reader has been closed")
 
 func (r *Reader) classify(err error) error {
@@ -235,8 +216,8 @@ func (r *Reader) classify(err error) error {
 	}
 	metrics.CountDisconnect(r.Labels)
 	metrics.SetConnected(r.Labels, false)
-	// A purged binlog cannot be waited out: the position no longer exists, so
-	// every attempt fails the same way and a fresh copy is the only way forward.
+	// A purged binlog cannot be waited out: the position is gone, so a fresh copy
+	// is the only way forward.
 	if reason, purged := positionNoLongerAvailable(err); purged {
 		return domain.Unrecoverable("%s", reason)
 	}
@@ -244,7 +225,7 @@ func (r *Reader) classify(err error) error {
 }
 
 // canalConfig builds the stream's configuration, covering every database the
-// task maps rather than one of them.
+// task maps.
 func (r *Reader) canalConfig() (*canal.Config, error) {
 	cfg := canal.NewDefaultConfig()
 	if strings.EqualFold(r.Config.Type, "mariadb") {
@@ -263,8 +244,8 @@ func (r *Reader) canalConfig() (*canal.Config, error) {
 	cfg.TLSConfig = tlsFor(parsed)
 	cfg.Dump.ExecutionPath = r.Config.DumpExecutionPath
 
-	// canal reports a synced position on this timer even when nothing is
-	// changing, which is what the heartbeat is built from.
+	// canal reports a synced position on this timer even when nothing changes,
+	// which is what the heartbeat is built from.
 	cfg.HeartbeatPeriod = heartbeatEvery
 
 	includes, err := r.includeTables()
@@ -275,7 +256,7 @@ func (r *Reader) canalConfig() (*canal.Config, error) {
 	return cfg, nil
 }
 
-// includeTables lists the tables the stream should carry, across every mapped
+// includeTables lists the tables the stream carries, across every mapped
 // database.
 func (r *Reader) includeTables() ([]string, error) {
 	var includes []string
@@ -293,9 +274,8 @@ func (r *Reader) includeTables() ([]string, error) {
 					"either, so there is nothing to read from")
 		}
 		if len(mapping.Tables) == 0 {
-			// Nothing listed for this database, so replicate all of it —
-			// including tables created after the task started, which used simply
-			// not to be replicated with no warning anywhere.
+			// Nothing listed for this database, so replicate all of it, including tables
+			// created after the task started.
 			add(&includes, seen, fmt.Sprintf("%s\\..*", db))
 			continue
 		}
@@ -322,9 +302,8 @@ func add(list *[]string, seen map[string]bool, pattern string) {
 	*list = append(*list, pattern)
 }
 
-// converter is the handler whose only job is to render statements. Its target
-// connection is never set: the statements go to the sink instead of being
-// applied here.
+// converter renders statements only. Its target connection is never set: the
+// statements go to the sink instead of being applied here.
 func (r *Reader) converter() *MyEventHandler {
 	discovering := false
 	for _, mapping := range r.Config.Mappings {
@@ -364,13 +343,12 @@ func (r *Reader) OnRow(e *canal.RowsEvent) error {
 	}
 	if len(r.tx) == before {
 		// The converter produced nothing, so no mapping covers this table.
-		// Debezium: NumberOfEventsFiltered.
 		metrics.CountFiltered(r.Labels, len(e.Rows))
 		return nil
 	}
 
-	// The namespace, key and source time are the same for every statement the
-	// event produced, and the converter does not know about events.
+	// Namespace, key and source time are the same for every statement the event
+	// produced, and the converter does not know about events.
 	ns := domain.Namespace{DB: e.Table.Schema, Object: e.Table.Name}
 	at := time.Time{}
 	if e.Header != nil && e.Header.Timestamp > 0 {
@@ -387,26 +365,23 @@ func (r *Reader) OnRow(e *canal.RowsEvent) error {
 	return nil
 }
 
-// OnXID marks the end of a source transaction, which is the only place a batch
-// may be cut. The whole transaction is handed over here, together.
+// OnXID marks the end of a source transaction, the only place a batch may be
+// cut. The whole transaction is handed over here.
 func (r *Reader) OnXID(header *replication.EventHeader, pos mysql.Position) error {
 	r.inTransaction = false
 	return r.handOver(pos, nil, header)
 }
 
-// OnGTID marks the start of a source transaction.
-//
-// It carries no rows of its own; what it establishes is that everything until
-// the matching XID belongs to one transaction, and so is not a place a position
-// may be recorded.
+// OnGTID marks the start of a source transaction: it carries no rows, but
+// everything until the matching XID belongs to one transaction and is no place
+// to record a position.
 func (r *Reader) OnGTID(_ *replication.EventHeader, _ mysql.BinlogGTIDEvent) error {
 	r.inTransaction = true
 	return nil
 }
 
-// OnDDL turns a schema change into an event of its own. A DDL is its own
-// transaction boundary, and nothing may be reordered across it: a row using a
-// new column cannot land before the column exists.
+// OnDDL turns a schema change into its own event and its own barrier: a row
+// using a new column cannot land before the column exists.
 func (r *Reader) OnDDL(header *replication.EventHeader, pos mysql.Position, e *replication.QueryEvent) error {
 	if e == nil {
 		return nil
@@ -417,9 +392,8 @@ func (r *Reader) OnDDL(header *replication.EventHeader, pos mysql.Position, e *r
 
 	decisions, err := r.conv.planDDL(string(e.Schema), string(e.Query))
 	if err != nil {
-		// BEGIN and COMMIT markers arrive as query events and do not parse.
-		// Carrying on is right for those; for anything else the schemas drift,
-		// so it is said loudly.
+		// BEGIN and COMMIT markers arrive as query events and do not parse; anything
+		// else that fails to parse means the schemas drift, so it is said loudly.
 		r.Logger.Warnf("[MySQL] Not propagating a statement that could not be parsed: %v", err)
 		return nil
 	}
@@ -435,9 +409,8 @@ func (r *Reader) OnDDL(header *replication.EventHeader, pos mysql.Position, e *r
 			metrics.CountSchemaRefused(r.Labels, "skipped")
 			r.Logger.Debugf("[MySQL][DDL] Skipping %q: %s", e.Query, decision.reason)
 		case ddlBlock:
-			// A refusal is a decision, and a decision nobody can see is a
-			// decision nobody can audit. Debezium has no equivalent because it
-			// propagates whatever it is told to.
+			// A refusal nobody can see is a decision nobody can audit. Debezium has no
+			// equivalent because it propagates whatever it is told to.
 			metrics.CountSchemaRefused(r.Labels, "blocked")
 			return domain.Unrecoverable(
 				"refusing to replicate %q: it %s. Replication has stopped so the change "+
@@ -458,15 +431,14 @@ func (r *Reader) OnDDL(header *replication.EventHeader, pos mysql.Position, e *r
 	return r.handOver(pos, nil, header)
 }
 
-// checkReordering stops the task when a statement that moves a column arrives
-// after rows for that table have already been handed over in this run. Those
-// rows were read against the shape this statement produced rather than the one
-// they were written under, because the column names come from asking the
-// source for its current schema and not from the binlog.
+// checkReordering stops the task when a column-moving statement arrives after
+// rows for that table were handed over: those rows were decoded against the
+// shape this statement produced, because the column names come from the
+// source's current schema and not the binlog.
 func (r *Reader) checkReordering(defaultSchema, query string) error {
 	if !r.resumed || len(r.appliedSince) == 0 {
-		// Nothing was read before this statement, so nothing was read against
-		// the wrong shape.
+		// Nothing was read before this statement, so nothing was read against the
+		// wrong shape.
 		return nil
 	}
 
@@ -501,21 +473,17 @@ func (r *Reader) checkReordering(defaultSchema, query string) error {
 	return nil
 }
 
-// OnPosSynced is canal's periodic report of where the stream stands.
-//
-// With events waiting it closes a transaction that produced no XID — a
-// non-transactional engine, or a stream stopped mid-transaction. With nothing
-// waiting it is the heartbeat: proof the link is alive, carrying a position, so
-// a restart does not re-read a stretch of log that held nothing.
+// OnPosSynced is canal's periodic report of where the stream stands. With
+// events waiting it closes a transaction that produced no XID; with none it is
+// the heartbeat, carrying a position so a restart does not re-read empty log.
 func (r *Reader) OnPosSynced(header *replication.EventHeader, pos mysql.Position, set mysql.GTIDSet, _ bool) error {
 	if len(r.tx) > 0 {
 		r.inTransaction = false
 		return r.handOver(pos, set, header)
 	}
 	if r.inTransaction {
-		// Between the BEGIN and the rows. The position offered here already
-		// counts this transaction as read, and nothing of it has been handed
-		// over, so recording it would step over the whole transaction.
+		// Between the BEGIN and the rows: the position offered already counts this
+		// transaction as read, so recording it would step over the whole of it.
 		return nil
 	}
 	return r.handOver(pos, set, header, heartbeatOnly)
@@ -525,22 +493,21 @@ type handOverOpt int
 
 const heartbeatOnly handOverOpt = 1
 
-// handOver pushes the accumulated transaction onto the channel, marking its last
-// event as the boundary and attaching the position.
+// handOver pushes the accumulated transaction onto the channel, marking its
+// last event as the boundary and attaching the position.
 func (r *Reader) handOver(pos mysql.Position, set mysql.GTIDSet, header *replication.EventHeader, opts ...handOverOpt) error {
 	payload, err := r.encode(pos, set)
 	if err != nil {
 		return err
 	}
 
-	// Where the stream has got to. The offset is a number so it can be graphed;
-	// the file name goes on an info series because it changes every few hours
-	// rather than every transaction. Publishing the GTID set here instead would
-	// make one series per transaction and take the scrape down with it.
+	// The offset is a number so it can be graphed; the file name goes on an info
+	// series because it changes hourly. The GTID set would be one series per
+	// transaction.
 	metrics.SetSourcePosition(r.Labels, int64(pos.Pos))
 	if !r.lastSchemaChange.IsZero() {
-		// Refreshed on every hand-over, heartbeats included, so the age climbs
-		// while nothing is happening instead of freezing at whatever it was.
+		// Refreshed on every hand-over, heartbeats included, so the age climbs while
+		// nothing happens instead of freezing.
 		metrics.SetSchemaChangeAge(r.Labels, time.Since(r.lastSchemaChange).Seconds())
 	}
 	if pos.Name != r.lastLogFile {
@@ -579,15 +546,13 @@ func (r *Reader) handOver(pos mysql.Position, set mysql.GTIDSet, header *replica
 		select {
 		case r.out <- event:
 		case <-r.done:
-			// Close was called, so nothing is reading any more. The position
-			// this event belongs to was never recorded, so it will be read
-			// again from the source: dropping it here loses nothing.
+			// Close was called, so nothing is reading. The position was never recorded,
+			// so the event is read again from the source.
 			return errReaderClosed
 		case <-time.After(time.Minute):
-			// The applier has not taken an event for a minute, so the queue
-			// ahead of it is full and staying full. Closing the stream is
-			// right: the backlog belongs in the source's log, where it is
-			// durable, not in this process's heap.
+			// The applier has not taken an event for a minute, so the queue is full and
+			// staying full. The backlog belongs in the source's log, not this process's
+			// heap.
 			return fmt.Errorf("the pipeline has been blocked for a minute, so the " +
 				"binlog stream is being closed rather than read further ahead of what " +
 				"can be applied")
@@ -604,10 +569,9 @@ func (r *Reader) encode(pos mysql.Position, set mysql.GTIDSet) (string, error) {
 		}
 	}
 	// Keeping the previous GTID is right even though it names an earlier point
-	// than the file and offset beside it: resuming from it replays a little,
-	// and every write here is an upsert, so replaying is free. Dropping it is
-	// not free — it turns a position that survives a failover into one that
-	// does not.
+	// than the file and offset beside it: replaying an upsert is free, and
+	// dropping it turns a position that survives a failover into one that does
+	// not.
 	if r.lastGTID != "" {
 		cp.GTID = r.lastGTID
 		cp.Flavor = r.flavor
@@ -615,17 +579,17 @@ func (r *Reader) encode(pos mysql.Position, set mysql.GTIDSet) (string, error) {
 	return checkpoint.Encode(cp)
 }
 
-// rowKey identifies the record a statement addresses, so two changes to one
-// row are never reordered against each other. The primary key columns are what
-// the target is addressed by, so they are what identifies the record.
+// rowKey identifies the record a statement addresses, so two changes to one row
+// are never reordered. The primary key columns are what the target is addressed
+// by.
 func rowKey(e *canal.RowsEvent, n int) string {
 	if e.Table == nil || len(e.Table.PKColumns) == 0 {
 		return ""
 	}
 	rows := e.Rows
 	if e.Action == canal.UpdateAction {
-		// The rows come in before/after pairs and the statement was built from
-		// the pair, so the nth statement addresses the nth pair.
+		// Rows come in before/after pairs and the statement was built from the pair,
+		// so the nth statement addresses the nth pair.
 		if idx := n*2 + 1; idx < len(rows) {
 			return keyOf(rows[idx], e.Table.PKColumns)
 		}
@@ -648,8 +612,8 @@ func keyOf(row []interface{}, pk []int) string {
 	return b.String()
 }
 
-// opOf reports what a rendered statement does, for the log and for the ordering
-// barrier a schema change needs.
+// opOf reports what a rendered statement does, for the log and for the schema-
+// change barrier.
 func opOf(query string) domain.Op {
 	switch {
 	case strings.HasPrefix(query, "INSERT"), strings.HasPrefix(query, "REPLACE"):

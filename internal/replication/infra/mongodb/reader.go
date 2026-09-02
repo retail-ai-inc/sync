@@ -21,43 +21,35 @@ import (
 	"github.com/retail-ai-inc/sync/internal/replication/infra/checkpoint"
 )
 
-// Reader turns one MongoDB deployment's change stream into a stream of events.
-// One stream, opened on the client rather than on a collection, covers every
-// collection the task maps: a stream per collection made the server scan the
-// oplog once for each, and the oplog has no index. On a sharded cluster mongos
-// merges the shards' streams in cluster time order, so one stream also gives the
-// single global ordering a payment ledger across collections needs.
+// Reader turns one MongoDB deployment's change stream into a stream of events,
+// opened on the client so one stream covers every mapped collection: the oplog
+// has no index, and mongos merges the shards in cluster time order, which is
+// the global ordering a ledger needs.
 type Reader struct {
 	Client *mongo.Client
 	Config config.SyncConfig
 	Logger logrus.FieldLogger
 	Labels metrics.Labels
 
-	// conv renders events into write models. It needs the task's mappings for
-	// field security and nothing else.
+	// conv renders events into write models, needing the task's mappings for field
+	// security and nothing else.
 	conv *MongoDBSyncer
 
 	stream *mongo.ChangeStream
-	// nudge keeps the source's idle shards advancing so mongos can release
-	// events instead of holding them for the server's no-op writer. Nil on a
-	// replica set, where nothing merges and nothing is held.
+	// nudge advances the source's idle shards so mongos releases events instead of
+	// holding them. Nil on a replica set, where nothing merges.
 	nudge *nudger
 	// mapped names the collections to replicate, empty when the task lists none
-	// and every collection of a mapped database is replicated.
+	// and every collection of a mapped database goes.
 	mapped map[string]bool
-	// databases names the source databases to read. Anything outside them is
+	// databases names the source databases to read; anything outside them is
 	// another tenant's data, or the target's own.
 	databases map[string]bool
 
-	// open holds the events of the transaction currently being delivered, and
-	// openID identifies it. A change stream reports every event of a
-	// multi-document transaction with the same lsid and txnNumber, so a
-	// transaction's events are held together and a batch is never cut inside one.
-	//
-	// ready holds complete units — a finished transaction, a standalone change, a
-	// schema change, a heartbeat — waiting to be handed over. The two were one
-	// list, with "the transaction ended" judged by an event belonging to no
-	// transaction arriving, so fifty transactions back to back delivered nothing
+	// open holds the transaction being delivered and openID identifies it — every
+	// event of one carries the same lsid and txnNumber, which is what keeps a
+	// batch from being cut inside it. ready holds complete units waiting to be
+	// handed over; as one list, fifty transactions back to back delivered nothing
 	// at all.
 	open   []*domain.Event
 	openID string
@@ -68,8 +60,7 @@ type Reader struct {
 }
 
 // idleHeartbeat is how long the stream may return nothing before the reader
-// reports that it is nonetheless alive. A stream delivering nothing looks
-// exactly like one that is up to date.
+// says it is alive anyway: silence looks exactly like being up to date.
 const idleHeartbeat = 10 * time.Second
 
 // Open starts the change stream at a position, or at the current end when there
@@ -82,16 +73,14 @@ func (r *Reader) Open(ctx context.Context, from domain.Position) error {
 	r.mapped = r.mappedCollections()
 	r.databases = r.mappedDatabaseSet()
 
-	// The schema changes are asked for as well as the rows. An index added at
-	// the source used never to reach the target — indexes were copied once, by
-	// the snapshot — so the moment the target most needed an index was exactly
-	// the moment it did not have it.
+	// Schema changes are asked for as well as rows: indexes were copied once by
+	// the snapshot, so the moment the target most needed an index was when it did
+	// not have it.
 	match := bson.D{{Key: "operationType", Value: bson.M{"$in": watchedOperations}}}
 	if dbs := r.mappedDatabases(); len(dbs) > 0 {
-		// Filtered on the server as well as here. A deployment-level stream sees
-		// every database on the cluster — including the target's, when the two
-		// are on one cluster, and including any other database that happens to
-		// hold a collection of the same name.
+		// Filtered on the server as well as here: a deployment-level stream sees
+		// every database on the cluster, the target's included when the two share
+		// one.
 		match = append(match, bson.E{Key: "ns.db", Value: bson.M{"$in": dbs}})
 	}
 	pipeline := mongo.Pipeline{{{Key: "$match", Value: match}}}
@@ -111,18 +100,16 @@ func (r *Reader) Open(ctx context.Context, from domain.Position) error {
 		}
 		switch {
 		case stored.Token != "":
-			// The stream has delivered something before, so resume exactly after
-			// it.
+			// The stream has delivered something before, so resume exactly after it.
 			token, err := stored.token()
 			if err != nil {
 				return err
 			}
 			opts.SetResumeAfter(token)
 		case stored.Cluster != 0:
-			// Nothing has been delivered yet: this is the cluster time the
-			// snapshot pinned before it copied. Starting there replays the writes
-			// made while the copy was running, which the copy itself could not
-			// see. Starting from now instead would lose that window silently.
+			// Nothing delivered yet: this is the cluster time the snapshot pinned, so
+			// starting there replays the writes made while the copy ran. Starting from
+			// now loses that window silently.
 			at := bson.Timestamp{T: stored.Cluster, I: stored.Increment}
 			r.Logger.Infof("[MongoDB] Starting the stream at the snapshot's cluster "+
 				"time %d.%d", at.T, at.I)
@@ -154,12 +141,9 @@ func (r *Reader) Open(ctx context.Context, from domain.Position) error {
 	return nil
 }
 
-// Next hands over the next event.
-//
-// The change stream is a cursor, so this drains a whole source transaction
-// before returning its first event: the events of one transaction share an lsid
-// and a txnNumber, and handing them over together is what stops a batch being
-// cut inside one.
+// Next drains a whole source transaction before returning its first event: they
+// share an lsid and txnNumber, and handing them over together is what stops a
+// batch being cut inside one.
 func (r *Reader) Next(ctx context.Context) (*domain.Event, error) {
 	for {
 		if len(r.ready) > 0 {
@@ -174,8 +158,8 @@ func (r *Reader) Next(ctx context.Context) (*domain.Event, error) {
 	}
 }
 
-// fill reads until it has a complete source transaction, or until the stream
-// goes quiet and a heartbeat is due.
+// fill reads until it has a complete source transaction, or the stream goes
+// quiet and a heartbeat is due.
 func (r *Reader) fill(ctx context.Context) error {
 	for {
 		if r.stream.TryNext(ctx) {
@@ -209,10 +193,9 @@ func (r *Reader) fill(ctx context.Context) error {
 		default:
 		}
 
-		// TryNext returned nothing and the stream is healthy, so the cursor is
-		// exhausted. A change stream delivers a committed transaction's events
-		// contiguously, so an open transaction with nothing behind it is
-		// complete and may be handed over.
+		// TryNext returned nothing on a healthy stream, so the cursor is exhausted —
+		// and a committed transaction's events arrive contiguously, so an open one
+		// with nothing behind it is complete.
 		if len(r.open) > 0 {
 			r.seal()
 			return nil
@@ -226,12 +209,9 @@ func (r *Reader) fill(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		// The heartbeat carries the source's own clock, not just a token.
-		//
-		// It means "everything up to here has been delivered", which is what a
-		// re-copy needs in order to know the stream has passed the point its
-		// chunk was read at. Without it a quiet source leaves the stream's clock
-		// at zero and a re-copy waits for ever — which is how this was found.
+		// The heartbeat carries the source's clock, not just a token: it means
+		// everything up to here was delivered, which is how a re-copy knows the
+		// stream passed the point its chunk was read at.
 		at, clockErr := r.sourceClock(ctx)
 		if clockErr != nil {
 			r.Logger.Warnf("[MongoDB] Could not read the source's cluster time for a "+
@@ -247,10 +227,9 @@ func (r *Reader) fill(ctx context.Context) error {
 	}
 }
 
-// capturedCollections counts the objects this task watches.
-//
-// Debezium: CapturedTables. The number changing on its own is how a mapping
-// edit that dropped a collection shows up; nothing else says so.
+// capturedCollections counts the objects this task watches (Debezium:
+// CapturedTables) — the number moving on its own is how a dropped mapping shows
+// up.
 func (r *Reader) capturedCollections() int {
 	n := 0
 	for _, mapping := range r.Config.Mappings {
@@ -272,8 +251,8 @@ func (r *Reader) sourceClock(ctx context.Context) (time.Time, error) {
 	return time.Unix(int64(at.T), 0), nil
 }
 
-// seal closes the open transaction and moves it to the events waiting to be
-// handed over, marking its last event as the boundary a batch may be cut at.
+// seal closes the open transaction and moves it to the waiting events, marking
+// its last one as the boundary a batch may be cut at.
 func (r *Reader) seal() {
 	if len(r.open) == 0 {
 		return
@@ -299,15 +278,15 @@ func (r *Reader) take(raw bson.Raw) error {
 
 	model, err := r.conv.convertRawBSONToWriteModel(raw, ns.DB, ns.Object)
 	if err != nil {
-		// A change that cannot be converted must not be skipped: the two sides
-		// would diverge from here on with only a log line to show it.
+		// A change that cannot be converted must not be skipped: the two sides would
+		// diverge from here with only a log line to show it.
 		return domain.Unrecoverable(
 			"a change to %s could not be turned into a write for the target (%v). "+
 				"Replication has stopped rather than skip it", ns, err)
 	}
 	if model == nil {
-		// The task asked for this operation to be ignored, which is a
-		// configured decision rather than a failure.
+		// The task asked for this operation to be ignored, which is a decision rather
+		// than a failure.
 		return nil
 	}
 
@@ -335,8 +314,8 @@ func (r *Reader) take(raw bson.Raw) error {
 	txID := transactionOf(raw)
 	switch {
 	case txID == "":
-		// Not part of a multi-document transaction, so whatever was open before
-		// it has ended, and this is its own boundary.
+		// Not part of a multi-document transaction, so whatever was open has ended
+		// and this is its own boundary.
 		r.seal()
 		event.EndsTransaction = true
 		r.ready = append(r.ready, event)
@@ -351,12 +330,9 @@ func (r *Reader) take(raw bson.Raw) error {
 	return nil
 }
 
-// watchedOperations are the change stream events this reader asks for.
-//
-// The four row operations, plus the schema changes that keep the target's shape
-// in step with the source's. "invalidate" is asked for because it is how the
-// server says the stream cannot continue — dropped unnoticed, the task would
-// look healthy and replicate nothing.
+// watchedOperations are the four row operations plus the schema changes that
+// keep the target's shape in step. "invalidate" is asked for because it is how
+// the server says the stream cannot continue.
 var watchedOperations = []string{
 	"insert", "update", "replace", "delete",
 	"create", "modify", "createIndexes", "dropIndexes",
@@ -383,9 +359,8 @@ func (r *Reader) takeSchemaChange(raw bson.Raw, ns domain.Namespace) error {
 	kind, _ := raw.Lookup("operationType").StringValueOK()
 
 	if kind == "invalidate" {
-		// The stream is over: the collection or database it watched is gone. A
-		// resume token from an invalidated stream cannot be used, so carrying on
-		// is not possible and pretending otherwise replicates nothing quietly.
+		// The stream is over: what it watched is gone. A token from an invalidated
+		// stream cannot be used, so pretending otherwise replicates nothing quietly.
 		return domain.Unrecoverable(
 			"the change stream was invalidated, which means what it watched no longer " +
 				"exists. A fresh copy is needed: clear the stored checkpoint")
@@ -408,9 +383,8 @@ func (r *Reader) takeSchemaChange(raw bson.Raw, ns domain.Namespace) error {
 	}
 	at, _ := eventClusterTime(raw)
 
-	// A schema change is its own transaction boundary and gets a batch of its
-	// own: MongoDB's catalogue is not transactional, so it cannot share one with
-	// rows.
+	// A schema change is its own boundary and gets its own batch: MongoDB's
+	// catalogue is not transactional, so it cannot share one with rows.
 	r.seal()
 	r.ready = append(r.ready, &domain.Event{
 		NS:              ns,
@@ -459,16 +433,15 @@ func (r *Reader) replicates(ns domain.Namespace) bool {
 		return false
 	}
 	if len(r.mapped) == 0 {
-		// The task lists no collections, so every collection of a mapped
-		// database is replicated under its own name — apart from the syncer's
-		// own bookkeeping.
+		// The task lists no collections, so every collection of a mapped database is
+		// replicated under its own name, apart from the syncer's own bookkeeping.
 		return !isInternal(ns.Object)
 	}
 	return r.mapped[strings.ToLower(ns.Object)]
 }
 
 // mappedCollections lists the collections the task names, empty when it names
-// none and replicates whatever it finds.
+// none.
 func (r *Reader) mappedCollections() map[string]bool {
 	mapped := map[string]bool{}
 	for _, mapping := range r.Config.Mappings {
@@ -489,8 +462,8 @@ func (r *Reader) mappedDatabaseSet() map[string]bool {
 	return dbs
 }
 
-// mappedDatabases lists the source databases the task reads, in the spelling the
-// server uses, for the server-side filter.
+// mappedDatabases lists those databases in the server's spelling, for the
+// server-side filter.
 func (r *Reader) mappedDatabases() []string {
 	seen := map[string]bool{}
 	var dbs []string
@@ -542,10 +515,9 @@ func opOf(raw bson.Raw) domain.Op {
 	return domain.OpSchema
 }
 
-// keyOf identifies the document a change touched: the whole documentKey, not
-// just the _id. On a sharded collection documentKey carries the shard key, and
-// that is what the target has to be addressed by — an updateOne whose filter
-// omits it cannot be routed, so mongos broadcasts to every shard.
+// keyOf identifies the document a change touched: the whole documentKey,
+// because on a sharded collection it carries the shard key and a filter without
+// it cannot be routed to one shard.
 func keyOf(raw bson.Raw) string {
 	value, err := raw.LookupErr("documentKey")
 	if err != nil {
@@ -567,10 +539,8 @@ func keyOf(raw bson.Raw) string {
 }
 
 // transactionOf identifies the multi-document transaction a change belongs to,
-// empty when it belongs to none.
-//
-// Every event of one transaction carries the same session id and transaction
-// number, which is what makes the transaction's boundary visible from outside.
+// empty when it belongs to none: every event of one carries the same session id
+// and transaction number.
 func transactionOf(raw bson.Raw) string {
 	number, err := raw.LookupErr("txnNumber")
 	if err != nil {
@@ -587,18 +557,16 @@ func transactionOf(raw bson.Raw) string {
 	return fmt.Sprintf("%x/%d", session.Value, n)
 }
 
-// streamPosition is how a MongoDB stream's position is stored. Two kinds, not
-// interchangeable, which is what this type exists to stop anybody forgetting:
-// before the stream has delivered anything the only thing to resume from is the
-// cluster time the snapshot pinned; once it has, the resume token is exact.
-// Guessing at the far end got "Bad resume token" over and over while the task
-// looked like it was restarting for a transient reason.
+// streamPosition holds either kind of position, which is what stops anybody
+// confusing them: before the stream delivers anything only the snapshot's
+// pinned cluster time exists; after, the resume token is exact. Guessing got
+// "Bad resume token" while the task looked transiently unhealthy.
 type streamPosition struct {
 	// Token is a resume token as extended JSON, once the stream has delivered an
 	// event.
 	Token string `json:"token,omitempty"`
-	// Cluster and Increment are a pinned cluster time, set by the snapshot
-	// before the stream has delivered anything.
+	// Cluster and Increment are a pinned cluster time, set by the snapshot before
+	// delivery.
 	Cluster   uint32 `json:"cluster,omitempty"`
 	Increment uint32 `json:"increment,omitempty"`
 }
@@ -635,8 +603,8 @@ func decodePosition(pos domain.Position) (streamPosition, error) {
 }
 
 // isInternal reports whether a collection is the syncer's own bookkeeping,
-// which must never be replicated: doing so writes the target's own checkpoint
-// back over itself.
+// which must never be replicated: it would write the target's checkpoint back
+// over itself.
 func isInternal(collection string) bool {
 	switch collection {
 	case "_sync_checkpoint", "_sync_direction", "_sync_dead_letter":

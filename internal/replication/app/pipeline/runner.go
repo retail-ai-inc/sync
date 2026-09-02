@@ -15,10 +15,8 @@ import (
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
 )
 
-// Checkpoints records how far the target has been written.
-//
-// It is the same shape as the checkpoint store the engines already use, named
-// here so the runner does not depend on the infrastructure package.
+// Checkpoints records how far the target has been written, named here so the
+// runner does not depend on the infrastructure package.
 type Checkpoints interface {
 	Load(ctx context.Context, key string) (string, error)
 	Save(ctx context.Context, key, payload string) error
@@ -26,24 +24,18 @@ type Checkpoints interface {
 
 type Options struct {
 	Limits Limits
-	// FlushInterval is the longest a partly filled batch waits. It is an upper
-	// bound rather than a cost paid on every batch: a batch with nothing behind
-	// it in the queue is sent at once, so this only bounds the case where events
-	// keep arriving but too slowly to fill one.
+	// FlushInterval is the longest a partly filled batch waits; a batch with an
+	// empty queue behind it is sent at once.
 	FlushInterval time.Duration
-	// QueueCapacity bounds how far the reader may run ahead of the applier.
-	// Reaching it stops the reader, which is what back pressure is: the source
-	// log holds the backlog, where it is durable, rather than this process's
-	// heap, where it is not.
+	// QueueCapacity bounds how far the reader may run ahead. Reaching it stops the
+	// reader, so the backlog sits in the source log where it is durable.
 	QueueCapacity int
-	// ReportInterval is how often the health gauges are refreshed while nothing
-	// is happening, so a stalled task shows a rising age rather than a frozen
-	// one.
+	// ReportInterval is how often the health gauges refresh while nothing happens,
+	// so a stalled task shows a rising age rather than a frozen one.
 	ReportInterval time.Duration
-	// ShutdownGrace is how long the last batch may take once the run has been
-	// asked to stop. It bounds a stop, rather than granting one: a target that
-	// will not answer must not hold a pod past its termination grace period,
-	// because being killed there is a harder stop than the one this avoids.
+	// ShutdownGrace bounds the last batch once the run is asked to stop: being
+	// killed past the pod's grace period is a harder stop than the one this
+	// avoids.
 	ShutdownGrace time.Duration
 
 	Labels metrics.Labels
@@ -51,11 +43,8 @@ type Options struct {
 	// Engine names the engine in log lines, as "[MySQL]" or "[MongoDB]".
 	Engine string
 
-	// StreamOrder hands the batch over as a single run in read order, rather
-	// than splitting it into runs that may be applied in parallel. The split is
-	// only safe when every event is an idempotent write of a whole record;
-	// replaying INCR adds again, and two commands on different keys may have
-	// been one atomic act at the source.
+	// StreamOrder hands the batch over as one run in read order. Splitting is only
+	// safe when every event is an idempotent write of a whole record.
 	StreamOrder bool
 }
 
@@ -63,8 +52,7 @@ const (
 	defaultFlushInterval  = 500 * time.Millisecond
 	defaultQueueCapacity  = 2000
 	defaultReportInterval = time.Second
-	// Well inside Kubernetes' default thirty-second termination grace period,
-	// with room for the reader to stop after it.
+	// Well inside Kubernetes' default thirty-second termination grace period.
 	defaultShutdownGrace = 5 * time.Second
 )
 
@@ -102,12 +90,11 @@ type Runner struct {
 	Applier     domain.Applier
 	Snapshotter domain.Snapshotter
 	Checkpoints Checkpoints
-	// CheckpointKey names this task's position in the store. Empty is the
-	// single position a single-stream task has, which is the normal case.
+	// CheckpointKey names this task's position; empty is the single-stream case.
 	CheckpointKey string
 
-	// Resyncs re-copy one object each, alongside the stream, without stopping
-	// it. Empty is the normal case.
+	// Resyncs re-copy one object each alongside the stream. Empty is the normal
+	// case.
 	Resyncs []*Resync
 
 	Opts Options
@@ -116,32 +103,29 @@ type Runner struct {
 	clock func() time.Time
 
 	mu sync.Mutex
-	// oldestPending is when the source made the oldest change that has been
-	// read and not yet applied. The applied lag is measured from it so that a
-	// task which has stopped applying shows a lag that climbs.
+	// oldestPending is when the source made the oldest change read and not yet
+	// applied, so a task that stops applying shows a lag that climbs.
 	oldestPending time.Time
-	// lastAppliedAt is when the source made the most recent change that did
-	// reach the target.
+	// lastAppliedAt is when the source made the most recent change that reached
+	// the target.
 	lastAppliedAt time.Time
 	// lastHeardAt is when anything last arrived, heartbeats included.
 	lastHeardAt time.Time
-	// lastReadAt is the source's own time of the newest change read from the
-	// stream. A re-copy holds each chunk until this has passed the moment the
-	// chunk was read, which is what orders the two against each other.
+	// lastReadAt is the source's time of the newest change read. A re-copy holds
+	// each chunk until this passes it, which is what orders the two.
 	lastReadAt time.Time
 	queueUsed  int
 
-	// window is the source's retention, and windowAt when it was last asked
-	// for. It is a server setting rather than a moving quantity, so it is read
-	// occasionally and not once a second.
+	// window is the source's retention and windowAt when it was asked for: a
+	// server setting, so it is read occasionally rather than every second.
 	window   time.Duration
 	windowAt time.Time
-	// windowFailed stops a source that cannot answer from being asked, and
-	// logged about, on every refresh.
+	// windowFailed stops a source that cannot answer from being asked on every
+	// refresh.
 	windowFailed bool
 
-	// events counts what the stream carried, split by operation. It is built
-	// once because counting happens per event.
+	// events counts what the stream carried by operation, built once because
+	// counting happens per event.
 	events *metrics.EventCounters
 	// queueBytes is how much unapplied change data the batch is holding.
 	queueBytes int64
@@ -154,10 +138,8 @@ func (r *Runner) counters() *metrics.EventCounters {
 	return r.events
 }
 
-// retentionRefresh is how often the source is asked how far its log reaches.
-//
-// The answer is a configuration setting, not a measurement, and on a sharded
-// deployment reaching it costs a round trip per shard.
+// retentionRefresh is how often the source is asked how far its log reaches — a
+// setting, not a measurement, and a round trip per shard.
 const retentionRefresh = 5 * time.Minute
 
 func (r *Runner) now() time.Time {
@@ -182,9 +164,7 @@ func (r *Runner) tag(format string) string {
 }
 
 // Run replicates until the context is cancelled or the stream cannot continue.
-//
-// The returned error is what the supervisor decides on: nil or a transient
-// failure means try again, an ErrUnrecoverable means stop and tell somebody.
+// nil or a transient error means try again; Unrecoverable means stop.
 func (r *Runner) Run(ctx context.Context) error {
 	start, err := r.startingPoint(ctx)
 	if err != nil {
@@ -206,11 +186,9 @@ func (r *Runner) Run(ctx context.Context) error {
 	readCtx, stopReading := context.WithCancel(ctx)
 	defer stopReading()
 
-	// The queue has more than one producer once a re-copy is running, so it is
-	// closed after all of them have finished rather than by whichever finishes
-	// first. Closing it from the reader alone was a data race, and worse than
-	// that: a re-copy still handing over a chunk would send on a closed channel
-	// and take the process down.
+	// The queue has several producers once a re-copy runs, so it is closed after
+	// all of them finish: closing it from the reader raced, and a re-copy still
+	// handing over a chunk took the process down.
 	var producers sync.WaitGroup
 
 	readErr := make(chan error, 1)
@@ -232,8 +210,7 @@ func (r *Runner) Run(ctx context.Context) error {
 
 	applyErr := r.apply(ctx, queue)
 
-	// A re-copy that failed is worth reporting even when the stream ended
-	// cleanly: the object it was repairing is still wrong.
+	// A re-copy that failed is worth reporting even when the stream ended cleanly.
 	select {
 	case err := <-resyncErr:
 		if err != nil && !errors.Is(err, context.Canceled) {
@@ -242,9 +219,8 @@ func (r *Runner) Run(ctx context.Context) error {
 	default:
 	}
 
-	// The reader is the one that knows why the stream ended, so its error is
-	// preferred: an applier that stops because its queue closed says nothing
-	// useful about the source going away.
+	// The reader knows why the stream ended, so its error wins: an applier
+	// stopping because its queue closed says nothing about the source.
 	stopReading()
 	select {
 	case err := <-readErr:
@@ -257,8 +233,8 @@ func (r *Runner) Run(ctx context.Context) error {
 	return applyErr
 }
 
-// startResyncs runs each re-copy alongside the stream, pushing its chunks onto
-// the same queue so the applier orders them against the stream's changes.
+// startResyncs runs each re-copy alongside the stream, on the same queue so the
+// applier orders them against the stream's changes.
 func (r *Runner) startResyncs(ctx context.Context, queue chan<- *domain.Event, producers *sync.WaitGroup) <-chan error {
 	failed := make(chan error, len(r.Resyncs)+1)
 	if len(r.Resyncs) == 0 {
@@ -281,10 +257,8 @@ func (r *Runner) startResyncs(ctx context.Context, queue chan<- *domain.Event, p
 				if len(events) == 0 {
 					return nil
 				}
-				// A chunk is its own batch: it carries no position, so applying
-				// it never moves the stream's offset, and its last event closes
-				// the batch so it is not held waiting for a boundary that will
-				// not come.
+				// A chunk is its own batch: it carries no position, and its last event
+				// closes the batch so it is not held for a boundary that will not come.
 				events[len(events)-1].EndsTransaction = true
 				for _, event := range events {
 					event.Pos = domain.Position{}
@@ -319,13 +293,13 @@ func (r *Runner) startingPoint(ctx context.Context) (domain.Position, error) {
 		return domain.Position{}, nil
 	}
 
-	// snapshotDone separates "finished" from "gave up" for the deferred report
-	// below: a copy that returns an error must not be recorded as completed.
+	// snapshotDone separates "finished" from "gave up": a copy that errored must
+	// not be recorded as completed.
 	snapshotDone := false
 
-	// Pinned before a row is copied, stored only once the copy has finished.
-	// Pinning afterwards loses every write made while the copy ran; storing
-	// early means an interrupted copy resumes from a point it never reached.
+	// Pinned before a row is copied, stored once the copy finished. Pinning after
+	// loses every write made during it; storing early resumes from a point never
+	// reached.
 	started := r.now()
 	metrics.SnapshotStarted(r.Opts.Labels, 0)
 	defer func() {
@@ -393,24 +367,21 @@ func (r *Runner) apply(ctx context.Context, queue <-chan *domain.Event) error {
 	timer := time.NewTimer(r.Opts.flushInterval())
 	defer timer.Stop()
 
-	// pending is the position the batch would advance to, held until the batch
-	// is applied. It is never recorded ahead of the data it points past.
+	// pending is the position the batch would advance to, never recorded ahead of
+	// the data it points past.
 	var pending domain.Position
 
-	// The run's context while the run is live, an independent bounded one once it
-	// has been asked to stop: a driver refuses a call on a cancelled context
-	// before it reaches the target, so the last batch never landed. The choice
-	// belongs here rather than in the stop branch — a cancelled context and a
-	// non-empty queue are ready at once and select picks at random, so either
-	// branch can be the one that writes.
+	// The run's context while the run lives, an independent bounded one once it is
+	// asked to stop, because a driver refuses a cancelled context before it
+	// reaches the target. Chosen here, not in the stop branch: a cancelled context
+	// and a non-empty queue are ready at once and select picks at random.
 	flush := func() error {
 		if b.len() == 0 {
 			return nil
 		}
 		if !b.cuttable() {
-			// The batch ends inside a source transaction, so it is not a legal
-			// cut point. Waiting is right: the alternative is showing the target
-			// half a transaction.
+			// The batch ends inside a source transaction, so it is not a legal cut
+			// point; the alternative is showing the target half a transaction.
 			return nil
 		}
 
@@ -428,14 +399,11 @@ func (r *Runner) apply(ctx context.Context, queue <-chan *domain.Event) error {
 	for {
 		select {
 		case <-ctx.Done():
-			// A clean stop applies what is already whole, so restarting does not
-			// replay it. flush knows the run has been asked to stop and writes
-			// through a context of its own.
+			// A clean stop applies what is already whole. flush knows the run was asked
+			// to stop and writes through a context of its own.
 			if err := flush(); err != nil {
-				// Reported, not returned: the batch is not on the target, but
-				// the position did not move either, so the next start replays
-				// it. Returning would tell the supervisor the task had failed
-				// when what happened is that it was asked to stop.
+				// Reported, not returned: the position did not move either, so the next
+				// start replays it. Returning would call a stop a failure.
 				r.log().Warnf(r.tag("The last batch did not reach the target before the "+
 					"stop, and will be replayed on the next start: %v"), err)
 			}
@@ -449,9 +417,8 @@ func (r *Runner) apply(ctx context.Context, queue <-chan *domain.Event) error {
 				return nil
 			}
 
-			// A schema change gets a batch to itself: it cannot share a
-			// transaction with rows, so a batch holding both could not be
-			// applied atomically.
+			// A schema change gets a batch to itself: it cannot share a transaction with
+			// rows.
 			if standsAlone(event) && b.len() > 0 {
 				if err := flush(); err != nil {
 					return err
@@ -475,9 +442,8 @@ func (r *Runner) apply(ctx context.Context, queue <-chan *domain.Event) error {
 			r.queueBytes = int64(b.bytes)
 			r.mu.Unlock()
 
-			// Nothing else is waiting, so holding the batch back buys nothing
-			// and costs latency — Kafka's linger.ms is 0 for the same reason.
-			// Under load the queue is rarely empty and batches still fill.
+			// Nothing else waiting, so holding the batch back only costs latency —
+			// Kafka's linger.ms is 0 for the same reason.
 			if len(queue) == 0 {
 				if err := flush(); err != nil {
 					return err
@@ -511,9 +477,8 @@ func (r *Runner) apply(ctx context.Context, queue <-chan *domain.Event) error {
 	}
 }
 
-// refreshApplied asks the checkpoint store to re-read what the target holds, for
-// stores that can. One that cannot is left alone: it is then no worse off than
-// it was before retrying existed.
+// refreshApplied asks the store to re-read what the target holds, for stores
+// that can; one that cannot is no worse off than before retrying existed.
 func (r *Runner) refreshApplied(ctx context.Context) error {
 	type refreshable interface {
 		Refresh(ctx context.Context) error
@@ -524,11 +489,9 @@ func (r *Runner) refreshApplied(ctx context.Context) error {
 	return nil
 }
 
-// applyWithRetry writes one batch, waiting for a target that is not ready
-// rather than ending the run: the reader is what keeps the source's log from
-// rolling past the position, and on Memorystore that log is a ring of tens of
-// kilobytes — twenty milliseconds of downtime at 12,000 ops/s. Keeping the
-// reader going turns a target outage into buffer space instead of a re-copy.
+// applyWithRetry waits for a target that is not ready rather than ending the
+// run: the reader is what keeps the source's log from rolling past the
+// position, and on Memorystore that log is a ring of tens of kilobytes.
 func (r *Runner) applyWithRetry(ctx context.Context, runs [][]*domain.Event,
 	pos domain.Position, count int) (bool, error) {
 
@@ -554,9 +517,8 @@ func (r *Runner) applyWithRetry(ctx context.Context, runs [][]*domain.Event,
 			return false, fmt.Errorf("apply %d changes: %w", count, err)
 		}
 		if permanentApplyFailure(err) {
-			// Retrying will fail identically for as long as anybody lets it, and
-			// stepping over it would leave the target permanently different from
-			// the source with nothing blocked and nothing alarming.
+			// Retrying would fail identically for ever, and stepping over it would leave
+			// the target permanently different with nothing alarming.
 			return false, domain.Unrecoverable(
 				"applying %d changes failed in a way retrying cannot fix: %v. "+
 					"The position has not moved, so nothing has been skipped; "+
@@ -569,10 +531,9 @@ func (r *Runner) applyWithRetry(ctx context.Context, runs [][]*domain.Event,
 				"batch and reading on, so the source's log is not left to roll past us"), err)
 		}
 
-		// A failure is not proof the write did not happen: a timeout can arrive
-		// after the transaction landed, and re-applying then repeats a command
-		// that is not idempotent — measured as an RPUSH landing three times too
-		// often under packet loss.
+		// A failure is not proof the write did not happen: a timeout can arrive after
+		// the transaction landed, and replaying then repeats a non-idempotent
+		// command.
 		if err := r.refreshApplied(ctx); err != nil {
 			return false, fmt.Errorf("apply %d changes: %w", count, err)
 		}
@@ -603,8 +564,8 @@ func permanentApplyFailure(err error) bool {
 	}
 	text := strings.ToUpper(err.Error())
 
-	// MySQL reports SQLSTATE in parentheses after the error number, as in
-	// "Error 1452 (23000): ...".
+	// MySQL reports SQLSTATE in parentheses after the error number: "Error 1452
+	// (23000)".
 	if m := sqlStatePattern.FindStringSubmatch(text); m != nil {
 		switch m[1][:2] {
 		case "23", "42":
@@ -612,9 +573,8 @@ func permanentApplyFailure(err error) bool {
 		}
 	}
 
-	// MongoDB reports its codes in the message rather than as SQLSTATE. Same
-	// reasoning: measured on a sharded pair, a duplicate key held one batch and
-	// retried for ever with task_blocked at 0, so the only sign was the lag.
+	// MongoDB reports its codes in the message, not as SQLSTATE. Measured on a
+	// sharded pair, a duplicate key retried for ever with task_blocked at 0.
 	for _, permanent := range []string{
 		"E11000",                    // duplicate key against an index the target holds
 		"E11001",                    // the older spelling of the same thing
@@ -643,16 +603,13 @@ func permanentApplyFailure(err error) bool {
 var sqlStatePattern = regexp.MustCompile(`\(([0-9A-Z]{5})\)`)
 
 // applyBatch writes one batch and records where it got to. The whole batch goes
-// over at once, already split into runs: handing the runs over one at a time
-// would let a failure land between two of them.
+// over at once so a failure cannot land between two runs.
 func (r *Runner) applyBatch(ctx context.Context, events []*domain.Event, pos domain.Position) error {
 	writable := applicable(events)
 
-	// What the stream carried, in Debezium's terms: events by operation, and
-	// source transactions carried through. The pair is what catches a whole
-	// transaction going missing — the defect this pipeline shipped with, where
-	// a checkpoint moved past a transaction whose rows were never read. Neither
-	// number alone would have shown it.
+	// Events by operation and source transactions carried through. The pair is
+	// what catches a whole transaction going missing; neither number alone shows
+	// it.
 	counters := r.counters()
 	transactions := 0
 	filtered := 0
@@ -689,8 +646,8 @@ func (r *Runner) applyBatch(ctx context.Context, events []*domain.Event, pos dom
 		}
 		committed, err := r.applyWithRetry(ctx, runs, pos, len(writable))
 		if err != nil {
-			// The whole batch was rolled back, so every source transaction in
-			// it is a transaction the target does not have.
+			// The whole batch rolled back, so every source transaction in it is one the
+			// target does not have.
 			metrics.CountRolledBack(r.Opts.Labels, transactions)
 			return err
 		}
@@ -699,10 +656,7 @@ func (r *Runner) applyBatch(ctx context.Context, events []*domain.Event, pos dom
 	}
 
 	// The position moves only now, after everything it points past is on the
-	// target. Recording it earlier would let a restart resume beyond changes
-	// this process still held. An applier that committed it with the data has
-	// already done this, and doing it again would be a second round trip for a
-	// value that is already correct.
+	// target. An applier that committed it with the data has already done this.
 	if !pos.IsZero() && !committedByApplier {
 		if err := r.Checkpoints.Save(ctx, r.CheckpointKey, pos.Payload); err != nil {
 			return fmt.Errorf("record the position: %w", err)
@@ -723,9 +677,8 @@ func (r *Runner) applyBatch(ctx context.Context, events []*domain.Event, pos dom
 	return nil
 }
 
-// report refreshes the health gauges on a timer. Without it the applied lag
-// only moves when a batch lands, so a stuck task leaves the gauge frozen at its
-// last healthy value — and an alert on a frozen gauge never fires.
+// report refreshes the health gauges on a timer: without it a stuck task leaves
+// the lag frozen at its last healthy value, and an alert never fires.
 func (r *Runner) report(ctx context.Context) (stop func()) {
 	ticker := time.NewTicker(r.Opts.reportInterval())
 	done := make(chan struct{})
@@ -768,11 +721,9 @@ func (r *Runner) report(ctx context.Context) (stop func()) {
 	return func() { once.Do(func() { close(done) }) }
 }
 
-// lagSeconds is how far behind the source the task is. Behind, it is measured
-// from the oldest change still waiting, so it climbs while the task is stuck.
-// Caught up, from the newest thing the stream reported, heartbeats included:
-// measuring from the last change applied made a quiet source report an hour of
-// lag while being perfectly up to date.
+// lagSeconds measures from the oldest change still waiting while behind, and
+// from the newest thing the stream reported once caught up — measuring from the
+// last change applied made a quiet source report an hour of lag.
 func lagSeconds(now, oldest, read, applied time.Time) (float64, bool) {
 	switch {
 	case !oldest.IsZero():
@@ -785,10 +736,8 @@ func lagSeconds(now, oldest, read, applied time.Time) (float64, bool) {
 	return 0, false
 }
 
-// reportRetention publishes how long the task could afford to be stopped.
-//
-// The window is asked for rarely; the headroom is recomputed every tick from
-// it, because the lag underneath it moves.
+// reportRetention publishes how long the task could afford to be stopped. The
+// window is asked for rarely; the headroom is recomputed each tick.
 func (r *Runner) reportRetention(ctx context.Context, now time.Time, lag float64, lagKnown bool) {
 	source, ok := r.Reader.(domain.Retention)
 	if !ok || r.windowFailed {
@@ -799,16 +748,12 @@ func (r *Runner) reportRetention(ctx context.Context, now time.Time, lag float64
 		window, err := source.Window(ctx)
 		switch {
 		case errors.Is(err, domain.ErrWindowNotYet):
-			// Not an answer, but not a refusal either: some sources have to be
-			// measured twice before they can say. Asking again next time is the
-			// difference between the metric appearing a few minutes late and it
-			// never appearing at all.
+			// Not an answer but not a refusal: some sources must be measured twice
+			// before they can say, so asking again beats never publishing at all.
 			return
 		case err != nil:
-			// Asked once, told no. Publishing a guess here would be worse than
-			// publishing nothing: the number is only read when somebody is
-			// deciding whether there is still time to restart rather than
-			// re-copy.
+			// Asked once, told no. A guess would be worse than nothing: this is only
+			// read when somebody is deciding restart against re-copy.
 			r.windowFailed = true
 			r.log().WithError(err).Warn(r.tag(
 				"the source did not say how far its log reaches, so no retention " +
@@ -824,15 +769,14 @@ func (r *Runner) reportRetention(ctx context.Context, now time.Time, lag float64
 	}
 
 	if !lagKnown {
-		// Nothing has been read yet, so there is no position whose age the
-		// headroom could be measured from.
+		// Nothing read yet, so there is no position whose age the headroom could use.
 		return
 	}
 	metrics.SetRetention(r.Opts.Labels, r.window.Seconds(), r.window.Seconds()-lag)
 }
 
 // newestSourceTime reports when the source made the most recent change in a
-// batch, ignoring the syncer's own heartbeats.
+// batch, ignoring heartbeats.
 func newestSourceTime(events []*domain.Event) time.Time {
 	var newest time.Time
 	for _, e := range events {
