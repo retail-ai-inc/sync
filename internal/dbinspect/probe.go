@@ -13,6 +13,7 @@ import (
 	_ "github.com/lib/pq"
 	"github.com/redis/go-redis/v9"
 	"github.com/retail-ai-inc/sync/internal/platform/dsn"
+	"github.com/retail-ai-inc/sync/internal/platform/httpx"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
@@ -28,7 +29,20 @@ func TestConnectionHandler(w http.ResponseWriter, r *http.Request) {
 		Database string `json:"database"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Bad Request", http.StatusBadRequest)
+		httpx.ErrorJSONStatus(w, http.StatusBadRequest, "the request body could not be read", err)
+		return
+	}
+
+	// The list endpoints mask stored passwords, so an edit form filled from one
+	// carries the mask rather than a password. Probing with it fails as an
+	// authentication error, which reads as "the credentials are wrong" when what
+	// happened is that none were sent. Saying so is the difference between an
+	// operator retyping the password and an operator changing it on the server.
+	if req.Password == httpx.RedactedPassword {
+		httpx.ErrorJSONStatus(w, http.StatusBadRequest,
+			"the password field still holds the mask the task list answers with, "+
+				"not a password. Type the password to test this connection; leaving "+
+				"the field alone keeps the stored one when the task is saved", nil)
 		return
 	}
 
@@ -46,7 +60,7 @@ func TestConnectionHandler(w http.ResponseWriter, r *http.Request) {
 				req.User, req.Password, req.Host, req.Port, req.Database),
 			"SHOW TABLES")
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			httpx.ErrorJSON(w, "the database refused the connection", err)
 			return
 		}
 
@@ -58,7 +72,7 @@ func TestConnectionHandler(w http.ResponseWriter, r *http.Request) {
 				req.User, req.Password, req.Host, req.Port, req.Database),
 			"SELECT tablename FROM pg_tables WHERE schemaname='public'")
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			httpx.ErrorJSON(w, "the database refused the connection", err)
 			return
 		}
 
@@ -83,7 +97,7 @@ func TestConnectionHandler(w http.ResponseWriter, r *http.Request) {
 
 		client, err := mongo.Connect(options.Client().ApplyURI(uri))
 		if err != nil {
-			http.Error(w, fmt.Sprintf("MongoDB connection error: %v", err), http.StatusInternalServerError)
+			httpx.ErrorJSON(w, "MongoDB connection error", err)
 			return
 		}
 		defer func() {
@@ -91,13 +105,13 @@ func TestConnectionHandler(w http.ResponseWriter, r *http.Request) {
 		}()
 
 		if err = client.Ping(ctx, nil); err != nil {
-			http.Error(w, fmt.Sprintf("MongoDB ping error: %v", err), http.StatusInternalServerError)
+			httpx.ErrorJSON(w, "MongoDB ping error", err)
 			return
 		}
 
 		collections, err := client.Database(req.Database).ListCollectionNames(ctx, struct{}{})
 		if err != nil {
-			http.Error(w, fmt.Sprintf("Listing collections failed: %v", err), http.StatusInternalServerError)
+			httpx.ErrorJSON(w, "Listing collections failed", err)
 			return
 		}
 		tables = collections
@@ -119,7 +133,7 @@ func TestConnectionHandler(w http.ResponseWriter, r *http.Request) {
 		})
 
 		if err = rdb.Ping(ctx).Err(); err != nil {
-			http.Error(w, fmt.Sprintf("Redis ping error: %v", err), http.StatusInternalServerError)
+			httpx.ErrorJSON(w, "Redis ping error", err)
 			return
 		}
 
@@ -134,7 +148,8 @@ func TestConnectionHandler(w http.ResponseWriter, r *http.Request) {
 		return
 
 	default:
-		http.Error(w, "Unsupported dbType", http.StatusBadRequest)
+		httpx.ErrorJSONStatus(w, http.StatusBadRequest,
+			fmt.Sprintf("%q is not a database type this build can probe", req.DbType), nil)
 		return
 	}
 

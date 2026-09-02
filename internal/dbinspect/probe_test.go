@@ -25,19 +25,25 @@ func TestTheProbeRejectsAnUnsupportedEngine(t *testing.T) {
 			if code != http.StatusBadRequest {
 				t.Errorf("status = %d, want 400 (body: %q)", code, body)
 			}
-			if !strings.Contains(body, "Unsupported dbType") {
-				t.Errorf("body = %q", body)
+			// The reason travels as JSON, because the UI parses it as JSON.
+			if !strings.Contains(body, `"success":false`) {
+				t.Errorf("body = %q, want the JSON envelope", body)
+			}
+			// And it names the type it refused, which "Unsupported dbType" did not.
+			if engine != "" && !strings.Contains(body, engine) {
+				t.Errorf("body = %q, want it to name %q", body, engine)
 			}
 		})
 	}
 }
 
-// TestTheProbeIsCaseSensitiveAboutTheEngine records that the probe compares
-// the engine name verbatim, so the UI has to send it in lower case.
+// The probe compares the engine name verbatim, so the UI has to send it in
+// lower case. The monitoring side folds case and this does not; the two
+// disagreeing is T-094.
 func TestTheProbeIsCaseSensitiveAboutTheEngine(t *testing.T) {
 	code, body := probe(t, `{"dbType":"MySQL","host":"127.0.0.1","port":"1"}`)
 
-	if code != http.StatusBadRequest || !strings.Contains(body, "Unsupported dbType") {
+	if code != http.StatusBadRequest {
 		t.Fatalf("status = %d, body = %q; the comparison appears to fold case now, "+
 			"so assert that instead", code, body)
 	}
@@ -165,5 +171,55 @@ func TestTheProbeStopsWhenTheRequestDoes(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
 		t.Errorf("the probe took %v after its request was cancelled", elapsed)
+	}
+}
+
+// The UI feeds this response to response.json(), so a failure answered as
+// text/plain surfaced as "Unexpected token 'M'" instead of the reason —
+// measured on staging when editing a MongoDB task.
+func TestAFailureIsAnsweredAsJSON(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/test-connection",
+		strings.NewReader(`{"dbType":"cassandra","host":"h","port":"1","database":"x"}`))
+	rec := httptest.NewRecorder()
+
+	TestConnectionHandler(rec, req)
+
+	if got := rec.Header().Get("Content-Type"); got != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", got)
+	}
+	var body map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("the response is not JSON (%v): %s", err, rec.Body.String())
+	}
+	if body["success"] != false {
+		t.Errorf("success = %v, want false", body["success"])
+	}
+	if body["error"] == nil || body["error"] == "" {
+		t.Errorf("no reason was given: %s", rec.Body.String())
+	}
+}
+
+// The task list masks stored passwords, so an edit form carries the mask.
+// Probing with it is an authentication failure that reads as "wrong
+// credentials" when none were sent, so it is refused by name instead.
+func TestTheMaskIsRefusedRatherThanProbedWith(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/test-connection",
+		strings.NewReader(`{"dbType":"mongodb","host":"h","port":"27017","user":"root",
+			"password":"********","database":"x"}`))
+	rec := httptest.NewRecorder()
+
+	TestConnectionHandler(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400: the caller sent a mask, not a credential", rec.Code)
+	}
+	var body map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("the response is not JSON: %s", err)
+	}
+	reason, _ := body["error"].(string)
+	if !strings.Contains(reason, "mask") {
+		t.Errorf("the reason does not mention the mask, so it does not say what to "+
+			"do: %q", reason)
 	}
 }
