@@ -100,7 +100,6 @@ func BackupCreateHandler(w http.ResponseWriter, r *http.Request) {
 	})
 
 	// After successful creation, sync crontab
-	app.SyncCrontab(r.Context(), "BackupCreateHandler")
 }
 
 // BackupUpdateHandler PUT /api/backup/{id}
@@ -137,7 +136,6 @@ func BackupUpdateHandler(w http.ResponseWriter, r *http.Request) {
 	})
 
 	// After successful update, sync crontab
-	app.SyncCrontab(r.Context(), "BackupUpdateHandler")
 }
 
 // BackupDeleteHandler DELETE /api/backup/{id}
@@ -164,7 +162,6 @@ func BackupDeleteHandler(w http.ResponseWriter, r *http.Request) {
 	})
 
 	// After successful deletion, sync crontab
-	app.SyncCrontab(r.Context(), "BackupDeleteHandler")
 }
 
 // BackupPauseHandler PUT /api/backup/{id}/pause
@@ -183,7 +180,6 @@ func BackupPauseHandler(w http.ResponseWriter, r *http.Request) {
 	})
 
 	// After successful pause, sync crontab
-	app.SyncCrontab(r.Context(), "BackupPauseHandler")
 }
 
 // BackupResumeHandler PUT /api/backup/{id}/resume
@@ -202,7 +198,6 @@ func BackupResumeHandler(w http.ResponseWriter, r *http.Request) {
 	})
 
 	// After successful resume, sync crontab
-	app.SyncCrontab(r.Context(), "BackupResumeHandler")
 }
 
 // BackupRunHandler POST /api/backup/{id}/run

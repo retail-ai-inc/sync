@@ -1,7 +1,6 @@
 package app
 
 import (
-	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -292,24 +291,6 @@ func TestPauseJobOnAnUnknownID(t *testing.T) {
 	if err := PauseJob("999"); err == nil {
 		t.Error("PauseJob on an unknown id returned no error")
 	}
-}
-
-// TestSyncCrontabSwallowsEveryFailure records that the crontab rewrite every
-// write endpoint performs after answering cannot report anything: it logs and
-// returns.
-func TestSyncCrontabSwallowsEveryFailure(t *testing.T) {
-	t.Run("no database", func(t *testing.T) {
-		unopenableDB(t)
-		SyncCrontab(context.Background(), "test") // must not panic
-	})
-	t.Run("no tables", func(t *testing.T) {
-		emptyJobDB(t)
-		SyncCrontab(context.Background(), "test")
-	})
-	t.Run("no crontab binary", func(t *testing.T) {
-		useTempJobDB(t) // isolateCrontab has emptied PATH
-		SyncCrontab(context.Background(), "test")
-	})
 }
 
 // completeRequest is a request that describes a whole job, which is what an

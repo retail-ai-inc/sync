@@ -1,8 +1,6 @@
 package domain
 
 import (
-	"encoding/json"
-	"fmt"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -21,48 +19,6 @@ type BackupConfig struct {
 	Schedule string `json:"schedule"`
 	Name     string `json:"name"`
 	// Other fields omitted...
-}
-
-func GenerateCrontabEntries(tasks []BackupTask, apiServer string) []string {
-	var entries []string
-
-	entries = append(entries, "# BEGIN SYNC BACKUP TASKS - DO NOT EDIT THIS SECTION")
-
-	for _, task := range tasks {
-		var config BackupConfig
-		if err := json.Unmarshal([]byte(task.ConfigJSON), &config); err != nil {
-			// The job's schedule is lost and nothing downstream can tell: no
-			// entry is written, no alert is raised, and the API still shows it as
-			// enabled. An error is the least this can do.
-			logrus.Errorf("[CronManager] Task %d has a configuration that will not "+
-				"parse, so it has NO SCHEDULED BACKUP: %v", task.ID, err)
-			continue
-		}
-
-		// A schedule that is not a cron expression used to be written out
-		// anyway, producing a line that begins with the curl command rather than
-		// with five time fields — and crontab refuses the whole file when any
-		// line is malformed, so one misconfigured job removed every backup
-		// schedule on the machine.
-		if _, err := ParseSchedule(config.Schedule); err != nil {
-			logrus.Errorf("[CronManager] Task %d has the schedule %q, which is not a "+
-				"cron expression, so it has NO SCHEDULED BACKUP: %v",
-				task.ID, config.Schedule, err)
-			continue
-		}
-
-		// Generate crontab entry
-		// Ensure the command format is correct, with complete path
-		entry := fmt.Sprintf("%s /usr/bin/curl -s -X POST %s/backup/execute/%d > /dev/null 2>&1",
-			config.Schedule, apiServer, task.ID)
-
-		comment := fmt.Sprintf("# Backup task: %s (ID: %d)", config.Name, task.ID)
-		entries = append(entries, comment, entry, "")
-	}
-
-	entries = append(entries, "# END SYNC BACKUP TASKS")
-
-	return entries
 }
 
 // NextBackupTime reports when a job with this cron expression runs next. It

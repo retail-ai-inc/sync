@@ -12,6 +12,7 @@ import (
 	"github.com/retail-ai-inc/sync/internal/platform/sqlite/sqlitetest"
 
 	_ "github.com/mattn/go-sqlite3"
+	"github.com/sirupsen/logrus"
 )
 
 // isolateCrontab empties PATH so the crontab command cannot be found.
@@ -97,3 +98,10 @@ func readConfig(t *testing.T, db *sql.DB, id int64) string {
 func contains(haystack, needle string) bool { return strings.Contains(haystack, needle) }
 
 func itoa(id int64) string { return strconv.FormatInt(id, 10) }
+
+// quietBackupLogger keeps the scheduler's reports out of the test output.
+func quietBackupLogger() logrus.FieldLogger {
+	l := logrus.New()
+	l.SetLevel(logrus.PanicLevel)
+	return l
+}

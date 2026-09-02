@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	backupapp "github.com/retail-ai-inc/sync/internal/backup/app"
 	identity "github.com/retail-ai-inc/sync/internal/identity/domain"
 	identityStore "github.com/retail-ai-inc/sync/internal/identity/infra"
 	"github.com/retail-ai-inc/sync/internal/platform/config"
@@ -109,6 +110,12 @@ func main() {
 		}
 	}()
 
+	// The backup schedule is this process's own, rebuilt from the job table on
+	// every start. It used to be the system crontab, written only when a job was
+	// edited through the API — so a new container had none, and every backup
+	// stopped until somebody happened to touch a job.
+	stopBackups := backupapp.StartBackupScheduler(ctx, log)
+
 	syncDone := make(chan struct{})
 	go func() {
 		defer close(syncDone)
@@ -133,6 +140,7 @@ func main() {
 	case <-time.After(drainTimeout + 5*time.Second):
 		log.Warn("Replication did not stop within the drain timeout")
 	}
+	stopBackups()
 	log.Info("Program exited")
 }
 

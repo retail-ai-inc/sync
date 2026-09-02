@@ -20,7 +20,10 @@ COPY . .
 
 # Build the executable
 ENV CGO_ENABLED=1
-RUN go build -o sync cmd/sync/main.go
+# The package, not the one file: cmd/sync is main.go plus supervisor.go, and
+# naming the file builds only that file — "undefined: runSyncTasks" at image
+# build time while `go build ./...` passes locally.
+RUN go build -o sync ./cmd/sync
 
 # Extract the UI files during the build stage
 RUN mkdir -p /app/ui && unzip -o /app/ui/dist.zip -d /app/ui/
