@@ -23,7 +23,6 @@ import (
 // nothing. A target that is not a sharded cluster, or a source collection that
 // is not sharded, is left exactly as it is.
 
-// shardKey describes how a collection is partitioned.
 type shardKey struct {
 	Key    bson.Raw
 	Unique bool
@@ -50,7 +49,6 @@ func collectionShardKey(ctx context.Context, client *mongo.Client, namespace str
 	return &shardKey{Key: doc.Key, Unique: doc.Unique}, nil
 }
 
-// isMongos reports whether a client is talking to a sharded cluster.
 func isMongos(ctx context.Context, client *mongo.Client) (bool, error) {
 	var hello struct {
 		Msg string `bson:"msg"`
@@ -62,7 +60,6 @@ func isMongos(ctx context.Context, client *mongo.Client) (bool, error) {
 	return hello.Msg == "isdbgrid", nil
 }
 
-// shardingAction is what the state of the two sides calls for.
 type shardingAction int
 
 const (
@@ -255,7 +252,6 @@ func addressOf(ctx context.Context, client *mongo.Client, namespace string) (doc
 	return documentAddress{Paths: paths}, nil
 }
 
-// filter builds the filter that addresses a document on the target.
 func (a documentAddress) filter(doc bson.M) (bson.M, error) {
 	id, ok := doc["_id"]
 	if !ok {

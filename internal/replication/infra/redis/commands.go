@@ -26,11 +26,9 @@ import (
 // touches keys in a single slot — a cross-slot command cannot be executed on a
 // cluster in the first place — so the first key names the slot for all of them.
 
-// classification is what the applier should do with a command.
 type classification uint8
 
 const (
-	// classWrite is an ordinary write, to be applied in its key's slot.
 	classWrite classification = iota + 1
 	// classHeartbeat proves the link is alive and changes nothing.
 	classHeartbeat
@@ -43,7 +41,6 @@ const (
 	classRefused
 )
 
-// commandTable knows how to read a key out of a command.
 type commandTable struct {
 	// keyAt is the one-based position of the first key, per command name.
 	keyAt map[string]int
@@ -51,7 +48,6 @@ type commandTable struct {
 	movable map[string]bool
 }
 
-// loadCommandTable asks a server for its command specifications.
 func loadCommandTable(ctx context.Context, client goredis.UniversalClient) (*commandTable, error) {
 	infos, err := client.Command(ctx).Result()
 	if err != nil {
@@ -107,7 +103,6 @@ var keyless = map[string]classification{
 	"swapdb":   classRefused,
 }
 
-// classify decides what a command is, and which key names its slot.
 func (t *commandTable) classify(ctx context.Context, client goredis.UniversalClient,
 	command *Command) (classification, []byte, error) {
 
@@ -152,7 +147,6 @@ func (t *commandTable) classify(ctx context.Context, client goredis.UniversalCli
 			"position %d", command.Name(), len(command.Args)-1, at)
 }
 
-// askForKey has the server work out which keys a command touches.
 func (t *commandTable) askForKey(ctx context.Context, client goredis.UniversalClient,
 	command *Command) ([]byte, error) {
 

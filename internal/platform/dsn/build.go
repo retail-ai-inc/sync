@@ -23,8 +23,7 @@ const (
 	KeyReplicaSet = "replicaSet"
 	// KeySRV asks for the mongodb+srv:// scheme, where the seed list comes from
 	// DNS rather than the configuration.
-	KeySRV = "srv"
-	// KeyAuthSource names the MongoDB database the credentials live in.
+	KeySRV        = "srv"
 	KeyAuthSource = "authSource"
 	// KeyDirect pins the MongoDB driver to a single node. It disables topology
 	// discovery, so it is never the default: a driver pinned to one node stops

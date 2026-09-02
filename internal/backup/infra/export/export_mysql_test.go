@@ -7,7 +7,6 @@ import (
 	"time"
 )
 
-// whereRE extracts the two timestamps from a generated time-range condition.
 var whereRE = regexp.MustCompile(`>= '([^']+)' AND ` + "`?" + `\w+` + "`?" + ` < '([^']+)'`)
 
 func parseWhereBounds(t *testing.T, where string) (time.Time, time.Time) {
@@ -39,7 +38,6 @@ func dailyQuery(start, end interface{}) map[string]interface{} {
 	return q
 }
 
-// mustClause builds a WHERE clause and fails the test if it cannot.
 func mustClause(t *testing.T, query map[string]interface{}) string {
 	t.Helper()
 

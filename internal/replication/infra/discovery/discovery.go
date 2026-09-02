@@ -71,7 +71,6 @@ func MySQLTables(ctx context.Context, db Querier, database string) ([]string, er
 	return tables, rows.Err()
 }
 
-// MongoCollections reports the collections in a MongoDB database.
 func MongoCollections(ctx context.Context, db *mongo.Database) ([]string, error) {
 	names, err := db.ListCollectionNames(ctx, bson.M{})
 	if err != nil {

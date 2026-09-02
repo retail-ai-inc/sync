@@ -380,7 +380,6 @@ func TestAWaitingCursorGivesUpWhenCancelled(t *testing.T) {
 	}
 }
 
-// TestAWaitingCursorGivesUpWhenTheBufferCloses covers a clean shutdown.
 func TestAWaitingCursorGivesUpWhenTheBufferCloses(t *testing.T) {
 	buffer := newBuffer(t, BufferOptions{})
 	if err := buffer.Reset(0); err != nil {

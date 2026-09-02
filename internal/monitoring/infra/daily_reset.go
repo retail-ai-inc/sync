@@ -10,7 +10,6 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// resetDailyStatisticsIfNeeded checks if it's a new day and resets statistics if needed
 func resetDailyStatisticsIfNeeded(tx *sql.Tx, syncTaskID int) error {
 	// Use Japan timezone (JST) for daily reset logic
 	jst, err := time.LoadLocation("Asia/Tokyo")
@@ -117,7 +116,6 @@ func parseStoredTime(value string) (time.Time, error) {
 	return time.Time{}, err
 }
 
-// resetInMemoryAndStored starts a task's daily counters again.
 func resetInMemoryAndStored(tx *sql.Tx, syncTaskID int) error {
 	const resetSQL = `
 		UPDATE changestream_statistics 

@@ -28,7 +28,6 @@ const (
 	StageDBFail      = "db fail"
 )
 
-// Fault is a store failure tagged with the message the endpoint answers with.
 type Fault struct {
 	Stage string
 	Err   error
@@ -43,7 +42,6 @@ func faultAt(stage string, err error) *Fault { return &Fault{Stage: stage, Err: 
 // success:false rather than a 404.
 var ErrNoSuchJob = errors.New("no such backup job")
 
-// ListJobs returns every job, oldest id first.
 func ListJobs() ([]domain.BackupJob, error) {
 	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
@@ -95,7 +93,6 @@ ORDER BY id ASC
 	return jobs, nil
 }
 
-// InsertJob stores a new job and returns its id.
 func InsertJob(enable int, now, nextBackup string, config domain.Config) (int64, error) {
 	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
@@ -221,7 +218,6 @@ WHERE id=?
 	return nil
 }
 
-// JobExists reports whether an id names a row.
 func JobExists(id string) (bool, error) {
 	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
@@ -236,7 +232,6 @@ func JobExists(id string) (bool, error) {
 	return count > 0, nil
 }
 
-// StampLastBackup records that a job ran, without running it.
 func StampLastBackup(id, now string) error {
 	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {

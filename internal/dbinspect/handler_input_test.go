@@ -8,7 +8,6 @@ import (
 	"testing"
 )
 
-// postJSON runs a handler over a request body and returns the recorder.
 func postJSON(h http.HandlerFunc, method, path, body string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(method, path, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")

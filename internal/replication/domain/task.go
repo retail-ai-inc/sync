@@ -109,7 +109,6 @@ type SyncTask struct {
 	configJSON     string
 }
 
-// NewSyncTask builds a task from a stored row.
 func NewSyncTask(id, enable int, lastUpdate, lastRun, configJSON string) SyncTask {
 	return SyncTask{
 		id:             id,

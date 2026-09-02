@@ -8,7 +8,6 @@ import (
 	"testing"
 )
 
-// exposition renders a registry the way a scrape would read it.
 func exposition(t *testing.T, r *Registry) string {
 	t.Helper()
 
@@ -61,7 +60,6 @@ func TestACounterNeverGoesBackwards(t *testing.T) {
 	}
 }
 
-// TestEachLabelSetIsItsOwnSeries is what lets one graph show every task.
 func TestEachLabelSetIsItsOwnSeries(t *testing.T) {
 	r := New()
 

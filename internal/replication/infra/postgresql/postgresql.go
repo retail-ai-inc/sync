@@ -39,7 +39,6 @@ type replicationState struct {
 	replicaConn *sql.DB
 }
 
-// PostgreSQLSyncer implements PostgreSQL synchronization
 type PostgreSQLSyncer struct {
 	cfg    config.SyncConfig
 	logger logrus.FieldLogger
@@ -63,7 +62,6 @@ type PostgreSQLSyncer struct {
 	checkpoints checkpoint.Store
 }
 
-// NewPostgreSQLSyncer creates a new PostgreSQL synchronizer
 func NewPostgreSQLSyncer(cfg config.SyncConfig, logger *logrus.Logger) *PostgreSQLSyncer {
 	return &PostgreSQLSyncer{
 		cfg:    cfg,
@@ -246,7 +244,6 @@ func replicationKeywords(dsn string) string {
 	return strings.Join(append(kept, "replication=database"), " ")
 }
 
-// ensureReplicationSlot ensures the replication slot exists
 func (s *PostgreSQLSyncer) ensureReplicationSlot(ctx context.Context) error {
 	info, err := pglogrepl.IdentifySystem(ctx, s.sourceConnRepl)
 	if err != nil {
@@ -286,7 +283,6 @@ func (s *PostgreSQLSyncer) ensureReplicationSlot(ctx context.Context) error {
 	return nil
 }
 
-// prepareTargetSchema prepares the target database schema
 func (s *PostgreSQLSyncer) prepareTargetSchema(ctx context.Context) error {
 	for _, dbmap := range s.cfg.Mappings {
 		srcSchema := dbmap.SourceSchema
@@ -337,7 +333,6 @@ func (s *PostgreSQLSyncer) prepareTargetSchema(ctx context.Context) error {
 	return nil
 }
 
-// generateCreateTableSQL generates SQL statement for table creation
 func (s *PostgreSQLSyncer) generateCreateTableSQL(
 	ctx context.Context,
 	srcSchema, srcTable, tgtSchema, tgtTable string,
@@ -424,7 +419,6 @@ ORDER BY ordinal_position
 	return createSQL, seqSlice, nil
 }
 
-// extractSequenceName extracts sequence name
 func extractSequenceName(defaultVal string) string {
 	reg := regexp.MustCompile(`nextval\('([^']+)'::regclass\)`)
 	matches := reg.FindStringSubmatch(defaultVal)
@@ -434,7 +428,6 @@ func extractSequenceName(defaultVal string) string {
 	return ""
 }
 
-// checkTableExist checks if a table exists
 func (s *PostgreSQLSyncer) checkTableExist(ctx context.Context, schemaName, tableName string) (bool, error) {
 	query := `SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=$1 AND table_name=$2`
 	var cnt int
@@ -445,7 +438,6 @@ func (s *PostgreSQLSyncer) checkTableExist(ctx context.Context, schemaName, tabl
 	return cnt > 0, nil
 }
 
-// copyIndexes copies indexes from source to target
 func (s *PostgreSQLSyncer) copyIndexes(ctx context.Context, srcSchema, srcTable, tgtSchema, tgtTable string) error {
 	sqlIdx := `
 	SELECT indexname, indexdef
@@ -527,7 +519,6 @@ func (s *PostgreSQLSyncer) copyIndexes(ctx context.Context, srcSchema, srcTable,
 	return rows.Err()
 }
 
-// doInitialSync performs initial data synchronization
 func (s *PostgreSQLSyncer) doInitialSync(ctx context.Context) error {
 	for _, dbmap := range s.cfg.Mappings {
 		srcSchema := dbmap.SourceSchema
@@ -612,7 +603,6 @@ func (s *PostgreSQLSyncer) doInitialSync(ctx context.Context) error {
 	return nil
 }
 
-// startLogicalReplication starts logical replication process
 func (s *PostgreSQLSyncer) startLogicalReplication(ctx context.Context) error {
 	if s.publicationNames == "" {
 		s.publicationNames = "mypub"
@@ -756,7 +746,6 @@ func (s *PostgreSQLSyncer) confirmProgress(ctx context.Context) error {
 	})
 }
 
-// processMessage processes replication messages
 func (s *PostgreSQLSyncer) processMessage(xld pglogrepl.XLogData, state *replicationState) (bool, error) {
 	walData := xld.WALData
 	logicalMsg, err := pglogrepl.ParseV2(walData, state.inStream)
@@ -825,7 +814,6 @@ func (s *PostgreSQLSyncer) processMessage(xld pglogrepl.XLogData, state *replica
 	return false, nil
 }
 
-// handleInsert handles insert operations
 func (s *PostgreSQLSyncer) handleInsert(
 	msg *pglogrepl.InsertMessageV2,
 	st *replicationState,
@@ -849,7 +837,6 @@ func (s *PostgreSQLSyncer) handleInsert(
 	return false, s.replicateQuery(st.replicaConn, query, args, "INSERT", relationName(rel))
 }
 
-// handleUpdate handles update operations
 func (s *PostgreSQLSyncer) handleUpdate(
 	msg *pglogrepl.UpdateMessageV2,
 	st *replicationState,
@@ -873,7 +860,6 @@ func (s *PostgreSQLSyncer) handleUpdate(
 	return false, s.replicateQuery(st.replicaConn, query, args, "UPDATE", relationName(rel))
 }
 
-// handleDelete handles delete operations
 func (s *PostgreSQLSyncer) handleDelete(
 	msg *pglogrepl.DeleteMessageV2,
 	st *replicationState,
@@ -895,7 +881,6 @@ func (s *PostgreSQLSyncer) handleDelete(
 	return false, s.replicateQuery(st.replicaConn, query, args, "DELETE", relationName(rel))
 }
 
-// relationName names a table for a log line.
 func relationName(rel *pglogrepl.RelationMessageV2) string {
 	return rel.Namespace + "." + rel.RelationName
 }
@@ -923,7 +908,6 @@ func (s *PostgreSQLSyncer) keyColumns(rel *pglogrepl.RelationMessageV2) []string
 	return keys
 }
 
-// getPrimaryKeyColumns retrieves primary key columns
 func (s *PostgreSQLSyncer) getPrimaryKeyColumns(schema, tableName string) ([]string, error) {
 	query := `
 		SELECT a.attname
@@ -1020,7 +1004,6 @@ func parseLSNFromString(lsnStr string) (pglogrepl.LSN, error) {
 	return pglogrepl.LSN(uint64(hi)<<32 + uint64(lo)), nil
 }
 
-// hexStrToUint32 converts hex string to uint32
 func hexStrToUint32(s string) (uint32, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -1096,7 +1079,6 @@ func (s *PostgreSQLSyncer) checkpointStore() checkpoint.Store {
 	}
 }
 
-// walCheckpoint is what the position store holds.
 type walCheckpoint struct {
 	LSN string `json:"lsn"`
 	// Source names the server the position belongs to, without credentials. An
@@ -1105,7 +1087,6 @@ type walCheckpoint struct {
 	Source string `json:"source,omitempty"`
 }
 
-// loadStoredLSN reports the position to resume from, or zero when there is none.
 func (s *PostgreSQLSyncer) loadStoredLSN(ctx context.Context) (pglogrepl.LSN, error) {
 	payload, err := s.checkpoints.Load(ctx, "")
 	if err != nil {
@@ -1131,7 +1112,6 @@ func (s *PostgreSQLSyncer) loadStoredLSN(ctx context.Context) (pglogrepl.LSN, er
 	return parseLSNFromString(cp.LSN)
 }
 
-// recordLSN stores the position everything before it has been applied at.
 func (s *PostgreSQLSyncer) recordLSN(ctx context.Context, lsn pglogrepl.LSN) error {
 	payload, err := checkpoint.Encode(walCheckpoint{
 		LSN:    lsn.String(),

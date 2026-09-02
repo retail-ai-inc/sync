@@ -279,7 +279,6 @@ func (l *link) acknowledge(ctx context.Context, stream *Stream) {
 
 func (l *link) log() logrus.FieldLogger { return orDefault(l.logger) }
 
-// failure reports why the connection stopped, or nil if it has not.
 func (l *link) failure() (error, bool) {
 	if l.pumpErr == nil {
 		return nil, false
@@ -292,7 +291,6 @@ func (l *link) failure() (error, bool) {
 	}
 }
 
-// cursor opens a reader on the buffered stream.
 func (l *link) cursor(offset int64) (*Cursor, error) {
 	cursor, err := l.buffer.Cursor(offset)
 	if err != nil {
@@ -307,7 +305,6 @@ func (l *link) cursor(offset int64) (*Cursor, error) {
 	return cursor, nil
 }
 
-// head is how far the buffer has been filled.
 func (l *link) head() int64 { return l.buffer.Newest() }
 
 // close stops the pump and releases the connection. The buffer stays on disk.
@@ -357,7 +354,6 @@ func (l *link) publishSourceLag(ctx context.Context) {
 	}
 }
 
-// masterOffset reads the source's own replication offset.
 func masterOffset(ctx context.Context, node goredis.UniversalClient) (int64, error) {
 	info, err := node.Info(ctx, "replication").Result()
 	if err != nil {
@@ -366,7 +362,6 @@ func masterOffset(ctx context.Context, node goredis.UniversalClient) (int64, err
 	return parseMasterOffset(info)
 }
 
-// parseMasterOffset reads master_repl_offset out of an INFO replication reply.
 func parseMasterOffset(info string) (int64, error) {
 	for _, line := range strings.Split(info, "\n") {
 		line = strings.TrimSpace(line)

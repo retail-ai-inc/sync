@@ -36,10 +36,8 @@ type Point struct {
 	Offset int64
 }
 
-// IsZero reports whether nothing is known, which asks for a full resync.
 func (p Point) IsZero() bool { return p.ReplID == "" }
 
-// Handshake is what the master agreed to.
 type Handshake struct {
 	// Full says the master would not continue from the offset asked for and is
 	// sending its whole data set instead.
@@ -50,7 +48,6 @@ type Handshake struct {
 	Offset int64
 }
 
-// Command is one command read from the stream.
 type Command struct {
 	// Args is the command and its arguments, as the master sent them.
 	Args [][]byte
@@ -61,7 +58,6 @@ type Command struct {
 	End int64
 }
 
-// Name is the command name, upper-cased, or "" for an empty command.
 func (c *Command) Name() string {
 	if len(c.Args) == 0 {
 		return ""
@@ -69,7 +65,6 @@ func (c *Command) Name() string {
 	return strings.ToUpper(string(c.Args[0]))
 }
 
-// StreamOptions configures a replication connection.
 type StreamOptions struct {
 	// Addr is the master to replicate from, as host:port.
 	Addr string
@@ -134,7 +129,6 @@ type Stream struct {
 	closeOnce sync.Once
 }
 
-// Dial connects to a master and authenticates.
 func Dial(ctx context.Context, opts StreamOptions) (*Stream, error) {
 	if opts.Addr == "" {
 		return nil, fmt.Errorf("no address to replicate from")
@@ -307,7 +301,6 @@ func (s *Stream) SkipRDB(ctx context.Context) (int64, error) {
 	}
 }
 
-// skipLength discards a data set sent with a length prefix.
 func (s *Stream) skipLength(ctx context.Context, size int64) (int64, error) {
 	var read int64
 	chunk := make([]byte, 64<<10)
@@ -442,7 +435,6 @@ func (s *Stream) Next(ctx context.Context) (*Command, error) {
 	return &Command{Args: args, Raw: raw, End: s.offset}, nil
 }
 
-// Offset is how far the stream has been read.
 func (s *Stream) Offset() int64 { return s.offset }
 
 // Ack reports an offset back to the master.
@@ -459,7 +451,6 @@ func (s *Stream) Ack(offset int64) error {
 		[]byte(strconv.FormatInt(offset, 10))})
 }
 
-// Close releases the connection.
 func (s *Stream) Close() error {
 	var err error
 	s.closeOnce.Do(func() {
@@ -473,7 +464,6 @@ func (s *Stream) Close() error {
 
 // ------------------------------------------------------------------ plumbing
 
-// call sends a command and reads a single-line reply, for the handshake only.
 func (s *Stream) call(args ...[]byte) (string, error) {
 	s.writing.Lock()
 	err := s.write(args)
@@ -505,7 +495,6 @@ func (s *Stream) write(args [][]byte) error {
 	return nil
 }
 
-// deadline arms the idle timeout before a read.
 func (s *Stream) deadline() error {
 	return s.conn.SetReadDeadline(time.Now().Add(s.opts.idleTimeout()))
 }
@@ -523,7 +512,6 @@ func (s *Stream) readLine() (string, error) {
 	return strings.TrimRight(line, "\r\n"), nil
 }
 
-// readLineRaw reads a line and records its bytes.
 func (s *Stream) readLineRaw() (string, error) {
 	if err := s.deadline(); err != nil {
 		return "", err
@@ -536,7 +524,6 @@ func (s *Stream) readLineRaw() (string, error) {
 	return strings.TrimRight(line, "\r\n"), nil
 }
 
-// readRaw reads exactly n bytes and records them.
 func (s *Stream) readRaw(n int) ([]byte, error) {
 	if err := s.deadline(); err != nil {
 		return nil, err
@@ -561,7 +548,6 @@ func (s *Stream) peek() (byte, error) {
 	return head[0], nil
 }
 
-// describe turns a read failure into something an operator can act on.
 func (s *Stream) describe(err error) error {
 	var timeout net.Error
 	if errors.As(err, &timeout) && timeout.Timeout() {

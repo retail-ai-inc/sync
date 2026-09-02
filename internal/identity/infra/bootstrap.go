@@ -16,7 +16,6 @@ var ErrNoBootstrapPassword = errors.New(
 	"the users table is empty and SYNC_ADMIN_PASSWORD is not set, so there is no " +
 		"way to sign in; set it and restart to create the first administrator")
 
-// BootstrapUsername is the name the first administrator is created under.
 const BootstrapUsername = "admin"
 
 // EnsureAdmin creates the first administrator on a database that has none.

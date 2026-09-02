@@ -24,7 +24,6 @@ import (
 // showExpandedEvents. What arrives is a description of what happened rather than
 // a statement to run, so each one is turned back into a command here.
 
-// schemaChange is what a DDL event is carried as through the pipeline.
 type schemaChange struct {
 	// Kind is the change stream's operationType.
 	Kind string
@@ -37,11 +36,9 @@ type schemaChange struct {
 	Describe string
 }
 
-// ddlDecision is what to do with one schema change.
 type ddlDecision int
 
 const (
-	// ddlApply rewrites it for the target and runs it.
 	ddlApply ddlDecision = iota
 	// ddlSkip leaves it alone: it is not something this replicates.
 	ddlSkip
@@ -148,7 +145,6 @@ func planSchemaChange(raw bson.Raw, collection string) (schemaChange, ddlDecisio
 	return schemaChange{}, ddlSkip, fmt.Sprintf("is a %q event", kind)
 }
 
-// indexSpecs reads the index specifications out of an operationDescription.
 func indexSpecs(description bson.RawValue) ([]bson.Raw, bool) {
 	if description.Type == 0 {
 		return nil, false
@@ -174,7 +170,6 @@ func indexSpecs(description bson.RawValue) ([]bson.Raw, bool) {
 	return specs, len(specs) > 0
 }
 
-// indexNames reads the names out of index specifications.
 func indexNames(specs []bson.Raw) []string {
 	var names []string
 	for _, spec := range specs {

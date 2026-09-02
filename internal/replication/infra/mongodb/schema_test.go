@@ -183,7 +183,6 @@ func TestAPinnedClusterTimeIsRecognisedAsOne(t *testing.T) {
 	}
 }
 
-// TestAResumeTokenIsRecognisedAsOne is the other half.
 func TestAResumeTokenIsRecognisedAsOne(t *testing.T) {
 	raw := rawEvent(t, bson.D{{Key: "_data", Value: "8264ABCDEF"}})
 	payload, err := encodeToken(raw)

@@ -38,7 +38,6 @@ type MySQLSyncer struct {
 	dialect dialect
 }
 
-// flavour reports the dialect to render statements in, defaulting to MySQL.
 func (s *MySQLSyncer) flavour() dialect {
 	if s.dialect == "" {
 		return dialectMySQL
@@ -380,7 +379,6 @@ func (s *MySQLSyncer) sourceCheckpoint(ctx context.Context, conn *sql.Conn) (*bi
 	return nil, lastErr
 }
 
-// readBinlogStatus runs one form of the status statement and maps its columns.
 func readBinlogStatus(ctx context.Context, conn *sql.Conn, stmt string) (*binlogCheckpoint, error) {
 	rows, err := conn.QueryContext(ctx, stmt)
 	if err != nil {
@@ -784,7 +782,6 @@ type binlogCheckpoint struct {
 	Source string `json:"source,omitempty"`
 }
 
-// position reports the file-and-offset half of the checkpoint.
 func (c *binlogCheckpoint) position() mysql.Position {
 	return mysql.Position{Name: c.Name, Pos: c.Pos}
 }
@@ -831,7 +828,6 @@ func (s *MySQLSyncer) checkpointStore(targetDB *sql.DB) checkpoint.Store {
 	}
 }
 
-// loadCheckpoint reads the stored position, reporting nil when there is none.
 func (s *MySQLSyncer) loadCheckpoint(ctx context.Context, store checkpoint.Store) (*binlogCheckpoint, error) {
 	payload, err := store.Load(ctx, "")
 	if err != nil {
@@ -921,7 +917,6 @@ func (s *MySQLSyncer) sourceTLS() *tls.Config {
 	return nil
 }
 
-// parseUserPassword recovers the credentials canal should authenticate with.
 func (s *MySQLSyncer) parseUserPassword(dsn string) (string, string) {
 	cfg, err := mysqldriver.ParseDSN(dsn)
 	if err != nil {
@@ -1024,7 +1019,6 @@ type MyEventHandler struct {
 	allowKeyless bool
 }
 
-// flavour reports the dialect to render statements in, defaulting to MySQL.
 func (h *MyEventHandler) flavour() dialect {
 	if h.dialect == "" {
 		return dialectMySQL
@@ -1462,7 +1456,6 @@ func (h *MyEventHandler) OnPosSynced(header *replication.EventHeader, pos mysql.
 	return nil
 }
 
-// recordCheckpoint writes one position and remembers when.
 func (h *MyEventHandler) recordCheckpoint(payload string) error {
 	if err := h.checkpoints.Save(context.Background(), "", payload); err != nil {
 		h.logger.Errorf("[MySQL] Failed to record the position: %v", err)

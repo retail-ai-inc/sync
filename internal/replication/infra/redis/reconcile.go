@@ -24,7 +24,6 @@ import (
 // failover — a record nobody can explain, which no amount of comparing row counts
 // would have found.
 
-// Reconciler compares one shard's keys against the target.
 type Reconciler struct {
 	// Node is this shard's master on the source. Scanning the cluster client
 	// would walk every shard, and each shard has its own reconciler.
@@ -134,7 +133,6 @@ func (r *Reconciler) Run(ctx context.Context) {
 	}
 }
 
-// pass compares every key once, in both directions.
 func (r *Reconciler) pass(ctx context.Context) (int, error) {
 	limit := newRateLimiter(r.ReadRate)
 	differences := 0
@@ -157,7 +155,6 @@ func (r *Reconciler) pass(ctx context.Context) (int, error) {
 	return differences + ghosts, err
 }
 
-// compare checks a page of keys and repairs what differs.
 func (r *Reconciler) compare(ctx context.Context, keys []string) (int, error) {
 	wanted := make([][]byte, 0, len(keys))
 	for _, key := range keys {
@@ -333,7 +330,6 @@ func (r *Reconciler) ghosts(ctx context.Context, limit *rateLimiter) (int, error
 	return found, err
 }
 
-// confirmGone re-checks keys the source appeared not to have.
 func (r *Reconciler) confirmGone(ctx context.Context, keys []string) ([]string, error) {
 	select {
 	case <-ctx.Done():
@@ -344,7 +340,6 @@ func (r *Reconciler) confirmGone(ctx context.Context, keys []string) ([]string, 
 	return absentFrom(ctx, r.Source, keys)
 }
 
-// absentFrom reports which of the keys a server does not have.
 func absentFrom(ctx context.Context, client goredis.UniversalClient, keys []string) ([]string, error) {
 	pipe := client.Pipeline()
 	exists := make([]*goredis.IntCmd, len(keys))

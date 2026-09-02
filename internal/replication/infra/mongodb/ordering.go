@@ -6,7 +6,6 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
-// idOf reports the _id of a document, or nil when it does not carry one.
 func idOf(doc interface{}) interface{} {
 	switch d := doc.(type) {
 	case bson.M:

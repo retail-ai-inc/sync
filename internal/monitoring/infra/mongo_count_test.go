@@ -60,7 +60,6 @@ func countedFilter(t *testing.T, qc *QueryCounter, out *bytes.Buffer,
 	return ""
 }
 
-// loggingCounter returns a counter whose debug output is captured.
 func loggingCounter(t *testing.T) (*QueryCounter, *bytes.Buffer) {
 	t.Helper()
 

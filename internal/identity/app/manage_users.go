@@ -14,7 +14,6 @@ import (
 // other part of the process is waiting on, replication checkpoints included.
 const MaxPageSize = 200
 
-// ErrBadPage means the paging parameters are not a page.
 var ErrBadPage = errors.New("current must be at least 1 and pageSize between 1 and 200")
 
 // ListUsers returns one page of the user directory together with the total

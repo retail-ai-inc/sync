@@ -15,7 +15,6 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// fakeConfig satisfies ConfigProvider.
 type fakeConfig struct {
 	webhook string
 	channel string
@@ -218,7 +217,6 @@ func TestAnAlertThatCouldNotBeSentIsReported(t *testing.T) {
 	}
 }
 
-// TestNoWebhookIsNotAFailure covers a deployment that has asked for no alerts.
 func TestNoWebhookIsNotAFailure(t *testing.T) {
 	chdirWithoutScript(t)
 

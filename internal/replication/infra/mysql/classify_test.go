@@ -87,7 +87,6 @@ func TestClassifyingAFailureCountsItAndMarksTheStreamDown(t *testing.T) {
 	}
 }
 
-// TestNoFailureIsNoFailure keeps classify from inventing one.
 func TestNoFailureIsNoFailure(t *testing.T) {
 	r := &Reader{Labels: metrics.Labels{"task": t.Name()}}
 	defer metrics.Default.Forget(r.Labels)

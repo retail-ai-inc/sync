@@ -87,7 +87,6 @@ func (m *fakeMaster) serve() {
 	}
 }
 
-// readCommandFrom reads one RESP array, which is all a replica ever sends.
 func readCommandFrom(conn net.Conn) ([]string, error) {
 	reader := make([]byte, 0, 256)
 	one := make([]byte, 1)
@@ -129,7 +128,6 @@ func readCommandFrom(conn net.Conn) ([]string, error) {
 	return args, nil
 }
 
-// resp renders a command the way a master writes it into the stream.
 func resp(args ...string) []byte {
 	out := []byte(fmt.Sprintf("*%d\r\n", len(args)))
 	for _, arg := range args {

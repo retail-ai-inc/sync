@@ -193,7 +193,6 @@ func (r *Reader) Open(ctx context.Context, from domain.Position) error {
 	return nil
 }
 
-// Next hands over the next event, or the reason the stream ended.
 func (r *Reader) Next(ctx context.Context) (*domain.Event, error) {
 	select {
 	case <-ctx.Done():
@@ -246,7 +245,6 @@ func (r *Reader) capturedTables() int {
 // read again next time.
 var errReaderClosed = errors.New("the reader has been closed")
 
-// classify decides whether a stream failure is worth retrying.
 func (r *Reader) classify(err error) error {
 	if err == nil {
 		return nil
@@ -377,7 +375,6 @@ func (r *Reader) converter() *MyEventHandler {
 
 // ------------------------------------------------------- canal callbacks
 
-// OnRow converts the rows into statements, which the sink collects.
 func (r *Reader) OnRow(e *canal.RowsEvent) error {
 	before := len(r.tx)
 	if err := r.conv.OnRow(e); err != nil {
@@ -620,7 +617,6 @@ func (r *Reader) handOver(pos mysql.Position, set mysql.GTIDSet, header *replica
 	return nil
 }
 
-// encode renders the position the way the checkpoint store holds it.
 func (r *Reader) encode(pos mysql.Position, set mysql.GTIDSet) (string, error) {
 	cp := binlogCheckpoint{Name: pos.Name, Pos: pos.Pos, Source: r.source}
 	if set != nil {
@@ -691,7 +687,6 @@ func opOf(query string) domain.Op {
 	return domain.OpSchema
 }
 
-// tlsFor reads the TLS setting out of a parsed DSN.
 func tlsFor(cfg *mysqldriver.Config) *tls.Config {
 	switch strings.ToLower(cfg.TLSConfig) {
 	case "true":

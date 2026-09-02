@@ -123,7 +123,6 @@ func mysqlCredentialsFile(password string) (string, func(), error) {
 	return file.Name(), remove, nil
 }
 
-// executeExternalMySQLDump executes mysqldump command with options
 func (e *BackupExecutor) executeExternalMySQLDump(ctx context.Context, host, port, username, password, database, table, outputPath string, config ExecutorBackupConfig) error {
 	// The password used to be spelled "-p<password>" in the argument list, where
 	// every other user on the host could read it out of the process table for
@@ -337,7 +336,6 @@ except Exception as e:
 	return nil
 }
 
-// exportMySQLMergedTables performs multi-table merged backup for MySQL
 func (e *BackupExecutor) exportMySQLMergedTables(ctx context.Context, connectionURL, database string, tables []string, tempDir string, config ExecutorBackupConfig) error {
 	logrus.Infof("[BackupExecutor] 🚀 Starting MySQL multi-table merge backup for %d tables: %v", len(tables), tables)
 
@@ -476,7 +474,6 @@ func (e *BackupExecutor) exportMySQLMergedTables(ctx context.Context, connection
 	return nil
 }
 
-// getMySQLTables queries MySQL INFORMATION_SCHEMA to get tables matching regex pattern
 func (e *BackupExecutor) getMySQLTables(ctx context.Context, config *ExecutorBackupConfig, pattern string) ([]string, error) {
 	// Parse connection URL. The credentials are the job's own fields: this used
 	// to read them out of the URL, where they never were — the two return values

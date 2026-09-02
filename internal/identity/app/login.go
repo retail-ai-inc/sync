@@ -70,7 +70,6 @@ func IdentifyFromHeader(authHeader string) string {
 	return username
 }
 
-// CurrentUser returns the stored profile of a username.
 func CurrentUser(username string) (map[string]interface{}, error) {
 	return infra.GetUserData(username)
 }

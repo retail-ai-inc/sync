@@ -14,7 +14,6 @@ import (
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
 )
 
-// rawEvent renders a change stream document the way the server sends one.
 func rawEvent(t *testing.T, doc bson.D) bson.Raw {
 	t.Helper()
 	encoded, err := bson.Marshal(doc)
@@ -178,12 +177,10 @@ func TestOneStreamStillOnlyReplicatesWhatTheTaskNames(t *testing.T) {
 	}
 }
 
-// ns is shorthand for a namespace in the tests below.
 func ns(db, object string) domain.Namespace {
 	return domain.Namespace{DB: db, Object: object}
 }
 
-// readerFor builds a reader with its filters settled, the way Open does.
 func readerFor(mappings []config.DatabaseMapping) *Reader {
 	r := &Reader{Config: config.SyncConfig{
 		Type:             "mongodb",
@@ -274,7 +271,6 @@ func TestATaskThatNamesNothingReplicatesEverythingInItsDatabase(t *testing.T) {
 
 // ------------------------------------------------------- transaction buffering
 
-// txEvent renders one event of a multi-document transaction.
 func txEvent(t *testing.T, coll, id, session string, number int64) bson.Raw {
 	t.Helper()
 	doc := changeDoc("shop", coll, "insert", bson.D{{Key: "_id", Value: id}})
@@ -502,7 +498,6 @@ func TestAnUnshardedChangeIsStillFilteredByItsIDAlone(t *testing.T) {
 	}
 }
 
-// filterIn reads the filter out of whichever write model was built.
 func filterIn(t *testing.T, model mongo.WriteModel) bson.M {
 	t.Helper()
 

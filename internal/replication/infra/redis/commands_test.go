@@ -8,7 +8,6 @@ import (
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
 )
 
-// cmd builds a command the way the master would have sent it.
 func cmd(parts ...string) *Command {
 	args := make([][]byte, 0, len(parts))
 	for _, p := range parts {

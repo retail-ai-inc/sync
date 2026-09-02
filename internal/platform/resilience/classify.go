@@ -101,7 +101,6 @@ var transientPhrases = []string{
 	"eof",
 }
 
-// IsConnectionError reports whether an error is worth another attempt.
 func IsConnectionError(err error) bool {
 	if err == nil {
 		return false

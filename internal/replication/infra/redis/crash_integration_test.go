@@ -132,7 +132,6 @@ func TestCommandsAreAppliedExactlyOnceAcrossCrashes(t *testing.T) {
 	t.Logf("phase %s, %d commands skipped as already applied", phase, skipped)
 }
 
-// recordedPhase reads which phase a shard's stored position is in.
 func recordedPhase(t *testing.T, target goredis.UniversalClient, taskID int, shard string) string {
 	t.Helper()
 	payload, err := target.Get(context.Background(), metaKey(taskID, shard)).Result()

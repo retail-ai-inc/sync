@@ -15,12 +15,10 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// BackupExecutor Backup executor
 type BackupExecutor struct {
 	db *sql.DB
 }
 
-// ExecutorBackupConfig Configuration structure for backup operations
 type ExecutorBackupConfig struct {
 	Name       string `json:"name"`
 	SourceType string `json:"sourceType"`
@@ -46,12 +44,10 @@ type ExecutorBackupConfig struct {
 	RegexPattern       string                            `json:"regexPattern"`
 }
 
-// NewBackupExecutor Create a new backup executor
 func NewBackupExecutor(db *sql.DB) *BackupExecutor {
 	return &BackupExecutor{db: db}
 }
 
-// Execute Execute backup task
 func (e *BackupExecutor) Execute(ctx context.Context, taskID int) error {
 	// Query backup task
 	task, err := e.getBackupTask(ctx, taskID)
@@ -155,7 +151,6 @@ func (e *BackupExecutor) Execute(ctx context.Context, taskID int) error {
 	return nil
 }
 
-// parseStamp reads one stored timestamp, saying so when it cannot.
 func parseStamp(taskID int, column string, stored sql.NullString) time.Time {
 	if !stored.Valid || stored.String == "" {
 		return time.Time{}
@@ -169,7 +164,6 @@ func parseStamp(taskID int, column string, stored sql.NullString) time.Time {
 	return t
 }
 
-// getBackupTask Get backup task information
 func (e *BackupExecutor) getBackupTask(ctx context.Context, taskID int) (domain.BackupTask, error) {
 	var task domain.BackupTask
 	var lastUpdateTime, lastBackupTime, nextBackupTime sql.NullString

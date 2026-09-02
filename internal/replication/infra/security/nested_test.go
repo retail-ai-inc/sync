@@ -67,7 +67,6 @@ func TestOneLevelStillWorks(t *testing.T) {
 	}
 }
 
-// TestABSONDocumentIsHandledLikeAMap covers what the MongoDB driver produces.
 func TestABSONDocumentIsHandledLikeAMap(t *testing.T) {
 	cfg := enabled(FieldSecurityConfig{Field: "profile.contact.phone", SecurityType: "masked"})
 

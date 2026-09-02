@@ -13,13 +13,11 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// CronManager Manages crontab entries for backup tasks
 type CronManager struct {
 	db        *sql.DB
 	apiServer string // API server address
 }
 
-// NewCronManager Create a new crontab manager
 func NewCronManager(db *sql.DB, apiServer string) *CronManager {
 	return &CronManager{
 		db:        db,
@@ -27,7 +25,6 @@ func NewCronManager(db *sql.DB, apiServer string) *CronManager {
 	}
 }
 
-// SyncCrontab Synchronize backup tasks from SQLite to system crontab
 func (cm *CronManager) SyncCrontab(ctx context.Context) error {
 	logrus.Info("[CronManager] Starting to sync backup tasks to crontab")
 
@@ -80,7 +77,6 @@ func (cm *CronManager) SyncCrontab(ctx context.Context) error {
 	return nil
 }
 
-// updateSystemCrontab Update system crontab
 func updateSystemCrontab(newEntries []string) error {
 	// Get current crontab
 	cmd := exec.Command("crontab", "-l")

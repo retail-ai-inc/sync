@@ -12,7 +12,6 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// quietLog returns a logger that discards output.
 func quietLog() *logrus.Logger {
 	l := logrus.New()
 	l.SetOutput(io.Discard)
@@ -92,7 +91,6 @@ func stubTask(started chan<- int) func(config.SyncConfig, *config.Config, *logru
 	}
 }
 
-// runWith drives a supervisor whose tasks are stubs.
 func runWith(t *testing.T, build func(config.SyncConfig, *config.Config, *logrus.Logger) func(context.Context) error) *supervisor {
 	t.Helper()
 
@@ -225,7 +223,6 @@ func TestStopAllWaitsForEveryTask(t *testing.T) {
 	}
 }
 
-// drain waits for n tasks to report that they started.
 func drain(t *testing.T, started <-chan int, n int) {
 	t.Helper()
 

@@ -751,7 +751,6 @@ func TestAChunkMigrationIsNotReplicated(t *testing.T) {
 	}
 }
 
-// movedChunk records where a chunk went.
 type movedChunk struct{ from, to string }
 
 // moveOneChunk moves one chunk of a collection to another shard, splitting the

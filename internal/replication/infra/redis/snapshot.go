@@ -31,7 +31,6 @@ import (
 // read early may have changed before a key read late. The reader resolves that by
 // applying changes by value until the stream has passed the end of the copy.
 
-// Snapshotter takes one shard's first copy.
 type Snapshotter struct {
 	Link *link
 	// Node is this shard's master. The copy reads from it rather than from the
@@ -83,7 +82,6 @@ func (s *Snapshotter) Pin(ctx context.Context) (domain.Position, error) {
 	return domain.Position{Payload: payload}, nil
 }
 
-// Copy reads every key from the source and writes it to the target.
 func (s *Snapshotter) Copy(ctx context.Context) error {
 	var (
 		copied int
@@ -194,7 +192,6 @@ func scanOne(ctx context.Context, client goredis.UniversalClient, batch int,
 	}
 }
 
-// isMetaKey reports whether a key is one of the position metadata keys.
 func isMetaKey(key string) bool {
 	const prefix = "__sync:pos:"
 	return len(key) >= len(prefix) && key[:len(prefix)] == prefix

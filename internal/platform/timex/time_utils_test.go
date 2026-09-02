@@ -141,7 +141,6 @@ func TestAnEmptyWindowIsReported(t *testing.T) {
 	}
 }
 
-// TestTheDefaultWindowIsYesterday covers an omitted pair of offsets.
 func TestTheDefaultWindowIsYesterday(t *testing.T) {
 	start, end, err := DailyOffsets(map[string]interface{}{"type": "daily"})
 	if err != nil {

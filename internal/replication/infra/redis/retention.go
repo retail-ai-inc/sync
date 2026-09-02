@@ -25,7 +25,6 @@ import (
 // nothing is being written to it. Those are two different failures and the one
 // this metric answers for is the second.
 
-// Window is how far back the source's replication backlog reaches.
 func (r *Reader) Window(ctx context.Context) (time.Duration, error) {
 	if r.Configured > 0 {
 		return r.Configured, nil
@@ -101,7 +100,6 @@ func (r *Reader) rate() (float64, error) {
 	return bytes / elapsed, nil
 }
 
-// backlogBytes asks a source how much history it keeps.
 func backlogBytes(ctx context.Context, node goredis.UniversalClient) (int64, error) {
 	values, err := node.ConfigGet(ctx, "repl-backlog-size").Result()
 	if err != nil {

@@ -100,7 +100,6 @@ func UpdateUserAccessAndStatus(userID, access, status string) (map[string]interf
 	return userData, nil
 }
 
-// DeleteUser removes a user by userId in one transaction.
 func DeleteUser(userID string) error {
 	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {

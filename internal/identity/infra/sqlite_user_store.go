@@ -12,7 +12,6 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// GetUserByUsername gets user information by username
 func GetUserByUsername(username string) (map[string]interface{}, error) {
 	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
@@ -73,7 +72,6 @@ WHERE username = ?`, username)
 	return user, nil
 }
 
-// ValidateUser validates username and password
 func ValidateUser(username, password string) (bool, string, error) {
 	user, err := GetUserByUsername(username)
 	if err != nil {
@@ -104,7 +102,6 @@ func ValidateUser(username, password string) (bool, string, error) {
 	return true, access, nil
 }
 
-// GetUserData gets user data for frontend display
 func GetUserData(username string) (map[string]interface{}, error) {
 	user, err := GetUserByUsername(username)
 	if err != nil {
@@ -145,7 +142,6 @@ func UpdateUserPassword(username, newPassword string) error {
 	return nil
 }
 
-// SaveGoogleUser saves or updates Google user information
 func SaveGoogleUser(email, name string) (string, string, error) {
 	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
@@ -247,7 +243,6 @@ LIMIT ? OFFSET ?`, limit, offset)
 	return users, total, nil
 }
 
-// GetAllUsers gets all user information
 func GetAllUsers() ([]map[string]interface{}, error) {
 	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
@@ -296,7 +291,6 @@ func scanUsers(rows *sql.Rows) ([]map[string]interface{}, error) {
 	return users, rows.Err()
 }
 
-// nullOrEmpty reads a nullable column, answering the empty string for NULL.
 func nullOrEmpty(s sql.NullString) string { return nullOr(s, "") }
 
 // Initialize user table when starting service

@@ -93,7 +93,6 @@ func (e *MongoEnd) Lookup(ctx context.Context, keys []string) (map[string]Row, e
 	return found, cursor.Err()
 }
 
-// rowFromDocument renders one document as a key and a digest.
 func rowFromDocument(raw bson.Raw) (Row, error) {
 	value, err := raw.LookupErr("_id")
 	if err != nil {
@@ -228,7 +227,6 @@ func canonical(v interface{}) string {
 	}
 }
 
-// MongoRepairer copies documents from a source collection to a target.
 type MongoRepairer struct {
 	Source *mongo.Collection
 	Target *mongo.Collection

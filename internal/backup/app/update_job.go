@@ -55,7 +55,6 @@ func UpdateJob(id string, req domain.Request) error {
 		domain.ConfigFrom(req, status))
 }
 
-// DeleteJob removes a job.
 func DeleteJob(id string) error { return infra.DeleteJob(id) }
 
 // PauseJob disables a job. ResumeJob enables it.

@@ -28,7 +28,6 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
-// tableName is the table, collection or key the checkpoints live in.
 const tableName = "_sync_checkpoint"
 
 // Store reads and writes checkpoints for one task. A key names which one: a
@@ -41,7 +40,6 @@ type Store interface {
 
 // ------------------------------------------------------------------- SQL
 
-// SQLStore keeps checkpoints in a table on the target database.
 type SQLStore struct {
 	DB *sql.DB
 	// Schema is the database the table lives in; empty addresses it unqualified.
@@ -52,7 +50,6 @@ type SQLStore struct {
 	NumberedPlaceholders bool
 }
 
-// arg renders the nth parameter marker, counting from one.
 func (s *SQLStore) arg(n int) string {
 	if s.NumberedPlaceholders {
 		return "$" + strconv.Itoa(n)
@@ -144,7 +141,6 @@ func (s *SQLStore) SaveTx(ctx context.Context, tx Execer, key, payload string) e
 	return nil
 }
 
-// Ensure creates the checkpoint table, so that SaveTx never has to.
 func (s *SQLStore) Ensure(ctx context.Context) error { return s.ensure(ctx) }
 
 // upsert renders the write. The two flavours spell it differently, which is why
@@ -168,7 +164,6 @@ func (s *SQLStore) upsert() string {
 
 // --------------------------------------------------------------- MongoDB
 
-// MongoStore keeps checkpoints in a collection on the target database.
 type MongoStore struct {
 	Database *mongo.Database
 	TaskID   int
@@ -222,7 +217,6 @@ func (s *MongoStore) SaveIn(ctx context.Context, key, payload string) error {
 
 // ----------------------------------------------------------------- Redis
 
-// RedisStore keeps checkpoints in one hash on the target.
 type RedisStore struct {
 	Client goredis.UniversalClient
 	TaskID int
@@ -323,7 +317,6 @@ func (l *Layered) Save(ctx context.Context, key, payload string) error {
 	return nil
 }
 
-// Encode renders a value as the payload a store holds.
 func Encode(v interface{}) (string, error) {
 	encoded, err := json.Marshal(v)
 	if err != nil {

@@ -40,7 +40,6 @@ func emptyJobDB(t *testing.T) {
 	sqlitetest.Tableless(t)
 }
 
-// insertJob seeds one backup_tasks row.
 func insertJob(t *testing.T, db *sql.DB, enable int, cfg string) int64 {
 	t.Helper()
 
@@ -55,7 +54,6 @@ func insertJob(t *testing.T, db *sql.DB, enable int, cfg string) int64 {
 	return id
 }
 
-// readConfig returns one row's stored configuration document.
 func readConfig(t *testing.T, db *sql.DB, id int64) string {
 	t.Helper()
 
@@ -79,7 +77,6 @@ func stageOf(err error) string {
 	return ""
 }
 
-// asFault is errors.As, wrapped so the helper above reads plainly.
 func asFault(err error, target **Fault) bool {
 	f, ok := err.(*Fault)
 	if ok {
@@ -88,14 +85,12 @@ func asFault(err error, target **Fault) bool {
 	return ok
 }
 
-// contains is strings.Contains, named so the assertions above read plainly.
 func contains(haystack, needle string) bool { return strings.Contains(haystack, needle) }
 
 // itoa renders a row id the way the endpoints hand it to the store: as the
 // string that arrived in the URL.
 func itoa(id int64) string { return strconv.FormatInt(id, 10) }
 
-// errNoRows is a stand-in cause for the Fault test.
 func errNoRows() error { return sql.ErrNoRows }
 
 // readTimestamp reads one of the DATETIME columns back as the string the store

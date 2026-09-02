@@ -32,13 +32,11 @@ import (
 // connection, its own buffer, its own position. They are independent, and any one
 // of them failing for good stops the task.
 
-// Syncer replicates one Redis task.
 type Syncer struct {
 	cfg    config.SyncConfig
 	logger logrus.FieldLogger
 }
 
-// NewSyncer builds the syncer for a task.
 func NewSyncer(cfg config.SyncConfig, logger *logrus.Logger) *Syncer {
 	return &Syncer{cfg: cfg, logger: logger.WithField("sync_task_id", cfg.ID)}
 }
@@ -125,7 +123,6 @@ func (s *Syncer) Start(ctx context.Context) error {
 	return group.Wait()
 }
 
-// shard names one source master and how to reach it.
 type shard struct {
 	// id is stable across restarts, so a position can be found again. The slot
 	// range serves: a master's address changes when it fails over, but the slots
@@ -181,7 +178,6 @@ func shardsOf(ctx context.Context, source goredis.UniversalClient, single string
 	return found, nil
 }
 
-// runShard replicates one shard until it stops.
 func (s *Syncer) runShard(ctx context.Context, sh shard, source, target goredis.UniversalClient,
 	commands *commandTable, compareNow <-chan string) error {
 
@@ -294,7 +290,6 @@ func (s *Syncer) runShard(ctx context.Context, sh shard, source, target goredis.
 	return runner.Run(ctx)
 }
 
-// bufferDir is where one shard's stream is held.
 func (s *Syncer) bufferDir(id string) (string, error) {
 	root := s.cfg.RedisBufferDir
 	if root == "" {
@@ -307,7 +302,6 @@ func (s *Syncer) bufferDir(id string) (string, error) {
 	return filepath.Join(root, strconv.Itoa(s.cfg.ID), sanitise(id)), nil
 }
 
-// sanitise keeps a shard identifier usable as a directory name.
 func sanitise(id string) string {
 	return strings.Map(func(r rune) rune {
 		switch {
@@ -404,7 +398,6 @@ func serverVersion(ctx context.Context, client goredis.UniversalClient) string {
 	return ""
 }
 
-// olderThan compares two dotted versions.
 func olderThan(a, b string) bool {
 	fieldsA, fieldsB := strings.Split(a, "."), strings.Split(b, ".")
 	for i := 0; i < len(fieldsA) && i < len(fieldsB); i++ {

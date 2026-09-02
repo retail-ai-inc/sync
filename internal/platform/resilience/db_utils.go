@@ -62,7 +62,6 @@ func RetryMongoOperation(ctx context.Context, logger logrus.FieldLogger, operati
 	return RetryDBOperation(ctx, logger, operation, fn)
 }
 
-// CheckMongoConnection checks MongoDB connection
 func CheckMongoConnection(ctx context.Context, client *mongo.Client) error {
 	return client.Ping(ctx, nil)
 }
@@ -99,7 +98,6 @@ func CheckSQLConnection(ctx context.Context, db *sql.DB) error {
 	return db.PingContext(ctx)
 }
 
-// ReopenSQLConnection reopens SQL database connection
 func ReopenSQLConnection(ctx context.Context, logger logrus.FieldLogger, connURI, driverName string) (*sql.DB, error) {
 	var db *sql.DB
 
@@ -131,13 +129,10 @@ func ReopenSQLConnection(ctx context.Context, logger logrus.FieldLogger, connURI
 // stops rather than spending its whole backoff on a typo in a connection string.
 type permanentFailure struct{ error }
 
-// Unwrap lets callers still match on the underlying error.
 func (p permanentFailure) Unwrap() error { return p.error }
 
-// Permanent tells Retry to stop.
 func (p permanentFailure) Permanent() bool { return true }
 
-// permanentUnless returns err marked as permanent when retrying it is pointless.
 func permanentUnless(err error) error {
 	if err == nil || IsConnectionError(err) {
 		return err

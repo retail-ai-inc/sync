@@ -20,7 +20,6 @@ func isolateCrontab(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 }
 
-// emptyIdentityDB points SYNC_DB_PATH at a file with no tables at all.
 func emptyIdentityDB(t *testing.T) {
 	t.Helper()
 	isolateCrontab(t)

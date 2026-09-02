@@ -118,12 +118,10 @@ func (s *SyncConfig) PGPlugin() string {
 	return s.PGPluginName
 }
 
-// GetSlackWebhookURL returns the Slack webhook URL from config
 func (c *Config) GetSlackWebhookURL() string {
 	return c.SlackWebhookURL
 }
 
-// GetSlackChannel returns the Slack channel from config
 func (c *Config) GetSlackChannel() string {
 	return c.SlackChannel
 }

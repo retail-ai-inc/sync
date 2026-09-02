@@ -9,7 +9,6 @@ import (
 	"github.com/go-mysql-org/go-mysql/mysql"
 )
 
-// insertEvent is one row event for the shared orders schema.
 func insertEvent(values ...interface{}) *canal.RowsEvent {
 	return &canal.RowsEvent{
 		Table:  sourceTable("orders", "id", "customer", "email"),

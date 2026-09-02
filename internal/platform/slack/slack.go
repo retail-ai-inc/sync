@@ -17,7 +17,6 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// SlackNotifier manages Slack notifications using cloudbuild.sh script
 type SlackNotifier struct {
 	webhookURL string
 	channel    string
@@ -26,7 +25,6 @@ type SlackNotifier struct {
 	logger     *logrus.Logger
 }
 
-// SlackAlertType defines the type of alert for Slack message color
 type SlackAlertType string
 
 const (
@@ -35,7 +33,6 @@ const (
 	SlackAlertDanger  SlackAlertType = "danger"  // Red color for errors
 )
 
-// SlackNotificationOptions contains optional parameters for notifications
 type SlackNotificationOptions struct {
 	AlertType   SlackAlertType
 	BranchName  string
@@ -44,7 +41,6 @@ type SlackNotificationOptions struct {
 	ExtraFields map[string]string
 }
 
-// NewSlackNotifier creates a new Slack notifier instance
 func NewSlackNotifier(webhookURL, channel string, logger *logrus.Logger) *SlackNotifier {
 	return &SlackNotifier{
 		webhookURL: webhookURL,
@@ -55,7 +51,6 @@ func NewSlackNotifier(webhookURL, channel string, logger *logrus.Logger) *SlackN
 	}
 }
 
-// NewSlackNotifierFromConfig creates a SlackNotifier from config interface
 func NewSlackNotifierFromConfig(cfg ConfigProvider, logger *logrus.Logger) *SlackNotifier {
 	return NewSlackNotifier(cfg.GetSlackWebhookURL(), cfg.GetSlackChannel(), logger)
 }
@@ -71,13 +66,11 @@ func NewSlackNotifierFromConfigWithFieldLogger(cfg ConfigProvider, logger logrus
 	return NewSlackNotifier(cfg.GetSlackWebhookURL(), cfg.GetSlackChannel(), newLogger)
 }
 
-// ConfigProvider interface for getting Slack configuration
 type ConfigProvider interface {
 	GetSlackWebhookURL() string
 	GetSlackChannel() string
 }
 
-// findCloudBuildScript finds the cloudbuild.sh script in possible locations
 func findCloudBuildScript() string {
 	possiblePaths := []string{
 		"/app/cloudbuild.sh",
@@ -254,7 +247,6 @@ func (s *SlackNotifier) postToWebhook(ctx context.Context, message string, opts 
 	return nil
 }
 
-// SendSuccess sends a success notification with good alert type
 func (s *SlackNotifier) SendSuccess(ctx context.Context, operation, details string) error {
 	message := fmt.Sprintf("✅ %s completed successfully", operation)
 	if details != "" {
@@ -267,7 +259,6 @@ func (s *SlackNotifier) SendSuccess(ctx context.Context, operation, details stri
 	})
 }
 
-// SendWarning sends a warning notification with warning alert type
 func (s *SlackNotifier) SendWarning(ctx context.Context, operation, warning string) error {
 	message := fmt.Sprintf("⚠️ %s completed with warnings", operation)
 	if warning != "" {
@@ -280,7 +271,6 @@ func (s *SlackNotifier) SendWarning(ctx context.Context, operation, warning stri
 	})
 }
 
-// SendError sends an error notification with danger alert type
 func (s *SlackNotifier) SendError(ctx context.Context, operation, errorMsg string) error {
 	message := fmt.Sprintf("❌ %s failed", operation)
 	if errorMsg != "" {
@@ -293,7 +283,6 @@ func (s *SlackNotifier) SendError(ctx context.Context, operation, errorMsg strin
 	})
 }
 
-// SendSyncStatus sends synchronization status notification
 func (s *SlackNotifier) SendSyncStatus(ctx context.Context, syncType, sourceName, targetName string, recordCount int, duration time.Duration) error {
 	message := fmt.Sprintf("🔄 %s Sync Completed", syncType)
 	details := fmt.Sprintf("Source: %s → Target: %s\nRecords: %d\nDuration: %v",
@@ -305,7 +294,6 @@ func (s *SlackNotifier) SendSyncStatus(ctx context.Context, syncType, sourceName
 	})
 }
 
-// SendBackupStatus sends backup completion notification
 func (s *SlackNotifier) SendBackupStatus(ctx context.Context, backupType, tableName, fileName string, fileSize int64) error {
 	message := fmt.Sprintf("💾 %s Backup Completed", backupType)
 	details := fmt.Sprintf("Table: %s\nFile: %s\nSize: %s",
@@ -317,7 +305,6 @@ func (s *SlackNotifier) SendBackupStatus(ctx context.Context, backupType, tableN
 	})
 }
 
-// formatFileSize formats file size in human readable format
 func formatFileSize(size int64) string {
 	const unit = 1024
 	if size < unit {

@@ -120,7 +120,6 @@ func TestABatchIsOnlyFullAtATransactionBoundary(t *testing.T) {
 	}
 }
 
-// TestASizeLimitAlsoWaitsForTheBoundary covers the other limit.
 func TestASizeLimitAlsoWaitsForTheBoundary(t *testing.T) {
 	limits := Limits{MaxEvents: 1000, MaxBytes: 10}
 	var b batch

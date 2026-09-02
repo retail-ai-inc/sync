@@ -12,7 +12,6 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// Zip compresses inputFile into outputFile with the system zip command.
 func Zip(ctx context.Context, workDir, inputFile, outputFile string) error {
 	// Use system zip command
 	cmd := exec.CommandContext(ctx, "zip", "-j", outputFile, inputFile)

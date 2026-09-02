@@ -320,7 +320,6 @@ func TestAStoredStatusThatIsNotAStringDoesNotPanic(t *testing.T) {
 	}
 }
 
-// TestAStoredNameThatIsNotAStringDoesNotPanic is the same for the name.
 func TestAStoredNameThatIsNotAStringDoesNotPanic(t *testing.T) {
 	for _, value := range []interface{}{42, true, nil} {
 		if got := DeriveUpdateName(map[string]interface{}{"name": value}, "7"); got != "Backup Task 7" {

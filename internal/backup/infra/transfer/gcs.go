@@ -76,7 +76,6 @@ func storedObject(gcsPath, localFile string) string {
 	return gcsPath
 }
 
-// contentLength picks the size out of gsutil stat's output.
 func contentLength(output string) (int64, error) {
 	for _, line := range strings.Split(output, "\n") {
 		_, value, found := strings.Cut(line, ":")

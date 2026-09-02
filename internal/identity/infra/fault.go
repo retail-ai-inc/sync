@@ -13,7 +13,6 @@ const (
 	StageCommit  = "commit"
 )
 
-// Fault is a store failure tagged with the stage it happened at.
 type Fault struct {
 	Stage string
 	Err   error
@@ -23,5 +22,4 @@ func (f *Fault) Error() string { return f.Stage + ": " + f.Err.Error() }
 
 func (f *Fault) Unwrap() error { return f.Err }
 
-// faultAt is a shorthand for building a Fault.
 func faultAt(stage string, err error) *Fault { return &Fault{Stage: stage, Err: err} }

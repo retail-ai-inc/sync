@@ -151,7 +151,6 @@ func TestTheDefaultIsEncryptionWhereItCannotBreakAnything(t *testing.T) {
 	}
 }
 
-// TestTLSCanBeRequired covers the deployment that must not fall back.
 func TestTLSCanBeRequired(t *testing.T) {
 	tests := []struct {
 		dbType string

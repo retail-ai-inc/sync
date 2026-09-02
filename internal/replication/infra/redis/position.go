@@ -56,7 +56,6 @@ const (
 // everything.
 func (p streamPosition) IsZero() bool { return p.ReplID == "" }
 
-// inValuePhase reports whether an offset is still inside the copy's window.
 func (p streamPosition) inValuePhase(offset int64) bool {
 	return p.Phase == phaseValue && offset < p.ValueUntil
 }
@@ -84,7 +83,6 @@ func decodePosition(payload string) (streamPosition, error) {
 	return position, nil
 }
 
-// metaKey names the metadata key for one task's one shard.
 func metaKey(taskID int, shard string) string {
 	return "__sync:pos:" + strconv.Itoa(taskID) + ":" + shard
 }

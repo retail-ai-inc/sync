@@ -60,7 +60,6 @@ func (l Labels) Key() string {
 	return b.String()
 }
 
-// render writes the labels the way the exposition format spells them.
 func (l Labels) render() string {
 	if len(l) == 0 {
 		return ""
@@ -80,20 +79,17 @@ func (l Labels) render() string {
 	return "{" + strings.Join(parts, ",") + "}"
 }
 
-// escape makes a label value safe for the exposition format.
 func escape(v string) string {
 	v = strings.ReplaceAll(v, `\`, `\\`)
 	v = strings.ReplaceAll(v, `"`, `\"`)
 	return strings.ReplaceAll(v, "\n", `\n`)
 }
 
-// series is one metric with one label set.
 type series struct {
 	labels Labels
 	value  float64
 }
 
-// metric is one named metric and every label set seen for it.
 type metric struct {
 	name string
 	kind Kind
@@ -103,18 +99,15 @@ type metric struct {
 	series map[string]*series
 }
 
-// Registry holds what the next scrape will report.
 type Registry struct {
 	mu      sync.Mutex
 	metrics map[string]*metric
 }
 
-// New returns an empty registry.
 func New() *Registry {
 	return &Registry{metrics: map[string]*metric{}}
 }
 
-// Default is the registry the syncer records into.
 var Default = New()
 
 // find returns the series for a metric and label set, creating it if needed.
@@ -135,7 +128,6 @@ func (r *Registry) find(name string, kind Kind, help string, labels Labels) *ser
 	return s
 }
 
-// SetGauge records the current value of something that moves both ways.
 func (r *Registry) SetGauge(name, help string, labels Labels, value float64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -224,7 +216,6 @@ func Handler(w http.ResponseWriter, _ *http.Request) {
 	_ = Default.Write(w)
 }
 
-// Sample is one series as a scrape would see it.
 type Sample struct {
 	Name   string
 	Labels Labels

@@ -29,7 +29,6 @@ type Chunks struct {
 	Masker *MongoDBSyncer
 }
 
-// NextChunk reads the documents after a key.
 func (c *Chunks) NextChunk(ctx context.Context, ns domain.Namespace, after string, size int) (pipeline.Chunk, error) {
 	session, err := c.Client.StartSession()
 	if err != nil {
@@ -121,7 +120,6 @@ func (c *Chunks) NextChunk(ctx context.Context, ns domain.Namespace, after strin
 	return chunk, nil
 }
 
-// rawOf renders an _id as a raw value, so it can be stored and compared.
 func rawOf(id interface{}) bson.RawValue {
 	kind, data, err := bson.MarshalValue(id)
 	if err != nil {
@@ -130,7 +128,6 @@ func rawOf(id interface{}) bson.RawValue {
 	return bson.RawValue{Type: kind, Value: data}
 }
 
-// encodeID stores an _id as text, so the re-copy's progress survives a restart.
 func encodeID(id bson.RawValue) (string, error) {
 	if id.Type == 0 {
 		return "", nil
@@ -142,7 +139,6 @@ func encodeID(id bson.RawValue) (string, error) {
 	return string(wrapped), nil
 }
 
-// decodeID reads a stored _id back.
 func decodeID(stored string) (interface{}, error) {
 	var wrapper struct {
 		ID interface{} `bson:"id"`

@@ -134,7 +134,6 @@ func writeFailure(w http.ResponseWriter, status int, code, message string) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-// writeSuccessEnvelope answers with the {success,data} shape.
 func writeSuccessEnvelope(w http.ResponseWriter) {
 	resp := map[string]interface{}{
 		"success": true,

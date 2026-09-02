@@ -85,7 +85,6 @@ func mongoBounds(t *testing.T, converted map[string]interface{}, field string) (
 	return read("$gte"), read("$lt")
 }
 
-// mustConvert converts a query and fails the test if it cannot.
 func mustConvert(t *testing.T, query map[string]interface{}) map[string]interface{} {
 	t.Helper()
 

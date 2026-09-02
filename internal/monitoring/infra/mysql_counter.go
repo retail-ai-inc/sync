@@ -15,7 +15,6 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// CountAndLogMySQLOrMariaDB obtains row counts for MySQL / MariaDB tables
 func CountAndLogMySQLOrMariaDB(ctx context.Context, sc config.SyncConfig, log *logrus.Logger) {
 	db, err := sql.Open("mysql", sc.SourceConnection)
 	if err != nil {

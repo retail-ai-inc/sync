@@ -11,7 +11,6 @@ import (
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
 )
 
-// Limits cap how large a batch may grow before it is applied.
 type Limits struct {
 	// MaxEvents is the event count a batch aims for. Zero means the default.
 	MaxEvents int
@@ -46,7 +45,6 @@ func (l Limits) maxTransactionEvents() int {
 	return defaultMaxTransactionEvents
 }
 
-// batch accumulates events until it may be applied.
 type batch struct {
 	events []*domain.Event
 	bytes  int
@@ -104,7 +102,6 @@ func (b *batch) overrunning(l Limits) bool {
 	return b.sinceBoundary > l.maxTransactionEvents()
 }
 
-// take returns the accumulated events and resets the batch.
 func (b *batch) take() []*domain.Event {
 	events := b.events
 	b.events = nil
@@ -137,7 +134,6 @@ func holdsSchemaChange(events []*domain.Event) bool {
 	return false
 }
 
-// runKey identifies the record an event touches, across namespaces.
 func runKey(e *domain.Event) (string, bool) {
 	if e.Key == "" || e.Op == domain.OpSchema {
 		// Nothing to compare, or a change to the shape of the object rather than

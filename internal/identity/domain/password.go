@@ -58,7 +58,6 @@ func hashIterations() int {
 	return n
 }
 
-// HashPassword renders a password in the form the users table stores.
 func HashPassword(password string) (string, error) {
 	salt := make([]byte, saltLength)
 	if _, err := rand.Read(salt); err != nil {

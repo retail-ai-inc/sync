@@ -19,7 +19,6 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
-// CountAndLogMongoDB obtains document counts for MongoDB collections
 func CountAndLogMongoDB(ctx context.Context, sc config.SyncConfig, log *logrus.Logger) {
 	srcClient, tgtClient, disconnect, ok := connectBothMongo(ctx, sc, log, "")
 	if !ok {
@@ -245,7 +244,6 @@ func getMongoDBActiveChangeStreams(ctx context.Context, client *mongo.Client) ([
 	return activeStreams, csCount, nil
 }
 
-// LogYesterdayMongoDBVolume logs yesterday's MongoDB data volume for dateRange tables
 func LogYesterdayMongoDBVolume(ctx context.Context, sc config.SyncConfig, log *logrus.Logger, yesterdayStart, yesterdayEnd time.Time) {
 	srcClient, tgtClient, disconnect, ok := connectBothMongo(ctx, sc, log, " for daily summary")
 	if !ok {

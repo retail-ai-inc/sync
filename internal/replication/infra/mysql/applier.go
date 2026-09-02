@@ -42,7 +42,6 @@ type Applier struct {
 	Labels        metrics.Labels
 }
 
-// Apply writes every run of the batch, then the position, then commits.
 func (a *Applier) Apply(ctx context.Context, runs [][]*domain.Event, pos domain.Position) (bool, error) {
 	total := 0
 	for _, run := range runs {
@@ -86,7 +85,6 @@ func namespacesOf(runs [][]*domain.Event) int {
 	return len(seen)
 }
 
-// once is one attempt: begin, write, commit or roll all of it back.
 func (a *Applier) once(ctx context.Context, runs [][]*domain.Event, pos domain.Position) (bool, int, time.Duration, error) {
 	if a.DB == nil {
 		return false, 0, 0, fmt.Errorf("no target connection")

@@ -52,7 +52,6 @@ const (
 	maxFrameBytes = 512 << 20
 )
 
-// BufferOptions configures a buffer.
 type BufferOptions struct {
 	// Dir holds the segments. One directory per source shard.
 	Dir string
@@ -105,7 +104,6 @@ type Buffer struct {
 	sealed bool
 }
 
-// segment is one file of the stream.
 type segment struct {
 	path string
 	// start is the absolute stream offset of the segment's first byte.
@@ -123,7 +121,6 @@ type segment struct {
 	dirty bool
 }
 
-// fileBytes is how long the segment's file should be for the frames it holds.
 func (s *segment) fileBytes() int64 { return s.end - s.start + s.overhead }
 
 func (s *segment) bytes() int64 { return s.end - s.start }
@@ -285,7 +282,6 @@ func (b *Buffer) Reset(start int64) error {
 	return nil
 }
 
-// Oldest is the earliest offset still held.
 func (b *Buffer) Oldest() int64 {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -295,7 +291,6 @@ func (b *Buffer) Oldest() int64 {
 	return b.segments[0].start
 }
 
-// Newest is the offset after everything appended.
 func (b *Buffer) Newest() int64 {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -305,7 +300,6 @@ func (b *Buffer) Newest() int64 {
 	return b.active.end
 }
 
-// Held is roughly how many stream bytes are on disk, for the retention window.
 func (b *Buffer) Held() int64 {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -316,7 +310,6 @@ func (b *Buffer) Held() int64 {
 	return total
 }
 
-// Close releases the active segment and wakes every cursor.
 func (b *Buffer) Close() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -398,7 +391,6 @@ func (b *Buffer) trimLocked() error {
 
 // ------------------------------------------------------------------- reading
 
-// Cursor reads frames from an offset onwards, blocking at the end.
 type Cursor struct {
 	buffer *Buffer
 
@@ -465,7 +457,6 @@ func (c *Cursor) openSegment(seg *segment) error {
 	return nil
 }
 
-// skipTo walks frames until the next one starts at or after the offset.
 func (c *Cursor) skipTo(offset int64) error {
 	for c.offset < offset {
 		length, err := c.peekLength()
@@ -606,10 +597,8 @@ func (c *Cursor) nextSegmentLocked() *segment {
 	return nil
 }
 
-// Offset is where the cursor stands.
 func (c *Cursor) Offset() int64 { return c.offset }
 
-// Close releases the open segment.
 func (c *Cursor) Close() error {
 	if c.file == nil {
 		return nil

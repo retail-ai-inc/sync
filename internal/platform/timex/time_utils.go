@@ -61,7 +61,6 @@ func replaceBareDateWords(pattern string, targetDate time.Time) string {
 	})
 }
 
-// ParseDatabaseTimestamp parses database timestamp string to time.Time
 func ParseDatabaseTimestamp(timestamp string) (time.Time, error) {
 	return time.Parse("2006-01-02 15:04:05", timestamp)
 }

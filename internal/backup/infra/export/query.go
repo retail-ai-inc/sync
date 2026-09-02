@@ -67,7 +67,6 @@ func dailyWindow(spec map[string]interface{}) (time.Time, time.Time, error) {
 	return timex.GetUTCTimeRange(startOffset, endOffset)
 }
 
-// cleanQueryStringValues Clean string values in query condition to remove extra escaping
 func cleanQueryStringValues(queryObj map[string]interface{}) map[string]interface{} {
 	cleaned := make(map[string]interface{})
 
@@ -99,7 +98,6 @@ func cleanQueryStringValues(queryObj map[string]interface{}) map[string]interfac
 	return cleaned
 }
 
-// buildMySQLSelectQuery builds SELECT query with WHERE conditions and field selection
 func (e *BackupExecutor) buildMySQLSelectQuery(table string, config ExecutorBackupConfig) (string, error) {
 	// Build field list
 	fields := "*"
@@ -186,7 +184,6 @@ func (e *BackupExecutor) convertTimeRangeQueryForMySQL(query map[string]interfac
 // an injection point into a statement the mysql client then executed.
 var identifier = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_$]*$`)
 
-// quoteMySQLIdentifier checks a column name and wraps it in backticks.
 func quoteMySQLIdentifier(name string) (string, error) {
 	if !identifier.MatchString(name) {
 		return "", fmt.Errorf("%q is not a column name", name)

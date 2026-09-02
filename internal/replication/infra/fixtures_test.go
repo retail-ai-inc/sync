@@ -36,7 +36,6 @@ func useTempTaskDB(t *testing.T) *sql.DB {
 	return db
 }
 
-// emptyTaskDB points SYNC_DB_PATH at a file with no tables at all.
 func emptyTaskDB(t *testing.T) {
 	t.Helper()
 	sqlitetest.Tableless(t)
@@ -54,7 +53,6 @@ func unopenableDB(t *testing.T) {
 	t.Setenv("SYNC_DB_PATH", filepath.Join(blocker, "sub", "sync.db"))
 }
 
-// insertTask seeds one sync_tasks row.
 func insertTask(t *testing.T, db *sql.DB, enable int, cfg string) int64 {
 	t.Helper()
 
@@ -68,7 +66,6 @@ func insertTask(t *testing.T, db *sql.DB, enable int, cfg string) int64 {
 	return id
 }
 
-// insertMonitoringRow seeds one monitoring_log row.
 func insertMonitoringRow(t *testing.T, db *sql.DB, taskID int, loggedAt, table string, src, tgt int64) {
 	t.Helper()
 
@@ -83,7 +80,6 @@ func insertMonitoringRow(t *testing.T, db *sql.DB, taskID int, loggedAt, table s
 	}
 }
 
-// readConfig returns one row's stored configuration document.
 func readConfig(t *testing.T, db *sql.DB, id int64) string {
 	t.Helper()
 

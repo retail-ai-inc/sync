@@ -65,7 +65,6 @@ type Permanent interface {
 	Permanent() bool
 }
 
-// isPermanent reports whether err says retrying it is pointless.
 func isPermanent(err error) bool {
 	var p Permanent
 	return errors.As(err, &p) && p.Permanent()

@@ -19,7 +19,6 @@ func pointAt(t *testing.T, token, userInfo string) {
 	t.Cleanup(func() { googleTokenURL, googleUserInfoURL = oldToken, oldUserInfo })
 }
 
-// serve starts a server answering every request with one status and one body.
 func serve(t *testing.T, status int, body string) string {
 	t.Helper()
 
@@ -93,7 +92,6 @@ func TestAnEmptyAccessTokenIsNotAsked(t *testing.T) {
 	}
 }
 
-// TestASuccessfulExchangeIsAnIdentity is the path that has to keep working.
 func TestASuccessfulExchangeIsAnIdentity(t *testing.T) {
 	tokenServer := serve(t, http.StatusOK, `{"access_token":"ya29.a0","id_token":"eyJ"}`)
 	userServer := serve(t, http.StatusOK, `{"email":"ada@example.com","name":"Ada"}`)

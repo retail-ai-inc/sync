@@ -43,14 +43,12 @@ func useTempDB(t *testing.T) *sql.DB {
 	return db
 }
 
-// emptyIdentityDB points SYNC_DB_PATH at a file with no tables at all.
 func emptyIdentityDB(t *testing.T) {
 	t.Helper()
 	isolateCrontab(t)
 	sqlitetest.Tableless(t)
 }
 
-// unopenableDB points SYNC_DB_PATH at a path whose parent is a regular file.
 func unopenableDB(t *testing.T) {
 	t.Helper()
 	isolateCrontab(t)
@@ -75,7 +73,6 @@ func insertUser(t *testing.T, db *sql.DB, username, password, name, access strin
 	}
 }
 
-// storeOAuthConfig seeds one auth_configs row.
 func storeOAuthConfig(t *testing.T, db *sql.DB, provider, cfg string, enabled bool) {
 	t.Helper()
 
@@ -86,7 +83,6 @@ func storeOAuthConfig(t *testing.T, db *sql.DB, provider, cfg string, enabled bo
 	}
 }
 
-// envelope decodes a JSON response body.
 func envelope(t *testing.T, rec *httptest.ResponseRecorder) map[string]interface{} {
 	t.Helper()
 

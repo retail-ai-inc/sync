@@ -38,7 +38,6 @@ func (b *syncBuffer) String() string {
 	return b.buf.String()
 }
 
-// captureBackgroundLog is captureLog for a path that logs from a goroutine.
 func captureBackgroundLog() (*logrus.Logger, *syncBuffer) {
 	out := &syncBuffer{}
 	logger := logrus.New()
@@ -87,7 +86,6 @@ func webhook(t *testing.T) (url string, posted <-chan map[string]interface{}) {
 	return server.URL, bodies
 }
 
-// awaitPost waits for the notification goroutine to reach the webhook.
 func awaitPost(t *testing.T, posted <-chan map[string]interface{}) map[string]interface{} {
 	t.Helper()
 

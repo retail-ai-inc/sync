@@ -15,7 +15,6 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// CountAndLogPostgreSQL obtains row counts for PostgreSQL tables
 func CountAndLogPostgreSQL(ctx context.Context, sc config.SyncConfig, log *logrus.Logger) {
 	db, err := sql.Open("postgres", sc.SourceConnection)
 	if err != nil {

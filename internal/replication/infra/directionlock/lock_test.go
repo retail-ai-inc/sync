@@ -440,7 +440,6 @@ func TestAFailedReleaseIsReportedButStillTriesBothEnds(t *testing.T) {
 
 // ------------------------------------------------------------------- hold
 
-// recordingWarner collects what the lifecycle reported.
 type recordingWarner struct {
 	mu       sync.Mutex
 	messages []string
@@ -738,7 +737,6 @@ func TestABlockedDirectionStaysBlocked(t *testing.T) {
 	}
 }
 
-// TestAConcurrentClaimIsNotBlocking keeps the rolling-update case retryable.
 func TestAConcurrentClaimIsNotBlocking(t *testing.T) {
 	source, target := newStore("tokyo"), newStore("osaka")
 

@@ -37,7 +37,6 @@ func probeConnection(t *testing.T, body map[string]string) (*httptest.ResponseRe
 	return rec, resp
 }
 
-// tableList returns the names the probe reported.
 func tableList(t *testing.T, resp map[string]interface{}) []string {
 	t.Helper()
 

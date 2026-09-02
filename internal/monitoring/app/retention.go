@@ -24,7 +24,6 @@ import (
 // up" and "what did it do last night"; nobody reads the row counts from four
 // months ago, and the daily summaries are derived from them at the time.
 const (
-	// defaultRetentionDays is how much history is kept.
 	defaultRetentionDays = 30
 	// retentionSweepEvery is how often rows past that are removed. Daily,
 	// because the point is to bound the size rather than to be prompt.
@@ -80,7 +79,6 @@ func StartMonitoringRetention(ctx context.Context, log *logrus.Logger) {
 	})
 }
 
-// sweepMonitoringLog removes rows older than the window and reports how many.
 func sweepMonitoringLog(ctx context.Context, log *logrus.Logger, days int) {
 	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
@@ -101,7 +99,6 @@ func sweepMonitoringLog(ctx context.Context, log *logrus.Logger, days int) {
 	}
 }
 
-// deleteOlderThan removes rows in bounded batches and reports the total.
 func deleteOlderThan(ctx context.Context, db *sql.DB, cutoff string) (int64, error) {
 	var total int64
 	for {

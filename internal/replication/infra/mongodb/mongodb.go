@@ -158,7 +158,6 @@ func connectMongo(ctx context.Context, uri string) (*mongo.Client, error) {
 	return client, nil
 }
 
-// isURIError reports whether the driver refused the connection string itself.
 func isURIError(err error) bool {
 	if err == nil {
 		return false
@@ -169,7 +168,6 @@ func isURIError(err error) bool {
 		strings.Contains(text, "invalid connection string")
 }
 
-// permanentURI stops Retry: no amount of waiting makes a malformed URI parse.
 type permanentURI struct{ error }
 
 func (p permanentURI) Unwrap() error   { return p.error }

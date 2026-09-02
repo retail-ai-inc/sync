@@ -8,7 +8,6 @@ import (
 	"github.com/retail-ai-inc/sync/internal/identity/domain"
 )
 
-// seedUser inserts a user with a userId, which the write calls address rows by.
 func seedUser(t *testing.T, db *sql.DB, username, access, status string) {
 	t.Helper()
 

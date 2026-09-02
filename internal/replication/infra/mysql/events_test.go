@@ -435,7 +435,6 @@ func TestAnUnknownActionStopsReplication(t *testing.T) {
 
 // -------------------------------------------------------- keyless tables
 
-// keylessTable describes the replicated table with no key columns.
 func keylessTable() *schema.Table {
 	table := sourceTable("orders", "id", "customer", "email")
 	table.PKColumns = nil

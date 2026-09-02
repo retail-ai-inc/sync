@@ -13,7 +13,6 @@ import (
 	"github.com/retail-ai-inc/sync/internal/identity/domain"
 )
 
-// postJSON runs a handler over a request body and returns the recorder.
 func postJSON(h http.HandlerFunc, method, path, body string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(method, path, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -215,7 +214,6 @@ func TestTheAdminEndpointNeedsACredential(t *testing.T) {
 	}
 }
 
-// TestTheAdminEndpointAnswersACredentialledCaller is the other half.
 func TestTheAdminEndpointAnswersACredentialledCaller(t *testing.T) {
 	db := useTempDB(t)
 	insertUser(t, db, "admin", "adminpw", "Admin", domain.AccessAdmin)

@@ -45,7 +45,6 @@ func stubPATH(t *testing.T) string {
 	return dir
 }
 
-// stubArgs returns the arguments a stub recorded, one per line.
 func stubArgs(t *testing.T, dir, name string) []string {
 	t.Helper()
 
@@ -64,7 +63,6 @@ func stubWasNotInvoked(t *testing.T, dir, name string) {
 	}
 }
 
-// mysqlBackupConfig builds a config for the external MySQL path.
 func mysqlBackupConfig(format, compression, gcsPath string) ExecutorBackupConfig {
 	var cfg ExecutorBackupConfig
 	cfg.SourceType = "mysql"
@@ -534,7 +532,6 @@ func mongoBackupConfig(gcsPath string) ExecutorBackupConfig {
 	return cfg
 }
 
-// zipStubBody produces the .zip argument it is handed, which the caller stats.
 const zipStubBody = `for a in "$@"; do case "$a" in *.zip) touch "$a";; esac; done`
 
 // mongoexportStubBody produces the --out file, which mongoexport writes itself

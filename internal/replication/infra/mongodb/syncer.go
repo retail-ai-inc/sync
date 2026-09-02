@@ -172,19 +172,16 @@ func (s *Snapshotter) collections(ctx context.Context, source *mongo.Database) (
 	return discovered, nil
 }
 
-// Syncer replicates one MongoDB deployment through the shared pipeline.
 type Syncer struct {
 	cfg    config.SyncConfig
 	global *config.Config
 	logger *logrus.Logger
 }
 
-// NewSyncer builds the syncer for one task.
 func NewSyncer(cfg config.SyncConfig, global *config.Config, logger *logrus.Logger) *Syncer {
 	return &Syncer{cfg: cfg, global: global, logger: logger}
 }
 
-// Start replicates until the context is cancelled or the stream cannot carry on.
 func (s *Syncer) Start(ctx context.Context) error {
 	if err := security.CheckKeyForMappings(s.cfg.Mappings); err != nil {
 		return domain.Unrecoverable("%v", err)

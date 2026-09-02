@@ -82,7 +82,6 @@ func insertJob(t *testing.T, db *sql.DB, enable int, cfg string) {
 	}
 }
 
-// installed returns what the stub was asked to install.
 func installed(t *testing.T, binDir string) string {
 	t.Helper()
 

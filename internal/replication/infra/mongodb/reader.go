@@ -270,7 +270,6 @@ func (r *Reader) capturedCollections() int {
 	return n
 }
 
-// sourceClock reads the source's own time, for a heartbeat to carry.
 func (r *Reader) sourceClock(ctx context.Context) (time.Time, error) {
 	raw, err := r.Client.Database("admin").
 		RunCommand(ctx, bson.D{{Key: "hello", Value: 1}}).Raw()
@@ -296,7 +295,6 @@ func (r *Reader) seal() {
 	r.openID = ""
 }
 
-// take converts one raw change stream document and buffers it.
 func (r *Reader) take(raw bson.Raw) error {
 	ns, ok := namespaceOf(raw)
 	if !ok {
@@ -378,7 +376,6 @@ var watchedOperations = []string{
 	"invalidate",
 }
 
-// rowOperations are the events that carry data rather than shape.
 var rowOperations = map[string]bool{
 	"insert": true, "update": true, "replace": true, "delete": true,
 }
@@ -393,7 +390,6 @@ func isSchemaEvent(raw bson.Raw) bool {
 	return !rowOperations[kind]
 }
 
-// takeSchemaChange decides what to do with one DDL event and buffers it.
 func (r *Reader) takeSchemaChange(raw bson.Raw, ns domain.Namespace) error {
 	kind, _ := raw.Lookup("operationType").StringValueOK()
 
@@ -529,7 +525,6 @@ func (r *Reader) mappedDatabases() []string {
 
 // ------------------------------------------------------------- event reading
 
-// namespaceOf reads which collection a change touched.
 func namespaceOf(raw bson.Raw) (domain.Namespace, bool) {
 	value, err := raw.LookupErr("ns")
 	if err != nil {
@@ -547,7 +542,6 @@ func namespaceOf(raw bson.Raw) (domain.Namespace, bool) {
 	return domain.Namespace{DB: db, Object: coll}, true
 }
 
-// opOf reads what happened.
 func opOf(raw bson.Raw) domain.Op {
 	kind, _ := raw.Lookup("operationType").StringValueOK()
 	switch kind {
@@ -631,7 +625,6 @@ type streamPosition struct {
 	Increment uint32 `json:"increment,omitempty"`
 }
 
-// token reads the resume token back.
 func (p streamPosition) token() (bson.Raw, error) {
 	var token bson.Raw
 	if err := bson.UnmarshalExtJSON([]byte(p.Token), true, &token); err != nil {
@@ -640,7 +633,6 @@ func (p streamPosition) token() (bson.Raw, error) {
 	return token, nil
 }
 
-// encodeToken stores a resume token as a position.
 func encodeToken(token bson.Raw) (string, error) {
 	if token == nil {
 		return "", nil
@@ -652,12 +644,10 @@ func encodeToken(token bson.Raw) (string, error) {
 	return checkpoint.Encode(streamPosition{Token: string(encoded)})
 }
 
-// encodeClusterTime stores a pinned cluster time as a position.
 func encodeClusterTime(at bson.Timestamp) (string, error) {
 	return checkpoint.Encode(streamPosition{Cluster: at.T, Increment: at.I})
 }
 
-// decodePosition reads either kind back.
 func decodePosition(pos domain.Position) (streamPosition, error) {
 	var stored streamPosition
 	if _, err := checkpoint.Decode(pos.Payload, &stored); err != nil {

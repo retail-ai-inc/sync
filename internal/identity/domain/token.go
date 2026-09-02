@@ -69,7 +69,6 @@ type tokenClaims struct {
 	ExpiresAt int64  `json:"e"`
 }
 
-// GenerateUserToken mints a token for a user, valid for TokenTTL.
 func GenerateUserToken(username, accessLevel string) string {
 	return generateUserTokenAt(username, accessLevel, time.Now().Add(TokenTTL))
 }
@@ -89,7 +88,6 @@ func generateUserTokenAt(username, accessLevel string, expiry time.Time) string 
 	return encoded + "." + sign(encoded)
 }
 
-// sign returns the hex MAC of an encoded payload.
 func sign(encodedPayload string) string {
 	mac := hmac.New(sha256.New, []byte(tokenSecret))
 	mac.Write([]byte("user_token:" + encodedPayload))
@@ -122,12 +120,10 @@ func ParseUserToken(token string) (username, accessLevel string, ok bool) {
 	return claims.Username, claims.Access, true
 }
 
-// GenerateAdminToken mints a token for the admin identity.
 func GenerateAdminToken() string {
 	return GenerateUserToken("admin", AccessAdmin)
 }
 
-// ValidateAdminToken reports whether a token proves the admin identity.
 func ValidateAdminToken(token string) bool {
 	username, access, ok := ParseUserToken(token)
 	return ok && username == "admin" && access == AccessAdmin

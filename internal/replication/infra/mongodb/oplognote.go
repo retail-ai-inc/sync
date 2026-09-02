@@ -89,7 +89,6 @@ func startNudging(ctx context.Context, client *mongo.Client, logger logrus.Field
 	return n
 }
 
-// Stop ends the nudging and waits for it to finish.
 func (n *nudger) Stop() {
 	if n == nil {
 		return

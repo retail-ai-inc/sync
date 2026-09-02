@@ -33,7 +33,6 @@ func call(t *testing.T, method, path, body, token string) *httptest.ResponseReco
 	return rec
 }
 
-// withUsers seeds an administrator and a guest, and returns a token for each.
 func withUsers(t *testing.T) (adminToken, guestToken string) {
 	t.Helper()
 
@@ -53,7 +52,6 @@ func withUsers(t *testing.T) (adminToken, guestToken string) {
 		domain.GenerateUserToken("guest", domain.AccessGuest)
 }
 
-// readRoutes are reachable by any authenticated caller.
 var readRoutes = []struct{ method, path string }{
 	{http.MethodGet, "/currentUser"},
 	{http.MethodGet, "/sync"},
@@ -67,7 +65,6 @@ var readRoutes = []struct{ method, path string }{
 	{http.MethodPut, "/updatePassword"},
 }
 
-// adminRoutes change something, or reach out to a database the caller names.
 var adminRoutes = []struct{ method, path string }{
 	{http.MethodPost, "/sync"},
 	{http.MethodPut, "/sync/1"},

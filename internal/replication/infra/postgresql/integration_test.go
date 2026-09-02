@@ -123,7 +123,6 @@ func startSyncer(t *testing.T, cfg config.SyncConfig) (stop func()) {
 	return stop
 }
 
-// names builds the three unique names one test needs.
 func names(t *testing.T, prefix string) (table, publication, slot string) {
 	t.Helper()
 

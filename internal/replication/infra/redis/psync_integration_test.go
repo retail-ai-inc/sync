@@ -40,7 +40,6 @@ func oneSource(t *testing.T) (string, *goredis.Client) {
 	return addr, client
 }
 
-// emptyOne clears one server, refusing unless the caller has said it may.
 func emptyOne(t *testing.T, client *goredis.Client) {
 	t.Helper()
 	if os.Getenv("SYNC_REDIS_ALLOW_FLUSH") != "1" {

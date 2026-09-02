@@ -106,7 +106,6 @@ func TestANewGoogleUserStartsAsGuest(t *testing.T) {
 	}
 }
 
-// TestUpdateAuthConfigReplacesAnExistingRow covers the upsert's update branch.
 func TestUpdateAuthConfigReplacesAnExistingRow(t *testing.T) {
 	db := useTempDB(t)
 

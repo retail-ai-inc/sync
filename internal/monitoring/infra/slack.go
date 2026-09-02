@@ -12,7 +12,6 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// SendTableComparisonSlackNotification sends Slack notification for a single table comparison
 func SendTableComparisonSlackNotification(ctx context.Context, sc config.SyncConfig, srcDB, srcTable, tgtDB, tgtTable string,
 	srcCount, tgtCount int64, yesterdayStart time.Time, log *logrus.Logger) {
 

@@ -116,7 +116,6 @@ func NewSQLiteHook() *SQLiteHook {
 	}
 }
 
-// Close releases the connection the hook holds.
 func (h *SQLiteHook) Close() error {
 	h.mu.Lock()
 	defer h.mu.Unlock()

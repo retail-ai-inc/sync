@@ -5,7 +5,6 @@ import (
 	"sync"
 )
 
-// SlotCount is how many hash slots a Redis cluster divides its key space into.
 const SlotCount = 16384
 
 // SlotOf reports which hash slot a key belongs to, by the same rule the server
@@ -51,7 +50,6 @@ func hashTag(key []byte) ([]byte, bool) {
 	return nil, false
 }
 
-// crc16 is CRC-16/XMODEM, the function Redis hashes keys with.
 func crc16(data []byte) uint16 {
 	var crc uint16
 	for _, b := range data {
@@ -84,7 +82,6 @@ var slotTags struct {
 	tags [SlotCount]string
 }
 
-// SlotTags returns the table, generating it on first use.
 func SlotTags() *[SlotCount]string {
 	slotTags.once.Do(func() {
 		found := 0
@@ -110,7 +107,6 @@ func OffsetKey(slot, taskID int) string {
 	return "{" + SlotTags()[slot] + "}:__off:" + strconv.Itoa(taskID)
 }
 
-// offsetKeyPrefix is what marks a key as one of ours, for the reconcile to skip.
 const offsetKeyPrefix = "}:__off:"
 
 // IsOffsetKey reports whether a key is one of the position markers this package

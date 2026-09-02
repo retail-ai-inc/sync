@@ -59,7 +59,6 @@ func TestAnEmptyTagIsNotATag(t *testing.T) {
 	}
 }
 
-// TestAnUnclosedTagIsNotATag covers a key with a '{' and no '}'.
 func TestAnUnclosedTagIsNotATag(t *testing.T) {
 	if SlotOf([]byte("{foo")) == SlotOf([]byte("foo")) {
 		t.Error("an unclosed brace was treated as a tag; the server hashes the whole key")
@@ -90,7 +89,6 @@ func TestEverySlotHasATag(t *testing.T) {
 	}
 }
 
-// TestEveryTagHashesToItsOwnSlot is the property the whole design rests on.
 func TestEveryTagHashesToItsOwnSlot(t *testing.T) {
 	tags := SlotTags()
 	for slot := 0; slot < SlotCount; slot++ {
@@ -163,7 +161,6 @@ func TestOrdinaryKeysAreNotMarkers(t *testing.T) {
 	}
 }
 
-// TestTwoTasksDoNotShareAMarker covers a target cluster receiving two tasks.
 func TestTwoTasksDoNotShareAMarker(t *testing.T) {
 	if OffsetKey(99, 1) == OffsetKey(99, 2) {
 		t.Error("two tasks share one marker, so each would erase the other's progress")

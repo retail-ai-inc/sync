@@ -40,7 +40,6 @@ func retentionDB(t *testing.T) *sql.DB {
 	return db
 }
 
-// seedRow writes one monitoring row aged by the given number of days.
 func seedRow(t *testing.T, db *sql.DB, daysOld int) {
 	t.Helper()
 

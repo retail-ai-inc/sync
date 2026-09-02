@@ -20,12 +20,10 @@ import (
 // required and until it is made the replica is falling further behind.
 var ErrUnrecoverable = errors.New("replication cannot continue without intervention")
 
-// Unrecoverable wraps a reason as a stop that must not be retried.
 func Unrecoverable(format string, args ...interface{}) error {
 	return fmt.Errorf("%w: %s", ErrUnrecoverable, fmt.Sprintf(format, args...))
 }
 
-// IsUnrecoverable reports whether an error says retrying is pointless.
 func IsUnrecoverable(err error) bool {
 	return errors.Is(err, ErrUnrecoverable)
 }

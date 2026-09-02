@@ -30,7 +30,6 @@ import (
 // The batch is then a set of per-slot transactions, each exactly once, and the
 // replay problem is gone rather than mitigated.
 
-// Applier writes batches of stream commands to the target cluster.
 type Applier struct {
 	Target goredis.UniversalClient
 	// Source is used to re-read a key's value, for the phase where commands
@@ -66,7 +65,6 @@ func (a *Applier) concurrency() int {
 	return defaultConcurrency
 }
 
-// work is what one slot has to have done to it.
 type work struct {
 	slot int
 	// commands are the stream commands for this slot, in the order they were
@@ -133,7 +131,6 @@ func (a *Applier) Apply(ctx context.Context, runs [][]*domain.Event, pos domain.
 	return true, nil
 }
 
-// repairsIn counts the keys a batch copied whole rather than by replaying.
 func repairsIn(jobs []work) int {
 	total := 0
 	for _, job := range jobs {
@@ -144,14 +141,12 @@ func repairsIn(jobs []work) int {
 
 func (a *Applier) logger() logrus.FieldLogger { return orDefault(a.Logger) }
 
-// Skipped is how many commands were dropped as already applied.
 func (a *Applier) Skipped() int {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.skipped
 }
 
-// plan groups the batch by slot, dropping what the target has already applied.
 func (a *Applier) plan(events []*domain.Event, markers []int64) ([]work, error) {
 	bySlot := make(map[int]*work)
 	order := make([]int, 0, 16)
@@ -206,7 +201,6 @@ func (a *Applier) plan(events []*domain.Event, markers []int64) ([]work, error) 
 	return jobs, nil
 }
 
-// run executes the slot transactions, several at a time.
 func (a *Applier) run(ctx context.Context, jobs []work, batchEnd int64, markers []int64) error {
 	if len(jobs) == 0 {
 		return nil
@@ -259,7 +253,6 @@ func (a *Applier) run(ctx context.Context, jobs []work, batchEnd int64, markers 
 	return firstErr
 }
 
-// applySlot writes one slot's commands and its marker in a single transaction.
 func (a *Applier) applySlot(ctx context.Context, job work, batchEnd int64) error {
 	repairs, err := a.readRepairs(ctx, job)
 	if err != nil {
@@ -302,7 +295,6 @@ func (a *Applier) applySlot(ctx context.Context, job work, batchEnd int64) error
 	return nil
 }
 
-// readRepairs fetches the current value of every key this slot has to repair.
 func (a *Applier) readRepairs(ctx context.Context, job work) ([]*repairedValue, error) {
 	if len(job.repairs) == 0 {
 		return nil, nil
@@ -326,7 +318,6 @@ func flatten(runs [][]*domain.Event) []*domain.Event {
 	return events
 }
 
-// endOf is the stream offset the batch reaches.
 func endOf(events []*domain.Event) int64 {
 	var end int64
 	for _, event := range events {

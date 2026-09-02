@@ -31,7 +31,6 @@ const (
 	maxRestartBackoff = 5 * time.Minute
 )
 
-// runningTask is one syncer the supervisor has started.
 type runningTask struct {
 	// fingerprint is the configuration the task was started from. A task whose
 	// fingerprint no longer matches the stored configuration is restarted; one
@@ -51,7 +50,6 @@ type runningTask struct {
 	blocked bool
 }
 
-// exited reports whether the task's goroutine has finished.
 func (t *runningTask) exited() bool {
 	select {
 	case <-t.done:
@@ -61,7 +59,6 @@ func (t *runningTask) exited() bool {
 	}
 }
 
-// fingerprint renders a task's configuration for comparison.
 func fingerprint(sc config.SyncConfig) string {
 	encoded, err := json.Marshal(sc)
 	if err != nil {
@@ -119,7 +116,6 @@ func newSupervisor(log *logrus.Logger) *supervisor {
 	return &supervisor{log: log, running: map[int]*runningTask{}, build: syncerFor}
 }
 
-// apply starts, stops and restarts tasks so the running set matches cfg.
 func (s *supervisor) apply(ctx context.Context, cfg *config.Config) {
 	s.global = cfg
 
@@ -210,7 +206,6 @@ func taskLabels(sc config.SyncConfig) metrics.Labels {
 	}
 }
 
-// start launches one task.
 func (s *supervisor) start(parentCtx context.Context, sc config.SyncConfig) {
 	syncer := s.build(sc, s.global, s.log)
 	if syncer == nil {
@@ -231,7 +226,6 @@ func (s *supervisor) start(parentCtx context.Context, sc config.SyncConfig) {
 	s.log.Infof("Task %d (%s) started", sc.ID, sc.Type)
 }
 
-// stop cancels one task and waits for it to finish, up to the drain timeout.
 func (s *supervisor) stop(id int) {
 	task, ok := s.running[id]
 	if !ok {

@@ -13,7 +13,6 @@ type Checkpoints struct {
 	Redis    string
 }
 
-// CheckpointsOf reads the four paths out of a configuration.
 func CheckpointsOf(c Config) Checkpoints {
 	return Checkpoints{
 		Postgres: c.PgPositionPath,

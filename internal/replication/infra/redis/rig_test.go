@@ -48,7 +48,6 @@ func redisAt(t *testing.T, addrs []string) goredis.UniversalClient {
 	return client
 }
 
-// addrsFrom reads a comma-separated list of addresses from the environment.
 func addrsFrom(t *testing.T, variable string) []string {
 	t.Helper()
 	value := os.Getenv(variable)
@@ -58,7 +57,6 @@ func addrsFrom(t *testing.T, variable string) []string {
 	return strings.Split(value, ",")
 }
 
-// emptyBoth clears the two ends, which is why it insists on being told to.
 func emptyBoth(t *testing.T, source, target goredis.UniversalClient) {
 	t.Helper()
 	if os.Getenv("SYNC_REDIS_ALLOW_FLUSH") != "1" {
@@ -117,7 +115,6 @@ type rig struct {
 	shards   []string
 }
 
-// newRig builds a pipeline per shard, the way the syncer does.
 func newRig(t *testing.T, source, target goredis.UniversalClient, root string,
 	commands *commandTable, taskID int, seed string) *rig {
 	t.Helper()
@@ -182,7 +179,6 @@ func newRig(t *testing.T, source, target goredis.UniversalClient, root string,
 	return built
 }
 
-// run starts every shard and returns a channel carrying one result each.
 func (r *rig) run(ctx context.Context) chan error {
 	done := make(chan error, len(r.runners))
 	for _, runner := range r.runners {
@@ -192,7 +188,6 @@ func (r *rig) run(ctx context.Context) chan error {
 	return done
 }
 
-// wait drains one result per shard.
 func (r *rig) wait(t *testing.T, done chan error, within time.Duration) []error {
 	t.Helper()
 	var errs []error
@@ -244,7 +239,6 @@ func (r *rig) inCommandPhase(target goredis.UniversalClient, taskID int) bool {
 	return true
 }
 
-// reachCommandPhase drives writes until every shard is replaying commands.
 func (r *rig) reachCommandPhase(t *testing.T, source, target goredis.UniversalClient,
 	taskID int, within time.Duration) {
 	t.Helper()
@@ -360,7 +354,6 @@ func compare(t *testing.T, source, target goredis.UniversalClient) (bool, string
 	return false, strings.Join(problems, "\n")
 }
 
-// everyKey lists a whole server or a whole cluster.
 func everyKey(ctx context.Context, client goredis.UniversalClient) ([]string, error) {
 	var keys []string
 	err := scanAll(ctx, client, 500, func(page []string) error {
@@ -371,7 +364,6 @@ func everyKey(ctx context.Context, client goredis.UniversalClient) ([]string, er
 	return keys, err
 }
 
-// digest renders a key's value in a form that can be compared across servers.
 func digest(ctx context.Context, client goredis.UniversalClient, key string) (string, error) {
 	kind, err := client.Type(ctx, key).Result()
 	if err == goredis.Nil {

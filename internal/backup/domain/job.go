@@ -133,7 +133,6 @@ type BackupJob struct {
 	lastRun        RunOutcome
 }
 
-// NewBackupJob builds a job from a stored row.
 func NewBackupJob(id, enable int, lastUpdate, lastBackup, nextBackup, configJSON string) BackupJob {
 	return BackupJob{
 		id:             id,
@@ -205,7 +204,6 @@ func (j BackupJob) DisplayName(c Config) string {
 	return c.Name
 }
 
-// Run is one execution of a job, tracked in memory while it happens.
 type Run struct {
 	TaskID      string     `json:"taskId"`
 	BackupID    int        `json:"backupId"`
@@ -224,7 +222,6 @@ const (
 	RunFailed    = "failed"
 )
 
-// IsTerminal reports whether a run status means the run is over.
 func IsTerminal(status string) bool {
 	return status == RunCompleted || status == RunFailed
 }

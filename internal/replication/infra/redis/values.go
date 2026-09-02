@@ -20,7 +20,6 @@ import (
 // large hash moves the whole hash. That is why steady state replays commands and
 // only the places that need idempotence use this.
 
-// repairedValue is a key's value, read from the source and ready for the target.
 type repairedValue struct {
 	key []byte
 	// payload is the serialised value, or nil when the source no longer has the
@@ -83,7 +82,6 @@ func readValues(ctx context.Context, source goredis.UniversalClient,
 	return values, nil
 }
 
-// queue adds the write to a transaction.
 func (v *repairedValue) queue(ctx context.Context, pipe goredis.Pipeliner) {
 	if v.payload == nil {
 		pipe.Del(ctx, string(v.key))

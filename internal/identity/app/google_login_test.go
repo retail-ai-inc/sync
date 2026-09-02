@@ -6,7 +6,6 @@ import (
 	"github.com/retail-ai-inc/sync/internal/identity/domain"
 )
 
-// storeGoogleConfig writes an auth_configs row for the google provider.
 func storeGoogleConfig(t *testing.T, cfg string) {
 	t.Helper()
 

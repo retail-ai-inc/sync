@@ -71,7 +71,6 @@ func withoutClientSecret(config map[string]interface{}) map[string]interface{} {
 	return safe
 }
 
-// MissingOAuthFieldError names a required field an enabled provider is missing.
 type MissingOAuthFieldError struct{ Field string }
 
 func (e *MissingOAuthFieldError) Error() string {

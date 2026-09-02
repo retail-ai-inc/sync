@@ -11,7 +11,6 @@ import (
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
 )
 
-// fakeChunks hands out prepared chunks.
 type fakeChunks struct {
 	mu     sync.Mutex
 	chunks []Chunk

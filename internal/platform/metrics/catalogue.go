@@ -35,15 +35,13 @@ import "time"
 // restarted" and "stopped and staying stopped" is the one an operator acts on,
 // so it is a metric here.
 const (
-	// TaskUp is 1 while a task is replicating and 0 once it has stopped.
 	TaskUp = "sync_task_up"
 	// TaskBlocked is 1 while a task is stopped for a reason retrying cannot fix.
 	//
 	// No Debezium equivalent: a failed connector is FAILED whatever the cause,
 	// and the two need separate alerts. A blocked task needs somebody to look
 	// at one event; a task that is merely down needs the process restarted.
-	TaskBlocked = "sync_task_blocked"
-	// RestartsTotal counts restarts after a task stopped by itself.
+	TaskBlocked   = "sync_task_blocked"
 	RestartsTotal = "sync_task_restarts_total"
 	// Connected is 1 while the source stream is established.
 	//
@@ -58,18 +56,14 @@ const (
 	helpConnected = "1 while the source stream is established, 0 while disconnected"
 )
 
-// SetTaskUp records whether a task is replicating.
 func SetTaskUp(labels Labels, up bool) { setBool(TaskUp, helpTaskUp, labels, up) }
 
-// SetTaskBlocked records whether a task is stopped for a reason retrying cannot fix.
 func SetTaskBlocked(labels Labels, blocked bool) {
 	setBool(TaskBlocked, helpBlocked, labels, blocked)
 }
 
-// CountRestart records that a task was restarted.
 func CountRestart(labels Labels) { Default.AddCounter(RestartsTotal, helpRestarts, labels, 1) }
 
-// SetConnected records whether the source stream is established.
 func SetConnected(labels Labels, connected bool) {
 	setBool(Connected, helpConnected, labels, connected)
 }
@@ -147,8 +141,7 @@ const (
 	// somebody else's problem. Here the target is the point of the exercise, so
 	// what reached it is counted separately from what was read.
 	AppliedTotal = "sync_changes_applied_total"
-	// FailedTotal counts changes the target refused.
-	FailedTotal = "sync_changes_failed_total"
+	FailedTotal  = "sync_changes_failed_total"
 
 	helpLag          = "Seconds between a change being made at the source and applied at the target"
 	helpReadLag      = "Seconds between a change being made at the source and read by the syncer"
@@ -180,7 +173,6 @@ type EventCounters struct {
 	base Labels
 }
 
-// NewEventCounters prepares the per-operation label sets for one task.
 func NewEventCounters(labels Labels) *EventCounters {
 	c := &EventCounters{byOp: make(map[string]Labels, 5), base: labels}
 	for _, op := range []string{"insert", "update", "delete", "schema", "unknown"} {
@@ -189,7 +181,6 @@ func NewEventCounters(labels Labels) *EventCounters {
 	return c
 }
 
-// Count records n events of one operation.
 func (c *EventCounters) Count(op string, n int) {
 	if c == nil || n == 0 {
 		return
@@ -206,15 +197,12 @@ func (c *EventCounters) Count(op string, n int) {
 	Default.AddCounter(EventsTotal, helpEvents, labels, float64(n))
 }
 
-// SetLag records the applied lag.
 func SetLag(labels Labels, seconds float64) { Default.SetGauge(LagSeconds, helpLag, labels, seconds) }
 
-// SetReadLag records how old an event was when it was read.
 func SetReadLag(labels Labels, seconds float64) {
 	Default.SetGauge(ReadLagSeconds, helpReadLag, labels, seconds)
 }
 
-// SetLastEventAge records how long the stream has been silent.
 func SetLastEventAge(labels Labels, seconds float64) {
 	Default.SetGauge(LastEventAgeSeconds, helpLastEventAge, labels, seconds)
 }
@@ -229,48 +217,40 @@ func CountEvent(labels Labels, op string, n int) {
 	Default.AddCounter(EventsTotal, helpEvents, withLabel(labels, "op", op), float64(n))
 }
 
-// CountFiltered counts events no mapping covers.
 func CountFiltered(labels Labels, n int) {
 	if n > 0 {
 		Default.AddCounter(EventsFilteredTotal, helpFiltered, labels, float64(n))
 	}
 }
 
-// CountSkipped counts events the reader stepped over.
 func CountSkipped(labels Labels, n int) {
 	if n > 0 {
 		Default.AddCounter(EventsSkippedTotal, helpSkipped, labels, float64(n))
 	}
 }
 
-// CountTransaction counts a source transaction carried through.
 func CountTransaction(labels Labels, n int) {
 	if n > 0 {
 		Default.AddCounter(TransactionsCommittedTotal, helpCommitted, labels, float64(n))
 	}
 }
 
-// CountRolledBack counts a source transaction that was rolled back.
 func CountRolledBack(labels Labels, n int) {
 	if n > 0 {
 		Default.AddCounter(TransactionsRolledBackTotal, helpRolledBack, labels, float64(n))
 	}
 }
 
-// SetCapturedTables records how many objects the task watches.
 func SetCapturedTables(labels Labels, n int) {
 	Default.SetGauge(CapturedTables, helpCaptured, labels, float64(n))
 }
 
-// CountDisconnect records that the source stream dropped.
 func CountDisconnect(labels Labels) {
 	Default.AddCounter(DisconnectsTotal, helpDisconnects, labels, 1)
 }
 
-// Applied counts changes written to the target.
 func Applied(labels Labels, n int) { Default.AddCounter(AppliedTotal, helpApplied, labels, float64(n)) }
 
-// Failed counts changes the target refused.
 func Failed(labels Labels, n int) { Default.AddCounter(FailedTotal, helpFailed, labels, float64(n)) }
 
 // withLabel copies a label set with one more label, so a caller's map is never
@@ -318,12 +298,10 @@ const (
 	helpSourceInfo      = "1, labelled with the source log file and server identity"
 )
 
-// SetSourcePosition records how far the stream has read.
 func SetSourcePosition(labels Labels, offset int64) {
 	Default.SetGauge(SourcePositionBytes, helpSourcePosition, labels, float64(offset))
 }
 
-// SetAppliedPosition records the position the target holds.
 func SetAppliedPosition(labels Labels, offset int64) {
 	Default.SetGauge(AppliedPositionBytes, helpAppliedPosition, labels, float64(offset))
 }
@@ -345,7 +323,6 @@ func SetSourceInfo(labels Labels, file, server string) {
 // queue that is persistently full is the signal that the target, not the
 // source, is the limit.
 const (
-	// QueueCapacityEvents is how many events the queue may hold.
 	QueueCapacityEvents = "sync_queue_capacity_events"
 	// QueueUsedEvents is how many it holds now. Debezium reports the remainder
 	// instead; used is the direction that reads as "pressure" on a graph, and
@@ -367,13 +344,11 @@ const (
 	HelpBufferBytes   = "Bytes of change data on local disk waiting to be applied to the target"
 )
 
-// SetQueue records the queue's depth.
 func SetQueue(labels Labels, used, capacity int) {
 	Default.SetGauge(QueueUsedEvents, helpQueueUsed, labels, float64(used))
 	Default.SetGauge(QueueCapacityEvents, helpQueueCapacity, labels, float64(capacity))
 }
 
-// SetQueueBytes records how much change data is waiting.
 func SetQueueBytes(labels Labels, bytes int64) {
 	Default.SetGauge(QueueBytes, helpQueueBytes, labels, float64(bytes))
 }
@@ -385,15 +360,10 @@ func SetQueueBytes(labels Labels, bytes int64) {
 // answer at all, which mattered the moment a Redis shard had to be re-copied
 // because the source's backlog had rolled past its position.
 const (
-	// SnapshotRunning is 1 while an initial copy is in progress.
-	SnapshotRunning = "sync_snapshot_running"
-	// SnapshotCompleted is 1 once an initial copy has finished cleanly.
-	SnapshotCompleted = "sync_snapshot_completed"
-	// SnapshotAborted is 1 if an initial copy stopped without finishing.
-	SnapshotAborted = "sync_snapshot_aborted"
-	// SnapshotDurationSeconds is how long the current or last copy took.
-	SnapshotDurationSeconds = "sync_snapshot_duration_seconds"
-	// SnapshotRowsScannedTotal counts rows, documents or keys read by the copy.
+	SnapshotRunning          = "sync_snapshot_running"
+	SnapshotCompleted        = "sync_snapshot_completed"
+	SnapshotAborted          = "sync_snapshot_aborted"
+	SnapshotDurationSeconds  = "sync_snapshot_duration_seconds"
 	SnapshotRowsScannedTotal = "sync_snapshot_rows_scanned_total"
 	// SnapshotObjectsTotal is how many tables, collections or shards the copy
 	// covers, and SnapshotObjectsRemaining how many it has left.
@@ -409,7 +379,6 @@ const (
 	helpSnapshotRemaining = "Tables, collections or shards the initial copy has left"
 )
 
-// SnapshotStarted marks an initial copy as running and records its size.
 func SnapshotStarted(labels Labels, objects int) {
 	setBool(SnapshotRunning, helpSnapshotRunning, labels, true)
 	setBool(SnapshotCompleted, helpSnapshotCompleted, labels, false)
@@ -419,7 +388,6 @@ func SnapshotStarted(labels Labels, objects int) {
 	Default.SetGauge(SnapshotDurationSeconds, helpSnapshotDuration, labels, 0)
 }
 
-// SnapshotProgress records how far an initial copy has got.
 func SnapshotProgress(labels Labels, rowsScanned, objectsRemaining int, elapsed float64) {
 	if rowsScanned > 0 {
 		Default.AddCounter(SnapshotRowsScannedTotal, helpSnapshotRows, labels, float64(rowsScanned))
@@ -428,7 +396,6 @@ func SnapshotProgress(labels Labels, rowsScanned, objectsRemaining int, elapsed 
 	Default.SetGauge(SnapshotDurationSeconds, helpSnapshotDuration, labels, elapsed)
 }
 
-// SnapshotFinished marks an initial copy as done, cleanly or not.
 func SnapshotFinished(labels Labels, completed bool, elapsed float64) {
 	setBool(SnapshotRunning, helpSnapshotRunning, labels, false)
 	setBool(SnapshotCompleted, helpSnapshotCompleted, labels, completed)
@@ -447,9 +414,7 @@ func SnapshotFinished(labels Labels, completed bool, elapsed float64) {
 // because a schema change that did not arrive is how rows silently land in the
 // wrong columns.
 const (
-	// SchemaChangesTotal counts schema changes carried to the target.
-	SchemaChangesTotal = "sync_schema_changes_applied_total"
-	// SchemaChangeAgeSeconds is how long since the last one.
+	SchemaChangesTotal     = "sync_schema_changes_applied_total"
 	SchemaChangeAgeSeconds = "sync_schema_last_change_age_seconds"
 	// SchemaChangesRefusedTotal counts schema changes deliberately not carried
 	// — a DROP that would empty the target, a rename that would orphan it.
@@ -464,19 +429,16 @@ const (
 	helpSchemaRefused = "Schema changes deliberately not carried through, by reason"
 )
 
-// CountSchemaChange counts a schema change carried to the target.
 func CountSchemaChange(labels Labels, n int) {
 	if n > 0 {
 		Default.AddCounter(SchemaChangesTotal, helpSchemaChanges, labels, float64(n))
 	}
 }
 
-// SetSchemaChangeAge records how long since the last schema change.
 func SetSchemaChangeAge(labels Labels, seconds float64) {
 	Default.SetGauge(SchemaChangeAgeSeconds, helpSchemaAge, labels, seconds)
 }
 
-// CountSchemaRefused counts a schema change that was deliberately not carried.
 func CountSchemaRefused(labels Labels, reason string) {
 	Default.AddCounter(SchemaChangesRefusedTotal, helpSchemaRefused,
 		withLabel(labels, "reason", reason), 1)
@@ -492,7 +454,6 @@ func CountSchemaRefused(labels Labels, reason string) {
 // down" is the number that decides whether a restart is routine or means a full
 // re-copy.
 const (
-	// RetentionWindowSeconds is how far back the source's log reaches.
 	RetentionWindowSeconds = "sync_source_retention_window_seconds"
 	// RetentionHeadroomSeconds is that window less the current lag: how long
 	// the task could stay stopped before its saved position is purged.
@@ -502,7 +463,6 @@ const (
 	helpRetentionHeadroom = "Seconds a stopped task has left before its position falls out of the source's log"
 )
 
-// SetRetention publishes the source's retention window and the headroom left.
 func SetRetention(labels Labels, window, headroom float64) {
 	Default.SetGauge(RetentionWindowSeconds, helpRetentionWindow, labels, window)
 	Default.SetGauge(RetentionHeadroomSeconds, helpRetentionHeadroom, labels, headroom)
@@ -517,7 +477,6 @@ func SetRetention(labels Labels, window, headroom float64) {
 // whether the two sides actually agree — and every stream defect found in this
 // codebase was found by comparing, not by the stream reporting itself.
 const (
-	// ReconcileDifference is what the last full comparison found.
 	ReconcileDifference = "sync_redis_reconcile_difference"
 	// ValueRepairsTotal counts keys copied whole rather than by replaying a
 	// command. A rate above zero outside the first copy means something is
@@ -536,24 +495,20 @@ const (
 	helpUnreplicated  = "Source objects that no mapping carries to the target"
 )
 
-// SetReconcileDifference publishes what the last comparison found.
 func SetReconcileDifference(labels Labels, objects float64) {
 	Default.SetGauge(ReconcileDifference, helpReconcileDiff, labels, objects)
 }
 
-// CountValueRepairs counts objects copied whole.
 func CountValueRepairs(labels Labels, n int) {
 	if n > 0 {
 		Default.AddCounter(ValueRepairsTotal, helpValueRepairs, labels, float64(n))
 	}
 }
 
-// SetDeadLettered publishes how many operations are set aside.
 func SetDeadLettered(labels Labels, count float64) {
 	Default.SetGauge(DeadLettered, helpDeadLettered, labels, count)
 }
 
-// SetUnreplicated publishes how many source objects nothing carries.
 func SetUnreplicated(labels Labels, count float64) {
 	Default.SetGauge(Unreplicated, helpUnreplicated, labels, count)
 }
@@ -565,9 +520,7 @@ func SetUnreplicated(labels Labels, count float64) {
 // equivalents of the position metrics above, kept under their own names because
 // they mean something only for that engine.
 const (
-	// StreamOffsetBytes is what the relay has received and written to disk.
-	StreamOffsetBytes = "sync_redis_stream_offset_bytes"
-	// AppliedOffsetBytes is what the target has recorded.
+	StreamOffsetBytes  = "sync_redis_stream_offset_bytes"
 	AppliedOffsetBytes = "sync_redis_applied_offset_bytes"
 	// SourceLagBytes is how far the target is behind the source's own write
 	// offset, read from the source rather than derived from what this process
@@ -590,19 +543,16 @@ const (
 	helpBufferHeld    = "Bytes of the replication stream held on disk"
 )
 
-// SetStreamOffset publishes how far the relay has received and buffered.
 func SetStreamOffset(labels Labels, offset, held int64) {
 	Default.SetGauge(StreamOffsetBytes, helpStreamOffset, labels, float64(offset))
 	Default.SetGauge(BufferHeldBytes, helpBufferHeld, labels, float64(held))
 	Default.SetGauge(BufferBytes, HelpBufferBytes, labels, float64(held))
 }
 
-// SetSourceLag publishes how far behind the source's own offset the target is.
 func SetSourceLag(labels Labels, lag int64) {
 	Default.SetGauge(SourceLagBytes, helpSourceLag, labels, float64(lag))
 }
 
-// SetAppliedOffset publishes the offset the target has recorded.
 func SetAppliedOffset(labels Labels, offset int64) {
 	Default.SetGauge(AppliedOffsetBytes, helpAppliedOffset, labels, float64(offset))
 	SetAppliedPosition(labels, offset)
@@ -629,7 +579,6 @@ const (
 	helpBatchEvents     = "Events carried by applied batches"
 )
 
-// ObserveBatch records what one applied batch cost.
 func ObserveBatch(labels Labels, apply, commit time.Duration, roundTrips, namespaces, events int) {
 	Default.AddCounter(BatchApplyCount, helpBatchCount, labels, 1)
 	Default.AddCounter(BatchApplySeconds, helpBatchApply, labels, apply.Seconds())

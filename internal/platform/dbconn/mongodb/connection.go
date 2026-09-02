@@ -16,7 +16,6 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 )
 
-// GetMongoClient establishes a MongoDB connection using the provided URI
 func GetMongoClient(ctx context.Context, uri string) (*mongo.Client, error) {
 	clientOptions := options.Client().ApplyURI(uri)
 	clientOptions.SetConnectTimeout(10 * time.Second)
@@ -40,7 +39,6 @@ func GetMongoClient(ctx context.Context, uri string) (*mongo.Client, error) {
 	return client, nil
 }
 
-// ConnectMongoDB connects to a MongoDB instance with the given parameters
 func ConnectMongoDB(ctx context.Context, host string, port string, user string, password string, database string, logger *logrus.Logger) (*mongo.Client, string, error) {
 	if logger == nil {
 		logger = logrus.StandardLogger()
@@ -61,7 +59,6 @@ func ConnectMongoDB(ctx context.Context, host string, port string, user string, 
 	return client, database, nil
 }
 
-// ConnectMongoDBFromTaskID connects to MongoDB using the configuration from a sync task ID
 func ConnectMongoDBFromTaskID(ctx context.Context, taskID string, logger *logrus.Logger) (*mongo.Client, string, error) {
 	if logger == nil {
 		logger = logrus.StandardLogger()

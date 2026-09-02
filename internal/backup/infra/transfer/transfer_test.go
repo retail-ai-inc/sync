@@ -42,7 +42,6 @@ func stubPATH(t *testing.T) string {
 	return dir
 }
 
-// stubArgs returns the arguments a stub recorded, one per line.
 func stubArgs(t *testing.T, dir, name string) []string {
 	t.Helper()
 

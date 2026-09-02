@@ -41,7 +41,6 @@ func briefCtx(t *testing.T) context.Context {
 	return ctx
 }
 
-// event encodes one change-stream document the way the disk buffer stores it.
 func event(t *testing.T, doc bson.M) bson.Raw {
 	t.Helper()
 

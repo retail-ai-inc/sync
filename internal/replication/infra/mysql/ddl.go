@@ -26,7 +26,6 @@ import (
 	"github.com/retail-ai-inc/sync/internal/replication/infra/discovery"
 )
 
-// ddlAction is what the handler decided to do with one parsed statement.
 type ddlAction int
 
 const (
@@ -38,7 +37,6 @@ const (
 	ddlBlock
 )
 
-// ddlDecision is the outcome for one statement of a query event.
 type ddlDecision struct {
 	action ddlAction
 	// query is the statement rewritten with the target's names, set when the
@@ -282,7 +280,6 @@ func (h *MyEventHandler) OnDDL(_ *replication.EventHeader, _ mysql.Position, e *
 	return nil
 }
 
-// execDDL runs one rewritten statement on the target.
 func (h *MyEventHandler) execDDL(query string) error {
 	h.mu.Lock()
 	db := h.targetDB

@@ -79,7 +79,6 @@ func (s *Snapshotter) Pin(ctx context.Context) (domain.Position, error) {
 	return domain.Position{Payload: payload}, nil
 }
 
-// Copy fills the target, reading through the pinned connection.
 func (s *Snapshotter) Copy(ctx context.Context) error {
 	if s.conn == nil {
 		return fmt.Errorf("the snapshot was not pinned")
@@ -110,12 +109,10 @@ type Syncer struct {
 	logger logrus.FieldLogger
 }
 
-// NewSyncer builds the syncer for one task.
 func NewSyncer(cfg config.SyncConfig, logger *logrus.Logger) *Syncer {
 	return &Syncer{cfg: cfg, logger: logger}
 }
 
-// Start replicates until the context is cancelled or the stream cannot carry on.
 func (s *Syncer) Start(ctx context.Context) error {
 	if err := security.CheckKeyForMappings(s.cfg.Mappings); err != nil {
 		return domain.Unrecoverable("%v", err)
@@ -237,7 +234,6 @@ func (s *Syncer) checkSource(ctx context.Context) error {
 	return preflight(ctx, source, s.cfg.Type, s.logger)
 }
 
-// resyncs builds a re-copy for each table the task asks to have re-copied.
 func (s *Syncer) resyncs(store *checkpoint.SQLStore) []*pipeline.Resync {
 	if len(s.cfg.Resync) == 0 {
 		return nil

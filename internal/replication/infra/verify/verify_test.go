@@ -125,7 +125,6 @@ func compare(t *testing.T, source, target End, chunk int) Result {
 	return result
 }
 
-// keyOf renders a single-column key the way the comparison does.
 func keyOf(id string) string {
 	return encodeKey([]sql.NullString{{String: id, Valid: true}})
 }
@@ -399,7 +398,6 @@ func TestOnlyOneRowOfACompositeKeyDiffers(t *testing.T) {
 	}
 }
 
-// TestACompositeKeyIsRepaired closes the loop for the tables that matter most.
 func TestACompositeKeyIsRepaired(t *testing.T) {
 	source := ledgerEnd(t, "source",
 		[3]string{"acct-1", "1", "100"}, [3]string{"acct-1", "2", "200"})

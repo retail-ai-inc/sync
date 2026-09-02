@@ -15,7 +15,6 @@ func yesterdayStamp() string {
 	return time.Now().AddDate(0, 0, -1).Format("2006-01-02")
 }
 
-// mongoMergedConfig builds a config for the merged MongoDB path.
 func mongoMergedConfig(gcsPath string) ExecutorBackupConfig {
 	var cfg ExecutorBackupConfig
 	cfg.SourceType = "mongodb"

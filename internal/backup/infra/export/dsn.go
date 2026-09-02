@@ -67,7 +67,6 @@ func parseMySQLConnectionURL(url string) (host, port string) {
 	return host, port
 }
 
-// buildMySQLConnectionString builds MySQL connection parameters
 func buildMySQLConnectionString(url, username, password string) (host, port, user, pass string) {
 	host, port = parseMySQLConnectionURL(url)
 	user = username
@@ -75,7 +74,6 @@ func buildMySQLConnectionString(url, username, password string) (host, port, use
 	return
 }
 
-// maskMySQLPassword masks MySQL password in command arguments
 func (e *BackupExecutor) maskMySQLPassword(args []string) string {
 	maskedArgs := make([]string, len(args))
 	copy(maskedArgs, args)
@@ -90,7 +88,6 @@ func (e *BackupExecutor) maskMySQLPassword(args []string) string {
 	return strings.Join(maskedArgs, " ")
 }
 
-// maskSensitiveArgs masks sensitive information like passwords in command arguments
 func (e *BackupExecutor) maskSensitiveArgs(args []string) string {
 	maskedArgs := make([]string, len(args))
 	copy(maskedArgs, args)

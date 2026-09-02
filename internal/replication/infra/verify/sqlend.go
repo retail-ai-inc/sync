@@ -51,7 +51,6 @@ func quoteAll(names []string) []string {
 	return out
 }
 
-// marks renders n parameter placeholders.
 func marks(n int) string {
 	return strings.TrimSuffix(strings.Repeat("?, ", n), ", ")
 }
@@ -62,7 +61,6 @@ func (e *SQLEnd) selectList() string {
 	return strings.Join(append(quoteAll(e.Keys), quoteAll(e.Columns)...), ", ")
 }
 
-// scanRow reads one row of that projection.
 func (e *SQLEnd) scanRow(rows *sql.Rows) (Row, []sql.NullString, error) {
 	cells := make([]sql.NullString, len(e.Keys)+len(e.Columns))
 	scan := make([]interface{}, len(cells))
@@ -177,7 +175,6 @@ func nullable(v sql.NullString) interface{} {
 
 // ---------------------------------------------------------------- repair
 
-// SQLRepairer copies rows from a source table to a target table.
 type SQLRepairer struct {
 	Source *SQLEnd
 	Target *SQLEnd
@@ -213,7 +210,6 @@ func (r *SQLRepairer) Repair(ctx context.Context, differences []Difference) (int
 	return fixed, nil
 }
 
-// where renders the clause that addresses one row by its key.
 func (e *SQLEnd) where() string {
 	parts := make([]string, len(e.Keys))
 	for i, k := range e.Keys {

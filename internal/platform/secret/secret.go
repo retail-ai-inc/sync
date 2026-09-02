@@ -30,10 +30,8 @@ import (
 // deployment that has a key — can be read without knowing which is which.
 const prefix = "enc:v1:"
 
-// ErrNoKey means a sealed value was found and there is no key to open it with.
 var ErrNoKey = errors.New("a stored credential is encrypted and SYNC_CONFIG_KEY is not set")
 
-// Keeper seals and opens stored values.
 type Keeper struct {
 	aead cipher.AEAD
 }
@@ -53,7 +51,6 @@ func init() {
 	Default = keeper
 }
 
-// Configured reports whether stored credentials are being encrypted.
 func Configured() bool { return Default != nil }
 
 // KeeperFromEnv builds a keeper from SYNC_CONFIG_KEY, reporting nil when the
@@ -141,7 +138,6 @@ func (k *Keeper) Open(stored string) (string, error) {
 	return string(plaintext), nil
 }
 
-// IsSealed reports whether a stored value is encrypted.
 func IsSealed(stored string) bool { return strings.HasPrefix(stored, prefix) }
 
 // ---------------------------------------------------------- task documents
@@ -166,14 +162,12 @@ func SealTaskConfig(configJSON string) (string, error) {
 	})
 }
 
-// OpenTaskConfig returns a task's stored JSON with its credentials decrypted.
 func OpenTaskConfig(configJSON string) (string, error) {
 	return transformTaskConfig(configJSON, func(value string) (string, error) {
 		return Default.Open(value)
 	})
 }
 
-// transformTaskConfig applies a transformation to every credential field.
 func transformTaskConfig(configJSON string, transform func(string) (string, error)) (string, error) {
 	if strings.TrimSpace(configJSON) == "" {
 		return configJSON, nil

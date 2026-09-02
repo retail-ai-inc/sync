@@ -66,7 +66,6 @@ type Applier struct {
 	bulk clientBulkSupport
 }
 
-// Apply writes every run of the batch, then the position.
 func (a *Applier) Apply(ctx context.Context, runs [][]*domain.Event, pos domain.Position) (bool, error) {
 	if a.Client == nil {
 		return false, fmt.Errorf("no target connection")
@@ -225,7 +224,6 @@ func (a *Applier) write(ctx context.Context, runs [][]*domain.Event) (roundTrips
 	return roundTrips, nil
 }
 
-// collectionGroup is the operations of one run that belong to one collection.
 type collectionGroup struct {
 	collection string
 	models     []mongo.WriteModel
@@ -264,7 +262,6 @@ func groupByCollection(run []*domain.Event) []collectionGroup {
 	return groups
 }
 
-// targetFor resolves a source collection to the name it is written under.
 func (a *Applier) targetFor(source string) string {
 	for _, mapping := range a.Mappings {
 		for _, table := range mapping.Tables {

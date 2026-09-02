@@ -24,7 +24,6 @@ import (
 // So the shape is watched, and a change to it triggers a comparison rather than
 // being trusted to come out right.
 
-// topologyWatcher reports when the source's slot ownership changes.
 type topologyWatcher struct {
 	Source goredis.UniversalClient
 	// Every is how often to look. Zero means the default.
@@ -46,7 +45,6 @@ func (w *topologyWatcher) every() time.Duration {
 
 func (w *topologyWatcher) logger() logrus.FieldLogger { return orDefault(w.Logger) }
 
-// Run watches until the context is cancelled.
 func (w *topologyWatcher) Run(ctx context.Context) {
 	cluster, ok := w.Source.(*goredis.ClusterClient)
 	if !ok {
@@ -101,7 +99,6 @@ func (w *topologyWatcher) Run(ctx context.Context) {
 	}
 }
 
-// ownership maps each slot range to the master serving it.
 func ownership(ctx context.Context, cluster *goredis.ClusterClient) (map[string]string, error) {
 	slots, err := cluster.ClusterSlots(ctx).Result()
 	if err != nil {
@@ -120,7 +117,6 @@ func ownership(ctx context.Context, cluster *goredis.ClusterClient) (map[string]
 	return shape, nil
 }
 
-// describe reports what changed between two shapes, or "" if nothing did.
 func describe(before, after map[string]string) string {
 	var changes []string
 

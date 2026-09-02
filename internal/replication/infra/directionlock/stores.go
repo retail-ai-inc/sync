@@ -22,7 +22,6 @@ const tableName = "_sync_direction_lock"
 
 // ------------------------------------------------------------------- SQL
 
-// SQLStore keeps the claims in a table on the database itself.
 type SQLStore struct {
 	DB *sql.DB
 	// Schema is the database the table lives in. It may be empty, in which case
@@ -35,7 +34,6 @@ type SQLStore struct {
 	NumberedPlaceholders bool
 }
 
-// arg renders the nth parameter marker, counting from one.
 func (s *SQLStore) arg(n int) string {
 	if s.NumberedPlaceholders {
 		return "$" + strconv.Itoa(n)
@@ -142,7 +140,6 @@ func (s *SQLStore) Remove(ctx context.Context, taskID int) error {
 
 // --------------------------------------------------------------- MongoDB
 
-// MongoStore keeps the claims in a collection on the database itself.
 type MongoStore struct {
 	Database *mongo.Database
 	Address  string
@@ -205,7 +202,6 @@ func (s *MongoStore) Remove(ctx context.Context, taskID int) error {
 
 // ----------------------------------------------------------------- Redis
 
-// RedisStore keeps the claims in one hash, keyed by task.
 type RedisStore struct {
 	Client  goredis.UniversalClient
 	Address string

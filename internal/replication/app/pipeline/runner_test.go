@@ -43,7 +43,6 @@ func (f *fakeReader) Next(ctx context.Context) (*domain.Event, error) {
 
 func (f *fakeReader) Close() error { f.closed = true; return nil }
 
-// fakeApplier records what it was asked to write.
 type fakeApplier struct {
 	mu sync.Mutex
 	// batches holds the runs of each batch it received.
@@ -86,7 +85,6 @@ func (f *fakeApplier) applied() [][][]*domain.Event {
 	return out
 }
 
-// fakeStore is an in-memory checkpoint store.
 type fakeStore struct {
 	mu      sync.Mutex
 	values  map[string]string
@@ -119,7 +117,6 @@ func (s *fakeStore) value(key string) string {
 	return s.values[key]
 }
 
-// fakeSnapshotter records the order Pin and Copy were called in.
 type fakeSnapshotter struct {
 	calls   []string
 	pinned  domain.Position
@@ -143,7 +140,6 @@ func quietLogger() logrus.FieldLogger {
 	return l
 }
 
-// event builds one change, ending its transaction unless told otherwise.
 func event(ns, key, pos string, opts ...func(*domain.Event)) *domain.Event {
 	e := &domain.Event{
 		NS:              domain.Namespace{DB: "shop", Object: ns},
@@ -180,7 +176,6 @@ func newRunner(t *testing.T, r domain.Reader, a domain.Applier, s Checkpoints) *
 	}
 }
 
-// runFor runs the runner until it settles, then cancels and returns its error.
 func runFor(t *testing.T, r *Runner, d time.Duration) error {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -475,7 +470,6 @@ func TestAnInterruptedCopyRecordsNoPosition(t *testing.T) {
 	}
 }
 
-// TestAStoredPositionSkipsTheSnapshot covers a restart: the copy is made once.
 func TestAStoredPositionSkipsTheSnapshot(t *testing.T) {
 	snap := &fakeSnapshotter{}
 	store := newStore()
@@ -530,7 +524,6 @@ func TestAQuietSourceDoesNotLookLikeALag(t *testing.T) {
 
 // ------------------------------------------------------- retention headroom
 
-// windowedReader is a reader that can say how far back its source's log reaches.
 type windowedReader struct {
 	*fakeReader
 	window time.Duration
@@ -553,7 +546,6 @@ func headroomOf(t *testing.T, labels metrics.Labels) (float64, bool) {
 	return 0, false
 }
 
-// runReporting drives one report tick against a runner whose clock is fixed.
 func runReporting(t *testing.T, r *Runner, lastRead time.Time) {
 	t.Helper()
 	r.mu.Lock()
@@ -822,7 +814,6 @@ func TestASourceThatCannotSayYetIsAskedAgain(t *testing.T) {
 	}
 }
 
-// TestASourceThatSaysNotYetAndThenAnswersIsPublished covers the whole sequence.
 func TestASourceThatSaysNotYetAndThenAnswersIsPublished(t *testing.T) {
 	labels := metrics.Labels{"task": "headroom-eventually"}
 	defer metrics.Default.Forget(labels)
@@ -1153,7 +1144,6 @@ func TestPermanentApplyFailureIsDecidedBySQLState(t *testing.T) {
 
 // ---------------------------------------------------- what the stream carried
 
-// counter reads a counter series the way a scrape would.
 func counter(t *testing.T, name string, labels metrics.Labels) float64 {
 	t.Helper()
 	for _, s := range metrics.Default.Snapshot(name) {

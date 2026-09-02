@@ -78,7 +78,6 @@ func splitSeeds(addrs []string) []string {
 	return seeds
 }
 
-// isClusterDSN reports whether a DSN names more than one host.
 func isClusterDSN(dsn string) bool {
 	u, err := url.Parse(dsn)
 	if err != nil {

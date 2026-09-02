@@ -667,7 +667,6 @@ func withSealedCredentials(t *testing.T) {
 	t.Cleanup(func() { secret.Default = previous })
 }
 
-// taskWithCredentials is a task carrying a password on each side.
 func taskWithCredentials() domain.Config {
 	return domain.ConfigFrom(domain.Request{
 		TaskName:   "tokyo-to-osaka",

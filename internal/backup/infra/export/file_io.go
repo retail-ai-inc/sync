@@ -15,7 +15,6 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// copyFile Copy file from source to destination
 func (e *BackupExecutor) copyFile(src, dst string) error {
 	// Log memory before file copy
 	var memStatsBefore runtime.MemStats
@@ -74,7 +73,6 @@ func (e *BackupExecutor) copyFile(src, dst string) error {
 	return nil
 }
 
-// processFileNamePattern Process file name pattern and replace date placeholders
 func processFileNamePattern(pattern, tableName string) string {
 	if pattern == "" {
 		// Fallback to default pattern if not specified, use yesterday's date
@@ -109,7 +107,6 @@ func processFileNamePattern(pattern, tableName string) string {
 	return result
 }
 
-// readJSONFile Read JSON documents from exported file
 func (e *BackupExecutor) readJSONFile(tempDir, tableName, dateStr string) ([]interface{}, error) {
 	fileName := fmt.Sprintf("%s_%s.json", tableName, dateStr)
 	filePath := filepath.Join(tempDir, fileName)
@@ -144,7 +141,6 @@ func (e *BackupExecutor) readJSONFile(tempDir, tableName, dateStr string) ([]int
 	return documents, nil
 }
 
-// writeJSONFile Write JSON documents to file in JSONL format (one JSON object per line)
 func (e *BackupExecutor) writeJSONFile(filePath string, documents []interface{}) error {
 	file, err := os.Create(filePath)
 	if err != nil {

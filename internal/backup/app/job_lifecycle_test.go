@@ -327,7 +327,6 @@ func completeRequest() domain.Request {
 	}
 }
 
-// withName and withSchedule build on completeRequest without repeating it.
 func withName(req domain.Request, name string) domain.Request {
 	req.Name = name
 	return req

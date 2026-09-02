@@ -46,7 +46,6 @@ func targetDB(t *testing.T, schema string) *sql.DB {
 	return db
 }
 
-// relation describes a replicated table to the handlers.
 func relation(id uint32, namespace, name string, columns ...string) *pglogrepl.RelationMessageV2 {
 	cols := make([]*pglogrepl.RelationMessageColumn, len(columns))
 	for i, c := range columns {

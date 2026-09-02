@@ -19,7 +19,6 @@ type Principal struct {
 	Access   string
 }
 
-// IsAdmin reports whether the principal may make administrative changes.
 func (p Principal) IsAdmin() bool { return p.Access == domain.AccessAdmin }
 
 type principalKey struct{}
@@ -31,12 +30,10 @@ func PrincipalFrom(ctx context.Context) (Principal, bool) {
 	return p, ok
 }
 
-// withPrincipal returns a request carrying an identity.
 func withPrincipal(r *http.Request, p Principal) *http.Request {
 	return r.WithContext(context.WithValue(r.Context(), principalKey{}, p))
 }
 
-// deny answers with the envelope the rest of the API uses.
 func deny(w http.ResponseWriter, status int, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)

@@ -32,7 +32,6 @@ func u16(v uint16) []byte {
 	return b
 }
 
-// beginBytes encodes a BEGIN carrying the transaction's final LSN.
 func beginBytes(finalLSN uint64) []byte {
 	out := []byte{'B'}
 	out = append(out, u64(finalLSN)...)
@@ -41,7 +40,6 @@ func beginBytes(finalLSN uint64) []byte {
 	return out
 }
 
-// commitBytes encodes a COMMIT.
 func commitBytes(commitLSN, endLSN uint64) []byte {
 	out := []byte{'C', 0}
 	out = append(out, u64(commitLSN)...)
@@ -50,7 +48,6 @@ func commitBytes(commitLSN, endLSN uint64) []byte {
 	return out
 }
 
-// relationBytes encodes a RELATION describing a table and its columns.
 func relationBytes(relID uint32, namespace, name string, columns ...string) []byte {
 	out := []byte{'R'}
 	out = append(out, u32(relID)...)
@@ -111,7 +108,6 @@ func updateBytes(relID uint32, oldValues, newValues []*string) []byte {
 	return out
 }
 
-// feed pushes one encoded message through the dispatch.
 func feed(t *testing.T, s *PostgreSQLSyncer, st *replicationState, walEnd uint64, data []byte) bool {
 	t.Helper()
 

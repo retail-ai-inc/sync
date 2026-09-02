@@ -33,7 +33,6 @@ import (
 // decrypts. To move them, set SYNC_FIELD_KEY and run the initial copy again —
 // the writes are upserts, so it rewrites every document under the new key.
 
-// ErrNoFieldKey means a task asks for encryption and no key is configured.
 var ErrNoFieldKey = errors.New(
 	"a table is configured to encrypt a field and neither SYNC_FIELD_KEY nor " +
 		"SYNC_CONFIG_KEY is set, so there is no key to encrypt it with")

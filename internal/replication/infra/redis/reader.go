@@ -21,7 +21,6 @@ import (
 // restart re-reads from the buffer rather than from the source, and the source is
 // only involved again when the buffer cannot reach far enough back.
 
-// Reader turns one master's stream into events.
 type Reader struct {
 	// Shard names the source master, for logs, metrics and the position's key.
 	Shard string
@@ -69,7 +68,6 @@ type Reader struct {
 	closeOnce sync.Once
 }
 
-// Open positions the reader, opening the connection if the snapshot did not.
 func (r *Reader) Open(ctx context.Context, from domain.Position) error {
 	position, err := decodePosition(from.Payload)
 	if err != nil {
@@ -109,7 +107,6 @@ func (r *Reader) Open(ctx context.Context, from domain.Position) error {
 
 func (r *Reader) logger() logrus.FieldLogger { return orDefault(r.Logger) }
 
-// Next hands over the next event.
 func (r *Reader) Next(ctx context.Context) (*domain.Event, error) {
 	for {
 		if len(r.ready) > 0 {
@@ -140,7 +137,6 @@ func (r *Reader) Next(ctx context.Context) (*domain.Event, error) {
 	}
 }
 
-// take reads one command from the buffer and turns it into events.
 func (r *Reader) take(ctx context.Context) error {
 	raw, end, err := r.cursor.Next(ctx)
 	if err != nil {
@@ -220,7 +216,6 @@ func (r *Reader) hand(event *domain.Event) {
 	r.ready = append(r.ready, event)
 }
 
-// currentPosition is what a batch ending here should record.
 func (r *Reader) currentPosition() domain.Position {
 	position := r.position
 	position.Offset = r.offset
@@ -296,7 +291,6 @@ func parseFrame(raw []byte) ([][]byte, error) {
 	return args, nil
 }
 
-// atoiStrict parses a non-negative decimal without accepting anything else.
 func atoiStrict(text string) (int, error) {
 	if text == "" {
 		return 0, fmt.Errorf("empty")

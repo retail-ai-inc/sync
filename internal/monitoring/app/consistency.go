@@ -91,7 +91,6 @@ func StartConsistencyChecks(ctx context.Context, cfg *config.Config, log *logrus
 	})
 }
 
-// runConsistencyChecks compares every task's tables once.
 func runConsistencyChecks(ctx context.Context, cfg *config.Config, n notifier, log *logrus.Logger) {
 	if cfg == nil {
 		return
@@ -109,7 +108,6 @@ func runConsistencyChecks(ctx context.Context, cfg *config.Config, n notifier, l
 	}
 }
 
-// report records and announces one comparison.
 func report(ctx context.Context, n notifier, log *logrus.Logger, task config.SyncConfig, name string, result verify.Result) {
 	labels := metrics.Labels{
 		"task":   strconv.Itoa(task.ID),
@@ -147,7 +145,6 @@ func report(ctx context.Context, n notifier, log *logrus.Logger, task config.Syn
 	}
 }
 
-// describe renders a handful of differences for a human to read.
 func describe(sample []verify.Difference) string {
 	const shown = 5
 	if len(sample) > shown {
@@ -224,7 +221,6 @@ func checkSQLTask(ctx context.Context, task config.SyncConfig, n notifier, log *
 	}
 }
 
-// tablePair names one table on each side.
 type tablePair struct{ source, target string }
 
 // sqlTablePairs reports the tables to compare, discovering them when the task
@@ -275,7 +271,6 @@ func primaryKey(ctx context.Context, db *sql.DB, schema, table string) ([]string
 	return columns, nil
 }
 
-// mysqlUpsert renders the statement a repair writes with.
 func mysqlUpsert(schema, table string, columns []string) string {
 	name := table
 	if schema != "" {

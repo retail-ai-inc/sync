@@ -90,7 +90,6 @@ func NewRouter() http.Handler {
 	return r
 }
 
-// Health answers the liveness probe: the process is running and serving.
 func Health(w http.ResponseWriter, r *http.Request) {
 	writeStatus(w, http.StatusOK, map[string]interface{}{"status": "ok"})
 }

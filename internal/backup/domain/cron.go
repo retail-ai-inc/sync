@@ -36,10 +36,8 @@ type Schedule struct {
 	weekdaysRestricted bool
 }
 
-// fieldSet is the set of values one field admits.
 type fieldSet map[int]bool
 
-// bounds describe what one field of the expression may hold.
 type bounds struct {
 	name     string
 	min, max int
@@ -53,7 +51,6 @@ var cronBounds = []bounds{
 	{"day of week", 0, 6},
 }
 
-// ParseSchedule reads a five-field cron expression.
 func ParseSchedule(expr string) (Schedule, error) {
 	fields := strings.Fields(strings.TrimSpace(expr))
 	if len(fields) != 5 {

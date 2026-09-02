@@ -74,7 +74,6 @@ func ExchangeGoogleCode(clientID, clientSecret, redirectURI, code string) (strin
 	return tokenData.AccessToken, nil
 }
 
-// FetchGoogleUser reports the email and name Google holds for an access token.
 func FetchGoogleUser(accessToken string) (email, name string, err error) {
 	if strings.TrimSpace(accessToken) == "" {
 		return "", "", fmt.Errorf("%w: no access token to ask with", ErrUserInfoRequest)
@@ -116,7 +115,6 @@ func FetchGoogleUser(accessToken string) (email, name string, err error) {
 	return userData.Email, userData.Name, nil
 }
 
-// firstLine trims a response body down to something a log line can carry.
 func firstLine(body []byte) string {
 	text := strings.TrimSpace(string(body))
 	if index := strings.IndexAny(text, "\r\n"); index >= 0 {

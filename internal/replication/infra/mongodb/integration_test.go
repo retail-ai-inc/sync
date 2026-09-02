@@ -100,7 +100,6 @@ func startSyncer(t *testing.T, cfg config.SyncConfig) (stop func()) {
 	return stop
 }
 
-// countIn reports how many documents match filter in the given collection.
 func countIn(t *testing.T, client *mongo.Client, db, coll string, filter interface{}) int64 {
 	t.Helper()
 

@@ -15,7 +15,6 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// StartRowCountMonitoring periodically logs row counts to console + DB
 func StartRowCountMonitoring(ctx context.Context, cfg *config.Config, log *logrus.Logger, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 
@@ -100,7 +99,6 @@ func countAndLogTables(ctx context.Context, sc config.SyncConfig, log *logrus.Lo
 	}
 }
 
-// logYesterdayDataVolume logs yesterday's data volume for tables with dateRange conditions
 func logYesterdayDataVolume(ctx context.Context, cfg *config.Config, log *logrus.Logger) {
 	log.Infof("[Monitor] Starting daily summary for yesterday's data volume...")
 

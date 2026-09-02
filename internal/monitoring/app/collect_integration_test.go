@@ -86,7 +86,6 @@ func openRedis(t *testing.T, endpoint string, dbIndex int) *goredis.Client {
 	return c
 }
 
-// monitoringRow is one monitoring_log entry.
 type monitoringRow struct {
 	TaskID          int
 	DBType          string

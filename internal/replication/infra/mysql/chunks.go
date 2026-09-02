@@ -29,7 +29,6 @@ type Chunks struct {
 	TargetOf       func(source string) string
 }
 
-// NextChunk reads the rows after a key.
 func (c *Chunks) NextChunk(ctx context.Context, ns domain.Namespace, after string, size int) (pipeline.Chunk, error) {
 	var chunk pipeline.Chunk
 
@@ -136,7 +135,6 @@ func (c *Chunks) primaryKey(ctx context.Context, table string) (string, error) {
 	return columns[0], nil
 }
 
-// columns lists the table's columns in ordinal order.
 func (c *Chunks) columns(ctx context.Context, table string) ([]string, error) {
 	rows, err := c.Source.QueryContext(ctx,
 		`SELECT COLUMN_NAME FROM information_schema.COLUMNS

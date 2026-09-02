@@ -24,7 +24,6 @@ const JSONFilenameSeparator = "_"
 // Change this to customize ZIP filename format (e.g., "-", "_", ".")
 const ZIPFilenameSeparator = "-"
 
-// logMemoryUsage logs memory usage information
 func (e *BackupExecutor) logMemoryUsage(phase string) {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)

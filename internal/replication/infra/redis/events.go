@@ -16,7 +16,6 @@ import (
 // re-reading the key's whole value, because replaying over a smeared copy could
 // apply a change twice.
 
-// command is one command from the replication stream, to be replayed.
 type command struct {
 	args [][]byte
 	// slot is which hash slot the command's key belongs to, and so which
@@ -46,7 +45,6 @@ func (c *command) operation() domain.Op {
 	return domain.OpUpdate
 }
 
-// arguments renders the command for the client.
 func (c *command) arguments() []interface{} {
 	args := make([]interface{}, 0, len(c.args))
 	for _, arg := range c.args {
@@ -95,7 +93,6 @@ func commandEvent(cmd *command, key []byte, at time.Time, endsBlock bool) *domai
 	}
 }
 
-// repairEvent wraps a value repair as an event.
 func repairEvent(repair *valueRepair, at time.Time, endsBlock bool) *domain.Event {
 	return &domain.Event{
 		NS:              domain.Namespace{DB: "0"},

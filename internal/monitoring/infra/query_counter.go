@@ -16,7 +16,6 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo"
 )
 
-// QueryCounter handles executing count queries with specific conditions
 type QueryCounter struct {
 	logger *logrus.Logger
 	// Support for custom date ranges (for yesterday support)
@@ -24,7 +23,6 @@ type QueryCounter struct {
 	customYesterdayEnd   *time.Time
 }
 
-// NewQueryCounter creates a new QueryCounter instance
 func NewQueryCounter(logger *logrus.Logger) *QueryCounter {
 	if logger == nil {
 		logger = logrus.New()
@@ -34,7 +32,6 @@ func NewQueryCounter(logger *logrus.Logger) *QueryCounter {
 	}
 }
 
-// NewQueryCounterWithYesterdaySupport creates a QueryCounter with custom yesterday date range
 func NewQueryCounterWithYesterdaySupport(logger *logrus.Logger, yesterdayStart, yesterdayEnd time.Time) *QueryCounter {
 	if logger == nil {
 		logger = logrus.New()
@@ -46,7 +43,6 @@ func NewQueryCounterWithYesterdaySupport(logger *logrus.Logger, yesterdayStart, 
 	}
 }
 
-// CountMongoDBDocuments counts documents in a MongoDB collection with specified conditions
 func (qc *QueryCounter) CountMongoDBDocuments(ctx context.Context, client *mongo.Client, database, collection string, query *domain.CountQuery) (int64, error) {
 	startTime := time.Now()
 
@@ -187,7 +183,6 @@ func equalityFilter(value string) interface{} {
 	return value
 }
 
-// buildReadableQueryString builds a human-readable MongoDB query string using ISODate format
 func (qc *QueryCounter) buildReadableQueryString(collection string, filter bson.M) string {
 	if len(filter) == 0 {
 		return fmt.Sprintf("db.%s.countDocuments({})", collection)
@@ -209,7 +204,6 @@ func (qc *QueryCounter) buildReadableQueryString(collection string, filter bson.
 	return fmt.Sprintf("db.%s.countDocuments({%s})", collection, strings.Join(conditions, ", "))
 }
 
-// formatFilterCondition formats a single filter condition to readable string
 func (qc *QueryCounter) formatFilterCondition(field string, value interface{}) string {
 	switch v := value.(type) {
 	case bson.M:
@@ -248,7 +242,6 @@ func (qc *QueryCounter) formatFilterCondition(field string, value interface{}) s
 	return ""
 }
 
-// formatValue formats a value for display
 func (qc *QueryCounter) formatValue(value interface{}) string {
 	switch v := value.(type) {
 	case time.Time:

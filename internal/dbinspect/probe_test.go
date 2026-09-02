@@ -10,7 +10,6 @@ import (
 	"time"
 )
 
-// probe posts a connection request and returns the recorder.
 func probe(t *testing.T, body string) (int, string) {
 	t.Helper()
 

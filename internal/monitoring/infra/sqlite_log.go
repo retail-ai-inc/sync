@@ -70,7 +70,6 @@ const (
 	actionCountFailed = "row_count_failed"
 )
 
-// rowCountAction picks the action for a pair of counts.
 func rowCountAction(srcOK, tgtOK bool) string {
 	if srcOK && tgtOK {
 		return actionRowCount
@@ -120,7 +119,6 @@ INSERT INTO monitoring_log (
 	}
 }
 
-// StoreChangeStreamStatistics stores ChangeStream statistics to changestream_statistics table
 func StoreChangeStreamStatistics(syncTaskID int, activeStreams map[string]*domain.ChangeStreamInfo) error {
 	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {

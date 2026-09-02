@@ -62,14 +62,12 @@ func jobDBDir(t *testing.T) string {
 	return dir
 }
 
-// emptyJobDB points SYNC_DB_PATH at a file with no tables at all.
 func emptyJobDB(t *testing.T) {
 	t.Helper()
 	isolateCrontab(t)
 	sqlitetest.Tableless(t)
 }
 
-// unopenableDB points SYNC_DB_PATH at a path whose parent is a regular file.
 func unopenableDB(t *testing.T) {
 	t.Helper()
 	isolateCrontab(t)

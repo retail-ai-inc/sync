@@ -42,7 +42,6 @@ func backupConfig(t *testing.T, conn *sql.DB, id int) map[string]interface{} {
 
 // ------------------------------------------------------------- BackupRun
 
-// emptyTaskDB points the package at a SQLite file with no tables.
 func emptyTaskDB(t *testing.T) {
 	t.Helper()
 	isolateCrontab(t)

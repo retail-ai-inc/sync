@@ -13,7 +13,6 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// recordingNotifier stands in for Slack.
 type recordingNotifier struct {
 	configured bool
 	messages   []string

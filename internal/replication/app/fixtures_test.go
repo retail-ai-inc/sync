@@ -33,13 +33,11 @@ func useTempTaskDB(t *testing.T) *sql.DB {
 	return db
 }
 
-// emptyTaskDB points SYNC_DB_PATH at a file with no tables at all.
 func emptyTaskDB(t *testing.T) {
 	t.Helper()
 	sqlitetest.Tableless(t)
 }
 
-// unopenableDB points SYNC_DB_PATH at a path whose parent is a regular file.
 func unopenableDB(t *testing.T) {
 	t.Helper()
 

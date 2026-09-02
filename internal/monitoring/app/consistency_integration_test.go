@@ -18,7 +18,6 @@ import (
 	"github.com/retail-ai-inc/sync/test/harness"
 )
 
-// verifyTask describes a comparison of one table against a live MySQL pair.
 func verifyTask(t *testing.T, table string) config.SyncConfig {
 	t.Helper()
 
@@ -35,7 +34,6 @@ func verifyTask(t *testing.T, table string) config.SyncConfig {
 	}
 }
 
-// verifyTables creates the same table on both sides and drops them afterwards.
 func verifyTables(t *testing.T, table, definition string) (source, target *sql.DB) {
 	t.Helper()
 

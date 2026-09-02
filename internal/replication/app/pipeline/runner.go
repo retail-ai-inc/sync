@@ -24,7 +24,6 @@ type Checkpoints interface {
 	Save(ctx context.Context, key, payload string) error
 }
 
-// Options configure one run.
 type Options struct {
 	Limits Limits
 	// FlushInterval is the longest a partly filled batch waits. It is an upper
@@ -153,7 +152,6 @@ type Runner struct {
 	queueBytes int64
 }
 
-// counters prepares the per-operation counters on first use.
 func (r *Runner) counters() *metrics.EventCounters {
 	if r.events == nil {
 		r.events = metrics.NewEventCounters(r.Opts.Labels)
@@ -312,7 +310,6 @@ func (r *Runner) startResyncs(ctx context.Context, queue chan<- *domain.Event, p
 	return failed
 }
 
-// startingPoint reads the stored position, taking a snapshot when there is none.
 func (r *Runner) startingPoint(ctx context.Context) (domain.Position, error) {
 	payload, err := r.Checkpoints.Load(ctx, r.CheckpointKey)
 	if err != nil {
@@ -366,7 +363,6 @@ func (r *Runner) startingPoint(ctx context.Context) (domain.Position, error) {
 	return pinned, nil
 }
 
-// read moves events from the reader onto the queue until it cannot.
 func (r *Runner) read(ctx context.Context, queue chan<- *domain.Event) error {
 	for {
 		event, err := r.Reader.Next(ctx)
@@ -403,7 +399,6 @@ func (r *Runner) read(ctx context.Context, queue chan<- *domain.Event) error {
 	}
 }
 
-// apply drains the queue into batches and writes each one.
 func (r *Runner) apply(ctx context.Context, queue <-chan *domain.Event) error {
 	var b batch
 	timer := time.NewTimer(r.Opts.flushInterval())
@@ -709,7 +704,6 @@ func permanentApplyFailure(err error) bool {
 	return false
 }
 
-// sqlStatePattern finds the SQLSTATE a MySQL driver puts after the error number.
 var sqlStatePattern = regexp.MustCompile(`\(([0-9A-Z]{5})\)`)
 
 // applyBatch writes one batch and records where it got to.
@@ -935,7 +929,6 @@ func newestSourceTime(events []*domain.Event) time.Time {
 	return newest
 }
 
-// resetTimer restarts a timer that may or may not have fired.
 func resetTimer(t *time.Timer, d time.Duration) {
 	if !t.Stop() {
 		select {

@@ -24,7 +24,6 @@ import (
 	"time"
 )
 
-// Role is what one database is doing for one replication task.
 type Role string
 
 const (
@@ -41,10 +40,8 @@ const (
 // another task would take the endpoint and the two would write over each other.
 const DefaultStaleAfter = 15 * time.Minute
 
-// HeartbeatInterval is how often a running task refreshes its claims.
 const HeartbeatInterval = time.Minute
 
-// Claim is the marker one task writes on one endpoint.
 type Claim struct {
 	TaskID int  `json:"task_id"`
 	Role   Role `json:"role"`
@@ -56,12 +53,10 @@ type Claim struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
-// Fresh reports whether a claim is recent enough to be believed.
 func (c Claim) Fresh(now time.Time, staleAfter time.Duration) bool {
 	return now.Sub(c.UpdatedAt) < staleAfter
 }
 
-// Store reads and writes the claims recorded on one endpoint.
 type Store interface {
 	// Claims reports every claim on the endpoint, from every task.
 	Claims(ctx context.Context) ([]Claim, error)
@@ -74,7 +69,6 @@ type Store interface {
 	Endpoint() string
 }
 
-// Guard holds one task's claims on both of its endpoints.
 type Guard struct {
 	TaskID int
 	Source Store

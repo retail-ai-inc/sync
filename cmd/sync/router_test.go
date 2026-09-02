@@ -9,7 +9,6 @@ import (
 	"testing"
 )
 
-// serve sends one request through the whole router.
 func serve(t *testing.T, method, target string) *httptest.ResponseRecorder {
 	t.Helper()
 

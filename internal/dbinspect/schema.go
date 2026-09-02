@@ -17,7 +17,6 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
-// SchemaRequest represents a request to get table structure
 type SchemaRequest struct {
 	SourceType string `json:"sourceType"`
 	Connection struct {
@@ -30,14 +29,12 @@ type SchemaRequest struct {
 	TableName string `json:"tableName"`
 }
 
-// Field represents table field information
 type Field struct {
 	Name      string `json:"name"`
 	Type      string `json:"type"`
 	IsPrimary bool   `json:"isPrimary"`
 }
 
-// SchemaResponse represents a table structure response
 type SchemaResponse struct {
 	Fields []Field `json:"fields"`
 }
@@ -121,7 +118,6 @@ func sortFieldsByName(schema *SchemaResponse) {
 	})
 }
 
-// getMongoDBSchema gets MongoDB collection structure
 func getMongoDBSchema(c context.Context, req SchemaRequest) (SchemaResponse, error) {
 	uri := fmt.Sprintf("mongodb://%s:%s/%s", req.Connection.Host, req.Connection.Port, req.Connection.Database)
 	if req.Connection.User != "" && req.Connection.Password != "" {
@@ -277,7 +273,6 @@ func getMongoFieldType(value interface{}) string {
 	}
 }
 
-// getMySQLSchema gets MySQL table structure
 func getMySQLSchema(c context.Context, req SchemaRequest) (SchemaResponse, error) {
 	// Check username and password
 	if req.Connection.User == "" {
@@ -356,7 +351,6 @@ func getMySQLSchema(c context.Context, req SchemaRequest) (SchemaResponse, error
 	return SchemaResponse{Fields: fields}, nil
 }
 
-// getPostgreSQLSchema gets PostgreSQL table structure
 func getPostgreSQLSchema(c context.Context, req SchemaRequest) (SchemaResponse, error) {
 	// Build connection string
 	connStr := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",

@@ -34,7 +34,6 @@ const (
 	StageMonitor = "query monitoring_log fail"
 )
 
-// Fault is a store failure tagged with the message the endpoint answers with.
 type Fault struct {
 	Stage string
 	Err   error
@@ -45,10 +44,8 @@ func (f *Fault) Unwrap() error { return f.Err }
 
 func faultAt(stage string, err error) *Fault { return &Fault{Stage: stage, Err: err} }
 
-// ErrNoSuchTask means the id names no row.
 var ErrNoSuchTask = errors.New("no such sync task")
 
-// ListTasks returns every task, oldest id first.
 func ListTasks() ([]domain.SyncTask, error) {
 	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
@@ -100,7 +97,6 @@ ORDER BY id ASC
 	return tasks, nil
 }
 
-// InsertTask stores a new task and returns its id.
 func InsertTask(enable int, now string, config domain.Config) (int64, error) {
 	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
@@ -124,7 +120,6 @@ VALUES(?, ?, ?, ?)
 	return newID, nil
 }
 
-// UpdateTask replaces a task's configuration and enable column.
 func UpdateTask(id string, enable int, now string, config domain.Config) error {
 	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {

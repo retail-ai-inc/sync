@@ -23,7 +23,6 @@ func sqlStore(t *testing.T, taskID int) *SQLStore {
 	return &SQLStore{DB: db, TaskID: taskID}
 }
 
-// stubStore is a store whose behaviour a test dictates.
 type stubStore struct {
 	payloads map[string]string
 	loadErr  error

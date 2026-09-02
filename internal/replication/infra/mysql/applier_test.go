@@ -45,7 +45,6 @@ func newApplier(t *testing.T, db *sql.DB) (*Applier, *checkpoint.SQLStore) {
 	return &Applier{DB: db, Checkpoints: store, Logger: log}, store
 }
 
-// insertEventFor builds one applier event carrying an INSERT.
 func insertEventFor(id int, customer string) *domain.Event {
 	return &domain.Event{
 		NS:      domain.Namespace{DB: "shop", Object: "orders"},

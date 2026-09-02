@@ -43,5 +43,4 @@ func UpdateTask(id string, req domain.Request) (stored domain.Request, err error
 	return req, infra.UpdateTask(id, enable, httpx.TimeNowStr(), domain.ConfigFrom(req))
 }
 
-// DeleteTask removes a task.
 func DeleteTask(id string) error { return infra.DeleteTask(id) }

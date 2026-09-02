@@ -96,7 +96,6 @@ func (e *BackupExecutor) ExpandAndGroupTables(ctx context.Context, config *Execu
 	return tableGroups, nil
 }
 
-// getMongoDBCollections Get collections from MongoDB that match the regex pattern
 func (e *BackupExecutor) getMongoDBCollections(ctx context.Context, config *ExecutorBackupConfig, pattern string) ([]string, error) {
 
 	// Build connection string
@@ -136,7 +135,6 @@ func (e *BackupExecutor) getMongoDBCollections(ctx context.Context, config *Exec
 	return collections, nil
 }
 
-// groupTablesByPrefix Group tables by common prefix for merging
 func (e *BackupExecutor) groupTablesByPrefix(tables []string) map[string][]string {
 	groups := make(map[string][]string)
 
@@ -149,7 +147,6 @@ func (e *BackupExecutor) groupTablesByPrefix(tables []string) map[string][]strin
 	return groups
 }
 
-// extractTablePrefix Extract common prefix from table name
 func (e *BackupExecutor) extractTablePrefix(tableName string) string {
 	// Common patterns for date-based table names, longest first. They used to be
 	// listed with the six-digit form ahead of the eight-digit one, so a table
@@ -182,7 +179,6 @@ func (e *BackupExecutor) extractTablePrefix(tableName string) string {
 	return tableName
 }
 
-// filterRelevantTables Filter tables based on query time range to avoid unnecessary exports
 func (e *BackupExecutor) filterRelevantTables(tables []string, queryConditions map[string]map[string]interface{}, groupName string) []string {
 	// If no query conditions exist, return all tables
 	if len(queryConditions) == 0 {
@@ -226,7 +222,6 @@ func (e *BackupExecutor) filterRelevantTables(tables []string, queryConditions m
 	return relevantTables
 }
 
-// TimeRange represents a time range for filtering
 type TimeRange struct {
 	Start time.Time
 	End   time.Time
@@ -263,7 +258,6 @@ func (e *BackupExecutor) extractTimeRange(query map[string]interface{}) *TimeRan
 	return nil
 }
 
-// isTableRelevantForTimeRange Check if a table is relevant for the given time range
 func (e *BackupExecutor) isTableRelevantForTimeRange(tableName string, timeRange *TimeRange) bool {
 	// Extract table time pattern
 	tableTime := e.extractTableTimePattern(tableName)
@@ -280,7 +274,6 @@ func (e *BackupExecutor) isTableRelevantForTimeRange(tableName string, timeRange
 	return tableTime.End.After(timeRange.Start) && tableTime.Start.Before(timeRange.End)
 }
 
-// extractTableTimePattern Extract time pattern from table name and return its time range
 func (e *BackupExecutor) extractTableTimePattern(tableName string) *TimeRange {
 	// Pattern for YYYYMM (monthly tables)
 	if re := regexp.MustCompile(`_(\d{6})$`); re.MatchString(tableName) {
@@ -321,7 +314,6 @@ func (e *BackupExecutor) extractTableTimePattern(tableName string) *TimeRange {
 	return nil
 }
 
-// parseYearMonth Parse YYYYMM string to year and month
 func parseYearMonth(yyyymm string) (int, time.Month, error) {
 	if len(yyyymm) != 6 {
 		return 0, 0, fmt.Errorf("invalid YYYYMM format: %s", yyyymm)
@@ -351,7 +343,6 @@ func parseYearMonth(yyyymm string) (int, time.Month, error) {
 	return year, time.Month(month), nil
 }
 
-// parseYear Parse YYYY string to year
 func parseYear(yyyy string) (int, error) {
 	if len(yyyy) != 4 {
 		return 0, fmt.Errorf("invalid YYYY format: %s", yyyy)

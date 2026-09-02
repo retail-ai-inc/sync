@@ -23,5 +23,4 @@ func IsValidStatus(s string) bool {
 	return s == "" || s == StatusActive || s == StatusInactive
 }
 
-// IsDeactivated reports whether an account status denies sign-in.
 func IsDeactivated(s string) bool { return s == StatusInactive }

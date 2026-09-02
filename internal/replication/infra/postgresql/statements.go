@@ -16,7 +16,6 @@ import (
 // that nothing here checks. The values are now bound as parameters, which also
 // makes NULL and the empty string different things again.
 
-// column is one column of a replicated row, ready to be bound.
 type column struct {
 	Name string
 	// Value is nil for SQL NULL.
@@ -82,12 +81,10 @@ func mask(c column, table security.TableSecurity) column {
 	return c
 }
 
-// qualified renders a schema-qualified table name.
 func qualified(rel *pglogrepl.RelationMessageV2) string {
 	return pq.QuoteIdentifier(rel.Namespace) + "." + pq.QuoteIdentifier(rel.RelationName)
 }
 
-// buildInsert renders an INSERT for one row.
 func buildInsert(rel *pglogrepl.RelationMessageV2, tuple *pglogrepl.TupleData,
 	table security.TableSecurity) (string, []interface{}, error) {
 

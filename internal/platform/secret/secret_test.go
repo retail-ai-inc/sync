@@ -9,7 +9,6 @@ import (
 	"testing"
 )
 
-// keeper builds a keeper from a fixed 32-byte key.
 func keeper(t *testing.T) *Keeper {
 	t.Helper()
 
@@ -248,7 +247,6 @@ const taskConfig = `{
   "mappings": [{"tables": [{"sourceTable": "orders", "targetTable": "orders"}]}]
 }`
 
-// passwordsIn reads the two stored passwords out of a task document.
 func passwordsIn(t *testing.T, configJSON string) (source, target string) {
 	t.Helper()
 
@@ -408,7 +406,6 @@ func TestADocumentWithNoConnectionsIsUnchanged(t *testing.T) {
 	}
 }
 
-// TestAConnectionWithNoPasswordIsUnchanged covers a database that takes none.
 func TestAConnectionWithNoPasswordIsUnchanged(t *testing.T) {
 	withDefault(t, keeper(t))
 	document := `{"sourceConn":{"host":"tokyo","password":""}}`

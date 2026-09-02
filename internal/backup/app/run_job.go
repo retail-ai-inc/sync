@@ -114,7 +114,6 @@ func SubmitRun(id int) string {
 	return taskID
 }
 
-// randomSuffix makes a task id unique even against a clock that has not moved.
 func randomSuffix() string {
 	buf := make([]byte, 4)
 	if _, err := rand.Read(buf); err != nil {
@@ -123,7 +122,6 @@ func randomSuffix() string {
 	return hex.EncodeToString(buf)
 }
 
-// execute runs a job to completion and records how it went.
 func execute(taskID string, id int) {
 	AdvanceRun(taskID, domain.RunRunning, "Backup execution started", nil)
 
@@ -178,7 +176,6 @@ func recordOutcome(id int, status, message string) {
 	}
 }
 
-// ErrJobNotFound means the id names no job.
 var ErrJobNotFound = errors.New("no such task")
 
 // StartRun runs a job now, in the background, and reports the task id to poll.

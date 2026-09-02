@@ -32,7 +32,6 @@ import (
 // should do. No key bookkeeping, and nothing to get wrong when a chunk is
 // retried.
 
-// Chunk is a run of records read from the source, in key order.
 type Chunk struct {
 	// Events are the records, as upserts the applier can write.
 	Events []*domain.Event

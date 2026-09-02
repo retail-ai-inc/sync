@@ -170,7 +170,6 @@ func TestAShardFailoverLosesNothing(t *testing.T) {
 	}
 }
 
-// stgWritableMember reports which member of the set currently takes writes.
 func stgWritableMember(t *testing.T, members []string) (string, error) {
 	t.Helper()
 

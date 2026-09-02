@@ -8,7 +8,6 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// BackupTask Backup task structure
 type BackupTask struct {
 	ID             int
 	Enable         int
@@ -24,7 +23,6 @@ type BackupConfig struct {
 	// Other fields omitted...
 }
 
-// GenerateCrontabEntries Generate crontab entries for tasks
 func GenerateCrontabEntries(tasks []BackupTask, apiServer string) []string {
 	var entries []string
 

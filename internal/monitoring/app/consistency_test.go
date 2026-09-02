@@ -102,7 +102,6 @@ func TestAnIdenticalPairIsReportedAsZero(t *testing.T) {
 	}
 }
 
-// TestADivergenceIsAnnounced pins that somebody is told, and what they are told.
 func TestADivergenceIsAnnounced(t *testing.T) {
 	n := &recordingNotifier{configured: true}
 	task := config.SyncConfig{
@@ -188,7 +187,6 @@ func TestTheRepairStatementIsAnUpsert(t *testing.T) {
 
 // ---------------------------------------------------------- primary keys
 
-// keyUsage stands in for information_schema.key_column_usage.
 func keyUsage(t *testing.T, rows ...[4]string) *sql.DB {
 	t.Helper()
 

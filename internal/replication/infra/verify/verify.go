@@ -54,14 +54,12 @@ type Row struct {
 	Digest string
 }
 
-// Difference is what the comparison found about one row.
 type Difference struct {
 	Key string
 	// Kind is what is wrong with it.
 	Kind Kind
 }
 
-// Kind names the three ways two sides can disagree about a row.
 type Kind string
 
 const (
@@ -75,7 +73,6 @@ const (
 	Differing Kind = "differing"
 )
 
-// Result is what one comparison found.
 type Result struct {
 	// SourceRows and TargetRows are how many rows each side held.
 	SourceRows int64
@@ -96,15 +93,12 @@ type Result struct {
 	RepairFailed int64
 }
 
-// Identical reports whether the two sides agree about every row.
 func (r Result) Identical() bool {
 	return r.Missing == 0 && r.Extra == 0 && r.Differing == 0
 }
 
-// Total counts every difference.
 func (r Result) Total() int64 { return r.Missing + r.Extra + r.Differing }
 
-// Summary describes the result in one line, for a log or an alert.
 func (r Result) Summary() string {
 	if r.Identical() {
 		return fmt.Sprintf("identical: %d rows on both sides", r.SourceRows)
@@ -151,25 +145,21 @@ func (r *Result) recorder(fix func(Difference) error) func(string, Kind) {
 	}
 }
 
-// Cursor streams one side's rows in that side's own order, once through.
 type Cursor interface {
 	// Next reports up to limit more rows, or none when the side is exhausted.
 	Next(ctx context.Context, limit int) ([]Row, error)
 	Name() string
 }
 
-// Lookup finds specific rows by key.
 type Lookup interface {
 	Lookup(ctx context.Context, keys []string) (map[string]Row, error)
 }
 
-// End is one side of a comparison.
 type End interface {
 	Cursor
 	Lookup
 }
 
-// Compare walks both sides and reports what they disagree about.
 func Compare(ctx context.Context, source, target End, chunkSize int) (Result, error) {
 	return CompareAndRepair(ctx, source, target, chunkSize, nil)
 }
@@ -242,7 +232,6 @@ func CompareAndRepair(ctx context.Context, source, target End, chunkSize int, fi
 	return result, nil
 }
 
-// keysOf collects a batch's keys.
 func keysOf(batch []Row) []string {
 	keys := make([]string, 0, len(batch))
 	for _, row := range batch {
