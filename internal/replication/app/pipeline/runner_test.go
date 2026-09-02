@@ -1297,3 +1297,86 @@ func TestAnOrdinaryMongoDBFailureStaysRetryable(t *testing.T) {
 		}
 	}
 }
+
+// ------------------------------------------------------------------ stopping
+
+// driverApplier refuses a call on a cancelled context, which is what every
+// database driver does and what the fixtures above do not: fakeApplier ignores
+// the context it is handed, so no test using it could tell a live context from
+// a dead one.
+type driverApplier struct {
+	mu       sync.Mutex
+	events   int
+	refused  bool
+	deadline bool
+}
+
+func (d *driverApplier) Apply(ctx context.Context, runs [][]*domain.Event, _ domain.Position) (bool, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		d.refused = true
+		return false, err
+	}
+	if _, ok := ctx.Deadline(); ok {
+		d.deadline = true
+	}
+	for _, run := range runs {
+		d.events += len(run)
+	}
+	return false, nil
+}
+
+// TestTheLastBatchIsWrittenAfterTheRunIsAskedToStop covers the stop this
+// pipeline claimed to make and never once made.
+//
+// The applier was handed the run's own context, so at a stop it was handed a
+// context that had just been cancelled. A driver refuses that before it reaches
+// the target, so the last batch failed immediately, the task ended its stop
+// reporting a failure, and the batch was replayed on the next start.
+//
+// The two branches that can write are both covered here on purpose. A cancelled
+// context and a queue with events in it are ready at the same moment, and select
+// chooses between them at random, so the fix has to hold whichever it picks —
+// which is why this runs the scenario many times rather than once.
+func TestTheLastBatchIsWrittenAfterTheRunIsAskedToStop(t *testing.T) {
+	const trials = 50
+	applied := 0
+
+	for i := 0; i < trials; i++ {
+		applier := &driverApplier{}
+		r := newRunner(t, &fakeReader{}, applier, newStore())
+		// Neither the timer nor the size limit may be what writes this batch:
+		// the stop has to be.
+		r.Opts.FlushInterval = time.Hour
+		r.Opts.Limits = Limits{MaxEvents: 1000}
+
+		queue := make(chan *domain.Event, 8)
+		queue <- event("orders", "1", "p1")
+		queue <- event("orders", "2", "p2")
+		queue <- event("orders", "3", "p3")
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		if err := r.apply(ctx, queue); err != nil {
+			t.Fatalf("trial %d: apply returned %v; being asked to stop is not a failure", i, err)
+		}
+		if applier.refused {
+			t.Fatalf("trial %d: the applier was handed a cancelled context, so the "+
+				"batch never reached the target", i)
+		}
+		if applier.events > 0 {
+			applied++
+			if !applier.deadline {
+				t.Fatalf("trial %d: the batch was written through a context with no "+
+					"deadline; a stop must not be able to outlast the pod's grace period", i)
+			}
+		}
+	}
+
+	if applied == 0 {
+		t.Fatalf("no trial out of %d wrote anything, so this proved nothing about "+
+			"what a stop does with a batch it is holding", trials)
+	}
+}

@@ -41,6 +41,11 @@ type Options struct {
 	// is happening, so a stalled task shows a rising age rather than a frozen
 	// one.
 	ReportInterval time.Duration
+	// ShutdownGrace is how long the last batch may take once the run has been
+	// asked to stop. It bounds a stop, rather than granting one: a target that
+	// will not answer must not hold a pod past its termination grace period,
+	// because being killed there is a harder stop than the one this avoids.
+	ShutdownGrace time.Duration
 
 	Labels metrics.Labels
 	Logger logrus.FieldLogger
@@ -64,6 +69,9 @@ const (
 	defaultFlushInterval  = 500 * time.Millisecond
 	defaultQueueCapacity  = 2000
 	defaultReportInterval = time.Second
+	// Well inside Kubernetes' default thirty-second termination grace period,
+	// with room for the reader to stop after it.
+	defaultShutdownGrace = 5 * time.Second
 )
 
 func (o Options) flushInterval() time.Duration {
@@ -85,6 +93,13 @@ func (o Options) reportInterval() time.Duration {
 		return o.ReportInterval
 	}
 	return defaultReportInterval
+}
+
+func (o Options) shutdownGrace() time.Duration {
+	if o.ShutdownGrace > 0 {
+		return o.ShutdownGrace
+	}
+	return defaultShutdownGrace
 }
 
 // Runner is the replication loop. One per task.
@@ -398,6 +413,25 @@ func (r *Runner) apply(ctx context.Context, queue <-chan *domain.Event) error {
 	// is applied. It is never recorded ahead of the data it points past.
 	var pending domain.Position
 
+	// flush writes the batch through the run's context while the run is live,
+	// and through an independent bounded one once it has been asked to stop.
+	//
+	// The second case is what a rolling update looks like from in here, and it
+	// used to write through the cancelled context: every driver refuses a call
+	// on one before it reaches the target, so the last batch failed at once,
+	// the task ended its stop reporting a failure, and the batch was replayed
+	// on the next start. The replay was correct — the position only moves once
+	// the data is on the target — so this cost work rather than data. It cost
+	// more than work on Redis, where the source's backlog is a fixed ring and a
+	// position it has rolled past means a full re-copy.
+	//
+	// The choice is made here rather than at the stop, because the stop is not
+	// the only branch that reaches it: a cancelled context and a non-empty
+	// queue are both ready at once, and select picks between them at random.
+	//
+	// Bounded, because a stop waits for the target but must not outlast the
+	// pod's termination grace period: being killed there is a harder stop than
+	// the one this avoids.
 	flush := func() error {
 		if b.len() == 0 {
 			return nil
@@ -408,17 +442,31 @@ func (r *Runner) apply(ctx context.Context, queue <-chan *domain.Event) error {
 			// half a transaction.
 			return nil
 		}
+
+		writeCtx, giveUp := ctx, func() {}
+		if ctx.Err() != nil {
+			writeCtx, giveUp = context.WithTimeout(
+				context.WithoutCancel(ctx), r.Opts.shutdownGrace())
+		}
+		defer giveUp()
+
 		events := b.take()
-		return r.applyBatch(ctx, events, pending)
+		return r.applyBatch(writeCtx, events, pending)
 	}
 
 	for {
 		select {
 		case <-ctx.Done():
 			// A clean stop applies what is already whole, so restarting does not
-			// replay it.
+			// replay it. flush knows the run has been asked to stop and writes
+			// through a context of its own.
 			if err := flush(); err != nil {
-				return err
+				// Reported, not returned: the batch is not on the target, but
+				// the position did not move either, so the next start replays
+				// it. Returning would tell the supervisor the task had failed
+				// when what happened is that it was asked to stop.
+				r.log().Warnf(r.tag("The last batch did not reach the target before the "+
+					"stop, and will be replayed on the next start: %v"), err)
 			}
 			return nil
 
