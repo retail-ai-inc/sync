@@ -342,9 +342,9 @@ func TestSetEnableReplacesACorruptDocument(t *testing.T) {
 }
 
 // TestANullDocumentDoesNotPanic covers a stored config_json of literal "null".
-// It is valid JSON, so the unmarshal succeeded and left the map nil; the guard
-// only tested the error, so the assignment that followed panicked with
-// "assignment to entry in nil map" and the request died with a 500 and no body.
+// A stored config_json of literal "null" is valid JSON, so the unmarshal
+// succeeded and left the map nil. The guard only tested the error, so the next
+// assignment panicked with "assignment to entry in nil map".
 func TestANullDocumentDoesNotPanic(t *testing.T) {
 	db := useTempJobDB(t)
 	id := insertJob(t, db, 1, `null`)
@@ -365,6 +365,7 @@ func TestSetEnableOnAnUnknownID(t *testing.T) {
 	}
 }
 
+// TestSetEnableTagsWhatWentWrong covers the one message an operator gets back.
 // This call did not tag its failures with a stage, unlike every other write in
 // the store, so the endpoint answered "pause fail" for a missing table, a
 // missing row and a locked database alike.

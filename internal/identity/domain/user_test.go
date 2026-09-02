@@ -11,10 +11,11 @@ import (
 // handler it mirrors.
 func fmtSscan(s string, a ...interface{}) (int, error) { return fmt.Sscan(s, a...) }
 
-// It used to be the current time to the second with a "google_" prefix and no
-// randomness at all — and password login is accepted for Google accounts too,
-// so knowing roughly when an account was created put it within a few hundred
-// guesses, and two accounts created in the same second shared one.
+// TestGeneratedPasswordsAreNotGuessable covers the password a new Google user is
+// given. It used to be the current time to the second with a "google_" prefix
+// and no randomness at all — and password login is accepted for Google accounts
+// too, so knowing roughly when an account was created put it within a few
+// hundred guesses, and two accounts created in the same second shared one.
 func TestGeneratedPasswordsAreNotGuessable(t *testing.T) {
 	first := GenerateRandomPassword()
 	second := GenerateRandomPassword()

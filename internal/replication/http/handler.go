@@ -31,13 +31,10 @@ func fail(w http.ResponseWriter, fallback string, err error) {
 // the value it hides.
 const redactedPassword = "********"
 
-// withoutCredentials copies a connection map with its password masked.
-//
-// The list endpoint answers with the connection settings of every task, and
-// those carry the passwords the syncer authenticates with — in the clear, to
-// anybody who could reach the port. Masking them here means the UI can still
-// show which host a task points at without the response being a credential
-// dump.
+// withoutCredentials copies a connection map with its password masked. The
+// list endpoint answers with the connection settings of every task, and those
+// carry the passwords the syncer authenticates with — in the clear, to anybody
+// who could reach the port.
 func withoutCredentials(conn map[string]string) map[string]string {
 	if conn == nil {
 		return nil

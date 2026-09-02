@@ -27,16 +27,8 @@ var (
 	googleUserInfoURL = "https://www.googleapis.com/oauth2/v2/userinfo"
 )
 
-// ExchangeGoogleCode trades an authorization code for an access token.
-//
-// The status code is what says whether the trade happened. It used to be
-// ignored: Google answers a code it does not recognise with 400 and an error
-// document, PostForm reports no error for that, and the document decodes
-// perfectly well into a struct of two strings — both empty. The caller then
-// asked for the user's details with an empty bearer token, got a 401 and another
-// error document, decoded that just as cleanly, and carried on with an empty
-// email and an empty name. SaveGoogleUser wrote a row for that empty identity
-// and a usable token came back. Anyone could post {"code":"x"} and be logged in.
+// ExchangeGoogleCode trades an authorization code for an access token. The
+// status code is what says whether the trade happened.
 func ExchangeGoogleCode(clientID, clientSecret, redirectURI, code string) (string, error) {
 	data := url.Values{}
 	data.Set("code", code)

@@ -127,10 +127,6 @@ func Consistently(t *testing.T, window time.Duration, cond func() error) {
 // RunSyncer starts a syncer in the background and returns a stop function that
 // cancels it and waits for the goroutine to unwind. Every test must call the
 // returned function, normally through t.Cleanup.
-//
-// A syncer that stops with a reason logs it here. Failing the test on it would
-// be wrong: several tests deliberately drive a syncer into stopping, and one
-// that is cancelled at the end of a test reports nothing anyway.
 func RunSyncer(t *testing.T, start func(context.Context) error) (stop func()) {
 	t.Helper()
 
@@ -174,14 +170,10 @@ var taskIDs = func() *atomic.Int64 {
 	return &n
 }()
 
-// UniqueTaskID returns an id no other task in this run uses.
-//
-// It matters because a task's checkpoint and its replication-direction claim are
-// now recorded on the target database, keyed by task id — which is what lets a
-// syncer replaced in the other region find out where to resume from. Two tasks
-// sharing an id therefore share a checkpoint, and the second one starts by
-// replaying from wherever the first one stopped. In production the id comes from
-// the sync_tasks table and is unique; in a test suite it has to be asked for.
+// UniqueTaskID returns an id no other task in this run uses. It matters
+// because a task's checkpoint and its replication-direction claim are now
+// recorded on the target database, keyed by task id — which is what lets a
+// syncer replaced in the other region find out where to resume from.
 func UniqueTaskID() int {
 	return int(taskIDs.Add(1))
 }

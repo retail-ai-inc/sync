@@ -13,16 +13,8 @@ import (
 )
 
 // What the source has to be set up to do, checked before a row is copied.
-//
 // These used to run inside the old syncer's Start, which the shared pipeline
-// replaced. The functions stayed, their only callers went away, and nothing said
-// so: an unused function is not an error to the compiler, to vet, or to any
-// test. The result was a task that would happily replicate from a source whose
-// binlog does not carry whole rows — the one failure in this package that
-// corrupts data without producing a single error.
-//
-// So they run from Syncer.Start now, before the snapshot rather than after it.
-// Failing here costs nothing; failing after the copy costs the copy.
+// replaced.
 
 // preflight refuses, or warns about, a source this task cannot replicate
 // correctly.
@@ -55,12 +47,9 @@ func preflight(ctx context.Context, source *sql.DB, flavour string, log logrus.F
 }
 
 // globalVariable reads one server setting, empty when the server has no such
-// setting.
-//
-// The name is interpolated rather than bound: SHOW GLOBAL VARIABLES does not
-// take a placeholder, and MySQL answers a prepared one with a syntax error. The
-// names are constants in this file, and settingName refuses anything that is not
-// one — a bound parameter's protection with none of its syntax.
+// setting. The name is interpolated rather than bound: SHOW GLOBAL VARIABLES
+// does not take a placeholder, and MySQL answers a prepared one with a syntax
+// error.
 func globalVariable(ctx context.Context, db *sql.DB, name string) (string, error) {
 	if !settingName(name) {
 		return "", fmt.Errorf("%q is not a server setting name", name)
@@ -96,17 +85,8 @@ func settingName(name string) bool {
 }
 
 // describeGTIDMode reports why a source without GTIDs is a problem here, or ""
-// when it has them.
-//
-// This is a warning rather than a refusal because replication works either way.
-// What does not work is the thing this deployment exists for: a position taken
-// as a file name and an offset only means something on the server that produced
-// it, so after a failover to a new primary the task either fails to resume or
-// resumes at unrelated bytes. A GTID set names the transactions themselves and
-// survives it.
-//
-// Saying so at startup is the difference between finding out now and finding out
-// during the failover.
+// when it has them. This is a warning rather than a refusal because
+// replication works either way.
 func describeGTIDMode(mode string, mariaDB bool) string {
 	if mariaDB || mode == "" {
 		// MariaDB tracks GTIDs through different settings, and a server with no

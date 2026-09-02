@@ -4,8 +4,10 @@ import (
 	"testing"
 )
 
-// They all answer with the driver's error rather than a tagged one, so a
-// caller cannot tell "no database" from "no such user".
+// TestEveryReadReportsAnUnopenableDatabase covers the branch each store read
+// takes when the SQLite file cannot be opened at all. They all answer with the
+// driver's error rather than a tagged one, so a caller cannot tell "no database"
+// from "no such user".
 func TestEveryReadReportsAnUnopenableDatabase(t *testing.T) {
 	for _, tt := range []struct {
 		name string

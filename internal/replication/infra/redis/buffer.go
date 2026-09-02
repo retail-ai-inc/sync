@@ -19,21 +19,16 @@ import (
 
 // The replication stream, written to disk on the way through.
 //
-// A Redis master keeps its replication backlog in memory, and repl-backlog-size
-// defaults to one megabyte. A replica that falls further behind than that gets a
-// full resync — for a cross-region target, that is tens of gigabytes over the
-// wire and, worse, a target that has to be emptied first. Every minute of that
-// is a minute the disaster-recovery copy does not exist.
+// A Redis master keeps its backlog in memory, one megabyte by default, and a
+// replica that falls further behind gets a full resync — tens of gigabytes
+// across regions, into a target that has to be emptied first. Buffering to disk
+// turns "the link was down for twenty minutes" into a partial resync, and is
+// the whole reason this relay exists rather than a replica pointed at the
+// source.
 //
-// So the stream lands here first. The buffer holds gigabytes on disk, which
-// turns "the link was down for twenty minutes" from a full resync into a partial
-// one. This is the single reason the relay exists rather than pointing a replica
-// straight at the source.
-//
-// The stream is a contiguous byte sequence, so offsets are arithmetic: a
-// segment records the absolute offset it starts at, and every frame after it
-// accounts for exactly its own length. Nothing needs to store an offset per
-// frame.
+// The stream is a contiguous byte sequence, so offsets are arithmetic: a segment
+// records the absolute offset it starts at and every frame accounts for its own
+// length. Nothing stores an offset per frame.
 
 // ErrTruncated says the requested offset is older than anything still held.
 //
@@ -95,12 +90,10 @@ type Buffer struct {
 	active   *segment
 	closed   bool
 	// sealed says the writer has finished, so a cursor that reaches the end has
-	// reached the end for good rather than being merely up to date.
-	//
-	// Without it, a connection that dies while a cursor is waiting leaves the
-	// cursor waiting for ever: the condition it blocks on is only signalled by an
-	// append, and there will not be another one. A task that neither progresses
-	// nor fails is the worst of the three outcomes.
+	// reached the end for good rather than being merely up to date. Without it, a
+	// connection that dies while a cursor is waiting leaves the cursor waiting
+	// for ever: the condition it blocks on is only signalled by an append, and
+	// there will not be another one.
 	sealed bool
 }
 

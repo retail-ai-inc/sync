@@ -30,7 +30,8 @@ func serve(t *testing.T, status int, body string) string {
 	return server.URL
 }
 
-// Neither call looked at the HTTP status.
+// TestARefusedCodeIsNotAnIdentity covers a way into the system with no
+// credentials at all. Neither call looked at the HTTP status.
 func TestARefusedCodeIsNotAnIdentity(t *testing.T) {
 	refused := serve(t, http.StatusBadRequest, `{"error":"invalid_grant"}`)
 	pointAt(t, refused, refused)

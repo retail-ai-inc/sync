@@ -1,28 +1,6 @@
-// The metric catalogue.
-//
-// The set is modelled on Debezium's, because it is the CDC implementation with
-// the most operational history behind its choices, and because an operator who
-// has run Debezium should not have to learn a second vocabulary to read these.
-// Debezium groups its MBeans into three contexts — snapshot, streaming and
-// schema history — and that grouping is kept here.
-//
-// Two things are deliberately not copied.
-//
-// Debezium reports durations in milliseconds (MilliSecondsBehindSource).
-// Prometheus expects base units, and every dashboard, alerting rule and
-// recording rule in that ecosystem assumes seconds; a millisecond gauge reads
-// wrong in Grafana's automatic unit handling and invites the classic mistake of
-// alerting on 1000 when 1 was meant. The names here end in _seconds and hold
-// seconds.
-//
-// Debezium also exposes strings as attributes — GtidSet, BinlogFilename,
-// LastTransactionId. Prometheus has no string values. The usual answer is an
-// info metric carrying them as labels, which works only for labels that change
-// rarely: a GTID set changes with every transaction, and one series per value
-// would be an unbounded cardinality leak that takes the scrape target down with
-// it. So the position is exposed twice: as a number that can be graphed
-// (_position_bytes) and as an info series carrying only the parts that change
-// slowly (the file name, the source's identity).
+// The metric catalogue, modelled on Debezium's names and its three contexts —
+// snapshot, streaming, schema history — so an operator who has run Debezium
+// need not learn a second vocabulary. Two departures.
 package metrics
 
 import "time"
@@ -91,20 +69,13 @@ const (
 	// than the source's or the network's.
 	ReadLagSeconds = "sync_source_event_age_seconds"
 	// LastEventAgeSeconds is how long since anything arrived, heartbeats
-	// included.
-	//
-	// Debezium: MilliSecondsSinceLastEvent. The applied lag cannot answer this:
-	// it is measured from events that arrive, so a stream that has stopped
-	// delivering leaves it frozen at whatever it last was, and an alert on a
-	// frozen gauge never fires.
+	// included (Debezium: MilliSecondsSinceLastEvent). The applied lag cannot
+	// answer this: a stream that stops delivering leaves it frozen, and an alert
+	// on a frozen gauge never fires.
 	LastEventAgeSeconds = "sync_source_last_event_age_seconds"
 
-	// EventsTotal counts source events by operation.
-	//
-	// Debezium keeps three separate attributes — TotalNumberOfCreateEventsSeen,
-	// UpdateEventsSeen, DeleteEventsSeen. One metric with an op label is the
-	// Prometheus spelling of the same thing, and it extends to the operations
-	// Debezium has no attribute for.
+	// EventsTotal counts source events by operation. Debezium keeps one
+	// attribute per operation; an op label is the Prometheus spelling of it.
 	EventsTotal = "sync_source_events_total"
 	// EventsFilteredTotal counts events dropped because nothing maps them.
 	//
@@ -116,11 +87,8 @@ const (
 	// Debezium: NumberOfSkippedEvents.
 	EventsSkippedTotal = "sync_source_events_skipped_total"
 	// TransactionsCommittedTotal counts source transactions carried through.
-	//
-	// Debezium: NumberOfCommittedTransactions. Paired with EventsTotal it is
-	// what catches a whole transaction going missing — the failure this
-	// codebase shipped with until it was measured, where a checkpoint moved
-	// past a transaction whose rows were never read.
+	// Paired with EventsTotal it catches a whole transaction going missing —
+	// a checkpoint that moved past rows nobody read, which this shipped with.
 	TransactionsCommittedTotal = "sync_source_transactions_committed_total"
 	// TransactionsRolledBackTotal counts source transactions rolled back.
 	//
@@ -266,23 +234,14 @@ func withLabel(labels Labels, name, value string) Labels {
 
 // ------------------------------------------------------------------ position
 
-// Where in the source's log the task has got to.
-//
-// Debezium publishes SourceEventPosition, BinlogFilename, BinlogPosition,
-// GtidSet and LastTransactionId as strings. Only a number can be graphed or
-// alerted on, so the position is published as cumulative bytes; the strings
-// that change slowly enough to be safe as labels go on an info series, and the
-// ones that change per transaction (the GTID set) stay in the logs where they
-// belong.
+// Where in the source's log the task has got to. Only a number can be graphed,
+// so the position is bytes; slow-changing strings go on an info series and the
+// GTID set stays in the logs, where it cannot leak cardinality.
 const (
-	// SourcePositionBytes is the offset the stream has read to inside the
-	// source's current log segment — a binlog file, a Redis replication stream.
-	//
-	// It is not cumulative across segments for engines that rotate them, so it
-	// falls back to near zero when MySQL opens a new binlog file. That is the
-	// same shape mysqld_exporter publishes and dashboards already handle: read
-	// it together with the file label on SourceInfo, and alert on the lag and
-	// retention metrics rather than on this.
+	// SourcePositionBytes is the offset read to inside the source's current log
+	// segment. It is not cumulative across segments, so it drops to near zero
+	// when MySQL rotates a binlog — the shape mysqld_exporter also publishes.
+	// Read it with SourceInfo's file label; alert on lag and retention instead.
 	SourcePositionBytes = "sync_source_position_bytes"
 	// AppliedPositionBytes is the position the target has actually recorded.
 	// Within one log segment the gap between the two is the backlog in the
@@ -416,12 +375,9 @@ func SnapshotFinished(labels Labels, completed bool, elapsed float64) {
 const (
 	SchemaChangesTotal     = "sync_schema_changes_applied_total"
 	SchemaChangeAgeSeconds = "sync_schema_last_change_age_seconds"
-	// SchemaChangesRefusedTotal counts schema changes deliberately not carried
-	// — a DROP that would empty the target, a rename that would orphan it.
-	//
-	// No Debezium equivalent: it propagates what it is told to. Refusing is a
-	// decision this codebase makes, and a decision nobody can see is a decision
-	// nobody can audit.
+	// SchemaChangesRefusedTotal counts schema changes deliberately not carried —
+	// a DROP that would empty the target, a rename that would orphan it. A
+	// decision nobody can see is a decision nobody can audit.
 	SchemaChangesRefusedTotal = "sync_schema_changes_refused_total"
 
 	helpSchemaChanges = "Schema changes carried through to the target"
@@ -446,13 +402,9 @@ func CountSchemaRefused(labels Labels, reason string) {
 
 // ------------------------------------------------------- source retention
 
-// How long a stopped task has before its position is unusable.
-//
-// Debezium has nothing like this: it assumes the log is there and fails when it
-// is not. On Memorystore the replication backlog was measured at five to twenty
-// kilobytes — a fraction of a second at load — so "how long may this task stay
-// down" is the number that decides whether a restart is routine or means a full
-// re-copy.
+// How long a stopped task has before its position is unusable. On Memorystore
+// the backlog measured five to twenty kilobytes — a fraction of a second at
+// load — so this decides whether a restart is routine or means a re-copy.
 const (
 	RetentionWindowSeconds = "sync_source_retention_window_seconds"
 	// RetentionHeadroomSeconds is that window less the current lag: how long
@@ -470,12 +422,8 @@ func SetRetention(labels Labels, window, headroom float64) {
 
 // ------------------------------------------------------------ correctness
 
-// What comparing the two sides found, and what had to be set aside.
-//
-// Debezium has no equivalent for either: it guarantees delivery to Kafka and
-// stops there. A disaster-recovery copy has to answer a different question —
-// whether the two sides actually agree — and every stream defect found in this
-// codebase was found by comparing, not by the stream reporting itself.
+// What comparing the two sides found, and what had to be set aside. Every
+// stream defect found here was found by comparing, not by the stream saying so.
 const (
 	ReconcileDifference = "sync_redis_reconcile_difference"
 	// ValueRepairsTotal counts keys copied whole rather than by replaying a
@@ -523,15 +471,10 @@ const (
 	StreamOffsetBytes  = "sync_redis_stream_offset_bytes"
 	AppliedOffsetBytes = "sync_redis_applied_offset_bytes"
 	// SourceLagBytes is how far the target is behind the source's own write
-	// offset, read from the source rather than derived from what this process
-	// received.
-	//
-	// The difference of the two above only measures the backlog this process is
-	// already holding. When the target goes away the reader stops too, so both
-	// freeze and their difference freezes with them: measured against a blocked
-	// target they held steady at 0.4 MB while the real distance passed 21 MB.
-	// This one is taken from the source's master_repl_offset, so it keeps
-	// climbing for as long as the source keeps writing.
+	// offset, taken from master_repl_offset rather than derived from what this
+	// process received. The difference of the two above freezes when the reader
+	// stops: measured against a blocked target it held at 0.4 MB while the real
+	// distance passed 21 MB.
 	SourceLagBytes = "sync_redis_source_lag_bytes"
 	// BufferHeldBytes is how much of the stream is on disk, which is what turns
 	// a briefly unavailable target into a partial resync instead of a full one.

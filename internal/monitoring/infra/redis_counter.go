@@ -84,13 +84,11 @@ func CountAndLogRedis(ctx context.Context, sc config.SyncConfig, log *logrus.Log
 // 	return cnt
 // }
 
-// keyCount reports how many keys an instance holds.
-//
-// DBSize asked of a cluster node answers for that node alone, so comparing one
-// node of the source against one node of the target says nothing about whether
-// the copy is complete — and a three-master pair would have reported roughly a
-// third of each side while looking like a healthy match. A cluster is summed
-// across its masters; a single instance answers for itself.
+// keyCount reports how many keys an instance holds. DBSize asked of a cluster
+// node answers for that node alone, so comparing one node of the source
+// against one node of the target says nothing about whether the copy is
+// complete — and a three-master pair would have reported roughly a third of
+// each side while looking like a healthy match.
 func keyCount(ctx context.Context, client goredis.UniversalClient) (int64, error) {
 	cluster, isCluster := client.(*goredis.ClusterClient)
 	if !isCluster {

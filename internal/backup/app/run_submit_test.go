@@ -29,9 +29,9 @@ func settled(t *testing.T, taskID string) domain.Run {
 	}
 }
 
-// It used to stamp last_backup_time and answer "started successfully" without
-// running anything: no executor was built, no command ran, nothing was written
-// anywhere.
+// TestStartRunActuallyRunsTheJob covers "back this up now". It used to stamp
+// last_backup_time and answer "started successfully" without running anything:
+// no executor was built, no command ran, nothing was written anywhere.
 func TestStartRunActuallyRunsTheJob(t *testing.T) {
 	db := useTempJobDB(t)
 	id := insertJob(t, db, 1, `{"name":"nightly","sourceType":"mongodb"}`)
@@ -205,7 +205,8 @@ func snapshotRun(t *testing.T, taskID string) (domain.Run, bool) {
 	return domain.Run{}, false
 }
 
-// It used to live only in the in-memory register, so a job that failed
+// TestAFailedRunIsRecordedInTheDatabase records that the outcome outlives the
+// process. It used to live only in the in-memory register, so a job that failed
 // overnight and a restart in the morning left nothing anywhere saying so — the
 // dashboard showed the timestamp of the last run that had worked, and "the
 // backup is a few days old" and "the backup has been failing since Tuesday"

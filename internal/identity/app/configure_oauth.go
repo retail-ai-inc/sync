@@ -34,26 +34,17 @@ func ReadOAuthConfig(provider string) (map[string]interface{}, error) {
 // recognises it as "leave the stored one alone".
 const maskedSecret = "********"
 
-// publicOAuthFields are the fields the read endpoint answers with.
-//
-// A list of what may go out, not a list of what may not. The endpoint is
-// reachable without a token — the sign-in page needs the client id before
-// anybody has one — so a field added to the stored document later must not
-// start being served to unauthenticated callers because nobody remembered to
-// add it to a deny-list.
+// publicOAuthFields are the fields the read endpoint answers with. A list of
+// what may go out, not a list of what may not.
 var publicOAuthFields = []string{
 	domain.FieldClientID,
 	domain.FieldRedirectURI,
 	domain.FieldEnabled,
 }
 
-// withoutClientSecret copies out the fields a sign-in page needs.
-//
-// The client secret is the one that matters: answering with it handed the whole
-// OAuth credential to any unauthenticated caller. It is still reported, as a
-// fixed placeholder, because the administrative form shows whether one is set
-// and the write path reads that placeholder back as "leave the stored one
-// alone".
+// withoutClientSecret copies out the fields a sign-in page needs. The client
+// secret is the one that matters: answering with it handed the whole OAuth
+// credential to any unauthenticated caller.
 func withoutClientSecret(config map[string]interface{}) map[string]interface{} {
 	if config == nil {
 		return nil

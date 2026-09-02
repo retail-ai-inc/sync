@@ -8,13 +8,12 @@ import (
 )
 
 // FileStateStore keeps one value per key as one file under a directory.
-//
 // Nothing in the tree uses it today — the replication checkpoints live in
 // SQLite — but what it holds is a resume position, so the three things a
 // position store has to get right are worth getting right here rather than
 // leaving as a trap: the directory has to exist, the key must not be able to
-// name a file outside the store, and a crash mid-write must not leave a
-// half-written position behind.
+// name a file outside the store, and a crash mid-write must not leave a half-
+// written position behind.
 type FileStateStore struct {
 	dir string
 }
@@ -23,13 +22,10 @@ func NewFileStateStore(dir string) *FileStateStore {
 	return &FileStateStore{dir: dir}
 }
 
-// Save writes value under key, replacing whatever was there.
-//
-// The write goes to a temporary file in the same directory and is then renamed
-// over the destination, which on a POSIX filesystem is atomic: a reader sees
-// either the old position or the new one, never a truncated one. Writing in
-// place left a checkpoint that on restart either would not parse or — worse —
-// parsed as an earlier position, which replays events that were already applied.
+// Save writes value under key, replacing whatever was there. The write goes to
+// a temporary file in the same directory and is then renamed over the
+// destination, which on a POSIX filesystem is atomic: a reader sees either the
+// old position or the new one, never a truncated one.
 func (f *FileStateStore) Save(key string, value []byte) error {
 	path, err := f.path(key)
 	if err != nil {

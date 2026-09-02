@@ -310,8 +310,9 @@ func TestReplayingAnAppliedRangeChangesNothing(t *testing.T) {
 		skipped)
 }
 
-// It is the one thing in this package that does not share the assumptions of
-// the replication path, so it is what would catch a case nobody thought of.
+// The comparison is the one thing in this package that does not share the
+// replication path's assumptions, so it is what would catch a case nobody
+// thought of.
 func TestTheComparisonFindsAndFixesADifference(t *testing.T) {
 	source, target := sourceCluster(t), targetCluster(t)
 	emptyBoth(t, source, target)

@@ -107,9 +107,10 @@ func TestDisabledTasksAreNotMeasured(t *testing.T) {
 	time.Sleep(80 * time.Millisecond)
 }
 
-// It printed "Daily summary completed" whatever had happened, so a MySQL task
-// with a dateRange condition was missing from a summary that reported itself
-// complete.
+// TestTheDailySummarySaysWhatItLeftOut covers a summary that was only ever
+// implemented for MongoDB. It printed "Daily summary completed" whatever had
+// happened, so a MySQL task with a dateRange condition was missing from a
+// summary that reported itself complete.
 func TestTheDailySummarySaysWhatItLeftOut(t *testing.T) {
 	log, buf := capturingLogger()
 	cfg := &config.Config{SyncConfigs: []config.SyncConfig{

@@ -22,13 +22,11 @@ import (
 // name a fragment of a query run against both databases.
 var qualifiedName = regexp.MustCompile("^[A-Za-z_][A-Za-z0-9_$]*(\\.[A-Za-z_][A-Za-z0-9_$]*)?$")
 
-// getRowCountWithContext is used by MySQL / MariaDB / PostgreSQL.
-//
-// It used to flatten every failure to -1 and hand that back as a count: a table
-// that does not exist, a permission that was not granted, a connection that
-// dropped and a cancelled context were indistinguishable from each other and,
-// once stored, from a real measurement. The reason comes back with the number
-// now, and the caller records the difference.
+// getRowCountWithContext is used by MySQL / MariaDB / PostgreSQL. It used to
+// flatten every failure to -1 and hand that back as a count: a table that does
+// not exist, a permission that was not granted, a connection that dropped and
+// a cancelled context were indistinguishable from each other and, once stored,
+// from a real measurement.
 func getRowCountWithContext(ctx context.Context, db *sql.DB, table string) (int64, error) {
 	if !qualifiedName.MatchString(table) {
 		return 0, fmt.Errorf("%q is not a table name", table)

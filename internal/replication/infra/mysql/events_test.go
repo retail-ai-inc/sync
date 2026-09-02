@@ -398,8 +398,9 @@ func TestTheDeleteMatchesOnTheKeyAlone(t *testing.T) {
 	}
 }
 
-// It used to be a warning, so an action the library grew later was dropped
-// with a log line nobody reads and the two sides diverged from then on.
+// TestAnUnknownActionStopsReplication covers an action this does not understand.
+// It used to be a warning, so an action the library grew later was dropped with
+// a log line nobody reads and the two sides diverged from then on.
 func TestAnUnknownActionStopsReplication(t *testing.T) {
 	db := sqliteTarget(t, ordersSchema)
 	h := newHandler(t, db, mapTable("orders", "orders"))
@@ -426,9 +427,10 @@ func keylessTable() *schema.Table {
 	return table
 }
 
-// This used to be dropped with one warning: inserts arrived and updates did
-// not, so the target accumulated rows the source had since changed, and the
-// row counts agreed the whole time.
+// TestAnUpdateWithNoPrimaryKeyStopsReplication covers a table whose rows cannot
+// be addressed on the target. This used to be dropped with one warning: inserts
+// arrived and updates did not, so the target accumulated rows the source had
+// since changed, and the row counts agreed the whole time.
 func TestAnUpdateWithNoPrimaryKeyStopsReplication(t *testing.T) {
 	db := sqliteTarget(t, ordersSchema)
 	if _, err := db.Exec(`INSERT INTO orders VALUES ('1','Ada','x')`); err != nil {
@@ -578,8 +580,9 @@ func TestAnUpdateAlsoMasks(t *testing.T) {
 	}
 }
 
-// That is what makes deletes work at all when the key itself is a secured
-// field — but it also means the raw value reaches the target's query log.
+// The delete path passes raw key values through, which is what makes deletes
+// work when the key is a secured field — and means the raw value reaches the
+// target's query log.
 func TestTheDeleteKeyIsNotMasked(t *testing.T) {
 	db := sqliteTarget(t, ordersSchema)
 	if _, err := db.Exec(`INSERT INTO orders VALUES ('1','Ada','x')`); err != nil {

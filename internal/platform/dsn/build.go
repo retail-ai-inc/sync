@@ -163,17 +163,10 @@ func buildPostgresDSN(c map[string]string) string {
 	return u.String()
 }
 
-// buildMongoDSN renders a MongoDB URI.
-//
-// directConnection is no longer forced. It pins the driver to one node, which
-// means it neither discovers the rest of the replica set nor follows an
-// election — against a cluster it stops writing the moment the primary changes.
-// It is now set only when the configuration asks for it by name.
-//
-// The write concern is majority with journalling, so a write this syncer has
-// acknowledged survives the failover the replica exists for. Without it a
-// failover can roll back writes the target has already reported as applied,
-// and the checkpoint has already moved past them.
+// buildMongoDSN renders a MongoDB URI.  directConnection is no longer forced.
+// It pins the driver to one node, which means it neither discovers the rest of
+// the replica set nor follows an election — against a cluster it stops writing
+// the moment the primary changes.
 func buildMongoDSN(c map[string]string) string {
 	scheme := "mongodb"
 	host := hostPort(c["host"], c["port"])

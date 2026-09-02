@@ -91,7 +91,9 @@ func TestEveryTagHashesToItsOwnSlot(t *testing.T) {
 	}
 }
 
-// These tags name the keys that hold how far each slot has been applied.
+// TestTheSlotTagTableIsStable is the most important test in this file, and the
+// least obvious. These tags name the keys that hold how far each slot has been
+// applied.
 func TestTheSlotTagTableIsStable(t *testing.T) {
 	const want = "6b728ddecb7be57061f8d2dbdbfe6db2d82aaabcccdc8ed4eb5e8f0231c325a0"
 

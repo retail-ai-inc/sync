@@ -226,16 +226,11 @@ type TimeRange struct {
 	End   time.Time
 }
 
-// extractTimeRange resolves the window a task's query conditions name.
-//
-// It used to do its own arithmetic — AddDate followed by Truncate(24h), which
-// rounds to a multiple of the zero instant and so lands on UTC midnight, then
-// shifted by nine hours as though that had been JST midnight — and it added a
-// day to the end offset. The result was a forty-eight hour window, aligned to
-// the wrong day for the nine hours of each day when the UTC and JST dates
-// differ, which is when the backup cron usually runs. Meanwhile the row filters
-// resolved the same configuration to twenty-four JST hours, so one job selected
-// its tables by one window and its rows by another. Both now come from timex.
+// extractTimeRange resolves the window a task's query conditions name. It used
+// to do its own arithmetic — AddDate followed by Truncate(24h), which rounds
+// to a multiple of the zero instant and so lands on UTC midnight, then shifted
+// by nine hours as though that had been JST midnight — and it added a day to
+// the end offset.
 func (e *BackupExecutor) extractTimeRange(query map[string]interface{}) *TimeRange {
 	for _, value := range query {
 		timeQuery, ok := value.(map[string]interface{})

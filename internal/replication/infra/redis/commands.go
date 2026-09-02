@@ -10,21 +10,15 @@ import (
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
 )
 
-// What each command in the stream means, and which key it touches.
+// What each command in the stream means, and which key it touches. The slot a
+// command belongs to decides which transaction its position marker goes in, so
+// getting the key wrong would put the marker in a different slot from the data
+// and lose the atomicity the design rests on.
 //
-// The slot a command belongs to is what decides which transaction its position
-// marker goes in, so getting the key wrong is not a cosmetic error — it would
-// put the marker in a different slot from the data and lose the atomicity the
-// whole design rests on.
-//
-// The key positions are read from the server with COMMAND INFO rather than
-// written down here. A table of command shapes is a table that drifts: Redis 8
-// alone added a set of commands and changed the key specification of others, and
-// a stale entry would misplace a key silently. The server always knows.
-//
-// One key is enough. Every command a cluster puts in its replication stream
-// touches keys in a single slot — a cross-slot command cannot be executed on a
-// cluster in the first place — so the first key names the slot for all of them.
+// Key positions come from COMMAND INFO rather than a table written down here: a
+// table of command shapes drifts, and a stale entry misplaces a key silently.
+// One key is enough — every command a cluster puts in its replication stream
+// touches a single slot, so the first key names the slot for all of them.
 
 type classification uint8
 
@@ -91,13 +85,10 @@ var keyless = map[string]classification{
 	"select": classIgnored,
 	"ping\n": classHeartbeat,
 
-	// The rest cannot be replicated safely, each for its own reason.
-	//
-	// Emptying the target is the one operation that destroys the disaster
-	// recovery copy, and it is indistinguishable at this level from an operator
-	// mistake on the source. Doing it because the stream said so would mean a
-	// fat-fingered FLUSHALL in Tokyo takes Osaka with it — so the task stops and
-	// a human decides.
+	// The rest cannot be replicated safely, each for its own reason. Emptying the
+	// target is the one operation that destroys the disaster recovery copy, and
+	// it is indistinguishable at this level from an operator mistake on the
+	// source.
 	"flushall": classRefused,
 	"flushdb":  classRefused,
 	"swapdb":   classRefused,

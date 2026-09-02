@@ -137,12 +137,11 @@ func main() {
 }
 
 // newRouter builds the whole HTTP surface: the API under /api, the probes and
-// the metrics beside it, and the single-page application under everything else.
-//
-// A function rather than a block inside main so it can be exercised: what is
-// reachable without a credential is a security property, and "the probes answer
-// before anything is configured" is the property a rolling deployment depends
-// on.
+// the metrics beside it, and the single-page application under everything
+// else. A function rather than a block inside main so it can be exercised:
+// what is reachable without a credential is a security property, and "the
+// probes answer before anything is configured" is the property a rolling
+// deployment depends on.
 func newRouter() *chi.Mux {
 	router := chi.NewRouter()
 	router.Mount("/api", httpapi.NewRouter())

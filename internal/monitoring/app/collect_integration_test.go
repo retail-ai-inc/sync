@@ -732,9 +732,11 @@ func TestAnUnreachablePostgreSQLSourceIsReported(t *testing.T) {
 	}
 }
 
-// It only runs once the task's own metrics say it has streams, so the counters
-// are seeded first — which is also what the statistics table is now built
-// from, after a year of it holding nothing but zeroes.
+// TestTheServerSideChangeStreamProbeRuns covers the branch that asks MongoDB
+// itself what change streams are open. It only runs once the task's own metrics
+// say it has streams, so the counters are seeded first — which is also what the
+// statistics table is now built from, after a year of it holding nothing but
+// zeroes.
 func TestTheServerSideChangeStreamProbeRuns(t *testing.T) {
 	conn := useMonitoringDB(t)
 

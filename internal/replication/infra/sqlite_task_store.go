@@ -224,12 +224,7 @@ WHERE id=?
 }
 
 // storedConfig decodes a stored configuration document into a map that can be
-// written to.
-//
-// It never returns nil. A document of literal "null" decodes *without an error*
-// and leaves the map nil, which an err != nil guard does not catch — and the
-// caller then assigns into it, which panics on a nil map. Nothing writes "null"
-// today; one hand-edited row or one migration that went wrong would.
+// written to. It never returns nil.
 func storedConfig(configJSON string) map[string]interface{} {
 	var data map[string]interface{}
 	if err := json.Unmarshal([]byte(configJSON), &data); err != nil || data == nil {
@@ -238,13 +233,12 @@ func storedConfig(configJSON string) map[string]interface{} {
 	return data
 }
 
-// ReadTaskConfig returns a task's stored configuration.
-//
-// It reports why it could not, which ReadTaskEngine below cannot: that answers
-// the empty string for a database it could not open, a row that is not there, a
-// document that is empty, a document that will not parse and a table that does
-// not exist, and the caller reads all five as "not a MongoDB task" and quietly
-// falls back to stale figures.
+// ReadTaskConfig returns a task's stored configuration. It reports why it
+// could not, which ReadTaskEngine below cannot: that answers the empty string
+// for a database it could not open, a row that is not there, a document that
+// is empty, a document that will not parse and a table that does not exist,
+// and the caller reads all five as "not a MongoDB task" and quietly falls back
+// to stale figures.
 func ReadTaskConfig(id string) (domain.Config, error) {
 	var cfg domain.Config
 

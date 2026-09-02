@@ -9,17 +9,9 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
-// Window is how far back the oplog reaches.
-//
-// It is measured rather than configured: the first and last entries of
-// local.oplog.rs, whose difference is the real history a resume token has to
-// land inside. The oplog is capped by size, so the window moves with the write
-// rate — a busy hour can shorten a month of headroom to a day, which is exactly
-// the change worth alerting on and exactly what a configured number would hide.
-//
-// It cannot be measured through mongos: the local database is not addressable
-// there, and the window would in any case differ per shard. A sharded task
-// therefore has to be told, and if it is not, no headroom is published.
+// Window is how far back the oplog reaches. It is measured rather than
+// configured: the first and last entries of local.oplog.rs, whose difference
+// is the real history a resume token has to land inside.
 func (r *Reader) Window(ctx context.Context) (time.Duration, error) {
 	if r.Config.RetentionWindow > 0 {
 		return r.Config.RetentionWindow, nil

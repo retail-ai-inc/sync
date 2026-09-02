@@ -8,15 +8,9 @@ import (
 )
 
 // Config is a backup job's configuration as stored in the config_json column.
-//
 // It had six declarations before this one: an anonymous struct in the list
 // handler, two more inside the create handler, two inside the update handler,
-// and a named ExecutorBackupConfig in the executor. All five in the handlers
-// carried exactly these twelve fields with exactly these tags, so this type
-// replaces them without changing a byte of the JSON that goes into or comes out
-// of the column. The executor keeps its own shape for now: it reads a different
-// projection of the same document, and reconciling the two is aggregate work
-// (#59).
+// and a named ExecutorBackupConfig in the executor.
 type Config struct {
 	Name               string                 `json:"name"`
 	SourceType         string                 `json:"sourceType"`
@@ -58,15 +52,12 @@ func (e *MissingFieldsError) Error() string {
 		"; an update replaces the whole configuration, so every field has to be sent"
 }
 
-// Complete reports the fields a request needs to describe a job, and what it is
-// missing.
-//
-// An update replaces the stored configuration, so a client that means to change
-// only the schedule and sends only the schedule used to have its database
-// connection, its destination, its format and its compression emptied — with the
-// job then failing at its next run, or backing up nothing at all. Saying so is
-// the difference between a mistake the caller can see and one they find out
-// about when they need the backup.
+// Complete reports the fields a request needs to describe a job, and what it
+// is missing. An update replaces the stored configuration, so a client that
+// means to change only the schedule and sends only the schedule used to have
+// its database connection, its destination, its format and its compression
+// emptied — with the job then failing at its next run, or backing up nothing
+// at all.
 func (r Request) Complete() error {
 	var missing []string
 
@@ -280,11 +271,6 @@ func DeriveUpdateName(oldConfig map[string]interface{}, id string) string {
 // ParseStoredConfig decodes a stored configuration document into a map. A
 // document that will not parse yields an empty map rather than an error, which
 // is what the update path has always done.
-//
-// It never returns nil. A stored document of literal "null" decodes *without an
-// error* and leaves the map nil, which the err != nil guard does not catch — and
-// the callers then assign into it, which panics on a nil map. Nothing writes
-// "null" today; one hand-edited row or one migration that went wrong would.
 func ParseStoredConfig(configJSON string) map[string]interface{} {
 	var data map[string]interface{}
 	if err := json.Unmarshal([]byte(configJSON), &data); err != nil || data == nil {

@@ -109,15 +109,10 @@ func isDestructive(stmt ast.StmtNode) (bool, string) {
 }
 
 // replicatesSchema reports whether a database a DDL statement names is the one
-// this task reads.
-//
-// A table reference used to be matched on its name alone, with the database it
-// named discarded and overwritten with the target's. A source server hosting
-// more than one database was all it took: an ALTER TABLE run against some other
-// database that happened to hold a table of the same name was rewritten and
-// applied to the replication target, changing the schema of the disaster-
-// recovery copy from a statement that had nothing to do with it. The row path
-// never had this problem — canal filters row events on database and table both.
+// this task reads. Matching on the table name alone, with the database
+// discarded and replaced by the target's, meant an ALTER TABLE against some
+// other database on the same server that happened to hold a table of the same
+// name was rewritten and applied to the disaster-recovery copy.
 func (h *MyEventHandler) replicatesSchema(schema string) bool {
 	if h.sourceDatabase == "" || schema == "" {
 		// There is nothing to compare against: either the handler was built
@@ -151,14 +146,11 @@ func (h *MyEventHandler) targetTableFor(source string) (string, bool) {
 	return "", false
 }
 
-// planDDL decides what to do with each statement of a query event.
-//
-// A statement that names no replicated table is skipped: the source runs plenty
-// of schema changes this task has no business copying. A statement that would
-// destroy replicated data is blocked, which stops replication so an operator
-// decides. Everything else is rewritten with the target's database and table
-// names and applied, so a column added at the source exists on the target
-// before the first row that uses it arrives.
+// planDDL decides what to do with each statement of a query event: one naming
+// no replicated table is skipped, one that would destroy replicated data is
+// blocked so an operator decides, and everything else is rewritten with the
+// target's names and applied — so a column added at the source exists before
+// the first row that uses it arrives.
 func (h *MyEventHandler) planDDL(defaultSchema, query string) ([]ddlDecision, error) {
 	stmts, _, err := parser.New().Parse(query, "", "")
 	if err != nil {

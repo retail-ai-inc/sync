@@ -21,14 +21,9 @@ import (
 	"github.com/retail-ai-inc/sync/internal/replication/infra/security"
 )
 
-// Snapshotter makes the first copy of a MySQL source.
-//
-// Pin and Copy share one pinned connection on purpose: the coordinates and every
-// SELECT that reads through them have to be the same session, inside one
-// consistent snapshot. Reading the coordinates afterwards — which is what
-// starting the stream with no stored position amounts to — loses every write
-// made while the copy was running, and the copy of a payment table runs for as
-// long as it runs.
+// Snapshotter makes the first copy of a MySQL source. Pin and Copy share one
+// pinned connection on purpose: the coordinates and every SELECT that reads
+// through them have to be the same session, inside one consistent snapshot.
 type Snapshotter struct {
 	Config config.SyncConfig
 	Target *sql.DB
@@ -194,19 +189,10 @@ func (s *Syncer) Start(ctx context.Context) error {
 		Checkpoints: store,
 		Resyncs:     s.resyncs(store),
 		Opts: pipeline.Options{
-			// The statements of a batch go to the target in the order the
-			// binlog held them.
-			//
-			// Splitting a batch into runs exists to let an applier work on
-			// several at once, and this one does not: it executes every run,
-			// and every statement in it, one after another inside a single
-			// transaction. So the split bought nothing here and cost the one
-			// property that matters — it can move a later change ahead of an
-			// earlier one whenever the two address different rows, and two
-			// rows are not independent when a unique index or a foreign key
-			// relates them. A DELETE that frees a unique value, reordered
-			// after the INSERT that takes it, is a duplicate-key error; and
-			// because the split is deterministic, retrying produces it again.
+			// The statements of a batch go to the target in the order the binlog held
+			// them. Splitting a batch into runs exists to let an applier work on
+			// several at once, and this one does not: it executes every run, and every
+			// statement in it, one after another inside a single transaction.
 			StreamOrder: true,
 			Labels:      labels,
 			Logger:      s.logger,
@@ -279,19 +265,8 @@ func (s *Syncer) resyncs(store *checkpoint.SQLStore) []*pipeline.Resync {
 const unlistedScanEvery = 5 * time.Minute
 
 // warnAboutUnlistedTables reports the tables the source has and this task does
-// not replicate.
-//
-// It does not start replicating them: a task that names its tables means it, and
-// quietly widening the scope would be worse than the gap. What it does is make
-// the gap visible, because the alternative is finding out during a failover that
-// the copy is missing a table nobody added to the task.
-//
-// This lived on the old syncer, which the shared pipeline replaced, so for as
-// long as the new path has been the one that runs, sync_unreplicated_tables has
-// read zero for every MySQL task whatever the source held — and the integration
-// test that covers it went on passing, because it started the old syncer. It is
-// a method on this type now so that deleting the old path cannot take it away
-// again.
+// not replicate. It does not start replicating them: a task that names its
+// tables means it, and quietly widening the scope would be worse than the gap.
 func (s *Syncer) warnAboutUnlistedTables(ctx context.Context, sourceDBName string,
 	labels metrics.Labels) {
 

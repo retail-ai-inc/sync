@@ -8,18 +8,9 @@ import (
 	"time"
 )
 
-// Retry runs operation until it succeeds, up to attempts times, waiting between
-// attempts and multiplying the wait by factor each time.
-//
-// The wait happens between attempts and not after the last one. The loop is
-// over by then and the same error goes back to the caller either way, so with
-// the settings the syncers use — five attempts starting at two seconds — the
-// trailing sleep delayed the report of an unreachable source by thirty-two
-// seconds for nothing.
-//
-// The context cancels both the waiting and the loop. Without one a syncer asked
-// to stop while its source was down went on sleeping for the best part of a
-// minute, and the supervisor gives a task ten seconds before it gives up on it.
+// Retry runs operation until it succeeds, up to attempts times, waiting
+// between attempts and multiplying the wait by factor each time. The wait
+// happens between attempts and not after the last one.
 func Retry(ctx context.Context, attempts int, initialDelay time.Duration, factor float64, operation func() error) error {
 	if attempts <= 0 {
 		// Reporting success for work that was never attempted is worse than

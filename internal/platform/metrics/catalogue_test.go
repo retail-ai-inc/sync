@@ -87,8 +87,10 @@ func TestAnUnpreparedOperationIsStillCounted(t *testing.T) {
 	}
 }
 
-// This codebase shipped with exactly that defect: a checkpoint moved past a
-// transaction whose rows were never read, and nothing said so.
+// TestTransactionsAndEventsAreCountedSeparately is the pair that catches a whole
+// source transaction going missing. This codebase shipped with exactly that
+// defect: a checkpoint moved past a transaction whose rows were never read, and
+// nothing said so.
 func TestTransactionsAndEventsAreCountedSeparately(t *testing.T) {
 	labels := Labels{"task": "tx", "engine": "mysql"}
 

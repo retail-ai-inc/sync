@@ -1,12 +1,8 @@
 // Package discovery finds the tables and collections a task should replicate
-// when its configuration does not list them.
-//
-// Until now every table had to be typed into the UI one at a time, and a table
-// created at the source afterwards was simply not replicated — silently, with
-// no warning anywhere, until somebody noticed it missing from the
-// disaster-recovery copy. For a payment schema that grows a table for a new
-// settlement type, "silently not replicated" is the worst possible failure: it
-// looks exactly like everything working.
+// when its configuration does not list them. Until now every table had to be
+// typed into the UI one at a time, and a table created at the source
+// afterwards was simply not replicated — silently, with no warning anywhere,
+// until somebody noticed it missing from the disaster-recovery copy.
 package discovery
 
 import (
@@ -119,14 +115,9 @@ func Added(known map[string]bool, current []string) []string {
 }
 
 // Poll runs scan straight away and then once per interval until the context is
-// cancelled.
-//
-// Three copies of this loop existed, one per thing a syncer rescans. Running
-// the first scan before the ticker is the part worth having in one place: a
-// loop that only ever runs on the tick does nothing at all for the length of
-// the interval, which for the newly-created-table scan means a table added
-// just before the syncer started is not replicated for a minute and nothing
-// says so.
+// cancelled. It scans once before the first tick: a loop that only runs on the
+// tick does nothing for the length of the interval, so a table added just before
+// the syncer started would go unreplicated for a minute with nothing saying so.
 func Poll(ctx context.Context, interval time.Duration, scan func()) {
 	scan()
 

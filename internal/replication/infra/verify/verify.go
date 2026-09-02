@@ -1,25 +1,5 @@
-// Package verify compares a replicated table against its source.
-//
-// Replication reports that it applied what it read. It cannot report what it
-// never read: an event dropped before the offset was written, a row written
-// while a subscription was reconnecting, a manual change made on the target by
-// somebody debugging. None of those show up as an error anywhere, and for a
-// disaster-recovery copy of a payment ledger "probably identical" is not a
-// statement anyone can act on.
-//
-// Each side is walked once and its keys are looked up on the other, so the
-// comparison reports three distinct things: rows the target is missing, rows it
-// holds that the source does not, and rows that exist on both sides with
-// different contents. Repair then makes each of them right, because knowing a
-// row is wrong and having to fix it by hand is most of the work.
-//
-// It deliberately does not merge two ordered streams, which would be cheaper.
-// That only works if both sides order keys the way the comparison does, and
-// neither does: MySQL orders an integer column numerically while Go compares the
-// decimal strings, so 10 sorts before 9 and every row after the first
-// disagreement would be reported as both missing and extra. A document store is
-// worse still, since an _id may be an ObjectId, a string or a number and the
-// server's order over those is not the order their rendered forms take.
+// Package verify compares a replicated table against its source. Replication
+// reports that it applied what it read.
 package verify
 
 import (
@@ -242,13 +222,10 @@ func keysOf(batch []Row) []string {
 
 // ------------------------------------------------------------------- keys
 
-// encodeKey renders a row's key columns as one string.
-//
-// Each part carries its length, so two rows whose key columns run together the
-// same way — ("ab", "c") and ("a", "bc") — do not collide, and a NULL is
-// distinguished from an empty string. The result is compared for equality and
-// decoded again for a repair; it is never ordered, which is what lets a
-// composite key be used at all.
+// encodeKey renders a row's key columns as one string. Each part carries its
+// length, so two rows whose key columns run together the same way — ("ab",
+// "c") and ("a", "bc") — do not collide, and a NULL is distinguished from an
+// empty string.
 func encodeKey(values []sql.NullString) string {
 	parts := make([]string, len(values))
 	for i, v := range values {

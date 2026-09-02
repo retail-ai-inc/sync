@@ -14,15 +14,11 @@ import (
 )
 
 // The monitoring log grows without bound: a row per table per monitoring
-// interval, for as long as the syncer runs. On a staging deployment monitoring a
-// few dozen tables every minute it had reached 565 MB, on the same volume the
-// control-plane database and the change buffer live on — so what fills up is not
-// a log directory somebody can truncate, it is the disk replication itself
-// depends on.
-//
-// Old rows are also worth very little. The log answers "is the replica keeping
-// up" and "what did it do last night"; nobody reads the row counts from four
-// months ago, and the daily summaries are derived from them at the time.
+// interval, for as long as the syncer runs. On a staging deployment monitoring
+// a few dozen tables every minute it had reached 565 MB, on the same volume
+// the control-plane database and the change buffer live on — so what fills up
+// is not a log directory somebody can truncate, it is the disk replication
+// itself depends on.
 const (
 	defaultRetentionDays = 30
 	// retentionSweepEvery is how often rows past that are removed. Daily,

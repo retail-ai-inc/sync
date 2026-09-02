@@ -278,9 +278,11 @@ func TestCountRecordsMiscountsNonJSONL(t *testing.T) {
 	}
 }
 
-// That buffer used to be a megabyte while a MongoDB document may be sixteen,
-// so one large document turned the record count for the whole file into an
-// error — and the count is what the caller reports as the size of the backup.
+// TestCountRecordsHandlesALargeDocument covers a document bigger than the
+// scanner's buffer. That buffer used to be a megabyte while a MongoDB document
+// may be sixteen, so one large document turned the record count for the whole
+// file into an error — and the count is what the caller reports as the size of
+// the backup.
 func TestCountRecordsHandlesALargeDocument(t *testing.T) {
 	e := newExecutor()
 	path := filepath.Join(t.TempDir(), "big.json")

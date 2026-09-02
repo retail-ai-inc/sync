@@ -4,14 +4,9 @@ import (
 	"github.com/retail-ai-inc/sync/internal/replication/infra/checkpoint"
 )
 
-// checkpointStore is where this task records what it has applied.
-//
-// It writes to the target database as well as the configured directory. The
-// directory alone was the problem: the syncer runs beside the source, so the
-// outage this setup exists to survive takes the resume tokens with it, and a
-// replacement started in the other region has no way to find out where to
-// resume from. It would re-copy every collection, or start the stream from the
-// current moment and silently skip whatever was in flight.
+// checkpointStore is where this task records what it has applied. It writes to
+// the target database as well as the configured directory: the directory alone
+// dies with the region the syncer runs in. See package checkpoint.
 func (s *MongoDBSyncer) checkpointStore(targetDBName string) checkpoint.Store {
 	var stores []checkpoint.Store
 	if s.targetClient != nil && targetDBName != "" {

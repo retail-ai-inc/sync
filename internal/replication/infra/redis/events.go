@@ -7,14 +7,8 @@ import (
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
 )
 
-// What the reader hands the applier.
-//
-// Two shapes, because the stream is applied two different ways. In steady state
-// a command is replayed as it arrived, which is cheap and handles a large key
-// changed in one field without moving the key. While the stream is still inside
-// the window the first copy was taken over, the same change is applied by
-// re-reading the key's whole value, because replaying over a smeared copy could
-// apply a change twice.
+// What the reader hands the applier. Two shapes, because the stream is applied
+// two different ways.
 
 type command struct {
 	args [][]byte
@@ -26,14 +20,10 @@ type command struct {
 	offset int64
 }
 
-// operation says whether the command removes the key or writes it.
-//
-// Redis cannot tell an insert from an update without reading the target first
-// — a SET creates or overwrites and the stream does not say which — so every
-// write is an update here. A removal is knowable, and it is the one worth
-// separating: a delete rate that climbs on its own is the shape of an eviction
-// storm or a mistaken FLUSH, and counting it in with the writes hides exactly
-// that.
+// operation says whether the command removes the key or writes it. Redis
+// cannot tell an insert from an update without reading the target first — a
+// SET creates or overwrites and the stream does not say which — so every write
+// is an update here.
 func (c *command) operation() domain.Op {
 	if len(c.args) == 0 {
 		return domain.OpUpdate

@@ -169,8 +169,9 @@ func TestPasswordsAreNotStoredInCleartext(t *testing.T) {
 	}
 }
 
-// They go on working, and the first successful login rewrites them as a hash —
-// so the cleartext leaves the file without a migration step or a password
+// TestAPasswordStoredInTheClearIsReplacedOnUse covers the rows that already
+// exist. They go on working, and the first successful login rewrites them as a
+// hash — so the cleartext leaves the file without a migration step or a password
 // reset.
 func TestAPasswordStoredInTheClearIsReplacedOnUse(t *testing.T) {
 	db := useTempDB(t)

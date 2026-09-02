@@ -8,13 +8,9 @@ import (
 )
 
 // convertRawBSONToWriteModel turns one buffered change stream event into the
-// write that applies it.
-//
-// It reports three things apart: a write to make, nothing to do — an event this
-// does not replicate, or a delete the task is configured to ignore — and an
-// event it could not read. The third used to be indistinguishable from the
-// second: every failure logged and returned nil, so a change nobody could parse
-// left the target without it and the batch went on to be recorded as applied.
+// write that applies it. It reports three things apart: a write to make,
+// nothing to do — an event this does not replicate, or a delete the task is
+// configured to ignore — and an event it could not read.
 func (s *MongoDBSyncer) convertRawBSONToWriteModel(rawData bson.Raw, sourceDB, collectionName string) (mongo.WriteModel, error) {
 	var event bson.M
 	if err := bson.Unmarshal(rawData, &event); err != nil {
@@ -59,14 +55,10 @@ func (s *MongoDBSyncer) convertRawBSONToWriteModel(rawData bson.Raw, sourceDB, c
 				opType, sourceDB, collectionName)
 		}
 
-		// The stream is opened with fullDocument=updateLookup, so the document
-		// is normally attached. It is not when the document was deleted between
-		// the update and the lookup — and the server says so by sending the
-		// field as null rather than by leaving it out. Testing only whether the
-		// key was present therefore took that null for a document and asked the
-		// driver to replace one with nothing, which fails the batch with
-		// "document is nil" and stops the task. The fallback below, written for
-		// exactly this case, was unreachable.
+		// The stream is opened with fullDocument=updateLookup, so the document is
+		// normally attached. It is not when the document was deleted between the
+		// update and the lookup — and the server says so by sending the field as
+		// null rather than by leaving it out.
 		if fullDoc, ok := event["fullDocument"]; ok && fullDoc != nil {
 			return mongo.NewReplaceOneModel().
 				SetFilter(filter).
@@ -143,26 +135,8 @@ func updateFromDescription(event bson.M) (bson.M, error) {
 	return update, nil
 }
 
-// filterOf is how the target addresses the document a change touched.
-//
-// It is the whole documentKey, not just the _id. On a sharded collection
-// documentKey carries the shard key as well, and that is what mongos routes by:
-// a filter holding only the _id cannot be routed, so an updateOne or a deleteOne
-// is broadcast to every shard and an upsert — which is what a replayed insert
-// has to be — is refused outright with "could not extract exact shard key". A
-// collection sharded on anything but its _id would stop replication on the first
-// document.
-//
-// The reasoning was written down against keyOf, which orders a batch, and the
-// writes went on being addressed by the _id alone. The tests missed it because
-// they sharded on {_id: hashed}, where the two are the same thing.
-//
-// Both document shapes are accepted, and that is not defensiveness. Unmarshalling
-// into a bson.M gives nested documents as bson.M under the driver's v1 and as
-// bson.D under its v2, so the type assertion that read the documentKey stopped
-// matching the moment the driver was upgraded — and an event whose documentKey
-// cannot be read is refused, which stopped every update and delete. idOf next
-// door was already written to take either; this was not.
+// filterOf is how the target addresses the document a change touched. It is
+// the whole documentKey, not just the _id.
 func filterOf(event bson.M) bson.M {
 	key := documentOf(event["documentKey"])
 	if len(key) == 0 {

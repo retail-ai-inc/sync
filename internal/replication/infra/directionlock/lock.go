@@ -1,17 +1,11 @@
 // Package directionlock records which way a task replicates, on both of the
 // databases it touches, so the direction cannot silently reverse.
 //
-// The failure it exists to prevent is the one that follows a regional outage.
-// Tokyo goes down, Osaka is promoted and starts taking payments. Tokyo comes
-// back, the Tokyo → Osaka task resumes from its stored position, and it
-// overwrites everything Osaka has written since the promotion — with data that
-// is both older and, from the moment of the promotion, wrong. Nothing in the
-// replication protocol notices: as far as the syncer is concerned it is simply
-// catching up.
-//
-// Each syncer therefore writes a claim on both endpoints saying what that
-// endpoint is doing for it, and refuses to start when the claims say the
-// direction has changed under it.
+// The failure it prevents follows a regional outage: Tokyo goes down, Osaka is
+// promoted and takes payments, Tokyo comes back and the Tokyo → Osaka task
+// resumes from its stored position — overwriting everything Osaka wrote since
+// the promotion with data that is older and wrong. Nothing in the replication
+// protocol notices; it looks like catching up.
 package directionlock
 
 import (
@@ -97,13 +91,11 @@ func (g *Guard) staleAfter() time.Duration {
 }
 
 // owner names the process holding a claim, which is what tells a restarted
-// instance apart from a second one.
-//
-// The hostname is the default because it is the granularity that matters where
-// this runs: a restarted pod keeps its name and may take its own claim back at
-// once, while a second replica has a different name and is refused. SYNC_INSTANCE
-// overrides it for the places where the hostname is not distinctive — a test
-// running two instances on one machine, or a container that shares the host's.
+// instance apart from a second one. The hostname is the default: a restarted
+// pod keeps its name and may take its own claim back at once, while a second
+// replica has a different name and is refused. SYNC_INSTANCE overrides it where
+// the hostname is not distinctive — two instances on one machine, or a
+// container sharing the host's.
 func (g *Guard) owner() string {
 	if g.Owner != "" {
 		return g.Owner
@@ -139,26 +131,16 @@ func (c *Conflict) Error() string {
 		c.Existing.Peer, c.Existing.Owner, c.Existing.UpdatedAt.Format(time.RFC3339))
 }
 
-// concurrentWith reports a claim held by another process running this same task.
+// concurrentWith reports a claim held by another process running this same
+// task. Skipping every claim carrying this task's id — which is what let a
+// crashed task take its own claim back at once — also let two processes run it
+// at the same time.
 //
-// A claim for this task used to be skipped outright, so that a task restarted
-// after a crash could take its own claim back without waiting a quarter of an
-// hour for it to go stale. That is right, and it also let two processes run the
-// same task at once: each read the other's claim, saw its own task id, and
-// carried on.
-//
-// Two writers replaying one stream from different offsets will eventually apply
-// an older version of a record after a newer one. Idempotence does not save that
-// — an upsert of the older version is a regression — and the two only agree once
-// both have reached the end of the log, so at any moment in between, including
-// the moment of a failover, the target can hold stale values. On top of that:
-// twice the load on both databases, write conflicts between the two
-// transactions, and a position that ping-pongs between two offsets so that "how
-// far behind is the copy" stops having an answer.
-//
-// The owner is the hostname by default, which is the granularity that matters in
-// practice: a restarted pod keeps its name and may take its claim back at once,
-// while a second replica has a different name and is refused.
+// Two writers replaying one stream from different offsets eventually apply an
+// older version of a record after a newer one, and idempotence does not save
+// that: an upsert of the older version is a regression. They agree only once
+// both reach the end of the log, so at any moment in between — the moment of a
+// failover included — the target can hold stale values.
 func (g *Guard) concurrentWith(existing Claim, now time.Time, endpoint string) *Conflict {
 	if existing.TaskID != g.TaskID || existing.Owner == g.owner() {
 		return nil
@@ -184,16 +166,13 @@ func IsConcurrent(err error) bool {
 	return errors.As(err, &conflict) && conflict.Concurrent
 }
 
-// IsBlocking reports whether a failure is a direction conflict that no amount of
-// retrying resolves, and so must stop the task rather than restart it.
+// IsBlocking reports whether a failure is a direction conflict that no amount
+// of retrying resolves, and so must stop the task rather than restart it.
 //
-// Everything else a guard can fail with is transient. The endpoint being
-// unreachable is the important one: reading a claim needs the very database the
-// outage took away, so a target that restarts fails the guard for as long as it
-// is down. Treating that as permanent stopped replication for good the first
-// time Osaka bounced — the opposite of what a claim on the target is for.
-//
-// A concurrent claim is transient too: it clears when the other process exits.
+// Everything else is transient, the unreachable endpoint most of all: reading a
+// claim needs the very database the outage took away, and treating that as
+// permanent stopped replication for good the first time Osaka bounced. A
+// concurrent claim clears when the other process exits.
 func IsBlocking(err error) bool {
 	var conflict *Conflict
 	return errors.As(err, &conflict) && !conflict.Concurrent
@@ -323,16 +302,10 @@ func (g *Guard) KeepAlive(ctx context.Context, onError func(error)) {
 	}
 }
 
-// Release discards this task's claims.
-//
-// It is called when a task stops on purpose, and it is what makes a planned
-// failover quick. Without it the claims sit there until they go stale, so an
-// operator who has stopped Tokyo → Osaka and wants to start Osaka → Tokyo is
-// refused for the length of the staleness window — a quarter of an hour of a
-// runbook spent waiting for a timeout rather than doing anything.
-//
-// A crash deliberately does not release them: a claim outliving a process that
-// died is the whole reason the heartbeat exists.
+// Release discards this task's claims, which is what makes a planned failover
+// quick: without it an operator switching Tokyo → Osaka round waits out the
+// staleness window. A crash deliberately does not release them — a claim
+// outliving the process that died is the whole reason the heartbeat exists.
 func (g *Guard) Release(ctx context.Context) error {
 	var firstErr error
 	for _, store := range []Store{g.Source, g.Target} {
@@ -356,16 +329,10 @@ type Warner interface {
 }
 
 // Hold acquires the claims, keeps them refreshed for as long as the context
-// lives, and returns the function that gives them up.
-//
-// Every engine did this itself, in fourteen identical lines each, and the parts
-// that are easy to get wrong were the parts being copied: the heartbeat has to
-// stop before the release, and the release needs a deadline that is not the
-// cancelled one. A syncer that skipped either would leave a claim behind and
-// refuse to start in the other direction until it went stale — a quarter of an
-// hour of a failover runbook spent waiting for a timeout.
-//
-// The returned function is safe to call more than once.
+// lives, and returns the function that gives them up. Every engine did this
+// itself, in fourteen identical lines each, and the parts that are easy to get
+// wrong were the parts being copied: the heartbeat has to stop before the
+// release, and the release needs a deadline that is not the cancelled one.
 func Hold(ctx context.Context, guard *Guard, log Warner, engine string) (release func(), err error) {
 	if err := guard.Acquire(ctx); err != nil {
 		return nil, err

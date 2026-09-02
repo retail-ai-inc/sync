@@ -19,14 +19,14 @@ import (
 
 // One shard's replication connection, and the disk behind it.
 //
-// The snapshot and the reader share this. The snapshot opens it — the handshake
-// is what pins the point the first copy is taken against — and the copy then runs
-// while the connection is already filling the buffer, so the source only has to
-// hold history for as long as the handshake, not for as long as the copy.
+// The snapshot and the reader share it. The snapshot opens it — the handshake
+// pins the point the first copy is taken against — and the copy then runs while
+// the connection is already filling the buffer, so the source need only hold
+// history for the handshake, not for the copy.
 //
 // Nothing on this side waits for the target. That separation is the reason to
-// relay at all: a target that is slow, restarting or unreachable cannot make the
-// source drop this replica and force a full resync.
+// relay at all: a target that is slow or unreachable cannot make the source drop
+// this replica and force a full resync.
 type link struct {
 	opts   StreamOptions
 	buffer *Buffer
@@ -51,14 +51,11 @@ type link struct {
 	// offset every few of them rather than every one.
 	lagTicks int
 
-	// applied is how far the target has been written, stored by the applier.
-	//
-	// It lives here so that it and durable can be published from one place at
-	// one instant. Publishing them separately, at the rates their own code
-	// happens to run at, makes their difference meaningless: the applier writes
-	// a batch every few tens of milliseconds and the pump reported once a
-	// second, so the applied offset routinely appeared *ahead* of the received
-	// one and the byte lag came out negative.
+	// applied is how far the target has been written, stored by the applier. It
+	// lives here so that it and durable are published from one place at one
+	// instant: published separately, at the rates their own code runs at, the
+	// applied offset routinely appeared ahead of the received one and the byte
+	// lag came out negative.
 	applied atomic.Int64
 
 	pumping   sync.WaitGroup
@@ -67,19 +64,17 @@ type link struct {
 	closeOnce sync.Once
 }
 
-// start opens the connection, positions it, and begins filling the buffer.
-//
-// It reports the position the stream now stands at. A zero position asks the
+// start opens the connection, positions it, and begins filling the buffer,
+// reporting the position the stream now stands at. A zero position asks the
 // source for everything, which is what pins the point a first copy is taken
-// against; a non-zero one asks it to continue.
+// against.
 //
-// The connection continues from the end of the disk, not from the position that
-// was applied. Those are two different clocks and confusing them corrupts the
-// buffer: the disk holds everything received, the position holds what has been
-// written to the target, and the second is always behind. Asking the source to
-// resume from the applied position makes it re-send bytes the disk already has,
-// and they get appended after the ones already there — the same commands twice,
-// at offsets that now mean nothing.
+// It continues from the end of the disk, not from the applied position. Those
+// are two clocks and confusing them corrupts the buffer: the disk holds
+// everything received, the position what reached the target, and the second is
+// always behind — so resuming from it re-sends bytes the disk already has and
+// appends them after the ones there, the same commands twice at offsets that
+// now mean nothing.
 func (l *link) start(ctx context.Context, from streamPosition) (streamPosition, error) {
 	resume := from
 	if !from.IsZero() {
@@ -129,12 +124,8 @@ func (l *link) start(ctx context.Context, from streamPosition) (streamPosition, 
 
 	case agreed.Full:
 		// The source would not continue from where this task had reached: its
-		// backlog no longer covers the gap.
-		//
-		// Emptying the target and copying everything again is the one thing not
-		// to do here. It is a window with no disaster recovery copy at all,
-		// entered because of a network problem — so the task stops and says what
-		// it needs instead.
+		// backlog no longer covers the gap. Emptying the target and copying
+		// everything again is the one thing not to do here.
 		stream.Close()
 		return streamPosition{}, domain.Unrecoverable(
 			"the source will not resume shard %s from offset %d and offered to send "+
@@ -235,20 +226,9 @@ func (l *link) pump(ctx context.Context, stream *Stream) error {
 	}
 }
 
-// acknowledge reports the durable offset to the source once a second, whether or
-// not anything has arrived.
-//
-// It runs on its own goroutine, and that is the point. Acknowledging only after
-// receiving something looks equivalent and is not: a master that streams its data
-// set without a length cannot tell when the replica finished loading it, so it
-// waits for an acknowledgement before sending any commands. If the one sent
-// straight after the transfer arrives while the master is still finishing — and
-// whether it does is a race — the master then waits for the next one, the replica
-// waits for a command, and the two wait for each other for good.
-//
-// The symptom is a connection that is established, online in INFO replication,
-// and completely silent. It took a while to find, because it only happened
-// sometimes.
+// acknowledge reports the durable offset to the source once a second, whether
+// or not anything has arrived. It runs on its own goroutine, and that is the
+// point.
 func (l *link) acknowledge(ctx context.Context, stream *Stream) {
 	ticker := time.NewTicker(ackPeriod)
 	defer ticker.Stop()
@@ -328,13 +308,9 @@ func (l *link) close() {
 const sourceLagPeriod = 5
 
 // publishSourceLag reports how far the target is behind the source's own write
-// offset, which is the only lag that keeps growing while this process is stuck.
-//
-// The difference between what this process received and what it applied only
-// describes the part of the backlog it is already holding. A target that will
-// not take writes stops the applier, which stops the reader, which freezes both
-// of those numbers and their difference with them — measured against a blocked
-// target they sat at 0.4 MB while the true distance passed 21 MB.
+// offset, which is the only lag that keeps growing while this process is
+// stuck. The difference between what this process received and what it applied
+// only describes the part of the backlog it is already holding.
 func (l *link) publishSourceLag(ctx context.Context) {
 	if l.node == nil {
 		return

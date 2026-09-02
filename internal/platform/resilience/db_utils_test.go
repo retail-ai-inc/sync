@@ -67,7 +67,8 @@ func TestAFailureWaitingCannotFixIsNotRetried(t *testing.T) {
 
 // These are what the drivers say while a replica set elects a new primary or a
 // managed instance restarts for maintenance — the moments this tool exists to
-// survive.
+// survive. None of them matched the old substring list, so each was given up on
+// at the first attempt.
 func TestTheFailuresOfAFailoverAreRetried(t *testing.T) {
 	transient := []error{
 		errors.New("server selection error: context deadline exceeded"),

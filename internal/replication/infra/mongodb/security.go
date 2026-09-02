@@ -45,14 +45,10 @@ func (s *MongoDBSyncer) maskValue(collectionName string, value interface{}) inte
 	case bson.D:
 		// Unmarshalling into a bson.M gives nested documents as bson.M under the
 		// driver's v1 and as bson.D under its v2, so a change stream event's
-		// fullDocument arrives here in the second shape now. It used to fall
-		// through and be returned untouched — the masking a task had configured
-		// simply stopped happening, with nothing to show it, which is the worst
-		// way for a security setting to fail.
-		//
-		// The order of the fields is not preserved, which is what the bson.M
-		// case has always done: what a document holds is the same either way,
-		// and the comparison hashes it in a fixed order.
+		// fullDocument arrives here in the second shape now. It used to fall through
+		// and be returned untouched — the masking a task had configured simply
+		// stopped happening, with nothing to show it, which is the worst way for a
+		// security setting to fail.
 		document := make(map[string]interface{}, len(typed))
 		for _, element := range typed {
 			document[element.Key] = element.Value

@@ -1,17 +1,9 @@
 // Package metrics exposes what the syncer is doing in the Prometheus text
-// format.
-//
-// Until now the only things a running deployment reported were Slack messages
-// and a row-count table in SQLite, so there was no way to put a number on the
-// recovery point objective: how far behind the Osaka copy is at any moment,
-// whether it is falling further behind, and whether a task has stopped applying
-// anything at all. Those are the questions a disaster-recovery setup exists to
-// answer, and none of them could be graphed or alerted on.
-//
-// The exposition is written by hand rather than pulled in with a client
-// library. The format is a handful of lines, this needs four metric types
-// between them, and a control plane for a payment system is a poor place to add
-// a large dependency for that.
+// format. Until now the only things a running deployment reported were Slack
+// messages and a row-count table in SQLite, so there was no way to put a
+// number on the recovery point objective: how far behind the Osaka copy is at
+// any moment, whether it is falling further behind, and whether a task has
+// stopped applying anything at all.
 package metrics
 
 import (

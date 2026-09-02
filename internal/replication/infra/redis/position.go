@@ -25,22 +25,15 @@ type streamPosition struct {
 	// resync.
 	ReplID string `json:"replid"`
 	// Offset is where to resume reading the stream from, and what a slot with no
-	// marker of its own is taken to have applied up to.
-	//
-	// It only moves after a batch has landed in every slot it touched, which is
-	// what makes both of those readings safe: a batch that failed part way leaves
-	// it where it was, so the slots that did not land are read again rather than
-	// assumed.
+	// marker of its own is taken to have applied up to. It only moves after a
+	// batch has landed in every slot it touched, which is what makes both of
+	// those readings safe: a batch that failed part way leaves it where it was,
+	// so the slots that did not land are read again rather than assumed.
 	Offset int64 `json:"offset"`
-	// Phase is "value" while the stream is still inside the window the first
-	// copy was taken over, and "command" afterwards.
-	//
-	// The first copy is taken with SCAN, so it is not a point in time: a key read
-	// early may have changed before a key read late. Replaying commands over a
-	// smear like that would apply a change twice — an INCR from before the key
-	// was read, added again. So until the stream has passed the end of the copy,
-	// every change is applied by re-reading the key's value instead, which lands
-	// the same result however many times it happens.
+	// Phase is "value" while the stream is still inside the window the first copy
+	// was taken over, and "command" afterwards. The first copy is taken with
+	// SCAN, so it is not a point in time: a key read early may have changed
+	// before a key read late.
 	Phase string `json:"phase,omitempty"`
 	// ValueUntil is the offset the copy finished at, and so where the value
 	// phase ends.
@@ -87,13 +80,8 @@ func metaKey(taskID int, shard string) string {
 	return "__sync:pos:" + strconv.Itoa(taskID) + ":" + shard
 }
 
-// Checkpoints is the position store for one shard's stream.
-//
-// Two things are written down, and the difference between them matters. The
-// per-slot markers are committed with the data, so they are the only record that
-// cannot disagree with what is on the target; they say what to skip. The metadata
-// holds a single floor to resume from, advanced only after a batch has landed
-// outright, so it is never ahead of the truth.
+// Checkpoints is the position store for one shard's stream. Two things are
+// written down, and the difference between them matters.
 type Checkpoints struct {
 	Target goredis.UniversalClient
 	TaskID int
@@ -107,16 +95,8 @@ type Checkpoints struct {
 }
 
 // Load reads the metadata and the slot markers, and reports where to resume.
-//
-// The resume point is the offset in the metadata, which is advanced only after a
-// batch has landed in every slot it touched. That makes it a floor that is never
-// ahead of the truth: if the write of it was lost, or a batch failed part way and
-// the process died, it still points at or before the last fully applied batch.
-//
-// Reading from there re-delivers work to slots that are further ahead, and the
-// markers are what let those slots skip it. The markers cannot serve as the
-// resume point themselves — a slot written once and never again would hold it at
-// that moment for ever.
+// The resume point is the offset in the metadata, which is advanced only after
+// a batch has landed in every slot it touched.
 func (c *Checkpoints) Load(ctx context.Context, _ string) (string, error) {
 	payload, err := c.Target.Get(ctx, metaKey(c.TaskID, c.Shard)).Result()
 	if err == goredis.Nil {
@@ -174,13 +154,8 @@ func (c *Checkpoints) readMarkers(ctx context.Context, start int64) ([]int64, er
 	return markers, nil
 }
 
-// Save writes the metadata.
-//
-// This is the resume floor, and it is only ever written after a batch has landed
-// in every slot it touched. Advancing it while a slot still held unapplied
-// commands would let those commands be skipped for good, because a slot with no
-// marker of its own is taken to be applied up to this offset — which is only
-// true if every batch before it succeeded outright.
+// Save writes the metadata. This is the resume floor, and it is only ever
+// written after a batch has landed in every slot it touched.
 func (c *Checkpoints) Save(ctx context.Context, _, payload string) error {
 	position, err := decodePosition(payload)
 	if err != nil {
@@ -203,19 +178,9 @@ func (c *Checkpoints) Save(ctx context.Context, _, payload string) error {
 }
 
 // Refresh forgets the in-memory slot markers so the next batch reads them from
-// the target again.
-//
-// The markers are advanced in memory as each slot lands, which is what lets a
-// batch that failed part way be re-applied without repeating the slots that
-// did land. That reasoning holds only while a failure means the write did not
-// happen. A timeout does not mean that: the transaction can land on the target
-// and the reply be lost, leaving the target ahead of what this process believes
-// it wrote. Replaying then repeats a command that is not idempotent — measured
-// as an RPUSH landing three times too often under packet loss.
-//
-// The target holds the truth, because the marker is written in the same
-// transaction as the data. Re-reading it is what a task restart always did, and
-// is what makes retrying in place as safe as restarting.
+// the target again. The markers are advanced in memory as each slot lands,
+// which is what lets a batch that failed part way be re-applied without
+// repeating the slots that did land.
 func (c *Checkpoints) Refresh(ctx context.Context) error {
 	c.mu.Lock()
 	c.loaded = false

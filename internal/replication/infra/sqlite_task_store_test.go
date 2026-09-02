@@ -341,10 +341,9 @@ func TestSetEnableReplacesACorruptDocument(t *testing.T) {
 	}
 }
 
-// It is valid JSON, so the unmarshal succeeded and left the map nil; the guard
-// only tested the error, so the assignment that followed panicked with
-// "assignment to entry in nil map" and the request died with a 500 and no
-// body.
+// A stored config_json of literal "null" is valid JSON, so the unmarshal
+// succeeded and left the map nil. The guard only tested the error, so the next
+// assignment panicked with "assignment to entry in nil map".
 func TestANullDocumentDoesNotPanic(t *testing.T) {
 	db := useTempTaskDB(t)
 	id := insertTask(t, db, 0, `null`)
@@ -365,9 +364,10 @@ func TestSetEnableOnAnUnknownID(t *testing.T) {
 	}
 }
 
+// TestSetEnableTagsWhatWentWrong covers the one message an operator gets back.
 // This call returned the driver's error untagged while every other call in the
-// package carries the stage, so "the table is missing", "the row is missing"
-// and "the database is locked" all came out as "start fail".
+// package carries the stage, so "the table is missing", "the row is missing" and
+// "the database is locked" all came out as "start fail".
 func TestSetEnableTagsWhatWentWrong(t *testing.T) {
 	emptyTaskDB(t)
 
@@ -555,8 +555,9 @@ func TestTodayTableStatsReportsAMissingTable(t *testing.T) {
 	}
 }
 
-// It used to be logged and dropped, so the table simply did not appear in the
-// answer — and a table with no traffic and a table whose rows cannot be read
+// TestARowThatWillNotScanIsReported covers a monitoring row whose counts are
+// text. It used to be logged and dropped, so the table simply did not appear in
+// the answer — and a table with no traffic and a table whose rows cannot be read
 // look the same from outside.
 func TestARowThatWillNotScanIsReported(t *testing.T) {
 	db := useTempTaskDB(t)

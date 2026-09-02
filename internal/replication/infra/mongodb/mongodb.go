@@ -58,14 +58,7 @@ type MongoDBSyncer struct {
 	faults chan error
 }
 
-// NewMongoDBSyncer builds the syncer for one task.
-//
-// It never returns nil. It used to, for a connection string the driver would
-// not parse — and the caller then called Start on that nil pointer, which
-// dereferences it. The panic happened in the goroutine one task runs in, where
-// nothing recovers it, so one mistyped URI took down every other task and the
-// API with it. A syncer that could not connect is returned carrying the reason
-// instead, and Start reports it.
+// NewMongoDBSyncer builds the syncer for one task. It never returns nil.
 func NewMongoDBSyncer(cfg config.SyncConfig, globalConfig *config.Config, logger *logrus.Logger) *MongoDBSyncer {
 	ctx := context.Background()
 
@@ -282,18 +275,7 @@ func (s *MongoDBSyncer) copyIndexes(ctx context.Context, sourceColl, targetColl 
 }
 
 // indexKeyOf reads an index's key specification, whatever shape the driver
-// decoded it into.
-//
-// The shape is not something to rely on. Asked to decode a document into an
-// interface, the driver's v1 gave a bson.M here and its v2 gives a bson.D — and
-// the code that assumed the map silently stopped copying every index, logging
-// one line per index about a format it did not recognise. Index copying is the
-// difference between a failover target that serves and one that answers too
-// slowly to be used, so it should not turn on a type assertion.
-//
-// Key order matters: a compound index on (a, b) is not the index on (b, a). A
-// bson.D keeps it and a bson.M does not, which is one more reason to read the
-// ordered form when there is one.
+// decoded it into. The shape is not something to rely on.
 func indexKeyOf(key interface{}) (bson.D, bool) {
 	direction := func(v interface{}) interface{} {
 		switch typed := v.(type) {

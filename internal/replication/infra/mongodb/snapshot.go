@@ -10,13 +10,9 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
-// clusterTime reports the source's current cluster time.
-//
-// It is read before the snapshot copies a document, and the change stream is
-// started from it afterwards. Starting the stream after the copy instead —
-// which is what happens with no start point at all — loses every write made
-// while the copy was running, and a first copy of a payment collection runs
-// for as long as it runs.
+// clusterTime reports the source's current cluster time. It is read before the
+// snapshot copies a document, and the change stream is started from it
+// afterwards.
 func (s *MongoDBSyncer) clusterTime(ctx context.Context) (bson.Timestamp, error) {
 	raw, err := s.sourceClient.Database("admin").
 		RunCommand(ctx, bson.D{{Key: "hello", Value: 1}}).Raw()
@@ -112,13 +108,10 @@ func (s *MongoDBSyncer) doInitialSync(ctx context.Context, sourceColl, targetCol
 	return nil
 }
 
-// copyBatch writes one batch of the snapshot.
-//
-// The writes are upserts rather than inserts because a copy that is interrupted
-// and resumed re-reads documents it already wrote, and because the change
-// stream that resumes from the pinned cluster time replays the writes made
-// while the copy was running. Neither may fail on a document that is already
-// there.
+// copyBatch writes one batch of the snapshot. The writes are upserts rather
+// than inserts because a copy that is interrupted and resumed re-reads
+// documents it already wrote, and because the change stream that resumes from
+// the pinned cluster time replays the writes made while the copy was running.
 func (s *MongoDBSyncer) copyBatch(ctx context.Context, targetColl *mongo.Collection, batch []bson.M, targetDB string, address documentAddress) (int, error) {
 	models := make([]mongo.WriteModel, 0, len(batch))
 	for _, doc := range batch {

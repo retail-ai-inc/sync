@@ -13,13 +13,10 @@ import (
 )
 
 // UploadGCS copies a local file to a GCS path with the system gsutil command,
-// then reads the object back and checks its size against the local file.
-//
-// The exit code used to be the only signal, so an archive that arrived
-// truncated — or a local file that was not there at all — was recorded as a
-// successful upload. For a disaster-recovery copy that means the backup list is
-// not a list of things that can be restored, which is the one property it is
-// kept for.
+// then reads the object back and checks its size against the local file. The
+// exit code used to be the only signal, so an archive that arrived truncated —
+// or a local file that was not there at all — was recorded as a successful
+// upload.
 func UploadGCS(ctx context.Context, localFile, gcsPath string) error {
 	local, err := os.Stat(localFile)
 	if err != nil {

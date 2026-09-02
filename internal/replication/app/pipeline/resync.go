@@ -8,29 +8,9 @@ import (
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
 )
 
-// Re-copying one object without stopping the rest.
-//
-// Sooner or later a collection or a table is found not to match — a bug, a
-// botched migration, a stretch of stream lost before the guarantees below were
-// in place. The only remedy used to be clearing the checkpoint, which throws
-// away the position for everything and re-copies the lot. On a payment database
-// that is hours during which the target is further behind, not closer.
-//
-// This re-copies one object while the stream keeps running. Debezium does the
-// same thing with a pair of watermarks around each chunk and a set of keys to
-// subtract; this takes a simpler route that the single ordered queue makes
-// available.
-//
-// The hazard is one thing only: a chunk read at source time T, applied before a
-// change the source made *before* T that the stream has not delivered yet. That
-// change is older than the chunk, so applying it afterwards puts the record back
-// as it was — a silent regression, in the middle of a repair.
-//
-// The fix is to hold the chunk until the stream has been read past T. Then every
-// change older than the chunk is already ahead of it in the queue and is applied
-// first, and everything newer arrives behind it and wins, which is what it
-// should do. No key bookkeeping, and nothing to get wrong when a chunk is
-// retried.
+// Re-copying one object without stopping the rest. Sooner or later a
+// collection or a table is found not to match — a bug, a botched migration, a
+// stretch of stream lost before the guarantees below were in place.
 
 type Chunk struct {
 	// Events are the records, as upserts the applier can write.

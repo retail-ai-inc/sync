@@ -12,20 +12,9 @@ import (
 	"strings"
 )
 
-// Passwords were stored as the operator typed them, and checked with ==.
-//
-// A copy of the production database confirms it: the admin row holds sixteen
-// printable characters, not a hash. Anyone who can read that file — from a GCS
-// backup, from the container volume, from the host — has working credentials for
-// the tool that holds the connection strings for both regions' payment
-// databases. The == comparison also runs in a time that depends on how much of
-// the password matched.
-//
-// Stored passwords are now PBKDF2-HMAC-SHA256 with a random salt. A value that
-// is not in that form is treated as a password stored in the clear, so existing
-// rows go on working, and the next successful login rewrites it as a hash: no
-// migration step, no password reset, and the cleartext leaves the file the first
-// time each account is used.
+// Passwords were stored as the operator typed them, and checked with ==. A
+// copy of the production database confirms it: the admin row holds sixteen
+// printable characters, not a hash.
 
 const (
 	// hashPrefix marks a stored value as hashed, so a plaintext row from before
@@ -79,12 +68,9 @@ func HashPassword(password string) (string, error) {
 }
 
 // PasswordMatches reports whether an offered password matches what is stored,
-// and whether the stored form should be replaced with a hash.
-//
-// A stored value that is not a hash is compared as plaintext, because that is
-// what rows written before this existed hold. The comparison is constant-time
-// either way: == returns as soon as two bytes differ, which tells a caller how
-// much of its guess was right.
+// and whether the stored form should be replaced with a hash. A stored value
+// that is not a hash is compared as plaintext, because that is what rows
+// written before this existed hold.
 func PasswordMatches(stored, offered string) (matches, needsRehash bool) {
 	if !strings.HasPrefix(stored, hashPrefix+"$") {
 		return subtle.ConstantTimeCompare([]byte(stored), []byte(offered)) == 1, true

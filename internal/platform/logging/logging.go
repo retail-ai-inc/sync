@@ -93,13 +93,10 @@ func getLogLevel(level string) logrus.Level {
 	}
 }
 
-// SQLiteHook writes log lines into the control database.
-//
-// It used to open and close a database connection for every line, which at the
-// info level is one SQLite open per log entry, and it answered every failure
-// with nil — so the rows could stop being written for good with nothing to show
-// it. The connection is now opened once and kept, and a failure is reported to
-// logrus once per outage rather than never or once per line.
+// SQLiteHook writes log lines into the control database. It used to open and
+// close a database connection for every line, which at the info level is one
+// SQLite open per log entry, and it answered every failure with nil — so the
+// rows could stop being written for good with nothing to show it.
 type SQLiteHook struct {
 	formatter *CustomTextFormatter
 

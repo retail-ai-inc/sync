@@ -15,16 +15,8 @@ import (
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
 )
 
-// The replication protocol, spoken from the replica's side.
-//
-// This is what makes the relay a replica rather than a client watching for
-// changes. Keyspace notifications, the obvious alternative, are published with
-// no acknowledgement, no replay and no position: a subscriber that misses a
-// window has no way to learn what it missed. The replication stream has all
-// three, and the commands in it have already been rewritten by the master into
-// deterministic form — SPOP arrives as SREM of the member that was actually
-// removed, EXPIRE as PEXPIREAT of an absolute time — so what arrives is what
-// the master's own replicas apply.
+// The replication protocol, spoken from the replica's side. This is what makes
+// the relay a replica rather than a client watching for changes.
 
 // Point is a position in a master's replication stream.
 //
@@ -249,17 +241,8 @@ func (s *Stream) Sync(from Point) (Handshake, error) {
 	return Handshake{}, fmt.Errorf("the source answered PSYNC with %q", reply)
 }
 
-// SkipRDB consumes the data set a full resync sends, discarding it.
-//
-// Nothing here parses it. The format changes with almost every Redis release —
-// new encodings for hashes, lists, streams and the bundled module types — and a
-// parser that has to keep up with them is a parser that silently misreads the
-// day it falls behind. The first copy is taken with SCAN and DUMP instead, which
-// speaks only stable commands, and the fuzziness that introduces is resolved by
-// repairing keys by value until the stream has passed it.
-//
-// The bytes still have to be read: they are on the wire, and the command stream
-// is behind them. They do not count towards the offset.
+// SkipRDB consumes the data set a full resync sends, discarding it. Nothing
+// here parses it.
 func (s *Stream) SkipRDB(ctx context.Context) (int64, error) {
 	for {
 		line, err := s.readLine()
@@ -437,13 +420,9 @@ func (s *Stream) Next(ctx context.Context) (*Command, error) {
 
 func (s *Stream) Offset() int64 { return s.offset }
 
-// Ack reports an offset back to the master.
-//
-// A real replica sends this every second, and the master uses it for WAIT, for
-// min-replicas-to-write and for choosing which replica to promote. The offset
-// reported here is the one written to the buffer rather than the one applied to
-// the target: once it is on disk it will be applied, and reporting less would
-// let the master purge history this relay still needs.
+// Ack reports an offset back to the master. A real replica sends this every
+// second, and the master uses it for WAIT, for min-replicas-to-write and for
+// choosing which replica to promote.
 func (s *Stream) Ack(offset int64) error {
 	s.writing.Lock()
 	defer s.writing.Unlock()

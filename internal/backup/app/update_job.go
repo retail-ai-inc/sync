@@ -27,14 +27,10 @@ func CreateJob(req domain.Request) (id int64, name, status string, err error) {
 	return newID, req.Name, status, nil
 }
 
-// UpdateJob replaces a job's configuration.
-//
-// The status and, when the request omits it, the name are carried over from the
-// stored document; everything else comes from the request, because an update
-// replaces the configuration rather than merging into it. A request that leaves
-// out the rest is refused rather than stored — it used to empty the database
-// connection, the destination, the format and the compression, and the job then
-// backed up nothing.
+// UpdateJob replaces a job's configuration. The status and, when the request
+// omits it, the name are carried over from the stored document; everything
+// else comes from the request, because an update replaces the configuration
+// rather than merging into it.
 func UpdateJob(id string, req domain.Request) error {
 	if err := req.Complete(); err != nil {
 		return err

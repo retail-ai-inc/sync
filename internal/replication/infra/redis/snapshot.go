@@ -13,23 +13,8 @@ import (
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
 )
 
-// The first copy.
-//
-// The point is pinned before a key is read and recorded only once every key has
-// been read. Pinning afterwards would lose everything written while the copy
-// ran; recording it before the copy finished would let an interrupted copy resume
-// from a point it never reached.
-//
-// The copy itself is SCAN and DUMP rather than the data set the source offers
-// over the replication connection. That is a deliberate trade: the wire format
-// changes with almost every release — new encodings for hashes, lists, streams
-// and the module types Redis 8 brought into the core — and a parser that has to
-// keep up is one that misreads silently the day it falls behind. SCAN and DUMP
-// speak only stable commands.
-//
-// What it costs is that the copy is a smear rather than a point in time: a key
-// read early may have changed before a key read late. The reader resolves that by
-// applying changes by value until the stream has passed the end of the copy.
+// The first copy. The point is pinned before a key is read and recorded only
+// once every key has been read.
 
 type Snapshotter struct {
 	Link *link
@@ -143,14 +128,7 @@ func (s *Snapshotter) Copy(ctx context.Context) error {
 }
 
 // scanAll walks every key of a source, whether it is one server or a cluster.
-//
-// The callback is called one page at a time, never twice at once. That matters
-// because ForEachMaster runs its callback against every master in parallel, and
-// every caller here accumulates something across pages — a count, a list of
-// keys. Leaving the callers to discover that would mean each of them racing on
-// its own accumulator, and the symptom is not a crash but a scan that quietly
-// returns fewer keys than the server holds, which reads as data missing from the
-// source.
+// The callback is called one page at a time, never twice at once.
 func scanAll(ctx context.Context, client goredis.UniversalClient, batch int,
 	page func(keys []string) error) error {
 

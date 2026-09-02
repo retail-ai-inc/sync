@@ -327,10 +327,11 @@ func TestGetUsersHandlerReturnsThePage(t *testing.T) {
 	}
 }
 
-// It used to be replaced with the default without a word, so a caller asking
-// for page "abc" was served page 1 and had no way to tell — and the endpoint's
-// own parsing was also the only thing keeping the arithmetic away from a
-// negative index, which panicked.
+// TestGetUsersHandlerRefusesAPageThatIsNotOne covers a parameter that is not a
+// page. It used to be replaced with the default without a word, so a caller
+// asking for page "abc" was served page 1 and had no way to tell — and the
+// endpoint's own parsing was also the only thing keeping the arithmetic away
+// from a negative index, which panicked.
 func TestGetUsersHandlerRefusesAPageThatIsNotOne(t *testing.T) {
 	db := useTempDB(t)
 	insertUser(t, db, "a", "secret", "User", domain.AccessGuest)
@@ -392,9 +393,10 @@ func TestGetUsersHandlerPagesInTheDatabase(t *testing.T) {
 	}
 }
 
-// It used to be reported inside the body with an empty list at HTTP 200, so a
-// front end that checks the status showed an empty user table rather than a
-// failure.
+// TestGetUsersHandlerReportsAStoreFailureByStatus covers a directory that could
+// not be read. It used to be reported inside the body with an empty list at HTTP
+// 200, so a front end that checks the status showed an empty user table rather
+// than a failure.
 func TestGetUsersHandlerReportsAStoreFailureByStatus(t *testing.T) {
 	emptyIdentityDB(t)
 

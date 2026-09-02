@@ -17,11 +17,6 @@ import (
 // target database, so the copy has one shard's capacity and one shard's
 // throughput where the source had three — and the region it exists to stand in
 // for cannot be stood in for.
-//
-// Nothing here reshards anything. The target is made to match the source before
-// the copy runs, while the collection is still empty and sharding it costs
-// nothing. A target that is not a sharded cluster, or a source collection that
-// is not sharded, is left exactly as it is.
 
 type shardKey struct {
 	Key    bson.Raw
@@ -207,19 +202,13 @@ func alreadySharded(err error) bool {
 
 // ------------------------------------------------- addressing a document
 
-// A write to a sharded collection has to say which shard it is for.
-//
-// mongos routes by the shard key, so a filter that carries only the _id cannot
-// be routed: an updateOne or a deleteOne is broadcast to every shard, and an
-// upsert — which is what every write here is, because replication is replayed —
-// is refused outright with "could not extract exact shard key". A collection
+// A write to a sharded collection has to say which shard it is for.  mongos
+// routes by the shard key, so a filter that carries only the _id cannot be
+// routed: an updateOne or a deleteOne is broadcast to every shard, and an
+// upsert — which is what every write here is, because replication is replayed
+// — is refused outright with "could not extract exact shard key". A collection
 // sharded on anything other than its _id therefore stops replication on the
 // first document.
-//
-// The change stream gives the answer for free: documentKey is the _id plus the
-// shard key, which is exactly the filter the target needs. A copy read straight
-// from a collection has no such field, so the shard key is read once and the
-// values are taken out of each document.
 
 // documentAddress is how documents of one collection are addressed on the
 // target.

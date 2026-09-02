@@ -12,22 +12,9 @@ import (
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
 )
 
-// Writing a run of changes in one request rather than one per collection.
-//
-// A batch spans several collections — one stream carries them all, and a source
-// transaction that writes an order and its payment touches two. BulkWrite
-// addresses one collection, so such a batch cost one request per collection: the
-// measurement on a three-shard 8.0 cluster put it at 2.33 requests per batch,
-// against a 7 ms round trip and a 30 ms batch. Two thirds of the time a batch
-// took was waiting for the network.
-//
-// MongoDB 8.0 added a bulkWrite command that carries the namespace on each write
-// instead, so a whole run goes in one request whatever it touches. That is the
-// only reason the driver was taken to v2; this is where the reason is spent.
-//
-// A server that does not have the command is not an error worth stopping for.
-// The applier notices once and writes per collection from then on, which is what
-// it did before.
+// Writing a run of changes in one request rather than one per collection. A
+// batch spans several collections — one stream carries them all, and a source
+// transaction that writes an order and its payment touches two.
 
 // clientBulkSupport remembers that a target lacks the bulkWrite command, so the
 // fallback is chosen without another failed attempt.
@@ -56,20 +43,9 @@ func (a *Applier) writeRunAsOne(ctx context.Context, run []*domain.Event) (int, 
 		return 0, nil
 	}
 
-	// Ordered, because the order is the only one known to be correct.
-	//
-	// It used to be unordered, on the grounds that no document appears twice in
-	// a run so the server could apply them in any order. That reasoning holds
-	// for two changes to two documents and nothing else: two documents are not
-	// independent when a unique index relates them, and handing a unique value
-	// from one to another is an ordinary thing to do. Applied the wrong way
-	// round, the write that takes the value runs before the one that frees it —
-	// and because every write here is an upsert, the result is not an error but
-	// a document rewritten where it should have been inserted.
-	//
-	// The cost is that the server applies the batch in sequence rather than
-	// concurrently. It is not paid in round trips: a whole batch now goes in one
-	// request, where before it took one per run.
+	// Ordered, because the order is the only one known to be correct. It used to
+	// be unordered, on the grounds that no document appears twice in a run so the
+	// server could apply them in any order.
 	_, err := a.Client.BulkWrite(ctx, writes, options.ClientBulkWrite().SetOrdered(true))
 	if err != nil {
 		return 1, err

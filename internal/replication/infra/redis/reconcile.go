@@ -11,18 +11,8 @@ import (
 	"github.com/retail-ai-inc/sync/internal/platform/metrics"
 )
 
-// Comparing the two sides, on a timer.
-//
-// This is the backstop for everything else in this package being wrong. The
-// per-slot position, the offset arithmetic, the protocol handling — each is
-// tested, and none of them can prove there is no case nobody thought of. What
-// makes that survivable is that a difference is found and fixed by something
-// that does not share any of their assumptions: read both sides, compare, repair.
-//
-// It runs in both directions. A key the target is missing is the obvious
-// failure; a key only the target has is the quieter one, and worse after a
-// failover — a record nobody can explain, which no amount of comparing row counts
-// would have found.
+// Comparing the two sides, on a timer. This is the backstop for everything
+// else in this package being wrong.
 
 type Reconciler struct {
 	// Node is this shard's master on the source. Scanning the cluster client
@@ -179,13 +169,9 @@ func (r *Reconciler) compare(ctx context.Context, keys []string) (int, error) {
 		suspect = append(suspect, value.key)
 	}
 
-	// Look again before believing it.
-	//
-	// Both sides are moving: a key can change on the source between the two reads
-	// and differ for no reason other than the replication being in flight. On a
-	// live source that happens routinely, and a metric that reports a difference
-	// every time anybody writes anything is a metric nobody reads. A difference
-	// that is still there a moment later is a difference.
+	// Look again before believing it. Both sides are moving: a key can change on
+	// the source between the two reads and differ for no reason other than the
+	// replication being in flight.
 	differing, err := r.confirm(ctx, suspect)
 	if err != nil || len(differing) == 0 {
 		return 0, err
@@ -222,15 +208,11 @@ func (r *Reconciler) confirm(ctx context.Context, keys [][]byte) ([]*repairedVal
 	return r.differing(ctx, keys)
 }
 
-// differing reads both sides and reports the keys they disagree about, with the
-// source's value ready to write over the target's.
-//
-// The serialised value is compared rather than the value itself, because it is
-// one comparison for every type — a string, a hash with per-field expiries, a
-// stream, a module type. Two servers of the same version that were given the
-// same changes produce the same serialisation; if they ever do not, this reports
-// a difference that repairing does not settle, and the metric says so rather
-// than the difference going unseen.
+// differing reads both sides and reports the keys they disagree about, with
+// the source's value ready to write over the target's. The serialised value is
+// compared rather than the value itself, because it is one comparison for
+// every type — a string, a hash with per-field expiries, a stream, a module
+// type.
 func (r *Reconciler) differing(ctx context.Context, keys [][]byte) ([]*repairedValue, error) {
 	fromSource, err := readValues(ctx, r.Source, keys)
 	if err != nil {

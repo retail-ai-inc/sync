@@ -83,10 +83,8 @@ type Event struct {
 	// EndsTransaction marks the last event of a source transaction, and a batch
 	// may only be cut where it is true: a transaction split across two batches
 	// shows the target the order without its payment, permanently so if the
-	// failover lands in between.
-	//
-	// An engine that cannot tell where transactions end sets this on every
-	// event, making every event a legal cut point.
+	// failover lands in between. An engine that cannot tell where transactions
+	// end sets this on every event, making every event a legal cut point.
 	EndsTransaction bool
 
 	// Heartbeat marks an event the syncer produced itself. It proves the link
@@ -116,15 +114,9 @@ type Reader interface {
 // of inconsistency a failover cannot recover from and nobody can detect.
 type Applier interface {
 	// Apply writes one batch, given as runs that must be applied in order, and
-	// reports whether it also recorded pos in the same commit.
-	//
-	// Every run has to land as one atomic unit; committing them separately is
-	// no better than not batching. Within a run no record appears twice, so an
-	// applier may parallelise one — between runs it may not.
-	//
-	// An engine that can commit the position with the data returns true and the
-	// runner records nothing further. One that returns false gets at-least-once
-	// delivery, which is why Apply must be idempotent.
+	// reports whether it also recorded pos in the same commit. Every run has to
+	// land as one atomic unit; committing them separately is no better than not
+	// batching.
 	Apply(ctx context.Context, runs [][]*Event, pos Position) (committed bool, err error)
 }
 

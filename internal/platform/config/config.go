@@ -61,28 +61,16 @@ type SyncConfig struct {
 	PGPublicationNames     string
 	RedisPositionPath      string
 	// RedisReconcileInterval is how often the Redis keyspace is fully compared
-	// against the source.
-	//
-	// It is no longer the mechanism that makes the target correct — the
-	// replication stream is — but the backstop for that mechanism being wrong
-	// somewhere nobody thought of. It also finds keys the target has and the
-	// source does not, which nothing else looks for and which after a failover
-	// are records nobody can account for.
-	//
-	// Zero means the default; a negative value turns it off.
+	// against the source. It is no longer the mechanism that makes the target
+	// correct — the replication stream is — but the backstop for that mechanism
+	// being wrong somewhere nobody thought of.
 	RedisReconcileInterval time.Duration
 	Status                 string
 	TaskName               string
-	// Resync names the tables or collections to re-copy alongside the stream.
-	//
-	// A copy found not to match used to be repairable only by clearing the
-	// checkpoint, which throws away the position for everything and re-copies
-	// the lot — hours during which the target is further behind, not closer.
-	// Listing one object here re-copies that one while the rest keeps streaming.
-	//
-	// Editing it changes the task's fingerprint, which is what the supervisor
-	// already watches, so the edit is the trigger. Removing the name again stops
-	// the re-copy from being started on the next restart.
+	// Resync names the tables or collections to re-copy alongside the stream. A
+	// copy found not to match used to be repairable only by clearing the
+	// checkpoint, which throws away the position for everything and re-copies the
+	// lot — hours during which the target is further behind, not closer.
 	Resync []string
 	// RetentionWindow is how far back the source's log reaches, for a source
 	// that cannot be asked: a sharded MongoDB deployment, whose local database
@@ -173,13 +161,10 @@ type jsonMapping struct {
 	} `json:"tables"`
 }
 
-// NewConfig reads the stored configuration.
-//
-// Every failure used to be log.Fatalf, and the supervisor re-reads the
-// configuration every ten seconds: one unreadable read — a locked SQLite file,
-// a moment of disk trouble — took the whole process down, replication and
-// control plane together. A disaster-recovery component cannot be that brittle,
-// so the failure is reported and the caller decides.
+// NewConfig reads the stored configuration. Every failure used to be
+// log.Fatalf, and the supervisor re-reads the configuration every ten seconds:
+// one unreadable read — a locked SQLite file, a moment of disk trouble — took
+// the whole process down, replication and control plane together.
 func NewConfig() (*Config, error) {
 	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {

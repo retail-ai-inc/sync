@@ -1,14 +1,6 @@
-// Package secret encrypts the credentials the configuration database holds.
-//
-// A replication task stores the connection settings for both of its databases,
-// passwords included, as JSON in a SQLite file. Masking them on the way out of
-// the API — which is done — does nothing about that file: anybody who can read
-// it has the credentials for both regions' payment databases. A backup, a volume
-// snapshot, or one `cat` inside the pod is enough.
-//
-// The values are sealed with AES-256-GCM under a key supplied out of band. It is
-// deliberately not stored anywhere near the file it protects: the point is that
-// having the file is not enough.
+// Package secret encrypts the credentials the configuration database holds. A
+// replication task stores the connection settings for both of its databases,
+// passwords included, as JSON in a SQLite file.
 package secret
 
 import (
@@ -54,12 +46,8 @@ func init() {
 func Configured() bool { return Default != nil }
 
 // KeeperFromEnv builds a keeper from SYNC_CONFIG_KEY, reporting nil when the
-// variable is unset.
-//
-// The key may be given as base64 or hex and has to decode to 32 bytes, which is
-// what AES-256 takes. Anything else is refused rather than stretched into one:
-// a key derived from a short string would look like encryption and provide much
-// less of it.
+// variable is unset. The key may be given as base64 or hex and has to decode
+// to 32 bytes, which is what AES-256 takes.
 func KeeperFromEnv() (*Keeper, error) {
 	raw := strings.TrimSpace(os.Getenv("SYNC_CONFIG_KEY"))
 	if raw == "" {

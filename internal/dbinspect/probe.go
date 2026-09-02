@@ -149,13 +149,9 @@ func TestConnectionHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // sqlTables opens one connection, checks it answers, and reads a single column
-// of names out of it.
-//
-// The MySQL and PostgreSQL branches of the probe were the same twenty-five
-// lines twice over, differing in the driver, the DSN and one query. Keeping the
-// ping is the part that matters: sql.Open does not dial, so without it the probe
-// answers "connected" for an address nobody is listening on and an operator
-// saves a task that cannot replicate.
+// of names out of it. The MySQL and PostgreSQL branches of the probe were the
+// same twenty-five lines twice over, differing in the driver, the DSN and one
+// query.
 func sqlTables(driver, dsn, query string) ([]string, error) {
 	db, err := sql.Open(driver, dsn)
 	if err != nil {

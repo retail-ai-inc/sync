@@ -8,17 +8,11 @@ import (
 	goredis "github.com/redis/go-redis/v9"
 )
 
-// Copying a key by its value rather than by the command that changed it.
-//
-// DUMP and RESTORE are the whole mechanism, and the reason they are worth using
-// is that they treat the value as opaque: one code path serialises a string, a
+// Copying a key by its value rather than by the command that changed it. DUMP
+// and RESTORE are the whole mechanism, and the reason they are worth using is
+// that they treat the value as opaque: one code path serialises a string, a
 // hash with per-field expiries, a stream, or a module type, and RESTORE with
-// REPLACE lands the same result however many times it runs. That idempotence is
-// what makes this the safe way to apply a change when replaying a command is not.
-//
-// The cost is proportional to the key, not to the change: a field changed in a
-// large hash moves the whole hash. That is why steady state replays commands and
-// only the places that need idempotence use this.
+// REPLACE lands the same result however many times it runs.
 
 type repairedValue struct {
 	key []byte
@@ -29,13 +23,11 @@ type repairedValue struct {
 	ttl time.Duration
 }
 
-// readValues fetches the current value and remaining life of each key.
-//
-// The time left is used rather than an absolute expiry so that no third clock
+// readValues fetches the current value and remaining life of each key. The
+// time left is used rather than an absolute expiry so that no third clock
 // enters into it: an absolute time computed here would carry this process's
-// clock skew into the target's data, while a duration lands on the target's own
-// clock and is only late by the time the copy took. That is the same lateness a
-// real replica has.
+// clock skew into the target's data, while a duration lands on the target's
+// own clock and is only late by the time the copy took.
 func readValues(ctx context.Context, source goredis.UniversalClient,
 	keys [][]byte) ([]*repairedValue, error) {
 

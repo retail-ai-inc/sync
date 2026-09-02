@@ -15,21 +15,15 @@ import (
 )
 
 // Applier writes one batch to a MySQL target in a single transaction, and
-// records the position in that same transaction.
+// records the position in that same transaction, the way MySQL's own replica
+// keeps mysql.slave_relay_log_info honest: a crash cannot leave the position
+// claiming more than the data holds. Committing them separately means every
+// unclean stop replays the difference, which is safe only where the writes are
+// idempotent — and on a table with no primary key they are not.
 //
-// Committing the two together is what MySQL's own replica does: the applier
-// position lives in the InnoDB table mysql.slave_relay_log_info and is updated
-// as part of the transaction that applies the rows, so a crash cannot leave the
-// position claiming more than the data holds. The alternative — which this
-// replaced — commits the data on one connection and the position on another
-// every couple of hundred milliseconds, so every unclean stop replays the
-// difference. Replaying is safe only because the writes are idempotent, and on a
-// table with no primary key they are not idempotent at all.
-//
-// One transaction for the whole batch also gives the batch the property the
-// design depends on: until it commits, no reader on the target sees any of it,
-// and if it fails none of it happened. A batch applied in pieces would leave the
-// target in a state the source was never in.
+// One transaction per batch is also what gives the batch its property: until it
+// commits no reader on the target sees any of it, and if it fails none of it
+// happened.
 type Applier struct {
 	DB *sql.DB
 	// Checkpoints records the position. When it is nil the runner records the

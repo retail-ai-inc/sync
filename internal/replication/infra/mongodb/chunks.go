@@ -14,12 +14,10 @@ import (
 )
 
 // Chunks reads a collection in _id order, for a re-copy that runs alongside the
-// stream.
-//
-// It reads inside a session so the read's own operation time can be taken from
-// the server rather than guessed from this machine's clock. That timestamp is
-// what the pipeline holds the chunk against: until the stream has been read past
-// it, applying the chunk could put a record back to an older value.
+// stream. It reads inside a session so the read's operation time comes from the
+// server rather than this machine's clock: the pipeline holds each chunk against
+// that timestamp, because applying it before the stream has been read past it
+// could put a record back to an older value.
 type Chunks struct {
 	Client *mongo.Client
 	// Database is the source database.

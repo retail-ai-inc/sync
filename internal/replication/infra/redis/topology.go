@@ -11,18 +11,8 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// Watching the source's shape.
-//
-// This exists for one failure that nothing else in the design catches. When a
-// slot is moved between shards, the keys in it are deleted from one master and
-// restored on another, and each of those reaches the relay down a different
-// connection. The two connections have no ordering between them, so the delete
-// can be applied after the restore — and the key is then gone from the target
-// while the source still has it. Nothing about that is loud: the counts do not
-// change, no command fails, and the key is simply missing.
-//
-// So the shape is watched, and a change to it triggers a comparison rather than
-// being trusted to come out right.
+// Watching the source's shape. This exists for one failure that nothing else
+// in the design catches.
 
 type topologyWatcher struct {
 	Source goredis.UniversalClient

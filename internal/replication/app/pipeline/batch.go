@@ -1,10 +1,8 @@
-// Package pipeline is the one replication loop every engine runs.
-//
-// It reads a single stream, groups events into batches, applies each batch
-// atomically and records where it got to. What each engine supplies is a
-// Reader, an Applier and a Snapshotter; the rules that have to be exactly right
-// — where a batch may be cut, what may be reordered within one, when the
-// position moves — live here, once.
+// Package pipeline is the one replication loop every engine runs. It reads a
+// single stream, groups events into batches, applies each batch atomically and
+// records where it got to. The rules that have to be exactly right — where a
+// batch may be cut, what may be reordered within one, when the position moves —
+// live here, once.
 package pipeline
 
 import (
@@ -18,11 +16,6 @@ type Limits struct {
 	MaxBytes int
 	// MaxTransactionEvents is the point at which a single source transaction is
 	// refused rather than buffered further. Zero means the default.
-	//
-	// A batch may not be cut inside a source transaction, so a transaction
-	// larger than memory would otherwise take the process down. Refusing says
-	// what happened and leaves the operator a knob; an out-of-memory kill in the
-	// middle of applying a payment batch does neither.
 	MaxTransactionEvents int
 }
 
@@ -65,16 +58,10 @@ func (b *batch) add(e *domain.Event) {
 
 func (b *batch) len() int { return len(b.events) }
 
-// cuttable reports whether the batch may be applied as it stands.
-//
-// It may not be cut in the middle of a source transaction. A transaction split
-// across two batches leaves the target holding part of it — the order without
-// its payment — for as long as the second batch takes, and permanently if the
-// first batch is the last thing applied before a failover. That state never
-// existed at the source, so nothing downstream is written to cope with it.
-//
-// This is the rule AWS DMS spells BatchApplyPreserveTransaction, and its default
-// is on for the same reason.
+// cuttable reports whether the batch may be applied as it stands. It may not be
+// cut in the middle of a source transaction: that leaves the target holding the
+// order without its payment, permanently if the failover lands in between. AWS
+// DMS spells the same rule BatchApplyPreserveTransaction, and defaults it on.
 func (b *batch) cuttable() bool {
 	if len(b.events) == 0 {
 		return false
@@ -110,14 +97,10 @@ func (b *batch) take() []*domain.Event {
 	return events
 }
 
-// standsAlone reports whether an event has to be the only one in its batch.
-//
-// A schema change cannot share a batch with rows. On MongoDB it cannot run
-// inside a transaction at all — the catalogue is not transactional — so a batch
-// holding both could not be applied atomically, and applying the two halves
-// separately is exactly the torn batch the design forbids. On MySQL a DDL
-// commits implicitly, which has the same effect. Giving it a batch of its own
-// makes both engines honest about it.
+// standsAlone reports whether an event has to be the only one in its batch. A
+// schema change cannot share one with rows: MongoDB's catalogue is not
+// transactional and a MySQL DDL commits implicitly, so a batch holding both
+// could not be applied atomically.
 func standsAlone(e *domain.Event) bool {
 	return e != nil && e.Op == domain.OpSchema
 }
@@ -144,15 +127,11 @@ func runKey(e *domain.Event) (string, bool) {
 }
 
 // orderedRuns splits a batch into groups that may each be applied in any order
-// internally, while the groups themselves are applied in sequence.
-//
-// Two events touching the same record have to be applied in the order they were
-// read: an insert followed by a delete leaves nothing behind, and the same two
-// applied the other way round leave the row there. Within one run no record
-// appears twice, so the applier is free to parallelise it — which is exactly the
-// rule a MongoDB secondary applies when it hands an oplog batch to its writer
-// threads: operations on one document go to one thread, everything else may go
-// wide.
+// internally, while the groups themselves are applied in sequence. Two events
+// touching the same record have to be applied in the order they were read: an
+// insert followed by a delete leaves nothing behind, and the same two the other
+// way round leave the row there. Within one run no record appears twice, which
+// is the rule a MongoDB secondary uses to hand an oplog batch to its writers.
 //
 // An event that names no record — a DDL statement — is a barrier: it gets a run
 // of its own and nothing after it may join a run that came before it.

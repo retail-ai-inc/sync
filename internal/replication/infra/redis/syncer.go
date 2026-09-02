@@ -23,14 +23,8 @@ import (
 	"github.com/retail-ai-inc/sync/internal/replication/infra/directionlock"
 )
 
-// One task, one pipeline per source shard.
-//
-// This is the one place the Redis flow differs in shape from MySQL and MongoDB.
-// Those have a single log for the whole server — one binlog, one change stream —
-// so one reader covers everything. A Redis cluster has a replication stream per
-// shard and no way to join them, so a task runs a pipeline for each: its own
-// connection, its own buffer, its own position. They are independent, and any one
-// of them failing for good stops the task.
+// One task, one pipeline per source shard. This is the one place the Redis
+// flow differs in shape from MySQL and MongoDB.
 
 type Syncer struct {
 	cfg    config.SyncConfig
@@ -131,13 +125,11 @@ type shard struct {
 	addr string
 }
 
-// sourceAddr is the address a single-server source is dialled at.
-//
-// It must be host:port and nothing else. dsn.Endpoint appends the database,
-// which is right for a log line and wrong for a dial: a standalone source with
-// a database configured stopped the task on every attempt with "lookup
-// tcp/6379/0: unknown port". A cluster never showed it, because there the
-// addresses come from CLUSTER SLOTS rather than from the configuration.
+// sourceAddr is the address a single-server source is dialled at. It must be
+// host:port and nothing else. dsn.Endpoint appends the database, which is
+// right for a log line and wrong for a dial: a standalone source with a
+// database configured stopped the task on every attempt with "lookup
+// tcp/6379/0: unknown port".
 func (s *Syncer) sourceAddr() string {
 	return dsn.HostPort("redis", s.cfg.SourceConnection)
 }
@@ -350,13 +342,8 @@ func (s *Syncer) warnAboutUnreplicatedThings(ctx context.Context, source, target
 	}
 
 	// A source that starts its fork immediately never starts the command stream.
-	//
 	// Setting this to zero reads like an optimisation: do not wait five seconds
-	// to batch several replicas into one fork, just go. On Redis 8.10.1 the
-	// result is a master that accepts the replica, reports it online, and then
-	// sends nothing whatsoever — no commands, not even the periodic ping. The
-	// relay notices, because a silent source trips the idle timeout, but it
-	// notices a minute later and after every reconnection.
+	// to batch several replicas into one fork, just go.
 	if delay, err := source.ConfigGet(ctx, "repl-diskless-sync-delay").Result(); err == nil {
 		if delay["repl-diskless-sync-delay"] == "0" {
 			s.logger.Warnf("[Redis] The source has repl-diskless-sync-delay set to 0. " +

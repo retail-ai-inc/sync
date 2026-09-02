@@ -58,13 +58,10 @@ func repairEnabled() bool {
 }
 
 // StartConsistencyChecks compares each replicated table against its source on a
-// schedule, and reports what disagrees.
-//
-// Replication can only report what it applied. It cannot report what it never
-// read: an event dropped before the offset was written, a row written while a
-// subscription was reconnecting, a change somebody made on the replica by hand.
-// None of those surface as an error, and for a disaster-recovery copy of a
-// payment ledger "probably identical" is not something anyone can act on.
+// schedule, and reports what disagrees. Replication can only report what it
+// applied — never what it failed to read: an event dropped before the offset
+// was written, a row written during a reconnect, a change somebody made on the
+// replica by hand.
 func StartConsistencyChecks(ctx context.Context, cfg *config.Config, log *logrus.Logger) {
 	interval := verifyInterval()
 	if interval == 0 {

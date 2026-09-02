@@ -11,18 +11,8 @@ import (
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
 )
 
-// Schema changes reaching the target, which used not to happen at all.
-//
-// Indexes were copied once, by the initial snapshot, and never again. An index
-// added at the source afterwards therefore never existed on the target — and an
-// index is usually added because a query became too slow, so the moment the
-// target most needed it was exactly the moment it did not have it. A target that
-// answers correctly but too slowly to serve is as much an outage as one that has
-// lost rows, and it is harder to predict.
-//
-// MongoDB 6.0 and later report these changes on a change stream opened with
-// showExpandedEvents. What arrives is a description of what happened rather than
-// a statement to run, so each one is turned back into a command here.
+// Schema changes reaching the target, which used not to happen at all. Indexes
+// were copied once, by the initial snapshot, and never again.
 
 type schemaChange struct {
 	// Kind is the change stream's operationType.
@@ -197,13 +187,9 @@ func describeElements(description bson.RawValue) []bson.RawElement {
 	return elements
 }
 
-// applySchemaChange runs one schema change on the target.
-//
-// It runs outside a transaction because MongoDB's catalogue is not
-// transactional: a DDL inside one is refused. That is why a schema change gets a
-// batch of its own — a batch holding both a DDL and rows could not be applied
-// atomically, and applying the halves separately is the torn batch this design
-// exists to prevent.
+// applySchemaChange runs one schema change on the target. It runs outside a
+// transaction because MongoDB's catalogue is not transactional: a DDL inside
+// one is refused.
 func (a *Applier) applySchemaChange(ctx context.Context, event *domain.Event) error {
 	change, ok := event.Payload.(schemaChange)
 	if !ok {

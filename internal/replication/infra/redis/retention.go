@@ -12,18 +12,11 @@ import (
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
 )
 
-// How long this shard could stay stopped.
-//
-// The answer is the source's backlog divided by how fast it is being written:
-// a stopped task is bridged on restart by the history the source still holds,
-// and once that history has rolled past the recorded position the only way back
-// is copying the shard again.
-//
-// Note which window this is. The relay's own disk buffer is much larger, and it
-// is what covers a target that is briefly unavailable while the relay keeps
-// running. It covers nothing at all while the relay is stopped, because then
-// nothing is being written to it. Those are two different failures and the one
-// this metric answers for is the second.
+// How long this shard could stay stopped. The answer is the source's backlog
+// divided by how fast it is being written: a stopped task is bridged on
+// restart by the history the source still holds, and once that history has
+// rolled past the recorded position the only way back is copying the shard
+// again.
 
 func (r *Reader) Window(ctx context.Context) (time.Duration, error) {
 	if r.Configured > 0 {
@@ -64,13 +57,11 @@ func (r *Reader) backlog(ctx context.Context) (int64, error) {
 
 const backlogFreshFor = 5 * time.Minute
 
-// rate is how many stream bytes a second the source is producing, measured from
-// how far the relay has read between two calls.
-//
-// The first call cannot answer, and says so rather than guessing: a headroom
-// figure is read when somebody is deciding whether there is still time to
-// restart rather than re-copy, and a number invented from one sample is worse
-// than no number.
+// rate is how many stream bytes a second the source is producing, measured
+// from how far the relay has read between two calls. The first call cannot
+// answer, and says so rather than guessing: a headroom figure is read when
+// somebody is deciding whether there is still time to restart rather than re-
+// copy, and a number invented from one sample is worse than no number.
 func (r *Reader) rate() (float64, error) {
 	now := time.Now()
 	offset := r.Link.head()

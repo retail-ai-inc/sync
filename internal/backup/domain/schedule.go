@@ -68,13 +68,10 @@ func GenerateCrontabEntries(tasks []BackupTask, apiServer string) []string {
 	return entries
 }
 
-// NextBackupTime reports when a job with this cron expression runs next.
-//
-// It used to ignore the expression and answer "twenty-four hours from now"
-// whatever it said, so a job running every five minutes and one running monthly
-// showed the same time and neither was true. An expression that cannot be read
-// answers the empty string: the column is then empty rather than carrying a
-// confident wrong answer, and GenerateCrontabEntries reports the same job.
+// NextBackupTime reports when a job with this cron expression runs next. It
+// used to ignore the expression and answer "twenty-four hours from now"
+// whatever it said, so a job running every five minutes and one running
+// monthly showed the same time and neither was true.
 func NextBackupTime(cronExpr string) string {
 	schedule, err := ParseSchedule(cronExpr)
 	if err != nil {

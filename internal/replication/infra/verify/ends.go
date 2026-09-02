@@ -188,13 +188,12 @@ func canonical(v interface{}) string {
 		return "{" + strings.Join(parts, ",") + "}"
 
 	case bson.D:
-		// The driver's v2 decodes a nested document into a bson.D where its v1
-		// gave a bson.M. Without this case a subdocument fell to the default
-		// branch and was hashed by its printed form — which includes the order
-		// of its fields, so two identical documents whose subdocuments were
-		// written in a different order compared as different, for ever, and
-		// repair rewrote them on every pass. Rendered as the equivalent map so
-		// that a document hashes the same whichever shape it arrived in.
+		// The driver's v2 decodes a nested document into a bson.D where its v1 gave
+		// a bson.M. Without this case a subdocument fell to the default branch and
+		// was hashed by its printed form — which includes the order of its fields,
+		// so two identical documents whose subdocuments were written in a different
+		// order compared as different, for ever, and repair rewrote them on every
+		// pass.
 		asMap := make(bson.M, len(value))
 		for _, element := range value {
 			asMap[element.Key] = element.Value

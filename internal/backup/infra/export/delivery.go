@@ -23,22 +23,8 @@ func removeTemp(kind, path string) {
 }
 
 // compressAndUpload finishes an export: it compresses the file when asked to,
-// and uploads the result when the job names somewhere to upload it.
-//
-// It returns the path that was uploaded so the caller can clean up.
-//
-// Every export path had its own copy of these two steps, and the copies had
-// drifted: three of the four ran gsutil whether or not a bucket was configured,
-// against a destination of "/<name>.zip". That fails, so a job with a local-only
-// destination was reported as failed although the dump had been taken — and the
-// dump was then deleted along with the temporary directory. One copy, one rule:
-// no destination means no upload, and the export still succeeds.
-//
-// Whether to compress is the caller's decision rather than this function's,
-// because the two engines answer it differently: the MySQL paths honour the
-// job's compressionType and the MongoDB paths have always compressed
-// regardless. Changing that here would silently alter what lands in the bucket
-// for every MongoDB job that has compression turned off.
+// and uploads the result when the job names somewhere to upload it. It returns
+// the path that was uploaded so the caller can clean up.
 func (e *BackupExecutor) compressAndUpload(
 	ctx context.Context, tempDir, filePath, zipPath string, compress bool, config ExecutorBackupConfig,
 ) (uploadPath string, err error) {

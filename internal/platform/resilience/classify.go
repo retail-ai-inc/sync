@@ -21,10 +21,6 @@ import (
 // "server selection error", "no reachable servers", "topology is closed",
 // "Deadlock found when trying to get lock" — matched nothing at all and were
 // given up on at the first attempt.
-//
-// The order below is what makes it work: a failure that cannot be fixed by
-// waiting is recognised first, then the typed checks the drivers offer, and the
-// text scan is only the last resort.
 
 // permanentPhrases name failures that waiting cannot fix: the configuration is
 // wrong, the statement is wrong, or the credentials are wrong. Retrying these

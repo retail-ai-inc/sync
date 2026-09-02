@@ -23,20 +23,13 @@ import (
 // Applier writes one batch to a MongoDB target, by default inside a transaction
 // so the batch and its position land together or not at all.
 //
-// MongoDB gives atomicity for a single document and nothing wider without a
-// transaction. A batch applied as bare bulk writes therefore commits an
-// operation at a time: a failure part way through — and a partly failed
-// BulkWrite is an ordinary occurrence, not a crash — leaves the target holding
-// some of the batch. Because the events of one batch may touch several
-// collections in the order the source wrote them, what remains can be a state
-// the source was never in: the payment present and the order it belongs to
-// absent. Nothing downstream is written to cope with that, and a reconciliation
-// by document count does not see it.
-//
-// A secondary has this property for free. It applies an oplog batch in parallel
-// and holds its readable timestamp at the batch boundary, so no reader ever sees
-// the middle of one. A client cannot hold anybody's read timestamp; a
-// transaction is the only way it can say "these writes become visible together".
+// MongoDB gives atomicity for a single document and nothing wider. A partly
+// failed BulkWrite is ordinary rather than a crash, and because one batch may
+// touch several collections in source order, what remains can be a state the
+// source was never in — the payment present, its order absent. A comparison by
+// document count does not see it. A secondary gets this free by holding its
+// readable timestamp at the batch boundary; a client cannot, so a transaction is
+// the only way to say "these writes become visible together".
 type Applier struct {
 	Client *mongo.Client
 	// TargetDatabase is the database the events are written to.
@@ -50,14 +43,11 @@ type Applier struct {
 	Logger        logrus.FieldLogger
 	Labels        metrics.Labels
 
-	// NoTransaction applies the batch as bare bulk writes.
-	//
-	// The zero value keeps the transaction, because the safe setting is the one
-	// an operator gets without knowing to ask for it. Turning it off is the
-	// trade AWS DMS spells BatchApplyEnabled: more throughput, and — in their
-	// words — temporary lapses in transactional integrity. On a sharded cluster
-	// a batch spanning shards is a two-phase commit, so the cost is real and
-	// worth measuring; the default is still the correct one.
+	// NoTransaction applies the batch as bare bulk writes. The zero value keeps
+	// the transaction, because the safe setting is the one an operator gets
+	// without knowing to ask for it. Turning it off is the trade AWS DMS spells
+	// BatchApplyEnabled: more throughput, and in their words temporary lapses in
+	// transactional integrity.
 	NoTransaction bool
 
 	// bulk remembers whether the target has the cross-collection bulkWrite
@@ -230,22 +220,14 @@ type collectionGroup struct {
 }
 
 // groupByCollection splits a run into consecutive stretches of one collection.
-//
 // BulkWrite addresses one collection, so a run spanning several needs one call
-// each, and the calls are made in sequence.
+// each, made in sequence.
 //
-// The stretches have to be consecutive. Gathering every change to a collection
-// into one group, wherever in the run it appeared, reorders the run: all of one
-// collection's writes go before all of another's. That was harmless while a run
-// held at most one change per document and the batch was split into runs that
-// separated them; it is not harmless now that a run is the whole batch, in the
-// order it was read. A payment and the order it belongs to live in different
-// collections, and which lands first is the difference between a target that
-// was never in a state the source was not.
-//
-// The cost is a request per stretch rather than per collection, and only where
-// a batch interleaves them. The path this feeds is itself the fallback, for a
-// target older than 8.0; a current one sends the whole run in one request.
+// Consecutive, not gathered: putting every change to a collection in one group
+// wherever it appeared would send all of one collection's writes before all of
+// another's. A payment and the order it belongs to live in different
+// collections, and which lands first decides whether the target is ever in a
+// state the source was not.
 func groupByCollection(run []*domain.Event) []collectionGroup {
 	var groups []collectionGroup
 
@@ -278,12 +260,9 @@ func (a *Applier) targetFor(source string) string {
 }
 
 // noTransaction reads the escape hatch from the environment.
-//
 // SYNC_MONGO_NO_TRANSACTION=1 applies batches as bare bulk writes. It exists
-// because on a sharded cluster a batch that spans shards is a two-phase commit,
-// and whether that cost is affordable is a measurement rather than an opinion.
-// The default is the safe one: an operator who has not measured gets the
-// guarantee, and one who has measured can trade it away deliberately.
+// because a batch spanning shards is a two-phase commit, and whether that cost
+// is affordable is a measurement rather than an opinion.
 func noTransaction() bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("SYNC_MONGO_NO_TRANSACTION"))) {
 	case "1", "true", "yes":
@@ -292,13 +271,11 @@ func noTransaction() bool {
 	return false
 }
 
-// describeNoTransaction reports what setting the escape hatch costs, or "" when
-// it is not set.
-//
-// Separate from noTransaction so it can be tested without a cluster, and said at
-// startup rather than left to whoever reads the code: the variable is read once,
-// deep in here, and a task started with it set looked exactly like a task
-// without it.
+// describeNoTransaction reports what setting the escape hatch costs, or ""
+// when it is not set. Separate from noTransaction so it can be tested without
+// a cluster, and said at startup rather than left to whoever reads the code:
+// the variable is read once, deep in here, and a task started with it set
+// looked exactly like a task without it.
 func describeNoTransaction(bare bool, taskID int) string {
 	if !bare {
 		return ""

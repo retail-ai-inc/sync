@@ -1,10 +1,8 @@
-// Package identityhttp adapts the identity use cases to HTTP.
-//
-// Every handler here keeps the request parsing and the response writing that it
-// has always done, down to the order in which the status code and the
-// Content-Type header are set — several handlers write the status first, which
-// makes the later Set a no-op, and that is observable. The decisions the
-// handlers used to make inline now live in the app layer.
+// Package identityhttp adapts the identity use cases to HTTP. Every handler
+// here keeps the request parsing and the response writing that it has always
+// done, down to the order in which the status code and the Content-Type header
+// are set — several handlers write the status first, which makes the later Set
+// a no-op, and that is observable.
 package identityhttp
 
 import (

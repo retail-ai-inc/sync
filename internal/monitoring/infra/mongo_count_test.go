@@ -112,9 +112,10 @@ func TestAConditionForAnotherTableIsIgnored(t *testing.T) {
 	}
 }
 
-// It used to be converted and the string dropped, and MongoDB does not match a
-// numeric filter against a text field — so an order id stored as text counted
-// zero rows, which reads as a replica that has lost everything.
+// TestTheEqualityOperatorMatchesEitherRepresentation covers a value that looks
+// like a number. It used to be converted and the string dropped, and MongoDB
+// does not match a numeric filter against a text field — so an order id stored
+// as text counted zero rows, which reads as a replica that has lost everything.
 func TestTheEqualityOperatorMatchesEitherRepresentation(t *testing.T) {
 	qc, out := loggingCounter(t)
 

@@ -23,12 +23,8 @@ type column struct {
 }
 
 // readTuple reads the columns a tuple carries, in the order the relation
-// declares them.
-//
-// A column pgoutput marks unchanged — 'u', a TOASTed value the server
-// deliberately did not resend — is left out rather than read as NULL. Writing
-// NULL for it is how a large text field that nobody touched was quietly emptied
-// on the target by an update to some other column of the same row.
+// declares them. A column pgoutput marks unchanged — 'u', a TOASTed value the
+// server deliberately did not resend — is left out rather than read as NULL.
 func readTuple(rel *pglogrepl.RelationMessageV2, cols []*pglogrepl.TupleDataColumn) ([]column, error) {
 	var present []column
 

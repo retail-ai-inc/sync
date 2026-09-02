@@ -44,13 +44,9 @@ func deny(w http.ResponseWriter, status int, message string) {
 	})
 }
 
-// RequireAuth rejects a request that does not carry a usable token.
-//
-// Before this existed, four handlers checked the Authorization header for
-// themselves and the other twenty-six did not. Anyone who could reach the port
-// could list every replication task — credentials included — create and delete
-// tasks, read schemas, drive the connection prober against arbitrary hosts, and
-// list the users.
+// RequireAuth rejects a request that does not carry a usable token. Before
+// this existed, four handlers checked the Authorization header for themselves
+// and the other twenty-six did not.
 func RequireAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		header := r.Header.Get("Authorization")

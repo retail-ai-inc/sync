@@ -9,17 +9,11 @@ import (
 )
 
 // The change stream statistics table has been written to for a year and has
-// never held anything but zeroes.
-//
-// The registry the collector read from — RegisterChangeStream and the functions
-// that update it — has no callers anywhere in the tree, so the map it keeps was
-// always empty: the collector asked for a task's streams, got nothing, wrote
-// nothing, and logged that it had stored the statistics. A copy of the
-// production database confirms it: thirty-three rows created in June 2025, every
-// counter still zero.
-//
-// The syncers do count what they apply, into the metrics registry, per task and
-// per collection. That is where these numbers come from now.
+// never held anything but zeroes. The registry the collector read from —
+// RegisterChangeStream and the functions that update it — has no callers
+// anywhere in the tree, so the map it keeps was always empty: the collector
+// asked for a task's streams, got nothing, wrote nothing, and logged that it
+// had stored the statistics.
 
 // changeStreamActivity reports what a task's collections have done, built from
 // the counters the replication side actually maintains.

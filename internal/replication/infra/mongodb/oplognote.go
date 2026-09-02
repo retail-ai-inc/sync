@@ -12,46 +12,17 @@ import (
 )
 
 // nudgeInterval is how often an idle sharded source is asked to advance its
-// oplog.
-//
-// It is the floor on replication latency for a cluster whose shards are not all
-// busy, so it wants to be short; every tick costs one no-op oplog entry per
-// shard, so it does not want to be shorter than the latency anyone will notice.
-// One second measured 999 ms end to end against 9,618 ms with no nudging.
+// oplog. It is the floor on replication latency for a cluster whose shards are
+// not all busy, so it wants to be short; every tick costs one no-op oplog
+// entry per shard, so it does not want to be shorter than the latency anyone
+// will notice.
 const nudgeInterval = time.Second
 
-// nudger keeps a sharded source's shards from going quiet.
-//
-// # Why this exists
-//
+// nudger keeps a sharded source's shards from going quiet.  # Why this exists
 // On a sharded cluster mongos merges one change stream per shard and must
 // return events in cluster-time order. It can only release an event stamped T
 // once *every* shard has reported oplog progress at or past T — otherwise a
-// later write on a quiet shard could turn out to belong before it. A shard with
-// no writes advances only through the server's periodic no-op writer, which
-// runs every periodicNoopIntervalSecs, 10 by default. So one quiet shard holds
-// every other shard's events for up to ten seconds.
-//
-// This is not a throughput problem and no amount of tuning inside the syncer
-// touches it: the events have not been handed out yet. Measured on a three-shard
-// cluster with the collection otherwise idle, a single document took 7.0–9.7
-// seconds to arrive; with the same cluster taking 200 writes/s spread over all
-// three shards it took 1.6 seconds.
-//
-// MongoDB's own guidance for change streams names two remedies: lower
-// periodicNoopIntervalSecs, or write no-op entries with appendOplogNote. The
-// first can only be set at startup, so it is a decision made when a cluster is
-// built and useless to a syncer pointed at one that already exists. The second
-// is a command any client can send, and mongos fans it out to every shard —
-// verified by watching all three shards' oplogs advance to the same timestamp
-// from one call.
-//
-// # What it costs
-//
-// One no-op oplog entry per shard per tick. That is a write to the source, which
-// a replication tool otherwise never makes, and it needs a role that allows
-// appendOplogNote. Where the credentials do not allow it the nudger says so once
-// and stops, leaving replication working at the latency the cluster gives it.
+// later write on a quiet shard could turn out to belong before it.
 type nudger struct {
 	client   *mongo.Client
 	logger   logrus.FieldLogger
@@ -116,12 +87,8 @@ func (n *nudger) run() {
 }
 
 // nudge advances every shard's oplog once, and reports whether to keep going.
-//
 // A failure that is the credentials refusing the command will fail identically
-// for ever, so it stops rather than logging the same line every second. Anything
-// else — the cluster restarting, a network blip — is left to the next tick,
-// because the nudger is an optimisation and must never be the reason
-// replication stops.
+// for ever, so it stops rather than logging the same line every second.
 func (n *nudger) nudge() bool {
 	ctx, cancel := context.WithTimeout(context.Background(), n.interval)
 	defer cancel()

@@ -12,12 +12,10 @@ import (
 )
 
 // Chunks reads a table in primary key order, for a re-copy that runs alongside
-// the stream.
-//
-// The source's own clock is read before the rows, not this machine's: the
-// pipeline holds the chunk until the stream has passed that moment, and the
-// comparison has to be in the source's terms or the two clocks' skew decides
-// whether a repair is safe.
+// the stream. The source's own clock is read before the rows, not this
+// machine's: the pipeline holds the chunk until the stream has passed that
+// moment, and the comparison has to be in the source's terms or the two
+// clocks' skew decides whether a repair is safe.
 type Chunks struct {
 	Source *sql.DB
 	// Database is the source database.

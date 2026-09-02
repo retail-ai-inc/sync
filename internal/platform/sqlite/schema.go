@@ -7,14 +7,11 @@ import (
 )
 
 // The control database's schema lived in a SQLite file committed to the
-// repository, and nothing in the program created it. A fresh checkout or a fresh
-// deployment could not start at all unless somebody copied that file into place
-// — and the committed copy carried whatever had accumulated in it, including an
-// account called "admin" whose password was in the repository with it.
-//
-// The schema is here now and is applied on open. Every statement is
-// IF NOT EXISTS: this creates what is missing and never alters what is there, so
-// an existing database is left exactly as it was.
+// repository, and nothing in the program created it. A fresh checkout or a
+// fresh deployment could not start at all unless somebody copied that file
+// into place — and the committed copy carried whatever had accumulated in it,
+// including an account called "admin" whose password was in the repository
+// with it.
 
 const schema = `
 CREATE TABLE IF NOT EXISTS config_global (
@@ -112,22 +109,13 @@ CREATE INDEX IF NOT EXISTS idx_monitoring_log_task ON monitoring_log(sync_task_i
 `
 
 // ensured records the database files this process has already applied the
-// schema to.
-//
-// Once per file, not once per open. Ten CREATE TABLE statements and an insert on
-// every open is a lot of work against a database whose pool holds one connection
-// and which replication writes its checkpoints through — and it would also mean
-// the program could never observe a table as missing, because it would put it
-// back before looking.
+// schema to. Once per file, not once per open.
 var ensured sync.Map
 
 // applySchema creates whatever the control database is missing, the first time
-// this process opens a given file.
-//
-// The single row of config_global is part of the schema rather than data: the
-// loader reads id = 1, and a database without it cannot be started. It is
-// inserted only when it is absent, so an operator's own settings are never
-// overwritten.
+// this process opens a given file. The single row of config_global is part of
+// the schema rather than data: the loader reads id = 1, and a database without
+// it cannot be started.
 func applySchema(db *sql.DB, path string) error {
 	if _, done := ensured.Load(path); done {
 		return nil
@@ -165,13 +153,9 @@ var addedColumns = []struct{ table, column, definition string }{
 	{"backup_tasks", "last_run_message", "TEXT"},
 }
 
-// addColumns adds each of those columns if it is missing.
-//
-// SQLite has no ADD COLUMN IF NOT EXISTS, and the error for one that is already
-// there is not distinguishable by a code — so the columns are read first. Adding
-// a column is the only schema change made to an existing table: nothing here
-// drops, renames, or retypes anything, so a database opened by an older binary
-// afterwards still works.
+// addColumns adds each of those columns if it is missing. SQLite has no ADD
+// COLUMN IF NOT EXISTS, and the error for one that is already there is not
+// distinguishable by a code — so the columns are read first.
 func addColumns(db *sql.DB) error {
 	for _, add := range addedColumns {
 		present, err := hasColumn(db, add.table, add.column)

@@ -10,14 +10,8 @@ import (
 )
 
 // ReplaceDatePlaceholdersWithDate replaces date placeholders in a pattern with
-// the specified date.
-//
-// The braced forms — {YYYY}, {MM}, {DD} and their lower-case spellings — are
-// unambiguous. The bare forms are kept for the patterns written before the
-// braces existed, but only where the whole word is a date: this used to be a
-// plain substring replacement, so every ordinary word containing "mm" or "dd"
-// was silently rewritten with digits and `summary_YYYYMM.json` became
-// `su08ary_202608.json` — which is the name the archive is then stored under.
+// the specified date. The braced forms — {YYYY}, {MM}, {DD} and their lower-
+// case spellings — are unambiguous.
 func ReplaceDatePlaceholdersWithDate(pattern string, targetDate time.Time) string {
 	result := pattern
 

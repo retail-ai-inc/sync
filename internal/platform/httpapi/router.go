@@ -94,13 +94,9 @@ func Health(w http.ResponseWriter, r *http.Request) {
 	writeStatus(w, http.StatusOK, map[string]interface{}{"status": "ok"})
 }
 
-// Ready answers the readiness probe.
-//
-// A rolling update has no way to know when a replica can take traffic without
-// one, so Kubernetes sends requests to a container that is still starting. The
-// check is deliberately cheap: it reports that the process is serving, not that
-// every replication task is caught up, because a task that is behind is a
-// reason to alert rather than to take the whole control plane out of service.
+// Ready answers the readiness probe. A rolling update has no way to know when
+// a replica can take traffic without one, so Kubernetes sends requests to a
+// container that is still starting.
 func Ready(w http.ResponseWriter, r *http.Request) {
 	writeStatus(w, http.StatusOK, map[string]interface{}{"status": "ready"})
 }

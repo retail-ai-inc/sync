@@ -44,13 +44,10 @@ func lagThreshold() float64 {
 	return seconds
 }
 
-// StartLagAlerting watches the recorded replication lag and reports a task that
-// has fallen too far behind.
-//
-// Nothing watched it before: a task could be an hour behind, or stalled
-// entirely, and the only sign was a graph nobody had because there were no
-// metrics either. For a disaster-recovery copy that is the number that matters
-// — how much would be lost if the source went away right now.
+// StartLagAlerting watches the recorded replication lag and reports a task
+// that has fallen too far behind. Nothing watched it before: a task could be
+// an hour behind, or stalled entirely, and the only sign was a graph nobody
+// had because there were no metrics either.
 func StartLagAlerting(ctx context.Context, cfg *config.Config, log *logrus.Logger) {
 	watch(func() {
 		var n notifier
@@ -80,13 +77,10 @@ type notifier interface {
 	SendNotification(ctx context.Context, message string, opts *slack.SlackNotificationOptions) error
 }
 
-// checkDeadLetters reports the tasks holding changes the target never accepted.
-//
-// A dead-lettered operation is a hole in the replica: the source has it and the
-// target does not, and the only thing that will ever close it is the retry loop
-// succeeding. It existed as a file on the syncer's own disk and a counter nobody
-// watched — so the copy that exists to be switched to could be missing rows and
-// the first anybody heard of it was after the switch.
+// checkDeadLetters reports the tasks holding changes the target never
+// accepted. A dead-lettered operation is a hole in the replica: the source has
+// it and the target does not, and the only thing that will ever close it is
+// the retry loop succeeding.
 func checkDeadLetters(ctx context.Context, n notifier, log *logrus.Logger, lastAlert map[string]time.Time, now time.Time) []string {
 	var alerted []string
 	for _, sample := range metrics.Default.Snapshot(metrics.DeadLettered) {

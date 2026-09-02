@@ -1,15 +1,9 @@
 // Package checkpoint stores how far a replication task has got.
 //
-// Every checkpoint used to live in a file on the syncer's own disk: the binlog
-// position, the MongoDB resume tokens, the Redis stream offsets. That is the
-// one place it must not be. The syncer runs in Tokyo alongside the source it is
-// reading, so the outage the whole setup exists to survive takes the record of
-// what has been applied with it — and a replacement started in Osaka has no way
-// to find out where to resume from. It re-copies everything, or worse, starts
-// from the current end of the stream and quietly skips whatever was in flight.
-//
-// The checkpoint belongs with the target, which is the side that survives. That
-// is also where it is true: it describes what the target has applied.
+// It belongs with the target, which is the side that survives the outage and
+// the side it is true about. On the syncer's own disk — where every checkpoint
+// used to live — the outage takes the record of what was applied with it, and a
+// replacement started in Osaka has no way to know where to resume.
 package checkpoint
 
 import (
@@ -121,19 +115,13 @@ type Execer interface {
 }
 
 // SaveTx records the position through a caller's transaction, so it commits with
-// whatever else that transaction is applying.
-//
-// This is how a MySQL replica keeps its own position honest: the applier
-// position lives in an InnoDB table and is written in the transaction that
-// applies the rows, so a crash cannot leave the two disagreeing. Saving through
-// a separate connection — which is what Save does — means the data commits at
-// one moment and the position at another, and every crash in between replays
-// the difference. Replaying is safe only because the writes are idempotent; on a
-// table with no primary key it is not safe at all.
+// whatever else that transaction is applying — the way a MySQL replica keeps its
+// own position honest. Saving on a separate connection, as Save does, lets a
+// crash land between the data and the position, and replaying the difference is
+// safe only where the writes are idempotent.
 //
 // The table has to exist already: creating it here would be DDL inside the
-// caller's transaction, which MySQL commits implicitly and would break the
-// atomicity this exists to provide. Call Ensure once before streaming.
+// caller's transaction, which MySQL commits implicitly. Call Ensure first.
 func (s *SQLStore) SaveTx(ctx context.Context, tx Execer, key, payload string) error {
 	if _, err := tx.ExecContext(ctx, s.upsert(), s.TaskID, key, payload); err != nil {
 		return fmt.Errorf("write %s: %w", s.qualified(), err)
@@ -143,14 +131,10 @@ func (s *SQLStore) SaveTx(ctx context.Context, tx Execer, key, payload string) e
 
 func (s *SQLStore) Ensure(ctx context.Context) error { return s.ensure(ctx) }
 
-// upsert renders the write. The two flavours spell it differently, which is why
-// this was a delete and an insert to begin with.
-//
-// REPLACE rather than MySQL's ON DUPLICATE KEY UPDATE so that one statement
-// serves MySQL, MariaDB and SQLite alike — the hermetic tests run this against
-// SQLite, and a store whose only exercised path is the one nothing tests is not
-// worth having. The row has no triggers and no auto-increment, so the delete
-// REPLACE performs underneath costs nothing here.
+// upsert renders the write. REPLACE rather than ON DUPLICATE KEY UPDATE so one
+// statement serves MySQL, MariaDB and SQLite alike — the hermetic tests run
+// against SQLite, and a store whose only exercised path is the untested one is
+// not worth having.
 func (s *SQLStore) upsert() string {
 	if s.NumberedPlaceholders {
 		return fmt.Sprintf(
@@ -200,17 +184,9 @@ func (s *MongoStore) Save(ctx context.Context, key, payload string) error {
 }
 
 // SaveIn records the position through a caller's session, so it commits with
-// whatever else that session's transaction is applying.
-//
-// A change stream applier writes several collections per batch and MongoDB gives
-// no atomicity across them outside a transaction. Recording the position in the
-// same transaction is what makes a batch all-or-nothing: without it the batch
-// can be half applied and the position can point either side of the gap, and the
-// target ends up in a state the source was never in — which is the one kind of
-// inconsistency a failover cannot recover from.
-//
-// The caller has to be inside mongo.SessionContext for this to join its
-// transaction; passed a plain context it is an ordinary write.
+// whatever else that session's transaction is applying. A change stream
+// applier writes several collections per batch and MongoDB gives no atomicity
+// across them outside a transaction.
 func (s *MongoStore) SaveIn(ctx context.Context, key, payload string) error {
 	return s.Save(ctx, key, payload)
 }
@@ -251,13 +227,9 @@ func (s *RedisStore) Save(ctx context.Context, key, payload string) error {
 // ----------------------------------------------------------------- layers
 
 // Layered reads from the first store that has an answer and writes to all of
-// them.
-//
-// It exists for the migration: a deployment upgrading from the file-only
-// version has its position on local disk and nothing on the target, so the file
-// is read once and every write from then on lands in both places. Ordering the
-// target first means that once it has a checkpoint, that is the one used — a
-// syncer replaced in the other region reads the same value the old one wrote.
+// them. It exists for the migration: a deployment upgrading from the file-only
+// version has its position on local disk and nothing on the target, so the
+// file is read once and every write from then on lands in both places.
 type Layered struct {
 	Stores []Store
 	// OnError is called for a store that fails, so a degraded layer is visible

@@ -252,17 +252,7 @@ func StampLastBackup(id, now string) error {
 }
 
 // RecordRunOutcome stores how a job's last run went, so the answer survives a
-// restart.
-//
-// Whether a backup worked was held only in an in-process map. A job that failed
-// at three in the morning left the dashboard showing the timestamp of the last
-// run that succeeded — days earlier — with nothing anywhere saying the newer one
-// had failed, because the process that knew had been restarted since. Before a
-// regional switchover that reads as "the backup is a few days old", not as "the
-// backup has been failing since Tuesday".
-//
-// last_backup_time keeps its meaning of "when a backup last succeeded"; these
-// columns say what happened the last time one was attempted, whatever that was.
+// restart. Whether a backup worked was held only in an in-process map.
 func RecordRunOutcome(id int, at, status, message string) error {
 	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {

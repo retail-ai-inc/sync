@@ -18,18 +18,10 @@ var ErrNoBootstrapPassword = errors.New(
 
 const BootstrapUsername = "admin"
 
-// EnsureAdmin creates the first administrator on a database that has none.
-//
-// The credentials used to arrive with the repository: sync.db was committed with
-// an admin row in it, so every deployment of this tool shared one password that
-// was published on a Git remote. The database is now built by the program, which
-// means a fresh install has no way in until somebody supplies one — that is what
-// SYNC_ADMIN_PASSWORD is for.
-//
-// It applies only to an empty users table. Once an account exists the variable
-// is ignored, so leaving it set in a manifest cannot reset a password that has
-// since been changed, and cannot resurrect an administrator that was removed on
-// purpose.
+// EnsureAdmin creates the first administrator on a database that has none. The
+// credentials used to arrive with the repository: sync.db was committed with
+// an admin row in it, so every deployment of this tool shared one password
+// that was published on a Git remote.
 func EnsureAdmin() (created bool, err error) {
 	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {

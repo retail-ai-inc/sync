@@ -8,12 +8,8 @@ import (
 const SlotCount = 16384
 
 // SlotOf reports which hash slot a key belongs to, by the same rule the server
-// uses.
-//
-// This has to agree with the server exactly, because it is what decides where a
-// slot's position marker is written. A marker that lands in a different slot
-// from the data it accounts for would be committed in a separate transaction,
-// which is the whole problem this package exists to avoid.
+// uses. This has to agree with the server exactly, because it is what decides
+// where a slot's position marker is written.
 func SlotOf(key []byte) int {
 	if tag, ok := hashTag(key); ok {
 		key = tag
@@ -65,18 +61,13 @@ func crc16(data []byte) uint16 {
 	return crc
 }
 
-// slotTags holds, for every slot, a short string that hashes into it.
-//
-// The table is what makes a per-slot position possible: wrapping one of these
-// in braces produces a key guaranteed to live in a chosen slot, so the marker
-// for slot 1234 can be written in the same MULTI as the data in slot 1234.
-//
-// **The table must never change.** The markers it names hold the only record of
-// how far each slot has been applied; generating different tags in a later
-// version would abandon every one of them and silently re-apply history. It is
-// derived by a fixed walk over the decimal integers rather than being written
-// down so that it cannot drift from the hash function, and TestTheSlotTagTableIsStable
-// pins the result.
+// slotTags holds, for every slot, a short string that hashes into it. The
+// table is what makes a per-slot position possible: wrapping one of these in
+// braces produces a key guaranteed to live in a chosen slot, so the marker for
+// slot 1234 can be written in the same MULTI as the data in slot 1234.  **The
+// table must never change.** The markers it names hold the only record of how
+// far each slot has been applied; generating different tags in a later version
+// would abandon every one of them and silently re-apply history.
 var slotTags struct {
 	once sync.Once
 	tags [SlotCount]string

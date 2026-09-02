@@ -102,13 +102,10 @@ func GetTableSchemaHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
-// sortFieldsByName puts the key columns first and orders the rest by name.
-//
-// The comparison used to answer true for both (i,j) and (j,i) when both were
+// sortFieldsByName puts the key columns first and orders the rest by name. The
+// comparison used to answer true for both (i,j) and (j,i) when both were
 // primary keys, which is not a strict weak ordering and is not something
-// sort.Slice promises anything about. A composite primary key — the ordinary
-// case in MySQL — therefore came back in no defined order, and those columns
-// were not sorted by name either.
+// sort.Slice promises anything about.
 func sortFieldsByName(schema *SchemaResponse) {
 	sort.SliceStable(schema.Fields, func(i, j int) bool {
 		if schema.Fields[i].IsPrimary != schema.Fields[j].IsPrimary {
@@ -234,14 +231,11 @@ func extractNestedFields(doc map[string]interface{}, prefix string, fields map[s
 // field that is not on every document goes unnoticed.
 const schemaSampleSize = 100
 
-// getMongoFieldType gets MongoDB field type.
-//
-// The switch used to name none of the types the driver actually decodes BSON
-// into, so every one of them fell through and came back as a Go type name: an
-// _id was "bson.ObjectID" and every array was "bson.A", because the
-// array case matched a bare []interface{} and the driver produces bson.A.
-// Every schema query therefore returned at least two type names the caller —
-// the interface that builds table mappings out of this — cannot map.
+// getMongoFieldType gets MongoDB field type. The switch used to name none of
+// the types the driver actually decodes BSON into, so every one of them fell
+// through and came back as a Go type name: an _id was "bson.ObjectID" and
+// every array was "bson.A", because the array case matched a bare
+// []interface{} and the driver produces bson.A.
 func getMongoFieldType(value interface{}) string {
 	switch value.(type) {
 	case int, int32, int64, bson.Timestamp:

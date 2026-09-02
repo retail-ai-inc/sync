@@ -390,12 +390,10 @@ func LogYesterdayMongoDBVolume(ctx context.Context, sc config.SyncConfig, log *l
 }
 
 // connectBothMongo opens the task's two MongoDB connections and returns the
-// function that closes them.
-//
-// ok is false when either side could not be reached, and the reason has already
-// been logged: a comparison with one end missing has nothing to say, and
-// answering with a count of zero for the unreachable side would read as a
-// database that has lost everything.
+// function that closes them.  ok is false when either side could not be
+// reached, and the reason has already been logged: a comparison with one end
+// missing has nothing to say, and answering with a count of zero for the
+// unreachable side would read as a database that has lost everything.
 func connectBothMongo(
 	ctx context.Context, sc config.SyncConfig, log *logrus.Logger, purpose string,
 ) (source, target *mongo.Client, disconnect func(), ok bool) {

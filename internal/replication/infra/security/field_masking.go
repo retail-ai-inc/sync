@@ -21,17 +21,8 @@ import (
 // A field configured as "encrypted" used to be sealed with an AES-256 key that
 // was a literal in this file — in a public repository, identical in every
 // deployment. Anything encrypted under it could be read by anyone who had the
-// source, which is everyone: the configuration said the field was protected and
-// it was not.
-//
-// The key comes from the environment and there is no fallback. A task that
-// declares an encrypted field and has no key refuses to start, rather than
-// writing values to the disaster-recovery copy that anybody can read while the
-// interface reports them as encrypted.
-//
-// Values already written under the published key stay as they are; nothing here
-// decrypts. To move them, set SYNC_FIELD_KEY and run the initial copy again —
-// the writes are upserts, so it rewrites every document under the new key.
+// source, which is everyone: the configuration said the field was protected
+// and it was not.
 
 var ErrNoFieldKey = errors.New(
 	"a table is configured to encrypt a field and neither SYNC_FIELD_KEY nor " +
@@ -199,13 +190,7 @@ func ProcessValue(value interface{}, fieldName string, config TableSecurity) int
 }
 
 // maskValue hides a value while keeping something the target column can hold.
-//
-// A text value becomes asterisks of the same length. Everything else used to
-// become the literal string "****" whatever its type, which for a numeric or
-// boolean column on the target is either an error or a truncation — and which
-// applied to every VARCHAR read through go-sql-driver too, because that returns
-// []byte and []byte was not the string case. Non-text values are replaced with
-// the zero of their own type, which hides them and still fits the column.
+// A text value becomes asterisks of the same length.
 func maskValue(value interface{}) interface{} {
 	switch v := value.(type) {
 	case nil:
@@ -249,18 +234,12 @@ func maskValue(value interface{}) interface{} {
 	}
 }
 
-// A field's path may name something several levels down — "profile.contact.phone"
-// — and the rule has to reach it.
-//
-// It used to reach exactly one level. processNestedObject stripped the parent
-// prefix and looked the remainder up as a literal key, so "profile.contact.phone"
-// went looking for a key called "contact.phone", did not find one, and left the
-// value in the clear. Beside it sat three more attempts at the same job —
-// ProcessNestedFieldValue, processNestedObjectValue, getNestedValue,
-// processNestedFieldSafe — of which two had no callers at all and the third
-// could not be reached, because ProcessValue only handed it values that were not
-// documents while its first act was to require one. That was about 190 lines,
-// none of which ran.
+// A field's path may name something several levels down —
+// "profile.contact.phone" — and the rule has to reach it. It used to reach
+// exactly one level. processNestedObject stripped the parent prefix and looked
+// the remainder up as a literal key, so "profile.contact.phone" went looking
+// for a key called "contact.phone", did not find one, and left the value in
+// the clear.
 
 // asDocument reports the map behind a value, whichever of the two shapes the
 // drivers produce it in.

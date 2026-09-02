@@ -31,12 +31,9 @@ func Login(username, password string) (ok bool, access, token string, err error)
 func Logout() {}
 
 // ValidateUserToken reports whether a token proves an identity the store still
-// recognises, and for whom.
-//
-// The token itself names the user now, so the store is consulted once rather
-// than being scanned for a user whose derived token happens to match. The
-// store still has the last word: a user who has been deleted, deactivated, or
-// had their access level changed cannot go on using a token minted earlier.
+// recognises, and for whom. The token itself names the user now, so the store
+// is consulted once rather than being scanned for a user whose derived token
+// happens to match.
 func ValidateUserToken(token string) (bool, string, string) {
 	username, access, ok := domain.ParseUserToken(token)
 	if !ok {

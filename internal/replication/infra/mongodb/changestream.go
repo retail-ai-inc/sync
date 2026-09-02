@@ -14,12 +14,10 @@ type streamEvent struct {
 }
 
 // positionLost reports whether an error says the change stream cannot be
-// resumed from the token or cluster time this task holds.
-//
-// The oplog is a capped collection: a task stopped for longer than it covers
-// comes back to find its resume point gone. Retrying cannot help — the entries
-// are not there — and the tempting repair, dropping the token and watching from
-// now, silently skips everything in between. So it is reported instead.
+// resumed from the token or cluster time this task holds. The oplog is capped,
+// so a task stopped for longer than it covers finds its resume point gone.
+// Retrying cannot help, and the tempting repair — dropping the token and
+// watching from now — silently skips everything in between, so it is reported.
 func positionLost(err error) bool {
 	if err == nil {
 		return false

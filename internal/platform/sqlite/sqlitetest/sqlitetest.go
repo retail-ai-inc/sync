@@ -16,11 +16,9 @@ import (
 
 // Tableless points SYNC_DB_PATH at a database whose tables have been removed,
 // which is the state a migration that did not finish — or a file restored from
-// the wrong backup — leaves behind.
-//
-// Naming an empty file no longer produces one: opening the control database
-// creates its schema, so the tables have to be dropped after that has happened.
-// The schema is applied once per file, so later opens leave them dropped.
+// the wrong backup — leaves behind. Naming an empty file no longer produces
+// one: opening the control database creates its schema, so the tables have to
+// be dropped after that has happened.
 func Tableless(t *testing.T) {
 	t.Helper()
 

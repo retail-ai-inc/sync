@@ -1,16 +1,7 @@
 // Package redis replicates one Redis deployment to another by reading the
-// replication stream a replica would read.
-//
-// The shape follows infra/mysql and infra/mongodb — a Reader, an Applier and a
-// Snapshotter driven by app/pipeline — with one structural difference. Those
-// engines have a single log for the whole server, so one reader covers
-// everything. A Redis cluster has a replication stream per shard and no way to
-// join them, so a task runs a pipeline for each.
-//
-// The hard part is committing a position with the data. A cluster has no
-// transaction spanning slots, so there is no single unit a batch can be
-// committed in; the way out is per-slot transactions, each carrying its own
-// marker. See applier.go.
+// replication stream a replica would read. The shape follows infra/mysql and
+// infra/mongodb — a Reader, an Applier and a Snapshotter driven by
+// app/pipeline — with one structural difference.
 package redis
 
 import "github.com/sirupsen/logrus"

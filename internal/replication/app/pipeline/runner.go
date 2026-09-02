@@ -51,16 +51,11 @@ type Options struct {
 	// Engine names the engine in log lines, as "[MySQL]" or "[MongoDB]".
 	Engine string
 
-	// StreamOrder hands the batch to the applier in the order it was read, as a
-	// single run, instead of splitting it into runs that may be applied in
-	// parallel.
-	//
-	// The split is safe for an engine whose events are idempotent writes of a
-	// whole record: two upserts of different rows commute. It is not safe for an
-	// engine whose log is a command stream. A command is not idempotent the way
-	// an upsert is — replaying INCR adds again — and two commands on different
-	// keys may still have been one atomic act at the source, so the order they
-	// were read in is the only order known to be correct.
+	// StreamOrder hands the batch over as a single run in read order, rather
+	// than splitting it into runs that may be applied in parallel. The split is
+	// only safe when every event is an idempotent write of a whole record;
+	// replaying INCR adds again, and two commands on different keys may have
+	// been one atomic act at the source.
 	StreamOrder bool
 }
 
@@ -328,15 +323,9 @@ func (r *Runner) startingPoint(ctx context.Context) (domain.Position, error) {
 	// below: a copy that returns an error must not be recorded as completed.
 	snapshotDone := false
 
-	// The position is pinned before a row is copied and stored only once the
-	// copy has finished. Pinning afterwards loses every write made while the
-	// copy ran; storing before it finishes means an interrupted copy resumes
-	// from a point it never reached.
-	// The snapshot context, in Debezium's terms. Until now an initial copy was
-	// invisible from outside: it either finished or the task looked stuck, with
-	// no way to tell how far it had got or whether it had given up. That
-	// mattered the first time a Redis shard had to be re-copied because the
-	// source's backlog had rolled past its position.
+	// Pinned before a row is copied, stored only once the copy has finished.
+	// Pinning afterwards loses every write made while the copy ran; storing
+	// early means an interrupted copy resumes from a point it never reached.
 	started := r.now()
 	metrics.SnapshotStarted(r.Opts.Labels, 0)
 	defer func() {
@@ -408,25 +397,12 @@ func (r *Runner) apply(ctx context.Context, queue <-chan *domain.Event) error {
 	// is applied. It is never recorded ahead of the data it points past.
 	var pending domain.Position
 
-	// flush writes the batch through the run's context while the run is live,
-	// and through an independent bounded one once it has been asked to stop.
-	//
-	// The second case is what a rolling update looks like from in here, and it
-	// used to write through the cancelled context: every driver refuses a call
-	// on one before it reaches the target, so the last batch failed at once,
-	// the task ended its stop reporting a failure, and the batch was replayed
-	// on the next start. The replay was correct — the position only moves once
-	// the data is on the target — so this cost work rather than data. It cost
-	// more than work on Redis, where the source's backlog is a fixed ring and a
-	// position it has rolled past means a full re-copy.
-	//
-	// The choice is made here rather than at the stop, because the stop is not
-	// the only branch that reaches it: a cancelled context and a non-empty
-	// queue are both ready at once, and select picks between them at random.
-	//
-	// Bounded, because a stop waits for the target but must not outlast the
-	// pod's termination grace period: being killed there is a harder stop than
-	// the one this avoids.
+	// The run's context while the run is live, an independent bounded one once it
+	// has been asked to stop: a driver refuses a call on a cancelled context
+	// before it reaches the target, so the last batch never landed. The choice
+	// belongs here rather than in the stop branch — a cancelled context and a
+	// non-empty queue are ready at once and select picks at random, so either
+	// branch can be the one that writes.
 	flush := func() error {
 		if b.len() == 0 {
 			return nil
@@ -499,19 +475,9 @@ func (r *Runner) apply(ctx context.Context, queue <-chan *domain.Event) error {
 			r.queueBytes = int64(b.bytes)
 			r.mu.Unlock()
 
-			// Nothing else is waiting, so holding this batch back can only add
-			// latency. A batch exists to spread the cost of a round trip over
-			// several events; with an empty queue there are no further events to
-			// spread it over, and the wait is paid for nothing.
-			//
-			// This is what every mature pipeline does by default — Kafka's
-			// linger.ms is 0, a change stream's getMore returns as soon as it has
-			// anything, MySQL's group commit delay is 0. Batching is meant to be
-			// what a busy pipeline falls into, not a toll an idle one pays. It
-			// needs no configuration to get right: under load the queue is rarely
-			// empty and batches fill as before, while an idle task now sends at
-			// once. flush() still refuses to cut inside a source transaction, so
-			// the atomicity this pipeline is built on is untouched.
+			// Nothing else is waiting, so holding the batch back buys nothing
+			// and costs latency — Kafka's linger.ms is 0 for the same reason.
+			// Under load the queue is rarely empty and batches still fill.
 			if len(queue) == 0 {
 				if err := flush(); err != nil {
 					return err
@@ -559,25 +525,10 @@ func (r *Runner) refreshApplied(ctx context.Context) error {
 }
 
 // applyWithRetry writes one batch, waiting for a target that is not ready
-// rather than ending the run.
-//
-// Returning the error used to end Run, which stopped the reader with it. That
-// is the wrong shape for this pipeline: the reader is what keeps the source's
-// replication log from rolling past the position, and on Memorystore that log
-// is a fixed ring of tens of kilobytes. Ending the run over a target that was
-// briefly unavailable therefore cost a full re-copy — measured at 30 KB of
-// source writes, which at 12,000 ops/s is twenty milliseconds of downtime.
-//
-// A reader that keeps reading turns that into what the on-disk buffer was built
-// for: the outage costs buffer space, and the buffer filling is its own loud
-// failure. This is the shape MySQL replication has always had, where the I/O
-// thread keeps filling the relay log while the SQL thread is stuck, and the one
-// Debezium gets from writing into Kafka rather than into the target itself.
-//
-// An error that retrying cannot fix is still returned, and wrapped as
-// unrecoverable so the supervisor stops the task and says so rather than
-// restarting it forever. A poisoned event must not be quietly stepped over: the
-// position does not move, because this returns before the caller records it.
+// rather than ending the run: the reader is what keeps the source's log from
+// rolling past the position, and on Memorystore that log is a ring of tens of
+// kilobytes — twenty milliseconds of downtime at 12,000 ops/s. Keeping the
+// reader going turns a target outage into buffer space instead of a re-copy.
 func (r *Runner) applyWithRetry(ctx context.Context, runs [][]*domain.Event,
 	pos domain.Position, count int) (bool, error) {
 
@@ -618,12 +569,10 @@ func (r *Runner) applyWithRetry(ctx context.Context, runs [][]*domain.Event,
 				"batch and reading on, so the source's log is not left to roll past us"), err)
 		}
 
-		// Before trying the same batch again, ask the target what it actually
-		// holds. A failure is not proof the write did not happen: a timeout can
-		// arrive after the transaction landed, and re-applying it then repeats a
-		// command that is not idempotent — measured as an RPUSH landing three
-		// times too often under packet loss. Re-reading is what a task restart
-		// always did, and is what makes retrying in place as safe as restarting.
+		// A failure is not proof the write did not happen: a timeout can arrive
+		// after the transaction landed, and re-applying then repeats a command
+		// that is not idempotent — measured as an RPUSH landing three times too
+		// often under packet loss.
 		if err := r.refreshApplied(ctx); err != nil {
 			return false, fmt.Errorf("apply %d changes: %w", count, err)
 		}
@@ -642,20 +591,12 @@ func (r *Runner) applyWithRetry(ctx context.Context, runs [][]*domain.Event,
 // that will refuse it again — a poisoned event rather than a target that is
 // merely unavailable.
 //
-// The MySQL side is decided by SQLSTATE rather than by a list of error numbers.
-// Two classes never become applicable by being retried:
+// Decided by SQLSTATE class rather than error number, because deciding one
+// number at a time kept missing members of the same class:
 //
-//	23xxx  an integrity constraint the target holds — a foreign key, a unique
-//	       index, a NOT NULL, a CHECK. The row is refused every time it is
-//	       offered.
-//	42xxx  the target does not have the table, the column or the privilege the
-//	       event needs. None of those appear by asking again.
-//
-// Deciding this one error number at a time did not hold up: a missing table was
-// added after the pipeline sat retrying "Table 'bench.nopk' doesn't exist" with
-// task_up at 1, and a foreign key was added after it did the same with "Cannot
-// add or update a child row". Both are the same shape, and so is every other
-// member of those two classes.
+//	23xxx  an integrity constraint the target holds. Refused every time.
+//	42xxx  the target lacks the table, column or privilege. Asking again does
+//	       not create it.
 func permanentApplyFailure(err error) bool {
 	if err == nil {
 		return false
@@ -671,14 +612,9 @@ func permanentApplyFailure(err error) bool {
 		}
 	}
 
-	// MongoDB reports its own codes in the message rather than as SQLSTATE.
-	// The same reasoning applies: an event the target refuses on its merits will
-	// be refused every time it is offered, and retrying it for ever leaves a
-	// task that looks alive while nothing moves. Measured on a sharded pair: a
-	// duplicate key against a unique index on the target held one batch and
-	// retried it indefinitely with task_blocked at 0, so the only sign was the
-	// lag climbing — the exact shape the SQLSTATE classification was added to
-	// stop on the MySQL side.
+	// MongoDB reports its codes in the message rather than as SQLSTATE. Same
+	// reasoning: measured on a sharded pair, a duplicate key held one batch and
+	// retried for ever with task_blocked at 0, so the only sign was the lag.
 	for _, permanent := range []string{
 		"E11000",                    // duplicate key against an index the target holds
 		"E11001",                    // the older spelling of the same thing
@@ -706,12 +642,9 @@ func permanentApplyFailure(err error) bool {
 
 var sqlStatePattern = regexp.MustCompile(`\(([0-9A-Z]{5})\)`)
 
-// applyBatch writes one batch and records where it got to.
-//
-// The whole batch goes to the applier at once, already split into runs, so it
-// can be committed as a single atomic unit. Handing the runs over one at a time
-// would let a failure land between two of them, which is the torn batch this
-// design exists to prevent.
+// applyBatch writes one batch and records where it got to. The whole batch goes
+// over at once, already split into runs: handing the runs over one at a time
+// would let a failure land between two of them.
 func (r *Runner) applyBatch(ctx context.Context, events []*domain.Event, pos domain.Position) error {
 	writable := applicable(events)
 
@@ -790,12 +723,9 @@ func (r *Runner) applyBatch(ctx context.Context, events []*domain.Event, pos dom
 	return nil
 }
 
-// report refreshes the health gauges on a timer.
-//
-// Without it the applied lag only moves when a batch lands, so a task that has
-// stopped applying leaves the gauge frozen at its last healthy value — and an
-// alert on a frozen gauge never fires. Here the lag is measured from the oldest
-// change still waiting, so it climbs for exactly as long as the task is stuck.
+// report refreshes the health gauges on a timer. Without it the applied lag
+// only moves when a batch lands, so a stuck task leaves the gauge frozen at its
+// last healthy value — and an alert on a frozen gauge never fires.
 func (r *Runner) report(ctx context.Context) (stop func()) {
 	ticker := time.NewTicker(r.Opts.reportInterval())
 	done := make(chan struct{})
@@ -819,15 +749,7 @@ func (r *Runner) report(ctx context.Context) (stop func()) {
 				held := r.queueBytes
 				r.mu.Unlock()
 
-				// Behind: measured from the oldest change still waiting, so the
-				// number climbs for exactly as long as the task is stuck.
-				//
-				// Caught up: measured from the newest thing the stream has
-				// reported, heartbeats included. Measuring from the last change
-				// applied instead made the lag climb whenever the source was
-				// merely quiet — a database nobody had written to for an hour
-				// reported an hour of lag while being perfectly up to date, which
-				// is how a quiet Sunday pages somebody.
+				// See lagSeconds for which clock each case is measured from.
 				lag, known := lagSeconds(now, oldest, read, applied)
 				if known {
 					metrics.SetLag(r.Opts.Labels, lag)
@@ -846,16 +768,11 @@ func (r *Runner) report(ctx context.Context) (stop func()) {
 	return func() { once.Do(func() { close(done) }) }
 }
 
-// lagSeconds is how far behind the source the task is.
-//
-// Behind: measured from the oldest change still waiting, so the number climbs
-// for exactly as long as the task is stuck.
-//
-// Caught up: measured from the newest thing the stream has reported, heartbeats
-// included. Measuring from the last change applied instead made the lag climb
-// whenever the source was merely quiet — a database nobody had written to for an
-// hour reported an hour of lag while being perfectly up to date, which is how a
-// quiet Sunday pages somebody.
+// lagSeconds is how far behind the source the task is. Behind, it is measured
+// from the oldest change still waiting, so it climbs while the task is stuck.
+// Caught up, from the newest thing the stream reported, heartbeats included:
+// measuring from the last change applied made a quiet source report an hour of
+// lag while being perfectly up to date.
 func lagSeconds(now, oldest, read, applied time.Time) (float64, bool) {
 	switch {
 	case !oldest.IsZero():

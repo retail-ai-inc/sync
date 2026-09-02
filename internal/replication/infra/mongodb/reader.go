@@ -22,14 +22,11 @@ import (
 )
 
 // Reader turns one MongoDB deployment's change stream into a stream of events.
-//
 // One stream, opened on the client rather than on a collection, covers every
-// collection the task maps. A change stream per collection made the server scan
-// the oplog once for each of them — and the oplog has no index, which is why
-// MongoDB's own guidance is to avoid opening a high number of narrowly targeted
-// change streams. On a sharded cluster the streams are merged by mongos in
-// cluster time order, so one stream also gives a single global ordering, which
-// is what a payment ledger spread over several collections needs.
+// collection the task maps: a stream per collection made the server scan the
+// oplog once for each, and the oplog has no index. On a sharded cluster mongos
+// merges the shards' streams in cluster time order, so one stream also gives the
+// single global ordering a payment ledger across collections needs.
 type Reader struct {
 	Client *mongo.Client
 	Config config.SyncConfig
@@ -55,17 +52,13 @@ type Reader struct {
 	// open holds the events of the transaction currently being delivered, and
 	// openID identifies it. A change stream reports every event of a
 	// multi-document transaction with the same lsid and txnNumber, so a
-	// transaction's events are held together and a batch can never be cut inside
-	// one.
+	// transaction's events are held together and a batch is never cut inside one.
 	//
 	// ready holds complete units — a finished transaction, a standalone change, a
-	// schema change, a heartbeat — waiting to be handed over.
-	//
-	// The two used to be one list, with "the transaction has ended" judged by an
-	// event arriving that belonged to no transaction. Fifty transactions
-	// back-to-back therefore delivered nothing at all: every event extended the
-	// buffer, the condition was never met, and the reader span reading a hundred
-	// documents it never passed on.
+	// schema change, a heartbeat — waiting to be handed over. The two were one
+	// list, with "the transaction ended" judged by an event belonging to no
+	// transaction arriving, so fifty transactions back to back delivered nothing
+	// at all.
 	open   []*domain.Event
 	openID string
 	ready  []*domain.Event
@@ -75,12 +68,8 @@ type Reader struct {
 }
 
 // idleHeartbeat is how long the stream may return nothing before the reader
-// reports that it is nonetheless alive.
-//
-// A stream delivering nothing looks exactly like one that is up to date. The
-// change stream's postBatchResumeToken advances on empty batches, so liveness is
-// already being reported by the server; turning it into an event makes it
-// visible.
+// reports that it is nonetheless alive. A stream delivering nothing looks
+// exactly like one that is up to date.
 const idleHeartbeat = 10 * time.Second
 
 // Open starts the change stream at a position, or at the current end when there
@@ -555,13 +544,10 @@ func opOf(raw bson.Raw) domain.Op {
 	return domain.OpSchema
 }
 
-// keyOf identifies the document a change touched.
-//
-// It is the whole documentKey, not just the _id. On a sharded collection
-// documentKey carries the shard key as well, and that is what the target has to
-// be addressed by: an updateOne whose filter omits the shard key cannot be
-// routed to one shard, so mongos broadcasts it to every one of them — one wasted
-// round trip per shard, per document, for the life of the task.
+// keyOf identifies the document a change touched: the whole documentKey, not
+// just the _id. On a sharded collection documentKey carries the shard key, and
+// that is what the target has to be addressed by — an updateOne whose filter
+// omits it cannot be routed, so mongos broadcasts to every shard.
 func keyOf(raw bson.Raw) string {
 	value, err := raw.LookupErr("documentKey")
 	if err != nil {
@@ -605,16 +591,12 @@ func transactionOf(raw bson.Raw) string {
 
 // ------------------------------------------------------------------- tokens
 
-// streamPosition is how a MongoDB stream's position is stored.
-//
-// There are two kinds and they are not interchangeable, which is what this type
-// exists to stop anybody forgetting. Before the stream has delivered anything
-// the only thing to resume from is the cluster time the snapshot pinned; once it
-// has, the resume token is exact and is what should be used. Storing them in one
-// opaque string and guessing at the far end got as far as production-shaped
-// testing and no further: the server answered "Bad resume token: _data of
-// missing or of wrong type", over and over, while the task looked like it was
-// restarting for a transient reason.
+// streamPosition is how a MongoDB stream's position is stored. Two kinds, not
+// interchangeable, which is what this type exists to stop anybody forgetting:
+// before the stream has delivered anything the only thing to resume from is the
+// cluster time the snapshot pinned; once it has, the resume token is exact.
+// Guessing at the far end got "Bad resume token" over and over while the task
+// looked like it was restarting for a transient reason.
 type streamPosition struct {
 	// Token is a resume token as extended JSON, once the stream has delivered an
 	// event.

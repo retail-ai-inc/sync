@@ -331,13 +331,8 @@ LIMIT 500
 	})
 }
 
-// parseRangeToSince resolves a window like "1h", "12h" or "7d" to the instant it
-// starts at. An empty range means no window at all.
-//
-// A range it cannot read is an error. It used to answer "ten hours ago" — a
-// value not in the set it documents — so a caller asking for "30m" or "24h",
-// both perfectly reasonable things to ask for, silently got ten hours of data
-// and no indication that its request had been ignored.
+// parseRangeToSince resolves a window like "1h", "12h" or "7d" to the instant
+// it starts at. An empty range means no window at all.
 func parseRangeToSince(rangeStr string) (since time.Time, err error) {
 	trimmed := strings.TrimSpace(rangeStr)
 	if trimmed == "" {

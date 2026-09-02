@@ -12,15 +12,9 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// convertTimeRangeQuery converts a dynamic time range condition into a concrete
-// MongoDB query.
-//
-// The window arithmetic lives in timex and is shared with the MySQL WHERE
-// clause and with table selection. It used to be written out three times, and
-// the three did not agree: table selection resolved the same configuration to a
-// forty-eight hour window aligned to UTC while the row filters resolved it to
-// twenty-four hours aligned to JST, so a single backup job selected its tables
-// by one window and its rows by another.
+// convertTimeRangeQuery converts a dynamic time range condition into a
+// concrete MongoDB query. The window arithmetic lives in timex and is shared
+// with the MySQL WHERE clause and with table selection.
 func (e *BackupExecutor) convertTimeRangeQuery(query map[string]interface{}) (map[string]interface{}, error) {
 	result := make(map[string]interface{})
 

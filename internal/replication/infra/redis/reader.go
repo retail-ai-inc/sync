@@ -85,13 +85,9 @@ func (r *Reader) Open(ctx context.Context, from domain.Position) error {
 	r.offset = position.Offset
 
 	if r.position.Phase == phaseValue && r.position.ValueUntil <= 0 {
-		// How long to keep re-reading values rather than replaying commands.
-		//
-		// The first copy is taken with SCAN, so it is a smear rather than a point
-		// in time, and a command from inside that smear may already be in the
-		// copy. Any offset at or past the end of the copy is safe to switch at,
-		// and the buffer's head is one: the copy finished before this ran. Being
-		// generous here costs a few redundant value reads and nothing else.
+		// How long to keep re-reading values rather than replaying commands. The
+		// first copy is taken with SCAN, so it is a smear rather than a point in
+		// time, and a command from inside that smear may already be in the copy.
 		r.position.ValueUntil = r.Link.head()
 		r.logger().Infof("[Redis] Shard %s applies by value up to offset %d, then "+
 			"replays commands", r.Shard, r.position.ValueUntil)

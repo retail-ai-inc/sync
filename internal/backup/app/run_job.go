@@ -53,13 +53,7 @@ func RecordRun(taskID string, run *domain.Run) {
 	runs[taskID] = run
 }
 
-// LookupRun returns a recorded run.
-//
-// A copy, not the pointer. The lock guards the map, not the Run behind it, and
-// the background goroutine writes to that Run as the export proceeds — so the
-// status endpoint used to serialise a struct that was being changed underneath
-// it, which is a data race and shows up as a status and a message from two
-// different moments.
+// LookupRun returns a recorded run. A copy, not the pointer.
 func LookupRun(taskID string) (*domain.Run, bool) {
 	runsLock.RLock()
 	defer runsLock.RUnlock()
@@ -163,13 +157,8 @@ func execute(taskID string, id int) {
 	logrus.Debugf("[BackupExecutor] Background backup task %s completed successfully", taskID)
 }
 
-// recordOutcome writes how a run went to the control database.
-//
-// The in-memory register is the only other record, and it goes with the
-// process. A backup that failed overnight and a restart in the morning left the
-// dashboard showing nothing but the timestamp of the last run that worked, so
-// "the backup is a few days old" and "the backup has been failing since
-// Tuesday" looked identical — the second is the one worth waking up for.
+// recordOutcome writes how a run went to the control database. The in-memory
+// register is the only other record, and it goes with the process.
 func recordOutcome(id int, status, message string) {
 	if err := infra.RecordRunOutcome(id, httpx.TimeNowStr(), status, message); err != nil {
 		logrus.Warnf("[BackupExecutor] Failed to record the outcome of task %d: %v", id, err)
@@ -179,13 +168,9 @@ func recordOutcome(id int, status, message string) {
 var ErrJobNotFound = errors.New("no such task")
 
 // StartRun runs a job now, in the background, and reports the task id to poll.
-//
 // It used to stamp last_backup_time and answer "started successfully" without
 // running anything at all: no executor was built, no command ran, nothing was
-// written anywhere. So "back this up now" produced a dashboard entry saying the
-// job had just succeeded, and an operator checking before a switchover that the
-// data was recoverable saw a fresh, successful backup that did not exist. That
-// is worse than showing "never backed up".
+// written anywhere.
 func StartRun(id string) (taskID string, err error) {
 	exists, err := infra.JobExists(id)
 	if err != nil {

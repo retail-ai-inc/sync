@@ -92,10 +92,12 @@ func TestTheMySQLCounterStopsAtTheTarget(t *testing.T) {
 	}
 }
 
-// It calls sql.Open("postgres", ...) without importing a driver: in the
-// production binary the replication syncer happens to import one, so the
-// counter worked — but nothing here guaranteed it, and dropping that import
-// elsewhere would have broken monitoring at runtime with "unknown driver".
+// TestThePostgreSQLCounterOpensItsOwnDriver covers a dependency this package
+// used to take on trust. It calls sql.Open("postgres", ...) without importing a
+// driver: in the production binary the replication syncer happens to import one,
+// so the counter worked — but nothing here guaranteed it, and dropping that
+// import elsewhere would have broken monitoring at runtime with "unknown
+// driver".
 func TestThePostgreSQLCounterOpensItsOwnDriver(t *testing.T) {
 	logger, out := captureLog()
 
@@ -130,9 +132,11 @@ func TestTheRedisCounterReportsAnUnparseableDSN(t *testing.T) {
 	}
 }
 
-// It used to go through go-redis's ParseURL, which takes a single host: the
-// Tokyo and Osaka clusters both have several, so the comparison never ran at
-// all — one parse error per interval in the log and no row written.
+// TestTheRedisCounterAcceptsAClusterDSN records that a DSN naming more than one
+// host is read as a cluster rather than refused. It used to go through go-
+// redis's ParseURL, which takes a single host: the Tokyo and Osaka clusters both
+// have several, so the comparison never ran at all — one parse error per
+// interval in the log and no row written.
 func TestTheRedisCounterAcceptsAClusterDSN(t *testing.T) {
 	logger, out := captureLog()
 

@@ -16,19 +16,14 @@ import (
 
 // Writing a batch, one transaction per slot.
 //
-// A Redis cluster has no atomic unit that spans slots: MULTI requires every key
-// in it to hash to the same one. So the position cannot be committed alongside a
-// whole batch the way it can in MySQL or MongoDB — and without that, a crash
-// between writing the data and recording the position replays commands, which
-// for INCR or LPUSH means a counter that is wrong or a queue entry handled
-// twice. Silently, and for a payment queue, expensively.
+// A Redis cluster has no atomic unit spanning slots — MULTI requires one hash
+// slot — so the position cannot be committed with a whole batch the way it can
+// for MySQL or MongoDB, and a crash between the data and the position replays
+// commands: a wrong counter, or a payment queue entry handled twice.
 //
-// The way out is to stop looking for one transaction and use the ones that do
-// exist. Every command in a cluster's replication stream touches a single slot,
-// and a hash tag places a key in a chosen slot, so each slot's commands can be
-// committed together with a marker saying how far that slot has been applied.
-// The batch is then a set of per-slot transactions, each exactly once, and the
-// replay problem is gone rather than mitigated.
+// The way out is to use the transactions that do exist. Every command in a
+// cluster's replication stream touches a single slot, so each slot's commands
+// commit together with a marker saying how far that slot has been applied.
 
 type Applier struct {
 	Target goredis.UniversalClient

@@ -323,9 +323,9 @@ func TestFindTableSecurityFromMappingsSkipsIncompleteEntries(t *testing.T) {
 	}
 }
 
-// It was a literal in this file — in a public repository, identical in every
-// deployment — so anything encrypted under it could be read by anyone who had
-// the source: the configuration said the field was protected and it was not.
+// The AES-256 key was a literal in this file — public repository, identical in
+// every deployment — so anything encrypted under it could be read by anyone who
+// had the source. There is no fallback now.
 func TestTheKeyComesFromTheEnvironment(t *testing.T) {
 	for name, given := range map[string]string{
 		"hex":    "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",

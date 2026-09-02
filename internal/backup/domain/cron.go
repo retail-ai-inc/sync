@@ -7,18 +7,8 @@ import (
 	"time"
 )
 
-// A backup job's schedule is a five-field cron expression, and until now nothing
-// read it. Two things went wrong as a result.
-//
-// The "next backup time" shown to an operator was always "twenty-four hours from
-// now", whatever the expression said — so a job set to run every five minutes and
-// one set to run monthly displayed the same thing, and neither was true.
-//
-// Worse, an expression that is not one at all was still written into the crontab.
-// A job whose schedule was empty produced a line beginning with the curl command
-// rather than with five time fields, and crontab refuses the *whole file* when
-// any line is malformed: one misconfigured job removed every backup schedule on
-// the machine.
+// A backup job's schedule is a five-field cron expression, and until now
+// nothing read it. Two things went wrong as a result.
 
 // Schedule is a parsed cron expression: which minutes, hours, days, months and
 // weekdays a job runs on.

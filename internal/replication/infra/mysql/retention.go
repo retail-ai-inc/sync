@@ -6,19 +6,11 @@ import (
 	"time"
 )
 
-// Window is how far back the source's binlog reaches.
-//
-// It comes from binlog_expire_logs_seconds, which is the promise the server
-// makes rather than a measurement of what is on disk: a file is only removed
-// once it has been rotated and is older than the setting, so the real history
-// is at least this long and usually a little longer. Under-reporting is the
-// right direction for a number somebody uses to decide whether there is still
-// time to restart the task rather than copy the database again.
-//
-// A configured window overrides it, for a managed source whose real retention
-// is governed by something the server does not know about — Cloud SQL keeps
-// binlogs for its transaction-log retention period, which can be longer than
-// the variable says.
+// Window is how far back the source's binlog reaches. It comes from
+// binlog_expire_logs_seconds, which is the promise the server makes rather
+// than a measurement of what is on disk: a file is only removed once it has
+// been rotated and is older than the setting, so the real history is at least
+// this long and usually a little longer.
 func (r *Reader) Window(ctx context.Context) (time.Duration, error) {
 	if r.Config.RetentionWindow > 0 {
 		return r.Config.RetentionWindow, nil

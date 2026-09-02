@@ -216,12 +216,11 @@ func (s *MySQLSyncer) Start(ctx context.Context) error {
 	var readerReturned atomic.Bool
 
 	// Stopping the reader is what makes this function's return mean anything.
-	// Cancelling the context used to return from here and leave canal reading
-	// the binlog and writing to the target for the life of the process: a task
+	// Cancelling the context used to return from here and leave canal reading the
+	// binlog and writing to the target for the life of the process: a task
 	// restarted by the supervisor ran a second reader beside the first, and a
 	// task edited to point somewhere else went on writing to where it used to
-	// point. The final position is recorded afterwards, once the handler is
-	// quiet, so nothing is applied after the position that names it.
+	// point.
 	defer func() {
 		c.Close()
 		if !readerReturned.Load() {
@@ -277,13 +276,10 @@ func (s *MySQLSyncer) Start(ctx context.Context) error {
 }
 
 // positionNoLongerAvailable reports whether an error says the source has
-// discarded the binlog this task would resume from.
-//
-// Cloud SQL expires binary logs on a retention schedule, so a task stopped for
-// longer than that comes back to find its offset gone. Retrying cannot help:
-// the bytes are not there, and every attempt fails the same way. What is needed
-// is a fresh copy, which somebody has to decide to make — and while nobody
-// knows, the replica falls further behind.
+// discarded the binlog this task would resume from. Cloud SQL expires binary
+// logs on a schedule, so a task stopped for longer comes back to find its
+// offset gone. Retrying cannot help — the bytes are not there — and what is
+// needed is a fresh copy, which somebody has to decide to make.
 func positionNoLongerAvailable(err error) (string, bool) {
 	if err == nil {
 		return "", false
@@ -307,15 +303,12 @@ func positionNoLongerAvailable(err error) (string, bool) {
 }
 
 // snapshot copies the source into the target and reports the binlog coordinates
-// the stream must resume from.
+// the stream must resume from. They are read before a row is copied, inside the
+// transaction the copy reads through: reading them afterwards loses every write
+// made while the copy ran.
 //
-// The coordinates are read before a row is copied, inside the same transaction
-// the copy reads through. Reading them afterwards — which is what starting canal
-// with no stored position amounts to — loses every write made while the copy was
-// running, and the copy of a payment table runs for as long as it runs.
-//
-// nil means the coordinates could not be pinned. The caller then has no safe
-// place to resume from, which is worth saying out loud rather than papering over.
+// nil means they could not be pinned, so the caller has no safe place to
+// resume from.
 func (s *MySQLSyncer) snapshot(ctx context.Context, targetDB *sql.DB) *binlogCheckpoint {
 	sourceDB, err := sql.Open("mysql", s.cfg.SourceConnection)
 	if err != nil {
@@ -428,16 +421,8 @@ func readBinlogStatus(ctx context.Context, conn *sql.Conn, stmt string) (*binlog
 }
 
 // doInitialSync copies every mapped table, reporting what it could not copy.
-//
 // Every failure here used to be logged and stepped over, and the caller then
-// recorded the position as though the copy had finished. A table whose create
-// failed, or whose rows only half arrived, was therefore never copied again: the
-// stream carried on from a point that assumed a complete base, and the gap
-// stayed for good. The row counts of the tables that did copy looked right.
-//
-// A failure to copy one table no longer stops the others — copying what can be
-// copied is useful — but the caller is told, and must not record the position
-// for an incomplete copy.
+// recorded the position as though the copy had finished.
 func (s *MySQLSyncer) doInitialSync(ctx context.Context, sourceDB *sql.Conn, targetDB *sql.DB) error {
 	s.logger.Info("[MySQL] Starting the initial full sync...")
 
@@ -715,13 +700,9 @@ const (
 	dialectSQLite dialect = "sqlite"
 )
 
-// upsertStatement renders an idempotent multi-row insert for d.
-//
-// Replication is at-least-once: the binlog position is persisted periodically,
-// so a restart replays whatever came after the last write. A plain INSERT turns
-// that replay into a duplicate-key error, and a duplicate-key error is not a
-// connection failure, so RetryDBOperation gives up on it immediately and the
-// row is dropped. Every insert this syncer emits therefore has to be an upsert.
+// upsertStatement renders an idempotent multi-row insert for d. Replication is
+// at-least-once: the binlog position is persisted periodically, so a restart
+// replays whatever came after the last write.
 func upsertStatement(d dialect, dbName, table string, cols []string, rowCount int) string {
 	if rowCount < 1 {
 		rowCount = 1
@@ -757,17 +738,8 @@ func makeQuestionMarks(n int) []string {
 	return res
 }
 
-// binlogCheckpoint is what the position file holds.
-//
-// The file-and-offset pair only means something on the server that produced it.
-// After a Cloud SQL failover the new primary has its own binlog files, and an
-// offset taken from the old one points at unrelated bytes — the syncer either
-// fails to start or, worse, resumes from the wrong place. A GTID set names the
-// transactions themselves and survives the failover, so it is what a resumed
-// task prefers.
-//
-// Name and Pos keep the capitalised spelling mysql.Position marshals to, so a
-// file written before GTIDs were recorded still loads.
+// binlogCheckpoint is what the position file holds. The file-and-offset pair
+// only means something on the server that produced it.
 type binlogCheckpoint struct {
 	Name   string `json:"Name"`
 	Pos    uint32 `json:"Pos"`
@@ -804,13 +776,8 @@ func (c *binlogCheckpoint) gtidSet() mysql.GTIDSet {
 	return set
 }
 
-// checkpointStore is where this task records its offset.
-//
-// It writes to the target database as well as the configured file. The file
-// alone was the problem: the syncer runs beside the source, so the outage this
-// setup exists to survive takes the record of what has been applied with it,
-// and a replacement started in the other region has no way to find out where to
-// resume from.
+// checkpointStore is where this task records its offset. It writes to the
+// target database as well as the configured file.
 func (s *MySQLSyncer) checkpointStore(targetDB *sql.DB) checkpoint.Store {
 	stores := []checkpoint.Store{
 		&checkpoint.SQLStore{
@@ -891,10 +858,9 @@ func (s *MySQLSyncer) parseAddr(dsn string) string {
 	return cfg.Addr
 }
 
-// sourceTLS reports the TLS settings the binlog connection should use.
-//
-// canal opens its own connection rather than going through database/sql, so the
-// tls parameter in the DSN does not reach it: without this the row events would
+// sourceTLS reports the TLS settings the binlog connection should use.  canal
+// opens its own connection rather than going through database/sql, so the tls
+// parameter in the DSN does not reach it: without this the row events would
 // cross the region in the clear even when every other connection is encrypted.
 // A DSN asking for "preferred" gets no TLS here, because canal has no way to
 // negotiate and fall back — asking for it unconditionally would break a server
@@ -1239,12 +1205,9 @@ func (h *MyEventHandler) buildStatement(
 }
 
 // refuseKeyless stops replication for a table whose rows cannot be addressed.
-//
 // Carrying on replicates the inserts and drops the updates and the deletes, so
 // the target accumulates rows the source has since changed or removed — and
-// nothing downstream can tell. The row counts even agree for a while. MySQL's
-// own answer to this is sql_require_primary_key, and Group Replication refuses
-// such a table outright; for payment data that is the right severity.
+// nothing downstream can tell.
 func (h *MyEventHandler) refuseKeyless(db, table string) error {
 	return domain.Unrecoverable(
 		"%s.%s has no primary key, so its updates and deletes cannot be addressed on "+
@@ -1255,13 +1218,11 @@ func (h *MyEventHandler) refuseKeyless(db, table string) error {
 }
 
 // warnAboutMissingKey reports a table whose rows cannot be addressed on the
-// target, once rather than once per event.
-//
-// Skipping the update or the delete is right — the alternative is matching on
-// every column and rewriting whatever happens to look the same — but it means
-// the table is only half replicated: inserts arrive and nothing else does, so
-// the target accumulates rows the source has changed or removed. That is worth
-// one clear line, not a debug entry per row.
+// target, once rather than once per event. Skipping the update or the delete
+// is right — the alternative is matching on every column and rewriting
+// whatever happens to look the same — but it means the table is only half
+// replicated: inserts arrive and nothing else does, so the target accumulates
+// rows the source has changed or removed.
 func (h *MyEventHandler) warnAboutMissingKey(db, table string) {
 	name := db + "." + table
 
@@ -1367,13 +1328,10 @@ func (h *MyEventHandler) flush() error {
 }
 
 // defaultCheckpointInterval is how often the binlog position is recorded.
-//
 // canal reports a synced position once per source transaction. Recording each
-// one costs a round trip and an fsync on the target per transaction replicated,
-// which is most of the cost of replicating a payment ledger where every payment
-// is its own transaction. What the interval buys back is bounded: after an
-// unclean stop, replication replays at most this much, and replaying is safe
-// because the statements are idempotent.
+// one costs a round trip and an fsync on the target per transaction
+// replicated, which is most of the cost of replicating a payment ledger where
+// every payment is its own transaction.
 const defaultCheckpointInterval = 200 * time.Millisecond
 
 // checkpointInterval reports the interval, which SYNC_MYSQL_CHECKPOINT_INTERVAL
@@ -1591,16 +1549,10 @@ func (s *MySQLSyncer) checkRowImage(c *canal.Canal) error {
 	return requireFullRowImage(image)
 }
 
-// requireFullRowImage reports why a binlog row image cannot be replicated from.
-//
-// With anything other than FULL the binlog carries only the columns that changed
-// plus the primary key, and the driver fills the rest of the row with nils. The
-// UPDATE this syncer builds sets every column, so those nils are written as NULL
-// over values that never changed — silently, with the target looking perfectly
-// healthy and the row counts matching.
-//
-// There is no way to tell such a nil from a column that really is NULL, so this
-// cannot be worked around by writing fewer columns. It has to be refused.
+// requireFullRowImage reports why a binlog row image cannot be replicated
+// from. With anything other than FULL the binlog carries only the columns that
+// changed plus the primary key, and the driver fills the rest of the row with
+// nils.
 func requireFullRowImage(image string) error {
 	switch {
 	case image == "":

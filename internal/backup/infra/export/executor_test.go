@@ -184,10 +184,11 @@ func TestIsTableRelevantForTimeRange(t *testing.T) {
 	}
 }
 
-// Both intervals are half-open — a monthly table ends on the first of the next
-// month — but the overlap test used Before and After rather than their strict
-// complements, so an interval ending exactly where the window starts counted
-// as overlapping and a one-month backup exported three months of tables.
+// TestATouchingIntervalDoesNotOverlap covers an off-by-one at the boundary. Both
+// intervals are half-open — a monthly table ends on the first of the next month
+// — but the overlap test used Before and After rather than their strict
+// complements, so an interval ending exactly where the window starts counted as
+// overlapping and a one-month backup exported three months of tables.
 func TestATouchingIntervalDoesNotOverlap(t *testing.T) {
 	august := &TimeRange{
 		Start: time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC),

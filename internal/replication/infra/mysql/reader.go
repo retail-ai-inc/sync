@@ -23,15 +23,12 @@ import (
 	"github.com/retail-ai-inc/sync/internal/replication/infra/checkpoint"
 )
 
-// Reader turns one MySQL server's binlog into a stream of events.
+// Reader turns one MySQL server's binlog into a stream of events. One stream
+// covers every database the task maps: the binlog is a single log per server,
+// so a reader per database opened several dump connections to the same bytes.
 //
-// One stream covers every database the task maps, not one per database. The
-// binlog is a single log per server, so a task per database meant several
-// binlog dump connections to the same server all reading the same bytes: the
-// source did the work once for each of them, and each held a connection slot.
-//
-// It is a canal.EventHandler as well as a domain.Reader. canal calls it back on
-// its own goroutine; Next hands the events over a channel.
+// It is a canal.EventHandler as well as a domain.Reader — canal calls it back on
+// its own goroutine, and Next hands the events over a channel.
 type Reader struct {
 	canal.DummyEventHandler
 
@@ -63,16 +60,11 @@ type Reader struct {
 
 	// lastGTID is the newest GTID set the stream has reported, kept so a
 	// checkpoint written without one does not throw away the one before it.
-	//
 	// canal does not carry a GTID set on every position it reports. Recording
-	// only what the current call carried meant one such call overwrote the
-	// stored GTID with nothing, and a restart then resumed from file and offset
-	// instead — which canal in turn does not track GTIDs for, so every later
-	// checkpoint lost it too. Measured on Cloud SQL: the first start logged
-	// "start sync binlog at GTID set", and after a few restarts the stored
-	// position was {"Name":"mysql-bin.000037","Pos":41017161} with no GTID at
-	// all. File and offset are local to one server, so a failover would have
-	// left that position pointing at nothing.
+	// only what the current call carried meant one such call overwrote the stored
+	// GTID with nothing, and a restart then resumed from file and offset instead
+	// — which canal in turn does not track GTIDs for, so every later checkpoint
+	// lost it too.
 	lastGTID string
 
 	// lastSchemaChange is when a schema change was last carried through, so its
@@ -85,15 +77,11 @@ type Reader struct {
 
 	// inTransaction says a GTID event has opened a transaction whose end has not
 	// been seen yet, so no position reported in the meantime is a boundary.
-	//
 	// canal reports a position at the BEGIN of every transaction, and the GTID
 	// set it carries already counts that transaction as done: go-mysql adds the
 	// GTID to the set when it reads the GTID event, which comes before the rows.
 	// Recording that position hands a restart a checkpoint that points past rows
-	// this process has not read yet, and they are then never read at all. It
-	// needs a crash in the window to show, which is why it survived every clean
-	// stop: measured under 1,000 tx/s with kills every 15s, a handful of rows per
-	// run reached the source and never the target, with nothing logged.
+	// this process has not read yet, and they are then never read at all.
 	inTransaction bool
 
 	// resumed says the stream started from a stored position rather than from
@@ -109,13 +97,12 @@ type Reader struct {
 	stop      func()
 }
 
-// heartbeatEvery is how often a stream with nothing to say says so.
-//
-// A reader that delivers nothing looks exactly like one that is up to date, so
-// "replication has stopped" was the one condition the monitoring could not see.
-// canal reports a synced position on its own timer even when no rows are
-// changing, which is a liveness signal already in hand: turned into an event it
-// costs nothing and proves the link end to end.
+// heartbeatEvery is how often a stream with nothing to say says so. A reader
+// that delivers nothing looks exactly like one that is up to date, so
+// "replication has stopped" was the one condition the monitoring could not
+// see. canal reports a synced position on its own timer even when no rows are
+// changing, which is a liveness signal already in hand: turned into an event
+// it costs nothing and proves the link end to end.
 const heartbeatEvery = 10 * time.Second
 
 // Open starts the binlog stream at a position, or at the current end when there
@@ -173,13 +160,10 @@ func (r *Reader) Open(ctx context.Context, from domain.Position) error {
 			r.lastGTID = stored.GTID
 			r.fail <- c.StartFromGTID(stored.gtidSet())
 		default:
-			// File and offset name a place on one server and nowhere else. A
-			// source that keeps GTIDs and a position that does not is a task
-			// that will not survive its next failover, and nothing else says
-			// so — the task looks healthy right up until the position is
-			// meaningless. It cannot be repaired from here: canal reports no
-			// GTID for a stream it did not start by GTID, so the position stays
-			// this way until the shard is copied again.
+			// File and offset name a place on one server and nowhere else. A source
+			// that keeps GTIDs and a position that does not is a task that will not
+			// survive its next failover, and nothing else says so — the task looks
+			// healthy right up until the position is meaningless.
 			r.Logger.Warnf("[MySQL] Resuming from a file and offset rather than a " +
 				"GTID. That position names a place on this server and nowhere else, " +
 				"so a failover leaves it pointing at nothing and this shard has to be " +
@@ -477,13 +461,10 @@ func (r *Reader) OnDDL(header *replication.EventHeader, pos mysql.Position, e *r
 }
 
 // checkReordering stops the task when a statement that moves a column arrives
-// after rows for that table have already been handed over in this run.
-//
-// Those rows were read against the shape this statement produced rather than the
-// one they were written under, because the column names come from asking the
-// source for its current schema and not from the binlog. They wrote cleanly and
-// they are wrong, and the row counts agree — see reorder.go for why this is the
-// one case that is neither loud nor harmless.
+// after rows for that table have already been handed over in this run. Those
+// rows were read against the shape this statement produced rather than the one
+// they were written under, because the column names come from asking the
+// source for its current schema and not from the binlog.
 func (r *Reader) checkReordering(defaultSchema, query string) error {
 	if !r.resumed || len(r.appliedSince) == 0 {
 		// Nothing was read before this statement, so nothing was read against
@@ -636,13 +617,9 @@ func (r *Reader) encode(pos mysql.Position, set mysql.GTIDSet) (string, error) {
 	return checkpoint.Encode(cp)
 }
 
-// rowKey identifies the record a statement addresses, so two changes to one row
-// are never reordered against each other.
-//
-// The primary key columns are what the target is addressed by, so they are what
-// identifies the record. A table with no key produces no key here — such a table
-// is refused before this point unless an operator has said otherwise, and a
-// best-effort copy of one has nothing to order.
+// rowKey identifies the record a statement addresses, so two changes to one
+// row are never reordered against each other. The primary key columns are what
+// the target is addressed by, so they are what identifies the record.
 func rowKey(e *canal.RowsEvent, n int) string {
 	if e.Table == nil || len(e.Table.PKColumns) == 0 {
 		return ""

@@ -14,13 +14,10 @@ import (
 	_ "github.com/mattn/go-sqlite3" // SQLite driver
 )
 
-// TokenTTL is how long a freshly minted token stays usable.
-//
-// The previous derivation had no expiry field at all: a token was a pure
-// function of the username, the access level and the calendar date, so it was a
-// constant for the whole day and there was no way to end a session early. It
-// also meant every token minted that day was recomputable by anyone who knew
-// the secret.
+// TokenTTL is how long a freshly minted token stays usable. The previous
+// derivation had no expiry field at all: a token was a pure function of the
+// username, the access level and the calendar date, so it was a constant for
+// the whole day and there was no way to end a session early.
 const TokenTTL = 12 * time.Hour
 
 var (
@@ -36,13 +33,9 @@ func init() {
 }
 
 // resolveTokenSecret reads the signing secret, generating a random one when
-// none is configured.
-//
-// It used to fall back to a constant compiled into the binary, which is in a
-// repository: anyone who had read it could mint an admin token for any day,
-// against any deployment that had not set the variable. A random secret is
-// useless to an attacker and obvious to an operator, because logins stop
-// working across replicas until the variable is set.
+// none is configured. It used to fall back to a constant compiled into the
+// binary, which is in a repository: anyone who had read it could mint an admin
+// token for any day, against any deployment that had not set the variable.
 func resolveTokenSecret() (secret string, ephemeral bool) {
 	if configured := os.Getenv("SYNC_TOKEN_SECRET"); configured != "" {
 		return configured, false

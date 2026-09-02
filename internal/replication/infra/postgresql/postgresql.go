@@ -199,12 +199,10 @@ func (s *PostgreSQLSyncer) Start(ctx context.Context) error {
 	return nil
 }
 
-// buildReplicationDSN constructs replication DSN
-// buildReplicationDSN turns the task's connection string into one that opens a
-// replication connection.
-//
-// libpq accepts two forms, and only the URL one used to be handled: the keyword
-// form ("host=x dbname=y") parses as a relative path rather than failing, so the
+// buildReplicationDSN constructs replication DSN buildReplicationDSN turns the
+// task's connection string into one that opens a replication connection. libpq
+// accepts two forms, and only the URL one used to be handled: the keyword form
+// ("host=x dbname=y") parses as a relative path rather than failing, so the
 // replication parameter was appended as a query string onto something that has
 // no query string and the connection was refused with an error naming neither.
 func (s *PostgreSQLSyncer) buildReplicationDSN(normalDSN string) (string, error) {
@@ -261,15 +259,10 @@ func (s *PostgreSQLSyncer) ensureReplicationSlot(ctx context.Context) error {
 			return fmt.Errorf("CreateReplicationSlot failed: %w", err)
 		}
 		s.logger.Infof("[PostgreSQL] Replication slot %s already exists, will use existing slot.", s.repSlot)
-		// Deliberately not info.XLogPos.
-		//
-		// That is where the server is writing *now*, and this branch is the
-		// restart case: setting it here told the server to stream from the
-		// present moment, so everything committed while the syncer was down was
-		// skipped and no later message ever carried it. Left at zero, the server
-		// resumes the slot from the position it last confirmed — which is what
-		// the slot has been holding the WAL for. A stored position, read a few
-		// lines further on, is more precise still and overrides this.
+		// Deliberately not info.XLogPos. That is where the server is writing *now*,
+		// and this branch is the restart case: setting it here told the server to
+		// stream from the present moment, so everything committed while the syncer
+		// was down was skipped and no later message ever carried it.
 		return nil
 	}
 	lsn, err2 := pglogrepl.ParseLSN(slot.ConsistentPoint)
@@ -725,14 +718,11 @@ func (s *PostgreSQLSyncer) startLogicalReplication(ctx context.Context) error {
 	}
 }
 
-// confirmProgress tells the source how far this syncer has got.
-//
-// The three positions are not the same thing, and reporting one number for all
-// of them is what made them dangerous: the server discards WAL the standby has
-// flushed, so confirming everything *received* let it recycle segments carrying
-// changes that had not been applied to the target yet. A restart then resumed
-// after a gap that no longer existed anywhere. Write is what has arrived; flush
-// and apply are what has been written to the target and recorded.
+// confirmProgress tells the source how far this syncer has got. The three
+// positions are not the same thing, and reporting one number for all of them
+// is what made them dangerous: the server discards WAL the standby has
+// flushed, so confirming everything *received* let it recycle segments
+// carrying changes that had not been applied to the target yet.
 func (s *PostgreSQLSyncer) confirmProgress(ctx context.Context) error {
 	applied := s.state.lastWrittenLSN
 	if applied > s.currentLsn {
@@ -886,12 +876,10 @@ func relationName(rel *pglogrepl.RelationMessageV2) string {
 }
 
 // keyColumns reports the primary key of a replicated table, or nothing when it
-// has none or the source cannot be asked.
-//
-// It used to call straight into getPrimaryKeyColumns, which reads through the
-// source connection: one DELETE while the source was down dereferenced a nil
-// connection and took the whole process with it. The fallback for a table with
-// no key — match on every column — is what happens when the key is unknown.
+// has none or the source cannot be asked. It used to call straight into
+// getPrimaryKeyColumns, which reads through the source connection: one DELETE
+// while the source was down dereferenced a nil connection and took the whole
+// process with it.
 func (s *PostgreSQLSyncer) keyColumns(rel *pglogrepl.RelationMessageV2) []string {
 	if s.sourceConnNormal == nil {
 		s.logger.Warnf("[PostgreSQL] The source connection is gone, so %s is "+
@@ -939,15 +927,10 @@ func (s *PostgreSQLSyncer) getPrimaryKeyColumns(schema, tableName string) ([]str
 	return primaryKeys, nil
 }
 
-// replicateQuery executes replication queries.
-//
-// A statement that failed used to be forgiven by the next one that succeeded:
-// the flag the commit path reads was cleared on every success, including the
-// next statement of the same transaction. The commit then advanced the LSN past
-// a row that never reached the target, and nothing would ever send it again.
-// Once a statement has failed the flag stays raised for the life of the syncer,
-// so the position never moves past the loss and a restart replays from the last
-// position everything was applied at.
+// replicateQuery executes replication queries. A statement that failed used to
+// be forgiven by the next one that succeeded: the flag the commit path reads
+// was cleared on every success, including the next statement of the same
+// transaction.
 func (s *PostgreSQLSyncer) replicateQuery(db *sql.DB, query string, args []interface{}, opType, tableName string) error {
 	s.logger.Debugf("[PostgreSQL][%s] table=%s query=%s", opType, tableName, query)
 
@@ -1055,13 +1038,8 @@ func (s *PostgreSQLSyncer) claimDirection(ctx context.Context) (func(), error) {
 	}, nil
 }
 
-// checkpointStore is where this task records its replication position.
-//
-// It writes to the target database as well as the configured file. The file
-// alone was the problem: the syncer runs beside the source, so the outage this
-// setup exists to survive takes the record of what has been applied with it, and
-// a replacement started in the other region has no way to find out where to
-// resume from.
+// checkpointStore is where this task records its replication position. It
+// writes to the target database as well as the configured file.
 func (s *PostgreSQLSyncer) checkpointStore() checkpoint.Store {
 	stores := []checkpoint.Store{
 		&checkpoint.SQLStore{

@@ -256,12 +256,11 @@ func (qc *QueryCounter) formatValue(value interface{}) string {
 }
 
 // mongoComparisons maps the operators a count query is written with onto the
-// ones MongoDB understands.
-//
-// Each of these used to be its own case, and each case carried its own copy of
-// the same three-step conversion below — five copies of a ladder that has to
-// stay identical, because a condition that reads a value differently from its
-// neighbour counts a different set of documents.
+// ones MongoDB understands. Each of these used to be its own case, and each
+// case carried its own copy of the same three-step conversion below — five
+// copies of a ladder that has to stay identical, because a condition that
+// reads a value differently from its neighbour counts a different set of
+// documents.
 var mongoComparisons = map[string]string{
 	">":  "$gt",
 	">=": "$gte",
@@ -273,11 +272,7 @@ var mongoComparisons = map[string]string{
 
 // comparableValue reads a condition's value as the narrowest type it fits: an
 // integer, then a floating-point number, then the string as it was written.
-//
-// The order matters. MongoDB compares a number against a number and a string
-// against a string, so a threshold written as "1000" against a numeric field has
-// to be sent as a number or it matches nothing — and a value that is not a
-// number at all has to be sent as it stands rather than dropped.
+// The order matters.
 func comparableValue(value string) interface{} {
 	if whole, err := strconv.ParseInt(value, 10, 64); err == nil {
 		return whole
@@ -289,15 +284,10 @@ func comparableValue(value string) interface{} {
 }
 
 // namedRange reports the window a named date range covers, in the given zone.
-//
 // The four ranges each used to compute their own bounds, convert them, set the
-// filter and log the query — four copies of the same twenty lines, which is how
-// "weekly" and "monthly" came to end at the end of today rather than at the end
-// of the period while "daily" ended at the end of its day. The bounds are here;
-// what is done with them is in one place at the call site.
-//
-// A range is inclusive at both ends: the last nanosecond of the last day is part
-// of it, because a document written at 23:59:59 belongs to that day.
+// filter and log the query — four copies of the same twenty lines, which is
+// how "weekly" and "monthly" came to end at the end of today rather than at
+// the end of the period while "daily" ended at the end of its day.
 func (qc *QueryCounter) namedRange(name string, zone *time.Location) (start, end time.Time, known bool) {
 	now := time.Now().In(zone)
 	dayStart := func(t time.Time) time.Time {

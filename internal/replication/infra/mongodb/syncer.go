@@ -81,15 +81,10 @@ func (s *Snapshotter) Copy(ctx context.Context) error {
 			targetName = table.SourceTable
 		}
 
-		// The collection has to exist, be partitioned the way the source is,
-		// and carry the source's indexes — all before a document is copied.
-		//
-		// Sharding an empty collection is immediate; sharding one that
-		// already holds the copy is a migration. And a sharded source
-		// replicated into a collection that MongoDB auto-created on first
-		// insert lands unsharded, which gives the disaster-recovery copy one
-		// shard's capacity where the source had all of them. Nothing reports
-		// it: the documents are all there.
+		// The collection has to exist, be partitioned the way the source is, and
+		// carry the source's indexes — all before a document is copied. Sharding an
+		// empty collection is immediate; sharding one that already holds the copy is
+		// a migration.
 		if err := s.Syncer.ensureCollectionExists(ctx, target, targetName); err != nil {
 			failures = append(failures,
 				fmt.Sprintf("%s.%s: could not create the target collection: %v",
@@ -133,17 +128,8 @@ func (s *Snapshotter) Copy(ctx context.Context) error {
 	return nil
 }
 
-// collections reports what to copy, discovering it from the source when the task
-// names nothing.
-//
-// The two halves of this used to disagree. The reader takes "no collections
-// listed" to mean every collection of the database, which is what the MySQL side
-// means by it too; the copy took it to mean there was nothing to copy, and its
-// loop simply did not run. It reported success, the position was recorded, and
-// the stream started — so the target held whatever was written from that moment
-// on and none of what was there before. Nothing said so: no error, no warning,
-// no metric. Only a comparison would have found it, and comparisons are off
-// unless asked for.
+// collections reports what to copy, discovering it from the source when the
+// task names nothing. The two halves of this used to disagree.
 func (s *Snapshotter) collections(ctx context.Context, source *mongo.Database) ([]config.TableMapping, error) {
 	var listed []config.TableMapping
 	for _, mapping := range s.Config.Mappings {
@@ -237,12 +223,9 @@ func (s *Syncer) Start(ctx context.Context) error {
 
 	// An environment variable can turn off the guarantee the rest of this
 	// pipeline is built on, so it says so where somebody will see it. A batch
-	// applied outside a transaction can be half applied, and the position is
-	// then recorded past changes the target does not have: the copy is quietly
-	// wrong, and the next consistency check is what finds it, if one is running.
-	//
-	// Nothing said this before. The variable is read once, deep in the applier,
-	// and a task started with it set looked exactly like a task without it.
+	// applied outside a transaction can be half applied, and the position is then
+	// recorded past changes the target does not have: the copy is quietly wrong,
+	// and the next consistency check is what finds it, if one is running.
 	bare := noTransaction()
 	if warning := describeNoTransaction(bare, s.cfg.ID); warning != "" {
 		s.logger.Warn(warning)
@@ -270,23 +253,10 @@ func (s *Syncer) Start(ctx context.Context) error {
 		Checkpoints: store,
 		Resyncs:     s.resyncs(inner, store, sourceDBName),
 		Opts: pipeline.Options{
-			// The changes of a batch go to the target in the order the stream
-			// held them.
-			//
-			// The alternative splits a batch into runs that may be applied
-			// independently, deciding independence by the _id: two changes to
-			// one document keep their order, everything else may move. Two
-			// documents are not independent when a unique index relates them,
-			// and handing a unique value from one to another is an ordinary
-			// thing for an application to do. Applied the wrong way round the
-			// write that takes the value runs first, and because every write
-			// here is an upsert the result is not an error — it is a document
-			// rewritten where it should have been inserted, and a later change
-			// that then matches nothing.
-			//
-			// Keeping the order costs the concurrency the server had inside a
-			// batch. It costs nothing in round trips: the whole batch is one
-			// run, so it goes in one request where it used to take one per run.
+			// The changes of a batch go to the target in the order the stream held
+			// them. The alternative splits a batch into runs that may be applied
+			// independently, deciding independence by the _id: two changes to one
+			// document keep their order, everything else may move.
 			StreamOrder: true,
 			Labels:      labels,
 			Logger:      s.logger,
@@ -304,14 +274,9 @@ func (s *Syncer) Start(ctx context.Context) error {
 }
 
 // warnAboutUnlistedCollections reports the collections the source has and this
-// task does not replicate.
-//
-// A task that lists nothing replicates the database as a whole, so there is
-// nothing to report; one that lists its collections has a gap whenever the
-// source grows another, and the gap is invisible. Every count agrees, every
-// check passes, and the collection is simply not in the disaster-recovery copy
-// — which for a payment schema that grows a collection for a new settlement
-// type is the worst way to find out.
+// task does not replicate. A task that lists nothing replicates the database
+// as a whole, so there is nothing to report; one that lists its collections
+// has a gap whenever the source grows another, and the gap is invisible.
 func (s *Syncer) warnAboutUnlistedCollections(ctx context.Context, inner *MongoDBSyncer,
 	sourceDB string, labels metrics.Labels) {
 

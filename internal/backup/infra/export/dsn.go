@@ -7,13 +7,9 @@ import (
 	"github.com/retail-ai-inc/sync/internal/platform/dsn"
 )
 
-// buildMongoDBConnectionString builds the URI mongodump reads through.
-//
-// It goes through the shared builder so a backup addresses a cluster the same
-// way replication does. It used to force directConnection, which pins the
-// driver to one node: against a replica set the backup would then read from
-// whichever node it happened to reach, and fail outright once that node was no
-// longer serving.
+// buildMongoDBConnectionString builds the URI mongodump reads through. It goes
+// through the shared builder so a backup addresses a cluster the same way
+// replication does.
 func buildMongoDBConnectionString(url, username, password string) string {
 	return dsn.BuildDSNByType("mongodb", map[string]string{
 		"user":     username,
@@ -22,14 +18,11 @@ func buildMongoDBConnectionString(url, username, password string) string {
 	})
 }
 
-// parseMySQLConnectionURL reads the host and port a backup connects to.
-//
-// The field is labelled a connection URL in the interface, so an operator fills
-// in an ordinary DSN — and this used to be Split(url, ":") taking the first two
-// parts, so "mysql://u:p@db:3306" gave the host "mysql" and the port "//u", and
-// mysqldump went looking for a machine called mysql. The credentials come from
-// the job's own username and password fields; the two return values named for
-// them were always the empty string.
+// parseMySQLConnectionURL reads the host and port a backup connects to. The
+// field is labelled a connection URL in the interface, so an operator fills in
+// an ordinary DSN — and this used to be Split(url, ":") taking the first two
+// parts, so "mysql://u:p@db:3306" gave the host "mysql" and the port "//u",
+// and mysqldump went looking for a machine called mysql.
 func parseMySQLConnectionURL(url string) (host, port string) {
 	trimmed := strings.TrimSpace(url)
 	host, port = "localhost", "3306"

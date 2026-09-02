@@ -76,10 +76,10 @@ func TestBackupRunHandlerReportsAMissingTable(t *testing.T) {
 	}
 }
 
-// It used to stamp last_backup_time and answer "Backup job started
-// successfully" without running anything at all — no executor, no command,
-// nothing written anywhere — so the dashboard showed a fresh, successful
-// backup that did not exist.
+// TestBackupRunHandlerActuallyRunsTheJob covers "back this up now". It used to
+// stamp last_backup_time and answer "Backup job started successfully" without
+// running anything at all — no executor, no command, nothing written anywhere —
+// so the dashboard showed a fresh, successful backup that did not exist.
 func TestBackupRunHandlerActuallyRunsTheJob(t *testing.T) {
 	conn := useTempTaskDB(t)
 	insertBackupTask(t, conn, 1, `{"name":"nightly","sourceType":"mongodb","schedule":"0 3 * * *"}`)

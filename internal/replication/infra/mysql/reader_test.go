@@ -412,8 +412,8 @@ func TestAPositionInsideATransactionIsNotHandedOver(t *testing.T) {
 	}
 }
 
-// It catches the change nothing else reports: a mapping edit that quietly
-// drops a table.
+// TestTheCapturedTableCountIsPublished is Debezium's CapturedTables. It catches
+// the change nothing else reports: a mapping edit that quietly drops a table.
 func TestTheCapturedTableCountIsPublished(t *testing.T) {
 	r := readerFor([]config.DatabaseMapping{
 		{Tables: []config.TableMapping{

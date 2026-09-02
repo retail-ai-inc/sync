@@ -461,9 +461,9 @@ func TestTheSampleReachesBeyondTheNewestFewDocuments(t *testing.T) {
 	}
 }
 
-// It was reported as "bson.ObjectID" — the Go type the driver decodes it into
-// — because the switch had no case for it, so every schema query returned at
-// least one type name the interface cannot map to a column type.
+// _id was reported as "bson.ObjectID", the Go type the driver decodes it into,
+// because the switch had no case for it — so every schema query returned a type
+// name the interface cannot map to a column type.
 func TestTheMongoIDTypeIsADatabaseType(t *testing.T) {
 	collection := harness.UniqueName("mid")
 	client := openSchemaMongo(t)

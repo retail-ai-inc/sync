@@ -7,12 +7,9 @@ import (
 )
 
 // Config is a sync task's configuration as stored in the config_json column.
-//
 // It had three declarations before this one: an anonymous `extra` struct the
 // list endpoint read into, and two anonymous `cfgJSONStruct` values the create
-// and update endpoints marshalled. All three carried exactly these fourteen
-// fields with exactly these tags, so this type replaces them without changing a
-// byte of the stored document.
+// and update endpoints marshalled.
 type Config struct {
 	Type                   string                   `json:"type"`
 	TaskName               string                   `json:"taskName"`

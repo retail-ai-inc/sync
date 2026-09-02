@@ -88,13 +88,8 @@ func findCloudBuildScript() string {
 	return ""
 }
 
-// IsConfigured checks if Slack notification is properly configured.
-//
-// It no longer requires cloudbuild.sh. A webhook URL is what Slack needs, and
-// this used to refuse to send without a shell script it looked for in three
-// hardcoded paths — so any deployment that did not have the script in one of
-// them dropped every alert, including the ones about replication having stopped,
-// while telling the caller the notification had been sent.
+// IsConfigured checks if Slack notification is properly configured. It no
+// longer requires cloudbuild.sh.
 func (s *SlackNotifier) IsConfigured() bool {
 	return s.webhookURL != ""
 }
