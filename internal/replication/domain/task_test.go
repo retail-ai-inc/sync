@@ -279,3 +279,48 @@ func TestIsMongoDB(t *testing.T) {
 		})
 	}
 }
+
+// The list endpoint has masked passwords since the port was closed, and the
+// edit form sends the whole connection back — so without this an edit that did
+// not touch the password stored "********" as the password, and the task
+// authenticated with it.
+func TestARedactedPasswordIsNotSavedOverTheRealOne(t *testing.T) {
+	stored := Config{
+		SourceConn: map[string]string{"host": "tokyo", "user": "root", "password": "real-source"},
+		TargetConn: map[string]string{"host": "osaka", "user": "root", "password": "real-target"},
+	}
+	req := Request{
+		SourceConn: map[string]string{"host": "tokyo", "user": "root", "password": RedactedPassword},
+		TargetConn: map[string]string{"host": "osaka", "user": "root", "password": RedactedPassword},
+	}
+
+	got := CarryStoredPasswords(req, stored)
+	if got.SourceConn["password"] != "real-source" {
+		t.Errorf("source password = %q, want the stored one", got.SourceConn["password"])
+	}
+	if got.TargetConn["password"] != "real-target" {
+		t.Errorf("target password = %q, want the stored one", got.TargetConn["password"])
+	}
+}
+
+func TestANewPasswordReplacesTheStoredOne(t *testing.T) {
+	stored := Config{SourceConn: map[string]string{"password": "old"}}
+	req := Request{SourceConn: map[string]string{"password": "new"}}
+
+	if got := CarryStoredPasswords(req, stored); got.SourceConn["password"] != "new" {
+		t.Errorf("password = %q, want the new one", got.SourceConn["password"])
+	}
+}
+
+// The mask with nothing behind it is not a password.
+func TestARedactedPasswordWithNothingStoredIsDropped(t *testing.T) {
+	req := Request{SourceConn: map[string]string{"host": "tokyo", "password": RedactedPassword}}
+
+	got := CarryStoredPasswords(req, Config{})
+	if _, present := got.SourceConn["password"]; present {
+		t.Errorf("password = %q, want it absent", got.SourceConn["password"])
+	}
+	if got.SourceConn["host"] != "tokyo" {
+		t.Errorf("the rest of the connection was lost: %v", got.SourceConn)
+	}
+}

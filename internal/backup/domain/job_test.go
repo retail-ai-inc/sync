@@ -415,3 +415,50 @@ func TestACorruptStoredConfigIsIndistinguishableFromAnEmptyOne(t *testing.T) {
 		t.Errorf("a corrupt document derives status %q, want %q", got, StatusDisabled)
 	}
 }
+
+// Masking a password on the way out is only safe if the mask coming back is
+// recognised: the edit form sends the whole configuration, so an edit that did
+// not touch the password would otherwise store "********" as the password and
+// the next run would authenticate with it.
+func TestARedactedPasswordIsNotSavedOverTheRealOne(t *testing.T) {
+	stored := ParseStoredConfig(`{
+		"database":{"url":"mongos:27017","username":"root","password":"real-source"},
+		"destination":{"gcsPath":"gs://bucket/x","password":"real-destination"}}`)
+
+	req := Request{
+		Database:    map[string]interface{}{"url": "mongos:27017", "username": "root", "password": RedactedPassword},
+		Destination: map[string]interface{}{"gcsPath": "gs://bucket/x", "password": RedactedPassword},
+	}
+
+	got := CarryStoredPasswords(req, stored)
+	if got.Database["password"] != "real-source" {
+		t.Errorf("database password = %v, want the stored one kept", got.Database["password"])
+	}
+	if got.Destination["password"] != "real-destination" {
+		t.Errorf("destination password = %v, want the stored one kept", got.Destination["password"])
+	}
+}
+
+// A password the caller really did change has to go through.
+func TestANewPasswordReplacesTheStoredOne(t *testing.T) {
+	stored := ParseStoredConfig(`{"database":{"password":"old"}}`)
+	req := Request{Database: map[string]interface{}{"password": "new"}}
+
+	if got := CarryStoredPasswords(req, stored); got.Database["password"] != "new" {
+		t.Errorf("password = %v, want the new one", got.Database["password"])
+	}
+}
+
+// The mask with nothing stored behind it is not a password: storing it would
+// make "********" the credential on a job that never had one.
+func TestARedactedPasswordWithNothingStoredIsDropped(t *testing.T) {
+	req := Request{Database: map[string]interface{}{"url": "h:1", "password": RedactedPassword}}
+
+	got := CarryStoredPasswords(req, ParseStoredConfig(`{}`))
+	if _, present := got.Database["password"]; present {
+		t.Errorf("password = %v, want it absent", got.Database["password"])
+	}
+	if got.Database["url"] != "h:1" {
+		t.Errorf("the rest of the connection was lost: %v", got.Database)
+	}
+}

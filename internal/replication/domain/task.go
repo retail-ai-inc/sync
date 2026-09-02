@@ -160,3 +160,34 @@ func (t SyncTask) DisplayName(c Config) string {
 // comparison is case-insensitive, which the monitor does and the syncer
 // dispatch does not (T-053).
 func IsMongoDB(c Config) bool { return strings.EqualFold(c.Type, "mongodb") }
+
+// RedactedPassword is the marker a masked password comes back as. It has to
+// match what the list endpoint sends out.
+const RedactedPassword = "********"
+
+// CarryStoredPasswords replaces a redacted password in an update with the one
+// already stored.
+//
+// The list endpoint has masked passwords since the port was closed, and the
+// edit form sends the whole connection back — so an edit that did not touch
+// the password stored "********" as the password, and the task then
+// authenticated with it. Masking a field the caller round-trips needs this on
+// the other side.
+func CarryStoredPasswords(req Request, stored Config) Request {
+	req.SourceConn = carryPassword(req.SourceConn, stored.SourceConn)
+	req.TargetConn = carryPassword(req.TargetConn, stored.TargetConn)
+	return req
+}
+
+func carryPassword(incoming, stored map[string]string) map[string]string {
+	if incoming == nil || incoming["password"] != RedactedPassword {
+		return incoming
+	}
+	if kept := stored["password"]; kept != "" {
+		incoming["password"] = kept
+		return incoming
+	}
+	// Nothing stored to carry over, so the mask is not a password either.
+	delete(incoming, "password")
+	return incoming
+}

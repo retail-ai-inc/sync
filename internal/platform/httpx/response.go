@@ -73,3 +73,33 @@ func ConvertTimeToJST(input string) string {
 
 	return input
 }
+
+// RedactedPassword is what a stored password is replaced with on its way out.
+// A fixed string rather than the real length, so it says nothing about the
+// value it hides.
+const RedactedPassword = "********"
+
+// WithoutPassword copies a connection map with its password masked.
+//
+// Both list endpoints answer with the connection settings they hold, and those
+// carry the passwords the process authenticates with. The replication side
+// masked them and the backup side did not, so GET /api/backup handed the
+// source and destination database passwords to anybody holding a token — in
+// the clear, because they are also stored that way unless SYNC_CONFIG_KEY is
+// set.
+//
+// It lives here rather than in either context so the next endpoint answering
+// with a connection map has one obvious thing to call.
+func WithoutPassword(conn map[string]interface{}) map[string]interface{} {
+	if conn == nil {
+		return nil
+	}
+	safe := make(map[string]interface{}, len(conn))
+	for k, v := range conn {
+		safe[k] = v
+	}
+	if text, ok := safe["password"].(string); ok && text != "" {
+		safe["password"] = RedactedPassword
+	}
+	return safe
+}

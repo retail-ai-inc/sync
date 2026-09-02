@@ -278,3 +278,45 @@ func ParseStoredConfig(configJSON string) map[string]interface{} {
 	}
 	return data
 }
+
+// RedactedPassword is the marker a masked password comes back as. It has to
+// match what the HTTP layer sends out; see httpx.WithoutPassword.
+const RedactedPassword = "********"
+
+// CarryStoredPasswords replaces a redacted password in an update with the one
+// already stored.
+//
+// The list endpoint masks passwords on the way out and the edit form sends the
+// whole configuration back, so without this an edit that did not touch the
+// password would save the mask as the password — and the next run would
+// authenticate with "********". Masking a field the caller round-trips is only
+// safe with this on the other side.
+func CarryStoredPasswords(req Request, stored map[string]interface{}) Request {
+	req.Database = carryPassword(req.Database, nested(stored, "database"))
+	req.Destination = carryPassword(req.Destination, nested(stored, "destination"))
+	return req
+}
+
+// nested reads one object out of a stored configuration document.
+func nested(stored map[string]interface{}, key string) map[string]interface{} {
+	inner, _ := stored[key].(map[string]interface{})
+	return inner
+}
+
+func carryPassword(incoming, stored map[string]interface{}) map[string]interface{} {
+	if incoming == nil {
+		return incoming
+	}
+	text, ok := incoming["password"].(string)
+	if !ok || text != RedactedPassword {
+		return incoming
+	}
+	kept, ok := stored["password"].(string)
+	if !ok {
+		// Nothing stored to carry over, so the mask is not a password either.
+		delete(incoming, "password")
+		return incoming
+	}
+	incoming["password"] = kept
+	return incoming
+}

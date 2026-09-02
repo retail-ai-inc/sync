@@ -37,6 +37,10 @@ func UpdateJob(id string, req domain.Request) error {
 	}
 
 	oldConfig := domain.ParseStoredConfig(configJSON)
+	// An edit that did not touch the password sends back the mask the list
+	// endpoint handed out, and saving that would leave the job authenticating
+	// with "********".
+	req = domain.CarryStoredPasswords(req, oldConfig)
 	status := domain.DeriveUpdateStatus(oldConfig, enable)
 	if req.Name == "" {
 		req.Name = domain.DeriveUpdateName(oldConfig, id)
