@@ -90,3 +90,34 @@ func TestCountCSVDataRowsOnAMissingFile(t *testing.T) {
 		t.Error("a missing file was counted as zero rows rather than reported")
 	}
 }
+
+// A job that asked for no compression never made a zip, so removing one is not
+// a failure — it warned on every uncompressed MongoDB export.
+func TestRemovingAFileThatWasNeverMadeIsSilent(t *testing.T) {
+	out := captureWarnings(t)
+
+	removeTemp("ZIP file", filepath.Join(t.TempDir(), "never-created.zip"))
+
+	if logged := out.String(); logged != "" {
+		t.Errorf("removing an absent file warned: %s", logged)
+	}
+}
+
+// A file that is there and cannot be removed still warns: that one is a real
+// leak of disk on a shared volume.
+func TestAFileThatCannotBeRemovedStillWarns(t *testing.T) {
+	out := captureWarnings(t)
+
+	dir := t.TempDir()
+	// A non-empty directory cannot be removed by os.Remove.
+	nested := filepath.Join(dir, "occupied")
+	if err := os.MkdirAll(filepath.Join(nested, "child"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	removeTemp("temporary directory", nested)
+
+	if !strings.Contains(out.String(), "Failed to remove") {
+		t.Errorf("a real removal failure was swallowed: %q", out.String())
+	}
+}

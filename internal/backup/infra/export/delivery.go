@@ -14,8 +14,13 @@ import (
 //
 // Failing to remove it is a warning rather than an error: the backup itself has
 // already been taken and uploaded, and the directory goes away with the job.
+// A file that was never created is not a failure at all — the zip is absent
+// whenever the job asked for no compression.
 func removeTemp(kind, path string) {
 	if err := os.Remove(path); err != nil {
+		if os.IsNotExist(err) {
+			return
+		}
 		logrus.Warnf("[BackupExecutor] Failed to remove %s %s: %v", kind, path, err)
 		return
 	}
