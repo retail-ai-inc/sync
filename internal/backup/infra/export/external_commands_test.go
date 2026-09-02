@@ -12,10 +12,7 @@ import (
 	"github.com/retail-ai-inc/sync/internal/backup/infra/transfer"
 )
 
-// stubBin installs an executable stub on PATH under the given name. The stub
-// appends its arguments to <dir>/<name>.args, runs the supplied shell body, and
-// exits with the given status. Returns the directory so callers can read the
-// recorded arguments.
+// stubBin installs an executable stub on PATH under the given name.
 func stubBin(t *testing.T, dir, name, body string, exitCode int) {
 	t.Helper()
 
@@ -117,11 +114,9 @@ func TestExecuteExternalMySQLDumpBuildsItsArguments(t *testing.T) {
 	}
 }
 
-// TestTheMySQLPasswordStaysOutOfTheProcessList covers what every other user on
-// the host could read. The password used to be spelled "-p<value>" in the
-// argument list, so it sat in the process table for as long as the dump ran, and
-// maskMySQLPassword masked only the log line. It now goes into a defaults file
-// that only this process can read, and the file is removed afterwards.
+// The password used to be spelled "-p<value>" in the argument list, so it sat
+// in the process table for as long as the dump ran, and maskMySQLPassword
+// masked only the log line.
 func TestTheMySQLPasswordStaysOutOfTheProcessList(t *testing.T) {
 	binDir := stubPATH(t)
 	stubBin(t, binDir, "mysqldump", "", 0)
@@ -473,10 +468,9 @@ func TestTheMySQLBackupWorkflowStopsWhenTheUploadFails(t *testing.T) {
 	}
 }
 
-// TestAFailedUploadLeavesNothingBehind covers disk use during an outage. The
-// intermediate .sql and .zip used to be removed only on the way out of the
-// success path, so a backup destination that was unreachable for a while filled
-// the disk one dump at a time.
+// The intermediate .sql and .zip used to be removed only on the way out of the
+// success path, so a backup destination that was unreachable for a while
+// filled the disk one dump at a time.
 func TestAFailedUploadLeavesNothingBehind(t *testing.T) {
 	binDir := stubPATH(t)
 	tempDir := t.TempDir()
@@ -696,11 +690,9 @@ func TestExecuteExternalMySQLCSVPipesThroughPython(t *testing.T) {
 	}
 }
 
-// TestCSVExportKeepsNullApartFromEmpty covers what a restore puts back. MySQL's
-// batch mode marks NULL as \N and the converter turned it into an empty field,
-// which is what an empty string also produced — so restoring from a CSV backup
-// replaced every NULL with ”. A NULL is now an unquoted empty field and an
-// empty string is "".
+// MySQL's batch mode marks NULL as \N and the converter turned it into an
+// empty field, which is what an empty string also produced — so restoring from
+// a CSV backup replaced every NULL with ”.
 func TestCSVExportKeepsNullApartFromEmpty(t *testing.T) {
 	binDir := stubPATH(t)
 	stubBin(t, binDir, "mysql", `printf 'a\tb\n\\N\t\n'`, 0)
@@ -782,12 +774,10 @@ func linkRealBinary(t *testing.T, dir, name string) {
 	t.Skipf("%s is not installed", name)
 }
 
-// TestABackupWithNoBucketSkipsTheUpload covers what a job with a local-only
-// destination does. Three of the four export paths ran gsutil regardless,
-// against a destination of "/<name>.zip" — which fails, so the backup was
-// reported as failed although the dump had been taken, and the dump was then
-// deleted with the temporary directory. All four go through one function now,
-// and it does not upload when there is nowhere to upload to.
+// Three of the four export paths ran gsutil regardless, against a destination
+// of "/<name>.zip" — which fails, so the backup was reported as failed
+// although the dump had been taken, and the dump was then deleted with the
+// temporary directory.
 func TestABackupWithNoBucketSkipsTheUpload(t *testing.T) {
 	t.Run("mongodb", func(t *testing.T) {
 		binDir := stubPATH(t)
@@ -821,10 +811,8 @@ func TestABackupWithNoBucketSkipsTheUpload(t *testing.T) {
 	})
 }
 
-// TestTheUploadedObjectKeepsItsName pins the name a backup takes in the bucket.
-// It is what an operator looks for when restoring, and what any retention rule
-// on the bucket matches on, so folding the four upload paths into one must not
-// have changed it.
+// TestTheUploadedObjectKeepsItsName pins the name a backup takes in the
+// bucket.
 func TestTheUploadedObjectKeepsItsName(t *testing.T) {
 	binDir := stubPATH(t)
 	stubBin(t, binDir, "mysqldump", "echo '-- dump'", 0)

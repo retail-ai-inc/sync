@@ -45,12 +45,9 @@ func chunkRow(key string) *domain.Event {
 
 type statementLike struct{ key string }
 
-// TestAChunkWaitsForTheStreamToPassIt is the whole correctness argument.
-//
-// A chunk read at source time T, applied before a change the source made before
-// T that the stream has not delivered yet, would put the record back as it was —
-// a silent regression in the middle of a repair. Holding the chunk until the
-// stream has been read past T makes that impossible.
+// A chunk read at source time T, applied before a change the source made
+// before T that the stream has not delivered yet, would put the record back as
+// it was — a silent regression in the middle of a repair.
 func TestAChunkWaitsForTheStreamToPassIt(t *testing.T) {
 	readAt := time.Now()
 	reader := &fakeChunks{chunks: []Chunk{

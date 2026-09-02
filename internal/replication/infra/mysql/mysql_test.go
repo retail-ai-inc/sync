@@ -78,10 +78,9 @@ func TestParseUserPassword(t *testing.T) {
 	}
 }
 
-// TestParseUserPasswordSurvivesSpecialCharacters covers the characters that
-// used to truncate the credentials. Both are legal inside a password and both
-// appear in passwords Cloud SQL generates; the DSN is assembled from whatever
-// an operator typed into the UI, so nothing rejects them earlier either.
+// Both are legal inside a password and both appear in passwords Cloud SQL
+// generates; the DSN is assembled from whatever an operator typed into the UI,
+// so nothing rejects them earlier either.
 func TestParseUserPasswordSurvivesSpecialCharacters(t *testing.T) {
 	s := newSyncer(t)
 

@@ -77,10 +77,9 @@ func TestAFailedStatementRollsBackItsTransaction(t *testing.T) {
 	}
 }
 
-// TestTheBufferIsClearedByAFailure records that a rejected transaction is not
-// retried against the next one. Canal is stopping and the offset is frozen, so
-// the statements will arrive again on the next run; replaying them here would
-// only mix them into an unrelated transaction.
+// Canal is stopping and the offset is frozen, so the statements will arrive
+// again on the next run; replaying them here would only mix them into an
+// unrelated transaction.
 func TestTheBufferIsClearedByAFailure(t *testing.T) {
 	db := sqliteTarget(t, ordersSchema)
 	h := newHandler(t, db, mapTable("orders", "orders"))
@@ -105,8 +104,7 @@ func TestTheBufferIsClearedByAFailure(t *testing.T) {
 	}
 }
 
-// TestAnOversizedTransactionIsSplit records the memory bound. A source
-// transaction larger than the cap is applied in more than one target
+// A source transaction larger than the cap is applied in more than one target
 // transaction, which gives up atomicity for that transaction rather than
 // buffering an unbounded stretch of the binlog.
 func TestAnOversizedTransactionIsSplit(t *testing.T) {
@@ -140,8 +138,7 @@ func TestTheDefaultBufferCapIsThePackageOne(t *testing.T) {
 
 // TestOnPosSyncedDrainsAnUnterminatedTransaction covers the source that never
 // sends an XID — a non-transactional engine, or a stream that stops mid
-// transaction. The periodic position checkpoint is where those rows are
-// applied, so they are not held indefinitely.
+// transaction.
 func TestOnPosSyncedDrainsAnUnterminatedTransaction(t *testing.T) {
 	db := sqliteTarget(t, ordersSchema)
 	h := newHandler(t, db, mapTable("orders", "orders"))

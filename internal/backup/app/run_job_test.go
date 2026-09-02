@@ -34,11 +34,10 @@ func TestTaskStatusRoundTrip(t *testing.T) {
 	}
 }
 
-// TestLookupRunHandsBackACopy covers a live pointer being serialised. The lock
-// guards the map, not the Run behind it, and the background goroutine writes to
-// that Run as the export proceeds — so the status endpoint used to read a struct
-// that was being changed underneath it, which is a data race and shows up as a
-// status and a message from two different moments.
+// The lock guards the map, not the Run behind it, and the background goroutine
+// writes to that Run as the export proceeds — so the status endpoint used to
+// read a struct that was being changed underneath it, which is a data race and
+// shows up as a status and a message from two different moments.
 func TestLookupRunHandsBackACopy(t *testing.T) {
 	resetTaskStatus(t)
 
@@ -123,10 +122,9 @@ func TestUpdateBackupTaskStatusUnknownTaskIsSilent(t *testing.T) {
 	}
 }
 
-// TestARecoveredTaskDropsItsStaleError covers a run that failed and was then
-// retried. A later update never cleared an error a previous one had recorded, so
-// the run came back as "completed" carrying the text of the failure — which
-// reads as a backup that both worked and did not.
+// A later update never cleared an error a previous one had recorded, so the
+// run came back as "completed" carrying the text of the failure — which reads
+// as a backup that both worked and did not.
 func TestARecoveredTaskDropsItsStaleError(t *testing.T) {
 	resetTaskStatus(t)
 	RecordRun("t1", &domain.Run{TaskID: "t1", Status: "running"})

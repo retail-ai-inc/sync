@@ -205,13 +205,7 @@ func TestUpdatePasswordHandlerReportsALookupFailure(t *testing.T) {
 
 // TestTheUnauthorizedPasswordBodyHasNoContentType records that the failure
 // helper writes the status before setting the header, so the Set never reaches
-// the wire. That ordering is preserved from the original handlers because it is
-// observable: the response a client receives carries no Content-Type, and Go
-// sniffs one from the body instead.
-//
-// It has to be read off Result(), which is the snapshot taken at WriteHeader.
-// ResponseRecorder.Header() hands back the live map, where the later Set is
-// still visible — so a test that reads it sees a header the client never gets.
+// the wire.
 func TestTheUnauthorizedPasswordBodyHasNoContentType(t *testing.T) {
 	useTempDB(t)
 
@@ -290,10 +284,9 @@ func TestUpdateAdminPasswordHandlerRejectsAWrongOldPassword(t *testing.T) {
 	}
 }
 
-// TestTheAdminPasswordEndpointAlwaysTargetsTheAdminRow records that the username
-// is hardcoded: the endpoint changes the password of the row called "admin",
-// whoever presented the token. The admin token is derived from that same row, so
-// the two agree — but the endpoint cannot be used for anyone else.
+// TestTheAdminPasswordEndpointAlwaysTargetsTheAdminRow records that the
+// username is hardcoded: the endpoint changes the password of the row called
+// "admin", whoever presented the token.
 func TestTheAdminPasswordEndpointAlwaysTargetsTheAdminRow(t *testing.T) {
 	db := useTempDB(t)
 	insertUser(t, db, "admin", "adminpw", "Admin", domain.AccessAdmin)
@@ -334,11 +327,10 @@ func TestGetUsersHandlerReturnsThePage(t *testing.T) {
 	}
 }
 
-// TestGetUsersHandlerRefusesAPageThatIsNotOne covers a parameter that is not a
-// page. It used to be replaced with the default without a word, so a caller
-// asking for page "abc" was served page 1 and had no way to tell — and the
-// endpoint's own parsing was also the only thing keeping the arithmetic away
-// from a negative index, which panicked.
+// It used to be replaced with the default without a word, so a caller asking
+// for page "abc" was served page 1 and had no way to tell — and the endpoint's
+// own parsing was also the only thing keeping the arithmetic away from a
+// negative index, which panicked.
 func TestGetUsersHandlerRefusesAPageThatIsNotOne(t *testing.T) {
 	db := useTempDB(t)
 	insertUser(t, db, "a", "secret", "User", domain.AccessGuest)
@@ -400,10 +392,9 @@ func TestGetUsersHandlerPagesInTheDatabase(t *testing.T) {
 	}
 }
 
-// TestGetUsersHandlerReportsAStoreFailureByStatus covers a directory that could
-// not be read. It used to be reported inside the body with an empty list at HTTP
-// 200, so a front end that checks the status showed an empty user table rather
-// than a failure.
+// It used to be reported inside the body with an empty list at HTTP 200, so a
+// front end that checks the status showed an empty user table rather than a
+// failure.
 func TestGetUsersHandlerReportsAStoreFailureByStatus(t *testing.T) {
 	emptyIdentityDB(t)
 
@@ -558,8 +549,7 @@ func TestGetOAuthConfigHandlerReturnsTheConfiguration(t *testing.T) {
 
 // TestTheOAuthConfigIsReadableWithoutTheSecret pins the shape of the one
 // endpoint that has to stay reachable without a token: the sign-in page needs
-// the client id before anybody has one. It used to answer with the client
-// secret too, which published the whole OAuth credential.
+// the client id before anybody has one.
 func TestTheOAuthConfigIsReadableWithoutTheSecret(t *testing.T) {
 	db := useTempDB(t)
 	storeOAuthConfig(t, db, "google",

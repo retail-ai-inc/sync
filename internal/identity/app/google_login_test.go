@@ -30,11 +30,9 @@ func TestGoogleLoginRefusesAnEmptyCode(t *testing.T) {
 	}
 }
 
-// TestAFailedGoogleLoginAffectsNobodyElse records what a failure means now that
-// the token is the whole identity: it produces no token and touches nothing.
-// The flow used to write to a session the whole process shared, and only one of
-// its eleven failure branches did, so a failed Google sign-in usually left the
-// previous user signed in and occasionally signed them out.
+// TestAFailedGoogleLoginAffectsNobodyElse records what a failure means now
+// that the token is the whole identity: it produces no token and touches
+// nothing.
 func TestAFailedGoogleLoginAffectsNobodyElse(t *testing.T) {
 	db := useTempDB(t)
 	insertUser(t, db, "alice", "secret", "Alice", "admin")
@@ -90,15 +88,10 @@ func TestGoogleLoginReportsEachMissingCredential(t *testing.T) {
 	}
 }
 
-// TestAnEmptyGoogleIdentityStillReachesTheStore covers what the store does with
-// the empty identity Google's error responses used to leave behind — a row whose
-// username and email are both empty, found again by the same empty name, and a
-// guest token minted for it.
-//
-// The way in is closed at the exchange (see internal/identity/infra): a code
-// Google refuses is now a failure rather than an empty identity. This is the
-// second line: it says that if an empty identity ever arrives here again, it is
-// still accepted, so the guard above is the only thing standing in the way.
+// TestAnEmptyGoogleIdentityStillReachesTheStore covers what the store does
+// with the empty identity Google's error responses used to leave behind — a
+// row whose username and email are both empty, found again by the same empty
+// name, and a guest token minted for it.
 func TestAnEmptyGoogleIdentityStillReachesTheStore(t *testing.T) {
 	useTempDB(t)
 

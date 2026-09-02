@@ -102,10 +102,8 @@ func TestCreateJobStoresAnEnabledJob(t *testing.T) {
 	}
 }
 
-// TestANewJobIsAlwaysEnabled records that the create endpoint has no way to add
-// a paused job: the status and the enable column are hardcoded. A caller that
-// wants one has to create it and then pause it, which is two writes and two
-// crontab rewrites.
+// TestANewJobIsAlwaysEnabled records that the create endpoint has no way to
+// add a paused job: the status and the enable column are hardcoded.
 func TestANewJobIsAlwaysEnabled(t *testing.T) {
 	useTempJobDB(t)
 
@@ -298,8 +296,7 @@ func TestPauseJobOnAnUnknownID(t *testing.T) {
 
 // TestSyncCrontabSwallowsEveryFailure records that the crontab rewrite every
 // write endpoint performs after answering cannot report anything: it logs and
-// returns. A schedule change that never reached the crontab is indistinguishable
-// from one that did.
+// returns.
 func TestSyncCrontabSwallowsEveryFailure(t *testing.T) {
 	t.Run("no database", func(t *testing.T) {
 		unopenableDB(t)
@@ -337,11 +334,10 @@ func withSchedule(req domain.Request, schedule string) domain.Request {
 	return req
 }
 
-// TestAnUpdateThatLeavesFieldsOutIsRefused covers a client that means to change
-// one thing and sends one thing. An update replaces the stored configuration, so
-// that used to empty the database connection, the destination, the format and
-// the compression — and the job then backed up nothing, at its next scheduled
-// run, with nobody watching.
+// An update replaces the stored configuration, so that used to empty the
+// database connection, the destination, the format and the compression — and
+// the job then backed up nothing, at its next scheduled run, with nobody
+// watching.
 func TestAnUpdateThatLeavesFieldsOutIsRefused(t *testing.T) {
 	db := useTempJobDB(t)
 	id := insertJob(t, db, 1, `{"name":"nightly","sourceType":"mongodb",`+

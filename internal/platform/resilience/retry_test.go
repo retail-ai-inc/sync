@@ -67,10 +67,9 @@ func TestRetryReturnsLastError(t *testing.T) {
 	}
 }
 
-// TestTheLastAttemptIsNotFollowedByASleep is the fix for a wasted wait. The loop
-// used to sleep after every failure including the last, so with the settings the
-// syncers use — Retry(5, 2s, 2.0) — an unreachable source was reported thirty-two
-// seconds after the last attempt had already failed.
+// The loop used to sleep after every failure including the last, so with the
+// settings the syncers use — Retry(5, 2s, 2.0) — an unreachable source was
+// reported thirty-two seconds after the last attempt had already failed.
 func TestTheLastAttemptIsNotFollowedByASleep(t *testing.T) {
 	const delay = 60 * time.Millisecond
 	start := time.Now()

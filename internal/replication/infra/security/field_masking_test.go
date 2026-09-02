@@ -18,13 +18,7 @@ func enabled(fields ...FieldSecurityConfig) TableSecurity {
 	return TableSecurity{SecurityEnabled: true, FieldSecurity: fields}
 }
 
-// decrypt mirrors encryptAES using the same package-level key, so the tests can
 // TestMain gives the package a field encryption key.
-//
-// There is no fallback key any more — a deployment that asks for encryption and
-// configures none is refused — so the tests that exercise encryption have to
-// supply one, exactly as a deployment does. The tests that cover the refusal
-// clear it for themselves.
 func TestMain(m *testing.M) {
 	if err := os.Setenv("SYNC_FIELD_KEY", "abcdefghijklmnopqrstuvwxyz012345"); err != nil {
 		panic(err)
@@ -32,6 +26,7 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
+// decrypt mirrors encryptAES with the same package-level key, so a test can
 // assert that ciphertext really carries the plaintext.
 func decrypt(t *testing.T, encoded string) string {
 	t.Helper()
@@ -111,8 +106,7 @@ func TestProcessValueMasked(t *testing.T) {
 
 // TestProcessValueMaskedCountsBytesNotRunes records that masking uses byte
 // length, so a multibyte value is replaced by more asterisks than it has
-// characters. Harmless on its own, but it means the mask leaks the encoded
-// size rather than a uniform placeholder.
+// characters.
 func TestProcessValueMaskedCountsBytesNotRunes(t *testing.T) {
 	cfg := enabled(FieldSecurityConfig{Field: "name", SecurityType: "masked"})
 
@@ -162,13 +156,7 @@ func TestProcessValueEncrypted(t *testing.T) {
 
 // TestProcessValueEncryptedIsNonDeterministic records a property that matters
 // for replication: AES-GCM uses a fresh random nonce, so the same source value
-// encrypts to different ciphertext on every call. Consequences:
-//
-//   - re-running an initial sync rewrites every encrypted field even when the
-//     source has not changed
-//   - source and target can never be compared on encrypted fields, so the
-//     row-count and checksum verification planned for the DR work cannot cover
-//     them
+// encrypts to different ciphertext on every call.
 func TestProcessValueEncryptedIsNonDeterministic(t *testing.T) {
 	cfg := enabled(FieldSecurityConfig{Field: "phone", SecurityType: "encrypted"})
 
@@ -184,12 +172,10 @@ func TestProcessValueEncryptedIsNonDeterministic(t *testing.T) {
 	}
 }
 
-// TestAnUnknownSecurityTypeDoesNotDestroyTheValue covers a defect that wrote
-// NULL over real data. The switch left `processed` at its zero value for
-// anything outside {masked, encrypted} and returned it unconditionally, so a
-// securityType of "Masked" — the comparison was case-sensitive — or anything a
-// client had made up replicated the field as NULL. The mapping store accepts
-// whatever string it is given as long as it is non-empty.
+// The switch left `processed` at its zero value for anything outside {masked,
+// encrypted} and returned it unconditionally, so a securityType of "Masked" —
+// the comparison was case-sensitive — or anything a client had made up
+// replicated the field as NULL.
 func TestAnUnknownSecurityTypeDoesNotDestroyTheValue(t *testing.T) {
 	const value = "john@example.com"
 
@@ -259,11 +245,6 @@ func TestProcessValueNestedBSON(t *testing.T) {
 }
 
 // The nested paths are covered in nested_test.go, against one implementation.
-// There used to be four overlapping ones — ProcessNestedFieldValue,
-// processNestedObjectValue, getNestedValue and processNestedFieldSafe — of which
-// two had no callers and the third could not be reached, because ProcessValue
-// only handed it values that were not documents while its first act was to
-// require one.
 
 func TestFindTableSecurityFromMappings(t *testing.T) {
 	mappings := []config.DatabaseMapping{{
@@ -342,11 +323,9 @@ func TestFindTableSecurityFromMappingsSkipsIncompleteEntries(t *testing.T) {
 	}
 }
 
-// TestTheKeyComesFromTheEnvironment covers where the AES-256 key is read from.
 // It was a literal in this file — in a public repository, identical in every
 // deployment — so anything encrypted under it could be read by anyone who had
 // the source: the configuration said the field was protected and it was not.
-// There is no fallback now.
 func TestTheKeyComesFromTheEnvironment(t *testing.T) {
 	for name, given := range map[string]string{
 		"hex":    "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
@@ -402,10 +381,9 @@ func TestWithNoKeyNothingIsEncrypted(t *testing.T) {
 	}
 }
 
-// TestATaskThatCannotEncryptIsRefused covers what a syncer does about it. A task
-// naming an encrypted field with no key would replicate that field in whatever
-// form the failed encryption left, while the interface went on reporting it as
-// protected — so it is refused at startup instead.
+// A task naming an encrypted field with no key would replicate that field in
+// whatever form the failed encryption left, while the interface went on
+// reporting it as protected — so it is refused at startup instead.
 func TestATaskThatCannotEncryptIsRefused(t *testing.T) {
 	encrypted := []config.DatabaseMapping{{
 		Tables: []config.TableMapping{{

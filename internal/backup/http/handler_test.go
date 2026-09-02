@@ -76,12 +76,10 @@ func TestBackupRunHandlerReportsAMissingTable(t *testing.T) {
 	}
 }
 
-// TestBackupRunHandlerActuallyRunsTheJob covers "back this up now". It used to
-// stamp last_backup_time and answer "Backup job started successfully" without
-// running anything at all — no executor, no command, nothing written anywhere —
-// so the dashboard showed a fresh, successful backup that did not exist. That is
-// worse than showing "never backed up": an operator checking before a switchover
-// that the data was recoverable saw exactly what they were hoping for.
+// It used to stamp last_backup_time and answer "Backup job started
+// successfully" without running anything at all — no executor, no command,
+// nothing written anywhere — so the dashboard showed a fresh, successful
+// backup that did not exist.
 func TestBackupRunHandlerActuallyRunsTheJob(t *testing.T) {
 	conn := useTempTaskDB(t)
 	insertBackupTask(t, conn, 1, `{"name":"nightly","sourceType":"mongodb","schedule":"0 3 * * *"}`)
@@ -242,13 +240,10 @@ func TestBackupUpdateHandlerToleratesACorruptStoredConfig(t *testing.T) {
 	}
 }
 
-// TestAPartialUpdateIsRefused covers a client that means to change one thing
-// and sends one thing. The update is a full replacement — which is what PUT
-// means — so only the name and the status were read back from the stored
-// configuration and everything else was blanked: the database connection, the
-// destination, the format, the compression. The job then backed up nothing, at
-// its next scheduled run, with nobody watching. It is answered with a 400
-// naming what is missing, and nothing is written.
+// The update is a full replacement — which is what PUT means — so only the
+// name and the status were read back from the stored configuration and
+// everything else was blanked: the database connection, the destination, the
+// format, the compression.
 func TestAPartialUpdateIsRefused(t *testing.T) {
 	conn := useTempTaskDB(t)
 	insertBackupTask(t, conn, 1, `{
@@ -280,10 +275,8 @@ func TestAPartialUpdateIsRefused(t *testing.T) {
 	}
 }
 
-// TestAStoredValueOfTheWrongTypeIsAnswered covers the stored status and name,
-// which were read with unchecked type assertions. A value of any other JSON type
-// panicked, and with no recovery in the router that aborted the connection
-// rather than returning anything at all.
+// A value of any other JSON type panicked, and with no recovery in the router
+// that aborted the connection rather than returning anything at all.
 func TestAStoredValueOfTheWrongTypeIsAnswered(t *testing.T) {
 	for name, stored := range map[string]string{
 		"a numeric status": `{"name":"n","status":123}`,

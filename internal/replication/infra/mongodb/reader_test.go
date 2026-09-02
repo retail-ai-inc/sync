@@ -34,17 +34,9 @@ func changeDoc(db, coll, op string, key bson.D) bson.D {
 
 // ------------------------------------------------------------------ keys
 
-// TestTheOrderingKeyCarriesTheShardKey is about how a batch is grouped, not how
-// it is written.
-//
-// Two changes to one document may never be reordered against each other, and on
-// a sharded collection two documents can share an _id while differing in the
-// shard key. So the ordering key is the whole documentKey.
-//
-// It used to claim to be about routing, which is a property of the write filter
-// and not of this function at all — and the filter went on carrying only the
-// _id for a long time underneath a test that read as though it did not. The
-// filter has its own test now, below.
+// Two changes to one document may never be reordered against each other, and
+// on a sharded collection two documents can share an _id while differing in
+// the shard key.
 func TestTheOrderingKeyCarriesTheShardKey(t *testing.T) {
 	raw := rawEvent(t, changeDoc("shop", "orders", "update", bson.D{
 		{Key: "_id", Value: "abc"},
@@ -194,14 +186,6 @@ func readerFor(mappings []config.DatabaseMapping) *Reader {
 
 // TestAnotherDatabaseIsNotReplicated is the defect a real cluster found within
 // seconds of the chunk migration test being pointed at it.
-//
-// A deployment-level change stream sees every database on the cluster. Matching
-// on the collection name alone therefore replicated the target's own writes back
-// over themselves when source and target were two databases on one cluster —
-// and, worse, would have replicated any other database's collection of the same
-// name into the disaster-recovery copy of a payment database. On a cluster
-// hosting twenty-odd databases, a name like "orders" colliding is an
-// expectation, not a possibility.
 func TestAnotherDatabaseIsNotReplicated(t *testing.T) {
 	r := readerFor([]config.DatabaseMapping{{
 		SourceDatabase: "shop",
@@ -289,13 +273,8 @@ func bufferingReader(t *testing.T) *Reader {
 	return r
 }
 
-// TestBackToBackTransactionsAreHandedOver is the defect a real workload found.
-//
-// A transaction's end used to be judged by an event arriving that belonged to no
-// transaction. Fifty transactions back-to-back therefore handed over nothing at
-// all: every event extended one buffer, the condition was never met, and the
-// reader span having read a hundred documents it never passed on. Nothing in the
-// unit tests fed it two consecutive transactions, so nothing caught it.
+// A transaction's end used to be judged by an event arriving that belonged to
+// no transaction.
 func TestBackToBackTransactionsAreHandedOver(t *testing.T) {
 	r := bufferingReader(t)
 
@@ -422,17 +401,7 @@ func quietLog() *logrus.Logger {
 
 // ------------------------------------------------- the write filter
 
-// TestTheWriteFilterCarriesTheShardKey is the difference between a write mongos
-// can route and one it refuses outright.
-//
-// Every write here is an upsert, because replication is replayed. An upsert on a
-// sharded collection has to name the whole shard key: without it the server
-// answers "could not extract exact shard key" and replication stops on the first
-// document. A deleteOne survives but is broadcast to every shard.
-//
-// This is the assertion that was missing while the reasoning for it sat on the
-// ordering key instead. The integration tests did not catch it because they
-// sharded on {_id: hashed}, where the shard key and the _id are the same field.
+// Every write here is an upsert, because replication is replayed.
 func TestTheWriteFilterCarriesTheShardKey(t *testing.T) {
 	syncer := &MongoDBSyncer{logger: logrus.New()}
 
@@ -523,12 +492,6 @@ func filterIn(t *testing.T, model mongo.WriteModel) bson.M {
 // TestAnUpdateWithoutTheDocumentIsStillApplied covers the path taken when the
 // document was deleted between the update and the lookup that would have
 // fetched it: the change itself is in the event, so it can be applied without.
-//
-// It reads the shape the driver decodes into, which is what broke: the fields
-// were read with a type assertion to bson.M, and the driver's v2 hands back a
-// bson.D. Every update that took this path was refused, and a refused event
-// stops the task rather than being skipped — correctly, but the cause was a
-// type assertion nobody had revisited.
 func TestAnUpdateWithoutTheDocumentIsStillApplied(t *testing.T) {
 	syncer := &MongoDBSyncer{logger: logrus.New()}
 
@@ -558,15 +521,7 @@ func TestAnUpdateWithoutTheDocumentIsStillApplied(t *testing.T) {
 	}
 }
 
-// TestANullFullDocumentFallsBackToTheDescription is the case the fallback was
-// written for, and could not reach.
-//
-// The stream is opened with fullDocument=updateLookup. When the document was
-// deleted between the update and the lookup, the server sends the field as null
-// rather than leaving it out — so testing only whether the key was present took
-// that null for a document, and asked the driver to replace one with nothing.
-// The batch failed with "document is nil" and the task stopped; the fallback
-// below it never ran.
+// The stream is opened with fullDocument=updateLookup.
 func TestANullFullDocumentFallsBackToTheDescription(t *testing.T) {
 	syncer := &MongoDBSyncer{logger: logrus.New()}
 
@@ -596,9 +551,7 @@ func TestANullFullDocumentFallsBackToTheDescription(t *testing.T) {
 
 // TestTheCapturedCollectionCountIsPublished is Debezium's CapturedTables, and
 // it earns its place by catching the change nothing else reports: a mapping
-// edit that quietly drops a collection. Replication carries on looking healthy
-// — the lag is zero, the task is up — and the collection simply stops being
-// copied. The count falling is the only signal.
+// edit that quietly drops a collection.
 func TestTheCapturedCollectionCountIsPublished(t *testing.T) {
 	r := &Reader{Config: config.SyncConfig{
 		Mappings: []config.DatabaseMapping{

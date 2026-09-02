@@ -220,10 +220,9 @@ func TestACompositePrimaryKeyComesBackSorted(t *testing.T) {
 	}
 }
 
-// TestAMissingTableIsReported covers a table name that is wrong.
-// INFORMATION_SCHEMA answers with no rows, which the handler used to serve as a
-// success with an empty field list — indistinguishable from a table with no
-// columns, which cannot exist. The only trace was a warn-level log line.
+// INFORMATION_SCHEMA answers with no rows, which the handler used to serve as
+// a success with an empty field list — indistinguishable from a table with no
+// columns, which cannot exist.
 func TestAMissingTableIsReported(t *testing.T) {
 	_, resp := postSchema(t, schemaRequestBody(t, "table_that_does_not_exist"))
 
@@ -427,10 +426,7 @@ func TestGetMongoDBSchemaMergesFieldsAcrossDocuments(t *testing.T) {
 	}
 }
 
-// The sample is the last ten documents by natural order. A field that exists
-// only in older documents is invisible to the schema, so a collection whose
-// shape changed at some point reports only the newest shape — and the UI builds
-// table mappings from this list.
+// The sample is the last ten documents by natural order.
 func TestTheSampleReachesBeyondTheNewestFewDocuments(t *testing.T) {
 	collection := harness.UniqueName("msample")
 	client := openSchemaMongo(t)
@@ -465,10 +461,9 @@ func TestTheSampleReachesBeyondTheNewestFewDocuments(t *testing.T) {
 	}
 }
 
-// TestTheMongoIDTypeIsADatabaseType covers the field every document has. It was
-// reported as "bson.ObjectID" — the Go type the driver decodes it into —
-// because the switch had no case for it, so every schema query returned at least
-// one type name the interface cannot map to a column type.
+// It was reported as "bson.ObjectID" — the Go type the driver decodes it into
+// — because the switch had no case for it, so every schema query returned at
+// least one type name the interface cannot map to a column type.
 func TestTheMongoIDTypeIsADatabaseType(t *testing.T) {
 	collection := harness.UniqueName("mid")
 	client := openSchemaMongo(t)
@@ -592,11 +587,9 @@ func TestMongoCredentialsAreIgnoredWithoutAPassword(t *testing.T) {
 	}
 }
 
-// TestAnArrayIsReportedAsAnArray covers what the driver really produces. The
-// array case matched a bare []interface{} while the driver decodes a BSON array
-// into bson.A, so the branch was dead for real documents and every array
-// came back as the Go type name. The unit test that showed "array" passed only
-// because it built a plain []interface{} by hand.
+// The array case matched a bare []interface{} while the driver decodes a BSON
+// array into bson.A, so the branch was dead for real documents and every array
+// came back as the Go type name.
 func TestAnArrayIsReportedAsAnArray(t *testing.T) {
 	collection := harness.UniqueName("marray")
 	client := openSchemaMongo(t)

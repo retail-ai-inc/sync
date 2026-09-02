@@ -15,11 +15,6 @@ import (
 
 // jstDay names a calendar day in Tokyo, which is the day the handler's window
 // is built from.
-//
-// The UTC day is a different day for the first nine hours of every JST morning,
-// so seeding "today" from the UTC clock made these tests fail every night
-// between midnight and nine — the same nine hours the handler itself used to get
-// wrong. See TestTheDailyWindowIsTheJSTDay.
 func jstDay(offset int) string {
 	return time.Now().In(time.FixedZone("JST", 9*60*60)).AddDate(0, 0, offset).Format("2006-01-02")
 }
@@ -63,11 +58,10 @@ func TestSyncTablesHandlerIgnoresOtherDays(t *testing.T) {
 	}
 }
 
-// TestTheDailyWindowIsTheJSTDay covers the nine hours of each JST morning when
-// the two calendars disagree. The window was built from the UTC calendar day
-// while the answer was labelled with the JST date — and everything else this API
-// reports is converted to JST — so during those hours the figures belonged to
-// the day before the label said, and that morning's traffic was left out.
+// The window was built from the UTC calendar day while the answer was labelled
+// with the JST date — and everything else this API reports is converted to JST
+// — so during those hours the figures belonged to the day before the label
+// said, and that morning's traffic was left out.
 func TestTheDailyWindowIsTheJSTDay(t *testing.T) {
 	conn := useMonitorDB(t)
 

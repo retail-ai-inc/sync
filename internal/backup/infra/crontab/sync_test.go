@@ -283,10 +283,9 @@ func TestACorruptTaskIsSkippedNotReported(t *testing.T) {
 	}
 }
 
-// TestAJobWithNoScheduleDoesNotReachTheCrontab covers one misconfigured job
-// taking every other backup with it. Nothing stood between a job with no
-// schedule and the crontab: the line was written with the schedule field empty,
-// which makes the whole file invalid, and crontab then refuses all of it.
+// Nothing stood between a job with no schedule and the crontab: the line was
+// written with the schedule field empty, which makes the whole file invalid,
+// and crontab then refuses all of it.
 func TestAJobWithNoScheduleDoesNotReachTheCrontab(t *testing.T) {
 	db := useTempJobDB(t)
 	insertJob(t, db, 1, `{"name":"noschedule"}`)

@@ -194,10 +194,9 @@ func runFor(t *testing.T, r *Runner, d time.Duration) error {
 
 // ------------------------------------------------------- transaction cutting
 
-// TestABatchIsNotCutInsideASourceTransaction is the guarantee the whole design
-// rests on. A transaction split across two batches shows the target the order
-// without its payment — a state the source was never in, and one nothing
-// downstream is written to cope with.
+// A transaction split across two batches shows the target the order without
+// its payment — a state the source was never in, and one nothing downstream is
+// written to cope with.
 func TestABatchIsNotCutInsideASourceTransaction(t *testing.T) {
 	reader := &fakeReader{events: []*domain.Event{
 		event("orders", "1", "p1", midTransaction),
@@ -358,12 +357,8 @@ func TestAHeartbeatStillMovesThePosition(t *testing.T) {
 
 // ------------------------------------------------------------------- gauges
 
-// TestTheLagClimbsWhileTheApplierIsStuck covers a defect in the gauge itself.
-//
 // The applied lag used to be set only when a batch landed, so a task that had
-// stopped applying left it frozen at whatever it last was. An alert on a frozen
-// gauge never fires, which made "replication has stopped" the one condition the
-// monitoring could not see.
+// stopped applying left it frozen at whatever it last was.
 func TestTheLagClimbsWhileTheApplierIsStuck(t *testing.T) {
 	release := make(chan struct{})
 	reader := &fakeReader{events: []*domain.Event{event("orders", "1", "p1")}}
@@ -489,14 +484,9 @@ func TestAStoredPositionSkipsTheSnapshot(t *testing.T) {
 	}
 }
 
-// TestAQuietSourceDoesNotLookLikeALag covers a defect the real cluster showed.
-//
-// The applied lag was measured from the last change applied, so a source nobody
-// had written to for an hour reported an hour of lag while being perfectly up to
-// date. Alerting on that pages somebody every quiet Sunday, and an alert that
-// cries wolf is worse than none. When there is nothing waiting the lag is
-// measured from the newest thing the stream has reported — which heartbeats keep
-// fresh precisely so that this works.
+// The applied lag was measured from the last change applied, so a source
+// nobody had written to for an hour reported an hour of lag while being
+// perfectly up to date.
 func TestAQuietSourceDoesNotLookLikeALag(t *testing.T) {
 	labels := metrics.Labels{"task": t.Name()}
 	// One change from long ago, applied; then a heartbeat from just now, which
@@ -565,11 +555,6 @@ func runReporting(t *testing.T, r *Runner, lastRead time.Time) {
 
 // TestTheHeadroomIsTheWindowLessTheLag covers the number an operator reads
 // while deciding whether a stopped task can still be restarted.
-//
-// A day of binlog and a minute behind leaves a day less a minute. Once that
-// reaches zero the saved position has been purged and the only way back is
-// copying the database again, which is a decision worth making before the
-// deadline rather than after it.
 func TestTheHeadroomIsTheWindowLessTheLag(t *testing.T) {
 	labels := metrics.Labels{"task": "headroom-basic"}
 	defer metrics.Default.Forget(labels)
@@ -592,13 +577,9 @@ func TestTheHeadroomIsTheWindowLessTheLag(t *testing.T) {
 	}
 }
 
-// TestTheHeadroomGoesNegativeOnceTheWindowIsPast keeps the metric from being
-// clamped at zero.
-//
-// A task an hour past its window and one a week past it need different answers:
-// the first is a re-copy, the second is a re-copy plus a conversation about how
-// nobody noticed for a week. Clamping loses that, and it also loses the slope an
-// alert would have fired on.
+// A task an hour past its window and one a week past it need different
+// answers: the first is a re-copy, the second is a re-copy plus a conversation
+// about how nobody noticed for a week.
 func TestTheHeadroomGoesNegativeOnceTheWindowIsPast(t *testing.T) {
 	labels := metrics.Labels{"task": "headroom-negative"}
 	defer metrics.Default.Forget(labels)
@@ -621,12 +602,8 @@ func TestTheHeadroomGoesNegativeOnceTheWindowIsPast(t *testing.T) {
 	}
 }
 
-// TestASourceThatCannotSayPublishesNothing covers the sharded MongoDB case,
-// where the oplog is not reachable through mongos.
-//
 // A guessed window would read exactly like a measured one, and it is read at
-// the moment somebody is deciding whether they still have time. Absence is the
-// honest answer.
+// the moment somebody is deciding whether they still have time.
 func TestASourceThatCannotSayPublishesNothing(t *testing.T) {
 	labels := metrics.Labels{"task": "headroom-unknown"}
 	defer metrics.Default.Forget(labels)
@@ -696,14 +673,8 @@ func TestTheWindowIsNotReReadEveryTick(t *testing.T) {
 	}
 }
 
-// TestStreamOrderHandsTheBatchOverUnsplit covers the engine whose log is a
-// command stream rather than a set of record writes.
-//
-// Splitting a batch into runs lets an applier parallelise within a run, which is
-// correct when every event is an idempotent write of a whole record. A command
-// stream has neither property: replaying INCR adds again, and two commands on
-// different keys may have been one atomic act at the source. So the batch has to
-// arrive in the order it was read, as one run.
+// Splitting a batch into runs lets an applier parallelise within a run, which
+// is correct when every event is an idempotent write of a whole record.
 func TestStreamOrderHandsTheBatchOverUnsplit(t *testing.T) {
 	applier := &fakeApplier{commits: true}
 	// Two events on the same key, which orderedRuns would put in separate runs.
@@ -780,12 +751,6 @@ func TestWithoutStreamOrderTheBatchIsStillSplit(t *testing.T) {
 }
 
 // TestASourceThatCannotSayYetIsAskedAgain separates "not yet" from "cannot".
-//
-// The refusal path gives up for the lifetime of the process, which is right for
-// a source that can never answer and wrong for one that needs measuring twice
-// before it can work out a rate. Conflating them meant the headroom metric never
-// appeared at all for such a source: the very first question failed, by design,
-// and nothing asked again.
 func TestASourceThatCannotSayYetIsAskedAgain(t *testing.T) {
 	labels := metrics.Labels{"task": "headroom-not-yet"}
 	defer metrics.Default.Forget(labels)
@@ -859,19 +824,8 @@ func TestASourceThatSaysNotYetAndThenAnswersIsPublished(t *testing.T) {
 	}
 }
 
-// TestAnIdleBatchIsSentWithoutWaitingForTheWindow covers the flush that happens
-// because nothing else is queued.
-//
 // The window used to be paid on every batch that did not fill, which is every
-// batch on a quiet source. Measured against Memorystore across regions at 500
-// writes a second, it put 263 ms of the 500 ms window into the recovery point
-// for a target that was idle at one percent of a core — latency bought nothing,
-// because there was no second event to amortise the round trip over.
-//
-// The assertion has to be about *when* the batch arrives, not that it arrives:
-// cancelling the context flushes what is whole, so any batch is applied
-// eventually. The window here is 30s and the deadline 500ms, so only an
-// immediate send can pass.
+// batch on a quiet source.
 func TestAnIdleBatchIsSentWithoutWaitingForTheWindow(t *testing.T) {
 	applied := make(chan struct{}, 1)
 	reader := &fakeReader{events: []*domain.Event{event("orders", "1", "p1")}}
@@ -933,12 +887,8 @@ func TestAnIdleFlushStillWillNotCutInsideATransaction(t *testing.T) {
 	<-done
 }
 
-// TestATargetThatIsNotReadyDoesNotStopTheReader covers the decoupling.
-//
-// Ending the run over a failed write also stopped the reader, and the reader is
-// what keeps the source's replication log from rolling past the position. On
-// Memorystore that log is a fixed ring measured at 10–30 KB, so a target that
-// was briefly away cost a full re-copy of the whole keyspace.
+// Ending the run over a failed write also stopped the reader, and the reader
+// is what keeps the source's replication log from rolling past the position.
 func TestATargetThatIsNotReadyDoesNotStopTheReader(t *testing.T) {
 	// onApply only fires on a successful write, so receiving from this channel
 	// means the batch that was refused earlier was retried and got through.
@@ -979,10 +929,6 @@ func TestATargetThatIsNotReadyDoesNotStopTheReader(t *testing.T) {
 
 // TestAPoisonedEventBlocksTheTaskRatherThanBeingSteppedOver covers the other
 // half: retrying forever is only right for a target that might come back.
-//
-// A WRONGTYPE will be refused identically for as long as anybody retries it,
-// and stepping over it leaves the target permanently different from the source
-// with nothing blocked and nothing alarming — which is what was measured.
 func TestAPoisonedEventBlocksTheTaskRatherThanBeingSteppedOver(t *testing.T) {
 	applier := &fakeApplier{err: errors.New(
 		"write slot 3030: WRONGTYPE Operation against a key holding the wrong kind of value")}
@@ -998,14 +944,8 @@ func TestAPoisonedEventBlocksTheTaskRatherThanBeingSteppedOver(t *testing.T) {
 	}
 }
 
-// TestARetryAsksTheTargetWhatItHoldsFirst covers the duplicate that retrying
-// in place would otherwise create.
-//
 // A failure is not proof the write did not happen: a timeout can arrive after
-// the transaction landed. Re-applying then repeats a command that is not
-// idempotent, which was measured as an RPUSH landing three times too often
-// under packet loss. Restarting the task always re-read the target; retrying in
-// place has to do the same.
+// the transaction landed.
 func TestARetryAsksTheTargetWhatItHoldsFirst(t *testing.T) {
 	store := &refreshingStore{fakeStore: newStore()}
 	applied := make(chan struct{}, 1)
@@ -1066,12 +1006,6 @@ func (s *refreshingStore) refreshes() int {
 
 // TestATargetMissingTheTableBlocksRatherThanRetryingForever covers the other
 // half of the retry: waiting is only right for a target that might come back.
-//
-// A table that does not exist on the target will not appear by being asked
-// again, and holding the batch forever blocks every later event behind it while
-// the task still reports itself up. Measured against a table that existed only
-// on the source: the pipeline sat retrying "Table 'bench.nopk' doesn't exist",
-// task_up stayed 1, task_blocked stayed 0, and nothing downstream was applied.
 func TestATargetMissingTheTableBlocksRatherThanRetryingForever(t *testing.T) {
 	applier := &fakeApplier{err: errors.New(
 		"apply 1 changes: Error 1146 (42S02): Table 'bench.nopk' doesn't exist")}
@@ -1087,14 +1021,8 @@ func TestATargetMissingTheTableBlocksRatherThanRetryingForever(t *testing.T) {
 	}
 }
 
-// TestAConstraintTheTargetAloneHoldsBlocksTheTask covers the other permanent
-// refusal the target can produce.
-//
-// A foreign key that exists on the target and not on the source refuses the row
-// every time it is offered. Measured against one: the pipeline retried "Cannot
-// add or update a child row" on a backoff for as long as it was left running,
-// with task_up at 1 and task_blocked at 0, so nothing said the replication had
-// stopped making progress.
+// A foreign key that exists on the target and not on the source refuses the
+// row every time it is offered.
 func TestAConstraintTheTargetAloneHoldsBlocksTheTask(t *testing.T) {
 	applier := &fakeApplier{err: errors.New(
 		"apply 1 changes: Error 1452 (23000): Cannot add or update a child row: " +
@@ -1154,10 +1082,8 @@ func counter(t *testing.T, name string, labels metrics.Labels) float64 {
 	return 0
 }
 
-// TestTheStreamsEventsAreCountedByOperation is the Debezium split this pipeline
-// had no answer for. "10,000 changes applied" hides the case where every one of
-// them was a delete, which is exactly what a botched migration looks like from
-// outside.
+// "10,000 changes applied" hides the case where every one of them was a
+// delete, which is exactly what a botched migration looks like from outside.
 func TestTheStreamsEventsAreCountedByOperation(t *testing.T) {
 	reader := &fakeReader{events: []*domain.Event{
 		{NS: domain.Namespace{DB: "shop", Object: "orders"}, Op: domain.OpInsert, Payload: "a"},
@@ -1185,14 +1111,8 @@ func TestTheStreamsEventsAreCountedByOperation(t *testing.T) {
 	}
 }
 
-// TestSourceTransactionsAreCounted is the other half of the pair that catches a
-// transaction going missing.
-//
 // The defect this pipeline shipped with moved a checkpoint past a transaction
-// whose rows were never read. The applied count looked healthy — everything
-// that arrived was applied. Counting transactions carried through gives the
-// number to compare against the source's own, and the comparison is what makes
-// the loss visible instead of leaving it to a reconciliation pass hours later.
+// whose rows were never read.
 func TestSourceTransactionsAreCounted(t *testing.T) {
 	reader := &fakeReader{events: []*domain.Event{
 		{NS: domain.Namespace{DB: "shop", Object: "orders"}, Op: domain.OpInsert, Payload: "a", EndsTransaction: true,
@@ -1250,16 +1170,9 @@ func TestTheQueueReportsTheBytesItHolds(t *testing.T) {
 	}
 }
 
-// TestADuplicateKeyOnMongoDBIsPermanent is the gap a sharded-cluster run found.
-//
 // MySQL had SQLSTATE classification and Redis had its own list of refusals;
-// MongoDB had neither, so every error it returned was treated as "the target is
-// briefly unavailable, try again". Measured against a real pair: a document
-// that collided with a unique index on the target held its batch and retried it
-// for ever, with task_blocked at 0 and task_up at 1. Nothing was lost — the
-// position does not move — but nothing was replicated either, and the only sign
-// was the lag climbing. That is the failure this classification exists to turn
-// into a stop with a reason attached.
+// MongoDB had neither, so every error it returned was treated as "the target
+// is briefly unavailable, try again".
 func TestADuplicateKeyOnMongoDBIsPermanent(t *testing.T) {
 	for _, text := range []string{
 		`bulk write exception: write errors: [E11000 duplicate key error collection: bench.orders index: uq_u dup key: { u: "conflict" }]`,
@@ -1317,18 +1230,8 @@ func (d *driverApplier) Apply(ctx context.Context, runs [][]*domain.Event, _ dom
 	return false, nil
 }
 
-// TestTheLastBatchIsWrittenAfterTheRunIsAskedToStop covers the stop this
-// pipeline claimed to make and never once made.
-//
 // The applier was handed the run's own context, so at a stop it was handed a
-// context that had just been cancelled. A driver refuses that before it reaches
-// the target, so the last batch failed immediately, the task ended its stop
-// reporting a failure, and the batch was replayed on the next start.
-//
-// The two branches that can write are both covered here on purpose. A cancelled
-// context and a queue with events in it are ready at the same moment, and select
-// chooses between them at random, so the fix has to hold whichever it picks —
-// which is why this runs the scenario many times rather than once.
+// context that had just been cancelled.
 func TestTheLastBatchIsWrittenAfterTheRunIsAskedToStop(t *testing.T) {
 	const trials = 50
 	applied := 0

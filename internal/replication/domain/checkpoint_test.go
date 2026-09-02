@@ -42,10 +42,8 @@ func TestCheckpointsFor(t *testing.T) {
 	}
 }
 
-// TestMariaDBSharesMySQLsCheckpoint records that a MariaDB task and a MySQL
-// task read the same field. Two tasks of the two engines configured with one
-// position path each will therefore be handed the same file, and neither
-// notices.
+// Two tasks of the two engines configured with one position path each will
+// therefore be handed the same file, and neither notices.
 func TestMariaDBSharesMySQLsCheckpoint(t *testing.T) {
 	cp := Checkpoints{MySQL: "/shared"}
 
@@ -56,8 +54,7 @@ func TestMariaDBSharesMySQLsCheckpoint(t *testing.T) {
 
 // TestAnUnconfiguredCheckpointIsIndistinguishableFromAnUnknownEngine records
 // that For answers with the empty string both when the engine has no path
-// configured and when the engine is not one it knows. A caller cannot tell a
-// missing configuration from a typo in the engine name.
+// configured and when the engine is not one it knows.
 func TestAnUnconfiguredCheckpointIsIndistinguishableFromAnUnknownEngine(t *testing.T) {
 	empty := Checkpoints{}
 

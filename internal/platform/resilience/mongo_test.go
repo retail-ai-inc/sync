@@ -59,12 +59,9 @@ func TestCheckMongoConnectionHonoursACancelledContext(t *testing.T) {
 	}
 }
 
-// TestTheReconnectBudgetIsBounded covers what shutdown depends on. The
-// reconnect helpers call Retry with five attempts, a two-second base and a
+// The reconnect helpers call Retry with five attempts, a two-second base and a
 // doubling factor: 2 + 4 + 8 + 16 = 30 seconds of waiting on top of whatever
-// each attempt itself costs. Retry took no context, so none of that waiting
-// could be interrupted — including by the process shutting down, which gives a
-// task ten seconds. The context now stops it.
+// each attempt itself costs.
 func TestTheReconnectBudgetIsBounded(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // already cancelled

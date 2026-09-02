@@ -123,8 +123,6 @@ func TestInsertJobStoresTheConfiguration(t *testing.T) {
 
 // TestTheStoredDocumentSpellsOutEveryZeroValue records that the configuration
 // is marshalled without omitempty, so every field is written even when unset.
-// A job created from a two-field request stores a twelve-field document with
-// nulls and empty strings, which is what the UI reads back.
 func TestTheStoredDocumentSpellsOutEveryZeroValue(t *testing.T) {
 	db := useTempJobDB(t)
 
@@ -329,8 +327,6 @@ func TestSetEnableKeepsTheRestOfTheDocument(t *testing.T) {
 
 // TestSetEnableReplacesACorruptDocument records that a configuration that will
 // not parse is discarded and replaced with a document holding only the status.
-// Pausing a job with a corrupt configuration therefore destroys whatever was
-// left of it, silently.
 func TestSetEnableReplacesACorruptDocument(t *testing.T) {
 	db := useTempJobDB(t)
 	id := insertJob(t, db, 1, `{"name":`)
@@ -369,7 +365,6 @@ func TestSetEnableOnAnUnknownID(t *testing.T) {
 	}
 }
 
-// TestSetEnableTagsWhatWentWrong covers the one message an operator gets back.
 // This call did not tag its failures with a stage, unlike every other write in
 // the store, so the endpoint answered "pause fail" for a missing table, a
 // missing row and a locked database alike.

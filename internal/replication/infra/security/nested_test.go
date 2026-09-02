@@ -8,10 +8,7 @@ import (
 )
 
 // A field's path may name something several levels down, and the rule has to
-// reach it. It used to reach exactly one: the parent prefix was stripped and the
-// remainder looked up as a literal key, so "profile.contact.phone" went looking
-// for a key called "contact.phone", did not find one, and left the phone number
-// in the clear on the target.
+// reach it.
 
 func TestARuleReachesAsDeepAsItsPathNames(t *testing.T) {
 	cfg := enabled(FieldSecurityConfig{Field: "profile.contact.phone", SecurityType: "masked"})

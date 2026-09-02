@@ -8,11 +8,9 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-// TestAnOlderDatabaseGainsTheAddedColumns records that a control database
-// created before a column existed picks it up. CREATE TABLE IF NOT EXISTS does
-// nothing to a table that is already there, so without the ALTER an upgraded
-// binary would query a column the file does not have and every backup listing
-// would fail.
+// CREATE TABLE IF NOT EXISTS does nothing to a table that is already there, so
+// without the ALTER an upgraded binary would query a column the file does not
+// have and every backup listing would fail.
 func TestAnOlderDatabaseGainsTheAddedColumns(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "sync.db")
 	t.Setenv("SYNC_DB_PATH", path)
@@ -63,10 +61,9 @@ INSERT INTO backup_tasks (enable, config_json) VALUES (1, '{"name":"nightly"}');
 	}
 }
 
-// TestTheSettingsRowIsNotOverwritten records that an operator's global settings
-// survive a restart. The row is part of the schema — the loader reads id = 1 and
-// a database without it will not start — so it is seeded, and seeding it on
-// every open would put the defaults back over whatever was configured.
+// The row is part of the schema — the loader reads id = 1 and a database
+// without it will not start — so it is seeded, and seeding it on every open
+// would put the defaults back over whatever was configured.
 func TestTheSettingsRowIsNotOverwritten(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "sync.db")
 	t.Setenv("SYNC_DB_PATH", path)

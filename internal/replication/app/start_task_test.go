@@ -58,22 +58,8 @@ func TestThreeOfFourConstructorsNeverFail(t *testing.T) {
 	}
 }
 
-// TestAMalformedMongoURIIsReportedNotPanicked covers what one typo in one
-// task's connection string used to cost.
-//
 // NewMongoDBSyncer answered a connection string the driver cannot parse by
-// logging and returning nil — no retries, no error. The process entry point then
-// wrote
-//
-//	replicationapp.NewMongoDBSyncer(sc, cfg, log).Start(ctx)
-//
-// with no nil check, in a goroutine. Start has a pointer receiver and its first
-// statement reads s.sourceClient, so a nil syncer dereferenced nil and panicked.
-// The panic was unrecovered and in a goroutine, so it took the whole process
-// down: every other replication task and the API server with it.
-//
-// The syncer now comes back carrying the reason, and Start reports it as
-// unrecoverable, because no later attempt will parse it either.
+// logging and returning nil — no retries, no error.
 func TestAMalformedMongoURIIsReportedNotPanicked(t *testing.T) {
 	cfg := config.SyncConfig{
 		ID:               1,

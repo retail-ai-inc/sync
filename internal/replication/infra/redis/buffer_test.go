@@ -25,8 +25,7 @@ func newBuffer(t *testing.T, opts BufferOptions) *Buffer {
 
 // TestOffsetsAreTheSumOfTheFramesWritten pins the arithmetic the whole design
 // leans on: the replication stream is contiguous, so a frame's offset is the
-// offset before it plus its own length. Nothing stores an offset per frame, and
-// a discrepancy here would silently misplace every position.
+// offset before it plus its own length.
 func TestOffsetsAreTheSumOfTheFramesWritten(t *testing.T) {
 	buffer := newBuffer(t, BufferOptions{})
 	if err := buffer.Reset(1000); err != nil {
@@ -96,12 +95,8 @@ func TestACursorResumesFromAnOffset(t *testing.T) {
 	}
 }
 
-// TestAnOffsetInsideAFrameYieldsTheWholeFrame covers a position that does not
-// land on a boundary.
-//
 // Re-delivering a frame is safe — the applier skips what a slot has already
-// recorded — while guessing where a command started is not. The buffer therefore
-// rewinds rather than seeking blindly.
+// recorded — while guessing where a command started is not.
 func TestAnOffsetInsideAFrameYieldsTheWholeFrame(t *testing.T) {
 	buffer := newBuffer(t, BufferOptions{})
 	if err := buffer.Reset(0); err != nil {
@@ -126,12 +121,7 @@ func TestAnOffsetInsideAFrameYieldsTheWholeFrame(t *testing.T) {
 	}
 }
 
-// TestAnOffsetOlderThanTheBufferIsRefusedAsTruncated covers the case that must
-// never become a silent empty read.
-//
-// A position the buffer cannot reach means the history is gone. The caller
-// repairs by value; what it must not do is treat the gap as "nothing to apply",
-// or empty the target and start again.
+// A position the buffer cannot reach means the history is gone.
 func TestAnOffsetOlderThanTheBufferIsRefusedAsTruncated(t *testing.T) {
 	buffer := newBuffer(t, BufferOptions{})
 	if err := buffer.Reset(5000); err != nil {
@@ -147,12 +137,8 @@ func TestAnOffsetOlderThanTheBufferIsRefusedAsTruncated(t *testing.T) {
 	}
 }
 
-// TestAPartialFrameIsDiscardedOnRecovery is the crash case.
-//
 // A process killed between writing a frame's header and its bytes leaves a
-// fragment on disk. Handing that fragment to the reader would deliver half a
-// command; recovery therefore truncates to the last frame that is both complete
-// and intact.
+// fragment on disk.
 func TestAPartialFrameIsDiscardedOnRecovery(t *testing.T) {
 	dir := t.TempDir()
 

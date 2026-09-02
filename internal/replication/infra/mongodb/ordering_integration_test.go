@@ -14,27 +14,9 @@ import (
 	"github.com/retail-ai-inc/sync/test/harness"
 )
 
-// TestAUniqueValueHandedFromOneDocumentToAnother is why the changes of a batch
-// go to the target in the order the stream held them.
-//
-// A batch used to be split into groups that could be applied independently, and
-// independence was decided by the _id: two changes to one document kept their
-// order, everything else could move. Two documents are not independent when a
-// unique index relates them, and handing a unique value from one to another is
-// an ordinary thing for an application to do.
-//
-// The handover here is a delete and an insert rather than two updates, and that
-// is deliberate. An update event is read with fullDocument=updateLookup, so it
-// carries the document as it stands when the lookup runs — which, for a stream
-// that is behind, is the document after the whole transaction. Applying it
-// therefore lands the final value whatever order the events go in, and the
-// reordering is hidden. It is hidden, not absent: a stream that is caught up
-// looks the document up between the two writes and sees the older value. A
-// delete carries no document to look up, so it cannot mask anything.
-//
-// With the split, the insert that takes the value is applied before the delete
-// that frees it, and the unique index refuses it. The batch is one transaction,
-// so nothing lands at all, and retrying reproduces it exactly.
+// A batch used to be split into groups that could be applied independently,
+// and independence was decided by the _id: two changes to one document kept
+// their order, everything else could move.
 func TestAUniqueValueHandedFromOneDocumentToAnother(t *testing.T) {
 	src, tgt := connect(t, harness.MongoSource), connect(t, harness.MongoTarget)
 

@@ -24,8 +24,7 @@ func TestClampSyncedToday(t *testing.T) {
 
 // TestClampingHidesDeletions records that the daily figure is a difference
 // between the highest and lowest row count seen, so a table that lost rows
-// produces a negative delta. Clamping it to zero reports "nothing synced today"
-// for a table that in fact shrank, and the deletion leaves no trace in the API.
+// produces a negative delta.
 func TestClampingHidesDeletions(t *testing.T) {
 	if got := ClampSyncedToday(-500); got != 0 {
 		t.Fatalf("ClampSyncedToday(-500) = %d; deletions now surface somewhere, "+

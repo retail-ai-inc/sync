@@ -112,8 +112,7 @@ func TestSyncMonitorHandlerOnAnUnknownTask(t *testing.T) {
 // TestTheMonitorReportsWhatItKnows covers three numbers that were constants
 // compiled into the handler: 85% progress, 500 tps and 0.2s delay, for every
 // task in every state — including one that was stopped, and one that had never
-// run at all. They now come from the counters the syncers keep, and a task with
-// no counters yet reports nothing rather than a figure nobody measured.
+// run at all.
 func TestTheMonitorReportsWhatItKnows(t *testing.T) {
 	conn := useMonitorDB(t)
 	if _, err := conn.Exec(`INSERT INTO sync_tasks (id, enable, config_json) VALUES (1, 0, '{}')`); err != nil {
@@ -232,11 +231,10 @@ func TestSyncMetricsWithNoRange(t *testing.T) {
 	}
 }
 
-// TestAnEmptyWindowIsAnEmptyAnswer covers a request for a window with nothing
-// in it. The handler used to re-run the query with the time filter removed and
-// return the entire history — up to a thousand rows — with nothing in the
-// response to say the window had been abandoned, so a client asking what
-// happened in the last hour got last month and could not tell.
+// The handler used to re-run the query with the time filter removed and return
+// the entire history — up to a thousand rows — with nothing in the response to
+// say the window had been abandoned, so a client asking what happened in the
+// last hour got last month and could not tell.
 func TestAnEmptyWindowIsAnEmptyAnswer(t *testing.T) {
 	conn := useMonitorDB(t)
 	// Nothing recent; one row far outside the requested window.

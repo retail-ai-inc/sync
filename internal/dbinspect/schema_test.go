@@ -42,13 +42,10 @@ func TestGetMongoFieldType(t *testing.T) {
 	}
 }
 
-// TestTheDriversTypesAreNamedAsDatabaseTypes covers what a caller receives. The
-// switch named none of the types the driver actually decodes BSON into, so every
-// one of them fell through to a Go type name — an _id was "bson.ObjectID"
-// and every array was "bson.A", because the array case matched a bare
-// []interface{} while the driver produces bson.A. The interface builds
-// table mappings out of this, so every schema query returned at least two type
-// names it could not map.
+// The switch named none of the types the driver actually decodes BSON into, so
+// every one of them fell through to a Go type name — an _id was
+// "bson.ObjectID" and every array was "bson.A", because the array case matched
+// a bare []interface{} while the driver produces bson.A.
 func TestTheDriversTypesAreNamedAsDatabaseTypes(t *testing.T) {
 	tests := []struct {
 		value interface{}
@@ -126,9 +123,8 @@ func TestExtractNestedFieldsWalksBSONTypes(t *testing.T) {
 	}
 }
 
-// TestANestedContainerIsTypedLikeItsChildren covers a bson.D, which is walked
-// into. The entry recorded for the container itself was typed by the switch,
-// which did not list bson.D — so the parent read as a Go type name while its
+// The entry recorded for the container itself was typed by the switch, which
+// did not list bson.D — so the parent read as a Go type name while its
 // children read as database types.
 func TestANestedContainerIsTypedLikeItsChildren(t *testing.T) {
 	fields := map[string]string{}
@@ -192,8 +188,7 @@ func TestSortFieldsByNameHandlesEmptyAndSingle(t *testing.T) {
 	}
 }
 
-// TestACompositePrimaryKeyHasADefinedOrder covers the ordinary MySQL case. The
-// comparator answered true for both (i,j) and (j,i) when both fields were
+// The comparator answered true for both (i,j) and (j,i) when both fields were
 // primary keys, which is not a strict weak ordering and is not something
 // sort.Slice promises anything about — so a composite key came back in no
 // defined order, and those columns were not sorted by name either.
@@ -266,10 +261,9 @@ func TestGetTableSchemaHandlerRejectsUnsupportedSourceTypes(t *testing.T) {
 	}
 }
 
-// TestTheSourceTypeIsMatchedWithoutRegardToCase covers the name the interface
-// displays. The comparison was exact while the rest of the tree stores the type
-// lower-cased, so a caller sending "MongoDB" or "MySQL" — which is what it shows
-// — was told the database type was unsupported rather than getting a schema.
+// The comparison was exact while the rest of the tree stores the type lower-
+// cased, so a caller sending "MongoDB" or "MySQL" — which is what it shows —
+// was told the database type was unsupported rather than getting a schema.
 func TestTheSourceTypeIsMatchedWithoutRegardToCase(t *testing.T) {
 	for _, sourceType := range []string{"MongoDB", "MySQL", " postgresql "} {
 		body, _ := json.Marshal(SchemaRequest{SourceType: sourceType, TableName: "t"})

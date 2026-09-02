@@ -93,11 +93,8 @@ func envelope(t *testing.T, rec *httptest.ResponseRecorder) map[string]interface
 	return resp
 }
 
-// cheapPasswordHashing drops the key derivation cost for the duration of a test.
-// The production figure is deliberately expensive — most of a second per login —
-// and a suite that creates and authenticates users would otherwise spend all its
-// time on it. What is being tested is the flow, not the work factor; the factor
-// itself is covered in internal/identity/domain.
+// cheapPasswordHashing drops the key derivation cost for the duration of a
+// test.
 func cheapPasswordHashing(t *testing.T) {
 	t.Helper()
 	t.Setenv("SYNC_PASSWORD_ITERATIONS", "1")

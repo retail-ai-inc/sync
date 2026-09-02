@@ -274,10 +274,8 @@ func TestDeleteTaskReportsAMissingTable(t *testing.T) {
 	}
 }
 
-// TestDeletingATaskRemovesItsMonitoringLog covers rows that used to outlive
-// what they described. There is no foreign key and no cascade, so the monitoring
-// log kept entries for task ids nothing could resolve — in the table that grows
-// without bound.
+// There is no foreign key and no cascade, so the monitoring log kept entries
+// for task ids nothing could resolve — in the table that grows without bound.
 func TestDeletingATaskRemovesItsMonitoringLog(t *testing.T) {
 	db := useTempTaskDB(t)
 	id := insertTask(t, db, 1, `{}`)
@@ -329,9 +327,6 @@ func TestSetEnableFlipsBothTheColumnAndTheDocument(t *testing.T) {
 
 // TestSetEnableReplacesACorruptDocument records that a configuration that will
 // not parse is discarded and replaced with a document holding only the status.
-// Starting a task whose configuration is corrupt therefore destroys its
-// connections and mappings, silently — and the syncer that would have used them
-// is not restarted either.
 func TestSetEnableReplacesACorruptDocument(t *testing.T) {
 	db := useTempTaskDB(t)
 	id := insertTask(t, db, 0, `{"taskName":`)
@@ -346,11 +341,10 @@ func TestSetEnableReplacesACorruptDocument(t *testing.T) {
 	}
 }
 
-// TestANullDocumentDoesNotPanic covers a stored config_json of literal "null" on
-// the replication side. It is valid JSON, so the unmarshal succeeded and left
-// the map nil; the guard only tested the error, so the assignment that followed
-// panicked with "assignment to entry in nil map" and the request died with a 500
-// and no body.
+// It is valid JSON, so the unmarshal succeeded and left the map nil; the guard
+// only tested the error, so the assignment that followed panicked with
+// "assignment to entry in nil map" and the request died with a 500 and no
+// body.
 func TestANullDocumentDoesNotPanic(t *testing.T) {
 	db := useTempTaskDB(t)
 	id := insertTask(t, db, 0, `null`)
@@ -371,10 +365,9 @@ func TestSetEnableOnAnUnknownID(t *testing.T) {
 	}
 }
 
-// TestSetEnableTagsWhatWentWrong covers the one message an operator gets back.
 // This call returned the driver's error untagged while every other call in the
-// package carries the stage, so "the table is missing", "the row is missing" and
-// "the database is locked" all came out as "start fail".
+// package carries the stage, so "the table is missing", "the row is missing"
+// and "the database is locked" all came out as "start fail".
 func TestSetEnableTagsWhatWentWrong(t *testing.T) {
 	emptyTaskDB(t)
 
@@ -407,10 +400,9 @@ func TestReadTaskEngine(t *testing.T) {
 	}
 }
 
-// TestReadTaskEngineAnswersEmptyForEverySortOfFailure records that the four ways
-// this can go wrong are indistinguishable: an unopenable database, a missing
-// row, an empty document and a corrupt document all answer "". The caller
-// treats every one of them as "not MongoDB" and skips the live row count.
+// TestReadTaskEngineAnswersEmptyForEverySortOfFailure records that the four
+// ways this can go wrong are indistinguishable: an unopenable database, a
+// missing row, an empty document and a corrupt document all answer "".
 func TestReadTaskEngineAnswersEmptyForEverySortOfFailure(t *testing.T) {
 	t.Run("unknown id", func(t *testing.T) {
 		useTempTaskDB(t)
@@ -563,9 +555,8 @@ func TestTodayTableStatsReportsAMissingTable(t *testing.T) {
 	}
 }
 
-// TestARowThatWillNotScanIsReported covers a monitoring row whose counts are
-// text. It used to be logged and dropped, so the table simply did not appear in
-// the answer — and a table with no traffic and a table whose rows cannot be read
+// It used to be logged and dropped, so the table simply did not appear in the
+// answer — and a table with no traffic and a table whose rows cannot be read
 // look the same from outside.
 func TestARowThatWillNotScanIsReported(t *testing.T) {
 	db := useTempTaskDB(t)
@@ -676,10 +667,9 @@ func taskWithCredentials() domain.Config {
 	})
 }
 
-// TestTheStoredPasswordsAreNotReadable is the point of sealing them. Masking
-// them on the way out of the API does nothing about the file: anybody who can
-// read it — a backup, a volume snapshot, one `cat` inside the pod — has the
-// credentials for both regions' payment databases.
+// Masking them on the way out of the API does nothing about the file: anybody
+// who can read it — a backup, a volume snapshot, one `cat` inside the pod —
+// has the credentials for both regions' payment databases.
 func TestTheStoredPasswordsAreNotReadable(t *testing.T) {
 	db := useTempTaskDB(t)
 	withSealedCredentials(t)

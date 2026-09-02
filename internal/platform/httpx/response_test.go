@@ -63,7 +63,6 @@ func TestErrorJSONShape(t *testing.T) {
 	}
 }
 
-// TestErrorJSONSetsAStatus covers a failure that used to be served as 200 OK.
 // The helper reported the failure in the body and left the status line
 // untouched, so anything that branches on the status — a load balancer, a
 // health probe, a generated client — read it as a successful request.

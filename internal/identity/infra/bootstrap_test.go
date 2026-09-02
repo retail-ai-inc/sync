@@ -61,10 +61,9 @@ func TestEnsureAdminCreatesTheFirstAdministrator(t *testing.T) {
 	}
 }
 
-// TestEnsureAdminLeavesAnExistingDirectoryAlone records that the variable is
-// read only when there is nobody at all. A manifest that keeps SYNC_ADMIN_PASSWORD
-// set must not reset a password an operator has since changed, and must not put
-// back an administrator that was removed on purpose.
+// A manifest that keeps SYNC_ADMIN_PASSWORD set must not reset a password an
+// operator has since changed, and must not put back an administrator that was
+// removed on purpose.
 func TestEnsureAdminLeavesAnExistingDirectoryAlone(t *testing.T) {
 	freshControlDB(t)
 	t.Setenv("SYNC_ADMIN_PASSWORD", "the-bootstrap-password")
@@ -102,10 +101,8 @@ func TestEnsureAdminLeavesAnExistingDirectoryAlone(t *testing.T) {
 	}
 }
 
-// TestEnsureAdminReportsAnEmptyDirectoryWithNoPassword records that a first run
-// without the variable is called out. The alternative — starting quietly — gives
-// an operator a UI that answers every sign-in with "wrong password" and no clue
-// why.
+// The alternative — starting quietly — gives an operator a UI that answers
+// every sign-in with "wrong password" and no clue why.
 func TestEnsureAdminReportsAnEmptyDirectoryWithNoPassword(t *testing.T) {
 	freshControlDB(t)
 	t.Setenv("SYNC_ADMIN_PASSWORD", "")

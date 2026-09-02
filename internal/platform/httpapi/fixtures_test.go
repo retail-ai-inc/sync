@@ -15,11 +15,10 @@ import (
 )
 
 // scratchDir is a temporary directory removed on a best-effort basis.
-//
 // t.TempDir fails the test when the directory is not empty at cleanup, and the
-// backup run handler starts a job that outlives the request: it writes into the
-// database directory after the test has returned, which turned an unrelated
-// assertion into a flake.
+// backup run handler starts a job that outlives the request: it writes into
+// the database directory after the test has returned, which turned an
+// unrelated assertion into a flake.
 func scratchDir(t *testing.T) string {
 	t.Helper()
 
@@ -45,14 +44,8 @@ func useTempTaskDB(t *testing.T) *sql.DB {
 	path := filepath.Join(scratchDir(t), "sync.db")
 	t.Setenv("SYNC_DB_PATH", path)
 
-	// Through the real opener, which carries the whole schema and creates it
-	// only when it is missing.
-	//
-	// The copies these fixtures used to keep were plain CREATE TABLE, and a
-	// background goroutine outliving an earlier test — a submitted backup run,
-	// say — opens whatever SYNC_DB_PATH now names and builds the schema there
-	// first. The fixture then failed with "table users already exists", rarely,
-	// and only under a loaded parallel suite.
+	// Through the real opener, which carries the whole schema and creates it only
+	// when it is missing.
 	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
 		t.Fatalf("open temp sqlite: %v", err)
@@ -81,14 +74,8 @@ func useMonitorDB(t *testing.T) *sql.DB {
 	path := filepath.Join(scratchDir(t), "sync.db")
 	t.Setenv("SYNC_DB_PATH", path)
 
-	// Through the real opener, which carries the whole schema and creates it
-	// only when it is missing.
-	//
-	// The copies these fixtures used to keep were plain CREATE TABLE, and a
-	// background goroutine outliving an earlier test — a submitted backup run,
-	// say — opens whatever SYNC_DB_PATH now names and builds the schema there
-	// first. The fixture then failed with "table users already exists", rarely,
-	// and only under a loaded parallel suite.
+	// Through the real opener, which carries the whole schema and creates it only
+	// when it is missing.
 	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
 		t.Fatalf("open temp sqlite: %v", err)
@@ -97,11 +84,7 @@ func useMonitorDB(t *testing.T) *sql.DB {
 	return db
 }
 
-// isolateCrontab empties PATH so the `crontab` command cannot be found. The
-// backup handlers call CronManager.SyncCrontab unconditionally, which shells
-// out to crontab and would otherwise rewrite the crontab of whoever runs the
-// suite. With crontab unreachable the handlers log a warning and carry on,
-// which is the behaviour under test.
+// isolateCrontab empties PATH so the `crontab` command cannot be found.
 func isolateCrontab(t *testing.T) {
 	t.Helper()
 	t.Setenv("PATH", t.TempDir())
@@ -118,14 +101,8 @@ func useTempDB(t *testing.T) *sql.DB {
 	path := filepath.Join(scratchDir(t), "sync.db")
 	t.Setenv("SYNC_DB_PATH", path)
 
-	// Through the real opener, which carries the whole schema and creates it
-	// only when it is missing.
-	//
-	// The copies these fixtures used to keep were plain CREATE TABLE, and a
-	// background goroutine outliving an earlier test — a submitted backup run,
-	// say — opens whatever SYNC_DB_PATH now names and builds the schema there
-	// first. The fixture then failed with "table users already exists", rarely,
-	// and only under a loaded parallel suite.
+	// Through the real opener, which carries the whole schema and creates it only
+	// when it is missing.
 	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
 		t.Fatalf("open temp sqlite: %v", err)

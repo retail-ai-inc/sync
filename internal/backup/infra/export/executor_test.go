@@ -35,11 +35,10 @@ func TestExtractTablePrefix(t *testing.T) {
 	}
 }
 
-// TestAnEightDigitDateIsStrippedWhole covers the pattern list's order. The
-// six-digit form used to be tried first, so an eight-digit date with no
-// underscore had only its last six digits removed and two stray digits stayed on
-// the prefix: orders20260821 grouped as "orders20", which is a different group
-// from every other day of that month.
+// The six-digit form used to be tried first, so an eight-digit date with no
+// underscore had only its last six digits removed and two stray digits stayed
+// on the prefix: orders20260821 grouped as "orders20", which is a different
+// group from every other day of that month.
 func TestAnEightDigitDateIsStrippedWhole(t *testing.T) {
 	tests := []struct{ table, want string }{
 		{"orders20260821", "orders"},
@@ -185,11 +184,10 @@ func TestIsTableRelevantForTimeRange(t *testing.T) {
 	}
 }
 
-// TestATouchingIntervalDoesNotOverlap covers an off-by-one at the boundary. Both
-// intervals are half-open — a monthly table ends on the first of the next month
-// — but the overlap test used Before and After rather than their strict
-// complements, so an interval ending exactly where the window starts counted as
-// overlapping and a one-month backup exported three months of tables.
+// Both intervals are half-open — a monthly table ends on the first of the next
+// month — but the overlap test used Before and After rather than their strict
+// complements, so an interval ending exactly where the window starts counted
+// as overlapping and a one-month backup exported three months of tables.
 func TestATouchingIntervalDoesNotOverlap(t *testing.T) {
 	august := &TimeRange{
 		Start: time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC),
@@ -233,9 +231,8 @@ func TestFilterRelevantTables(t *testing.T) {
 
 // TestNoMatchingTableSelectsNothing covers what a job did when its window
 // excluded every table: it backed up tables[0] and reported success, so the
-// archive held a table from outside the requested window and looked like a fresh
-// backup of the right thing. Selecting nothing is now what happens, and Execute
-// reports it.
+// archive held a table from outside the requested window and looked like a
+// fresh backup of the right thing.
 func TestNoMatchingTableSelectsNothing(t *testing.T) {
 	// A daily range around today cannot overlap tables from 2020.
 	tables := []string{"orders_202001", "orders_202002"}
@@ -388,9 +385,8 @@ func TestProcessFileNamePattern(t *testing.T) {
 	})
 }
 
-// TestTheWordingInAPatternSurvives covers the name an archive is stored under in
-// GCS. The bare date placeholders used to be replaced as plain substrings, and
-// "mm" and "dd" occur in ordinary English, so summary_YYYYMM.json was stored as
+// The bare date placeholders used to be replaced as plain substrings, and "mm"
+// and "dd" occur in ordinary English, so summary_YYYYMM.json was stored as
 // su08ary_202608.json.
 func TestTheWordingInAPatternSurvives(t *testing.T) {
 	yesterday := time.Now().AddDate(0, 0, -1)
@@ -435,10 +431,9 @@ func TestBuildMongoDBConnectionString(t *testing.T) {
 	}
 }
 
-// TestTheBackupNoLongerPinsOneNode is the counterpart to T-007 for the backup
-// path. Pinning the driver to a single node meant a backup taken against a
-// replica set read from whichever node it happened to reach, and failed
-// outright once that node stopped serving.
+// Pinning the driver to a single node meant a backup taken against a replica
+// set read from whichever node it happened to reach, and failed outright once
+// that node stopped serving.
 func TestTheBackupNoLongerPinsOneNode(t *testing.T) {
 	for _, conn := range []string{
 		buildMongoDBConnectionString("localhost:27017", "root", "root"),

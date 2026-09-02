@@ -48,10 +48,9 @@ func TestLoginRejectsAWrongPassword(t *testing.T) {
 	}
 }
 
-// TestOneCallersFailedLoginDoesNotAffectAnother is the fix for T-070 seen from
-// the login side. The identity used to live in one package variable shared by
-// every request, so a failed attempt by one caller downgraded an administrator
-// working in another tab to a guest.
+// The identity used to live in one package variable shared by every request,
+// so a failed attempt by one caller downgraded an administrator working in
+// another tab to a guest.
 func TestOneCallersFailedLoginDoesNotAffectAnother(t *testing.T) {
 	db := useTempDB(t)
 	insertUser(t, db, "admin", "adminpw", "Admin", "admin")
@@ -94,8 +93,7 @@ func TestLoginReportsAStoreFailure(t *testing.T) {
 
 // TestLogoutDoesNotSignAnybodyElseOut records what logging out means now that
 // the token is the identity: the client discards it, and nothing on the server
-// changes. It used to clear the one session the whole process shared, so one
-// caller logging out signed everybody out.
+// changes.
 func TestLogoutDoesNotSignAnybodyElseOut(t *testing.T) {
 	db := useTempDB(t)
 	insertUser(t, db, "alice", "secret", "Alice", "admin")
@@ -136,9 +134,8 @@ func TestIdentifyFromHeader(t *testing.T) {
 }
 
 // TestATokenIsOnlyValidWhileItsUserRowExists records that a token carries no
-// claim: validation regenerates a token for every user in the table and compares.
-// Deleting the user therefore invalidates a token that has not expired, and a
-// change to the user's access level does too.
+// claim: validation regenerates a token for every user in the table and
+// compares.
 func TestATokenIsOnlyValidWhileItsUserRowExists(t *testing.T) {
 	db := useTempDB(t)
 	insertUser(t, db, "alice", "secret", "Alice", "admin")
@@ -204,7 +201,6 @@ func TestCurrentUserOnAnUnknownUser(t *testing.T) {
 	}
 }
 
-// TestAdminTokenRequiresAnAdminCredential is the fix for T-070 at its sharpest.
 // The use case used to consult the process-wide session, so once anybody had
 // signed in as admin it handed an admin token to any caller at all — including
 // one that had presented nothing.
@@ -270,8 +266,7 @@ func TestChangePasswordRejectsAWrongOldPassword(t *testing.T) {
 
 // TestChangePasswordOnAnUnknownUserIsAMismatchNotAMissingUser records that a
 // username that is not in the table is reported the same way as a wrong
-// password. A caller cannot tell the two apart, which is the right answer for a
-// login form and the wrong one for an administrator's tooling.
+// password.
 func TestChangePasswordOnAnUnknownUserIsAMismatchNotAMissingUser(t *testing.T) {
 	useTempDB(t)
 

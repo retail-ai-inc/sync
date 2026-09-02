@@ -18,9 +18,8 @@ func serve(t *testing.T, method, target string) *httptest.ResponseRecorder {
 }
 
 // TestTheProbesAnswerWithoutACredential covers what a rolling deployment
-// depends on: the readiness and liveness probes are outside /api, so they answer
-// before anything is configured and without a token. A probe behind the
-// authentication middleware would keep every pod out of service.
+// depends on: the readiness and liveness probes are outside /api, so they
+// answer before anything is configured and without a token.
 func TestTheProbesAnswerWithoutACredential(t *testing.T) {
 	for _, path := range []string{"/healthz", "/readyz"} {
 		rec := serve(t, http.MethodGet, path)

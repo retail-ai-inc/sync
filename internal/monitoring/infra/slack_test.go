@@ -17,10 +17,6 @@ import (
 )
 
 // syncBuffer collects log output that is written from another goroutine.
-//
-// The notification is sent in the background, so the test and the sender touch
-// the buffer at the same time — captureLog's plain bytes.Buffer is a data race
-// here, and the race detector is part of the default suite.
 type syncBuffer struct {
 	mu  sync.Mutex
 	buf bytes.Buffer
@@ -116,9 +112,7 @@ func colour(t *testing.T, payload map[string]interface{}) string {
 }
 
 // TestADifferenceIsReportedToSlack covers the path that exists for one reason:
-// telling somebody the copy that will be switched to is missing rows. It used to
-// be reachable only through a shell script the process looked for in three fixed
-// paths, so a deployment without it dropped every alert while reporting success.
+// telling somebody the copy that will be switched to is missing rows.
 func TestADifferenceIsReportedToSlack(t *testing.T) {
 	logger, out := captureBackgroundLog()
 	url, posted := webhook(t)

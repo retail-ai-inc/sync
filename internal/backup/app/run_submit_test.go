@@ -29,12 +29,9 @@ func settled(t *testing.T, taskID string) domain.Run {
 	}
 }
 
-// TestStartRunActuallyRunsTheJob covers "back this up now". It used to stamp
-// last_backup_time and answer "started successfully" without running anything:
-// no executor was built, no command ran, nothing was written anywhere. So the
-// dashboard showed a fresh, successful backup that did not exist — and an
-// operator checking before a switchover that the data was recoverable saw
-// exactly what they were hoping for.
+// It used to stamp last_backup_time and answer "started successfully" without
+// running anything: no executor was built, no command ran, nothing was written
+// anywhere.
 func TestStartRunActuallyRunsTheJob(t *testing.T) {
 	db := useTempJobDB(t)
 	id := insertJob(t, db, 1, `{"name":"nightly","sourceType":"mongodb"}`)
@@ -175,11 +172,10 @@ func TestABackgroundRunFailsWhenTheDatabaseCannotBeOpened(t *testing.T) {
 	t.Fatal("the run never failed")
 }
 
-// TestTwoSubmissionsInTheSameSecondCollide records T-114: the task id is the job
-// id and the current Unix second, so two submissions of the same job inside one
-// second produce the same id and the second overwrites the first's record. The
-// caller that submitted the first then polls a status belonging to a different
-// execution.
+// TestTwoSubmissionsInTheSameSecondCollide records T-114: the task id is the
+// job id and the current Unix second, so two submissions of the same job
+// inside one second produce the same id and the second overwrites the first's
+// record.
 func TestTwoSubmissionsInTheSameSecondCollide(t *testing.T) {
 	useTempJobDB(t)
 	ForgetRuns()
@@ -198,12 +194,6 @@ func TestTwoSubmissionsInTheSameSecondCollide(t *testing.T) {
 }
 
 // snapshotRun copies a recorded run while holding the register's own lock.
-//
-// LookupRun hands back the live *domain.Run that the background goroutine keeps
-// mutating, and Run has no synchronisation of its own, so reading its fields
-// after LookupRun returns is a data race — one production shares (T-214). This
-// helper reaches for runsLock directly, which a test in this package can do and
-// an HTTP handler cannot.
 func snapshotRun(t *testing.T, taskID string) (domain.Run, bool) {
 	t.Helper()
 
@@ -215,8 +205,7 @@ func snapshotRun(t *testing.T, taskID string) (domain.Run, bool) {
 	return domain.Run{}, false
 }
 
-// TestAFailedRunIsRecordedInTheDatabase records that the outcome outlives the
-// process. It used to live only in the in-memory register, so a job that failed
+// It used to live only in the in-memory register, so a job that failed
 // overnight and a restart in the morning left nothing anywhere saying so — the
 // dashboard showed the timestamp of the last run that had worked, and "the
 // backup is a few days old" and "the backup has been failing since Tuesday"

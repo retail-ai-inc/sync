@@ -188,11 +188,10 @@ func TestAStaleBeginIsSkipped(t *testing.T) {
 	}
 }
 
-// TestATransactionAtTheWrittenLSNIsNotReplayed covers the boundary after a
-// restart. The comparison used to be strictly greater, so a transaction whose
-// end LSN is exactly the recorded position — the last one applied before the
-// restart — was applied a second time: a duplicate for an INSERT, and for a
-// DELETE a statement that matches nothing.
+// The comparison used to be strictly greater, so a transaction whose end LSN
+// is exactly the recorded position — the last one applied before the restart —
+// was applied a second time: a duplicate for an INSERT, and for a DELETE a
+// statement that matches nothing.
 func TestATransactionAtTheWrittenLSNIsNotReplayed(t *testing.T) {
 	st := stateWith(nil)
 	st.lastWrittenLSN = 100
@@ -219,10 +218,9 @@ func TestACommitClosesTheTransaction(t *testing.T) {
 	}
 }
 
-// TestTheCommitLSNIsNotRecorded records that the dispatch itself never advances
-// the written position, and that the COMMIT's own TransactionEndLSN is read and
-// discarded. The caller does the advancing, and it uses the LSN the BEGIN
-// carried rather than the one the COMMIT reports.
+// TestTheCommitLSNIsNotRecorded records that the dispatch itself never
+// advances the written position, and that the COMMIT's own TransactionEndLSN
+// is read and discarded.
 func TestTheCommitLSNIsNotRecorded(t *testing.T) {
 	st := stateWith(nil)
 	s := newSyncer(t, config.SyncConfig{})
@@ -254,10 +252,8 @@ func TestAnInsertInsideATransactionIsApplied(t *testing.T) {
 	}
 }
 
-// TestAnInsertOutsideATransactionIsDropped records that every row change is
-// gated on having seen a BEGIN. A stream that starts mid-transaction — the
-// server resuming from a slot after a restart — loses the changes that arrive
-// before the next BEGIN.
+// A stream that starts mid-transaction — the server resuming from a slot after
+// a restart — loses the changes that arrive before the next BEGIN.
 func TestAnInsertOutsideATransactionIsDropped(t *testing.T) {
 	db := targetDB(t, ordersSchema)
 	st := stateWith(db)
@@ -322,17 +318,9 @@ func TestADeleteOutsideATransactionIsDropped(t *testing.T) {
 	}
 }
 
-// TestAnUnhandledMessageTypeIsIgnored records that message kinds the syncer does
-// not implement — TRUNCATE among them — are logged at debug level and skipped.
-// A TRUNCATE on the source is therefore never replicated, and the target keeps
-// rows the source no longer has.
-// TestATruncateStopsReplicationRatherThanBeingIgnored covers a TRUNCATE at the
-// source. It used to fall into the default branch and be logged at debug level,
-// so the target went on holding rows the source no longer had and nothing said
-// so. Applying it is not the answer either — the disaster-recovery copy is the
-// only thing left to recover from, and a mistaken truncate would take it too —
-// so replication stops and an operator decides, which is what a destructive DDL
-// does on the MySQL side.
+// TestAnUnhandledMessageTypeIsIgnored records that message kinds the syncer
+// does not implement — TRUNCATE among them — are logged at debug level and
+// skipped.
 func TestATruncateStopsReplicationRatherThanBeingIgnored(t *testing.T) {
 	db := targetDB(t, ordersSchema)
 	if _, err := db.Exec(`INSERT INTO orders VALUES ('1','Ada','x')`); err != nil {
@@ -363,9 +351,8 @@ func TestATruncateStopsReplicationRatherThanBeingIgnored(t *testing.T) {
 }
 
 // TestAnInsertForAnUnannouncedRelationIsDropped records the dependency on the
-// relation cache: without a RELATION message first, the row cannot be named and
-// is skipped. The cache lives only in memory, so a restart mid-stream relies on
-// PostgreSQL resending the relation.
+// relation cache: without a RELATION message first, the row cannot be named
+// and is skipped.
 func TestAnInsertForAnUnannouncedRelationIsDropped(t *testing.T) {
 	db := targetDB(t, ordersSchema)
 	st := stateWith(db)
@@ -394,13 +381,9 @@ func TestTheReceivedLSNAdvancesOnEveryMessage(t *testing.T) {
 	}
 }
 
-// TestAFailedStatementIsNotForgivenByALaterSuccess covers permanent, silent
-// loss of one row. The commit path only advances the LSN when the error flag
-// reads zero — but the flag used to be cleared by any later successful
-// statement, including the next statement of the same transaction. A transaction
-// whose first row failed and whose second succeeded was recorded as fully
-// applied, the position moved past it, and nothing would ever send that row
-// again.
+// The commit path only advances the LSN when the error flag reads zero — but
+// the flag used to be cleared by any later successful statement, including the
+// next statement of the same transaction.
 func TestAFailedStatementIsNotForgivenByALaterSuccess(t *testing.T) {
 	db := targetDB(t, ordersSchema)
 	st := stateWith(db)

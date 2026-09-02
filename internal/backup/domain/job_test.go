@@ -252,10 +252,9 @@ func TestRunAdvanceRecordsTheError(t *testing.T) {
 	}
 }
 
-// TestARecoveredRunDropsItsStaleError covers a run that failed and was then
-// advanced to completed. Advance only wrote the error field when it was handed
-// one, so the run still carried the failure text — and a caller polling it saw
-// "completed" next to an error message.
+// Advance only wrote the error field when it was handed one, so the run still
+// carried the failure text — and a caller polling it saw "completed" next to
+// an error message.
 func TestARecoveredRunDropsItsStaleError(t *testing.T) {
 	run := &Run{TaskID: "t"}
 	run.Advance(RunFailed, "boom", errors.New("disk full"))
@@ -291,11 +290,10 @@ func TestDeriveUpdateStatus(t *testing.T) {
 	}
 }
 
-// TestTheUpdateAndTheListAgreeOnTheStatus covers one job with two statuses. The
-// test used to be on the key rather than the value, so a document holding
+// The test used to be on the key rather than the value, so a document holding
 // "status": "" made an update store an empty status — and the list endpoint,
-// seeing an empty status, fell back to the enable column and reported something
-// else.
+// seeing an empty status, fell back to the enable column and reported
+// something else.
 func TestTheUpdateAndTheListAgreeOnTheStatus(t *testing.T) {
 	got := DeriveUpdateStatus(map[string]interface{}{"status": ""}, 1)
 
@@ -308,10 +306,9 @@ func TestTheUpdateAndTheListAgreeOnTheStatus(t *testing.T) {
 	}
 }
 
-// TestAStoredStatusThatIsNotAStringDoesNotPanic covers a document whose status
-// is a number or a boolean. The assertion was unchecked, so it killed the
-// request with a runtime panic — and the router installs no recovery, so that
-// panic reached net/http and cut the connection instead of answering.
+// The assertion was unchecked, so it killed the request with a runtime panic —
+// and the router installs no recovery, so that panic reached net/http and cut
+// the connection instead of answering.
 func TestAStoredStatusThatIsNotAStringDoesNotPanic(t *testing.T) {
 	for _, value := range []interface{}{1, true, nil, []interface{}{}} {
 		if got := DeriveUpdateStatus(map[string]interface{}{"status": value}, 1); got != StatusEnabled {
@@ -343,8 +340,7 @@ func TestDeriveUpdateName(t *testing.T) {
 // TestTheGeneratedNamesDisagreeBetweenCreateAndUpdate records that the two
 // paths format the same fallback differently: the list endpoint interpolates
 // the numeric id, the update endpoint interpolates the id as it arrived in the
-// URL. They agree today only because both render "7"; a non-numeric id makes
-// them diverge, and the update path accepts one.
+// URL.
 func TestTheGeneratedNamesDisagreeBetweenCreateAndUpdate(t *testing.T) {
 	fromUpdate := DeriveUpdateName(nil, "not-a-number")
 	fromList := NewBackupJob(0, 0, "", "", "", "").DisplayName(Config{})
@@ -391,11 +387,7 @@ func TestParseStoredConfig(t *testing.T) {
 
 // TestAJSONNullDocumentIsAWritableMap covers a stored document of literal
 // "null", which is valid JSON: Unmarshal succeeds and leaves the map nil, so a
-// guard that only tests the error does not catch it. Both SetEnable
-// implementations then assign into that map, which panics with "assignment to
-// entry in nil map" — pause, resume, start and stop all died with a 500 and no
-// body. Nothing writes "null" today; one hand-edited row or one failed migration
-// would.
+// guard that only tests the error does not catch it.
 func TestAJSONNullDocumentIsAWritableMap(t *testing.T) {
 	got := ParseStoredConfig("null")
 
@@ -409,10 +401,8 @@ func TestAJSONNullDocumentIsAWritableMap(t *testing.T) {
 }
 
 // TestACorruptStoredConfigIsIndistinguishableFromAnEmptyOne records that
-// ParseStoredConfig answers with an empty map both for a document that will not
-// parse and for one that is genuinely empty. An update therefore silently
-// discards a corrupt configuration and writes a fresh one, with no trace that
-// anything was lost.
+// ParseStoredConfig answers with an empty map both for a document that will
+// not parse and for one that is genuinely empty.
 func TestACorruptStoredConfigIsIndistinguishableFromAnEmptyOne(t *testing.T) {
 	corrupt := ParseStoredConfig(`{"name":`)
 	empty := ParseStoredConfig(`{}`)

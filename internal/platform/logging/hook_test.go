@@ -103,12 +103,8 @@ func TestAnEntryWithoutATaskIDIsStillWritten(t *testing.T) {
 	}
 }
 
-// TestAFailureIsReportedOnceAndNotOncePerLine covers log rows quietly stopping.
 // Every failure used to be answered with nil — a missing table, an unopenable
-// path — so the hook could stop writing for good with nothing to show it. It now
-// reports the first failure of an outage and stays quiet until it recovers,
-// which is the difference between one visible complaint and either none or one
-// per log line.
+// path — so the hook could stop writing for good with nothing to show it.
 func TestAFailureIsReportedOnceAndNotOncePerLine(t *testing.T) {
 	entry := &logrus.Entry{Logger: logrus.New(), Level: logrus.ErrorLevel, Message: "m"}
 
@@ -140,10 +136,9 @@ func TestAFailureIsReportedOnceAndNotOncePerLine(t *testing.T) {
 	})
 }
 
-// TestTheConnectionIsReusedAcrossLines covers the cost of logging. Every line
-// used to open and close its own SQLite connection — at the info level that is
-// one open per log entry, against a database whose pool holds a single
-// connection and which replication also writes its checkpoints to.
+// Every line used to open and close its own SQLite connection — at the info
+// level that is one open per log entry, against a database whose pool holds a
+// single connection and which replication also writes its checkpoints to.
 func TestTheConnectionIsReusedAcrossLines(t *testing.T) {
 	db := useTempLogDB(t)
 

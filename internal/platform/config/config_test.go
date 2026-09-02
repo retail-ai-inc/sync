@@ -257,11 +257,8 @@ func TestLoadSyncTasksSynthesisesEmptyMapping(t *testing.T) {
 	}
 }
 
-// TestLoadSyncTasksSwallowsMalformedJSON records F-273. A config_json that
-// does not parse produces a task with every field left at its zero value: no
-// type, no connection strings, no mappings. Nothing propagates the failure, so
-// the task is silently skipped by the dispatcher in cmd/sync as an unknown
-// type. Validation belongs in the aggregate that owns these invariants.
+// A config_json that does not parse produces a task with every field left at
+// its zero value: no type, no connection strings, no mappings.
 func TestLoadSyncTasksSwallowsMalformedJSON(t *testing.T) {
 	db := newConfigDB(t)
 	if _, err := db.Exec(
@@ -306,20 +303,9 @@ func TestSyncConfigAccessors(t *testing.T) {
 	}
 }
 
-// TestLoadSyncTasksStringDurationVoidsWholeTask records a defect with a wide
-// blast radius. AdvancedSettings declares BaseRetryDelay and MaxRetryDelay as
-// time.Duration, an int64, while the field comments and the manual parsing
-// further down this file both treat them as strings such as "5s". Supplying a
-// string therefore fails the very first json.Unmarshal, and because that error
-// is only logged (F-273) the task loses everything: type, connection strings,
-// and mappings. cmd/sync then skips it as an unknown type and the task simply
-// never syncs, with one warning line as the only trace.
-//
-// Two consequences worth spelling out:
-//   - the format documented in the struct comments is unusable; only raw
-//     nanosecond integers survive the unmarshal
-//   - the time.ParseDuration branch in loadSyncTasks is unreachable, since it
-//     only runs when the enclosing unmarshal already succeeded
+// AdvancedSettings declares BaseRetryDelay and MaxRetryDelay as time.Duration,
+// an int64, while the field comments and the manual parsing further down this
+// file both treat them as strings such as "5s".
 func TestLoadSyncTasksStringDurationVoidsWholeTask(t *testing.T) {
 	db := newConfigDB(t)
 	const taskJSON = `{
@@ -419,7 +405,6 @@ func TestASealedPasswordIsOpenedBeforeItIsUsed(t *testing.T) {
 	}
 }
 
-// TestATaskWhosePasswordCannotBeOpenedIsNotStarted is the deliberate choice.
 // Starting it would connect with a ciphertext and fail authentication against
 // the payment database, with an error naming neither the task nor the reason;
 // skipping it says exactly which task is not replicating and why.

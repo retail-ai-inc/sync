@@ -13,7 +13,6 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
-// expandAndGroupTables Expand regex patterns and group tables for merging
 func (e *BackupExecutor) ExpandAndGroupTables(ctx context.Context, config *ExecutorBackupConfig) (map[string][]string, error) {
 
 	tableGroups := make(map[string][]string)

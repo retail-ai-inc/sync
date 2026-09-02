@@ -31,12 +31,9 @@ func connect(t *testing.T, endpoint string) *mongo.Client {
 	host, port := harness.SplitHostPort(t, endpoint)
 	uri := dsn.BuildDSNByType("mongodb", map[string]string{
 		"host": host, "port": port, "database": sourceDB,
-		// The fixture's replica sets advertise 127.0.0.1:27017, which is
-		// reachable inside the container and nowhere else, so topology
-		// discovery cannot be used here. A production cluster advertises
-		// addresses its clients can resolve and must not set this: pinned to
-		// one node the driver neither finds the rest of the set nor follows an
-		// election. That path needs a real replica set to exercise.
+		// The fixture's replica sets advertise 127.0.0.1:27017, which is reachable
+		// inside the container and nowhere else, so topology discovery cannot be
+		// used here.
 		dsn.KeyDirect: "true",
 	})
 
@@ -208,11 +205,10 @@ func TestIncrementalSyncAppliesInsertUpdateDelete(t *testing.T) {
 	})
 }
 
-// TestSecurityPolicyIsAppliedForMongoDB covers a masking rule end to end. The
-// task declared one, the syncer accepted it, and the target received the value
-// in the clear — MySQL and PostgreSQL applied the same configuration while the
-// MongoDB path never called the security package at all, so what the interface
-// showed and what the replica held were different things.
+// The task declared one, the syncer accepted it, and the target received the
+// value in the clear — MySQL and PostgreSQL applied the same configuration
+// while the MongoDB path never called the security package at all, so what the
+// interface showed and what the replica held were different things.
 func TestSecurityPolicyIsAppliedForMongoDB(t *testing.T) {
 	collection := harness.UniqueName("security")
 	src, tgt := connect(t, harness.MongoSource), connect(t, harness.MongoTarget)

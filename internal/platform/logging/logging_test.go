@@ -77,10 +77,9 @@ func TestCustomTextFormatterIncludesFields(t *testing.T) {
 	}
 }
 
-// TestTheFieldsAreSeparated covers a line an operator has to read. The parts
-// used to be joined with an empty separator, so two fields came out as
-// "sync_task_id=7table=users" — neither readable nor parseable, and this is the
-// default format for every line the process writes.
+// The parts used to be joined with an empty separator, so two fields came out
+// as "sync_task_id=7table=users" — neither readable nor parseable, and this is
+// the default format for every line the process writes.
 func TestTheFieldsAreSeparated(t *testing.T) {
 	line := formatEntry(t, &logrus.Entry{
 		Time:    time.Date(2026, 8, 21, 0, 0, 0, 0, time.UTC),

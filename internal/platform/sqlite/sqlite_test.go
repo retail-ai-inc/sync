@@ -25,9 +25,7 @@ func TestOpenSQLiteDBCreatesTheFileAndItsDirectory(t *testing.T) {
 }
 
 // TestTheConnectionPoolIsCappedAtOne records that the pool is deliberately a
-// single connection, because SQLite serialises writers anyway. Every store call
-// in this repository opens its own pool and closes it again, so the cap applies
-// per call rather than across the process.
+// single connection, because SQLite serialises writers anyway.
 func TestTheConnectionPoolIsCappedAtOne(t *testing.T) {
 	t.Setenv("SYNC_DB_PATH", filepath.Join(t.TempDir(), "sync.db"))
 
@@ -43,9 +41,7 @@ func TestTheConnectionPoolIsCappedAtOne(t *testing.T) {
 }
 
 // TestARelativePathIsMadeAbsolute records that a relative SYNC_DB_PATH is
-// resolved against the working directory of whichever process opens it. Two
-// processes started from different directories therefore use different
-// databases, silently.
+// resolved against the working directory of whichever process opens it.
 func TestARelativePathIsMadeAbsolute(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
@@ -82,8 +78,7 @@ func TestAnEmptyPathFallsBackToSyncDB(t *testing.T) {
 
 // TestAnUncreatableDirectoryIsReportedImmediately records that a path whose
 // parent is a regular file fails on the directory creation, before any of the
-// five connection attempts. The retry loop is not entered, so the call returns
-// at once rather than after five seconds.
+// five connection attempts.
 func TestAnUncreatableDirectoryIsReportedImmediately(t *testing.T) {
 	blocker := filepath.Join(t.TempDir(), "not-a-directory")
 	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {

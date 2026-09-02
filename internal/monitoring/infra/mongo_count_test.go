@@ -112,11 +112,9 @@ func TestAConditionForAnotherTableIsIgnored(t *testing.T) {
 	}
 }
 
-// TestTheEqualityOperatorMatchesEitherRepresentation covers a value that looks
-// like a number. It used to be converted and the string dropped, and MongoDB
-// does not match a numeric filter against a text field — so an order id stored
-// as text counted zero rows, which reads as a replica that has lost everything.
-// Nothing here knows which way a given collection stores it, so both are matched.
+// It used to be converted and the string dropped, and MongoDB does not match a
+// numeric filter against a text field — so an order id stored as text counted
+// zero rows, which reads as a replica that has lost everything.
 func TestTheEqualityOperatorMatchesEitherRepresentation(t *testing.T) {
 	qc, out := loggingCounter(t)
 
@@ -210,10 +208,9 @@ func TestTheComparisonOperatorsAcceptFloatsAndStrings(t *testing.T) {
 	}
 }
 
-// TestAConditionThatCannotBeExpressedIsReported covers a count that silently
-// became a count of something else. A condition the builder did not recognise
-// contributed nothing to the filter, so the number reported as "orders matching
-// X" was the size of the whole collection — and nothing said so.
+// A condition the builder did not recognise contributed nothing to the filter,
+// so the number reported as "orders matching X" was the size of the whole
+// collection — and nothing said so.
 func TestAConditionThatCannotBeExpressedIsReported(t *testing.T) {
 	for name, condition := range map[string]domain.CountCondition{
 		"an unknown operator":        {Table: "orders", Field: "name", Operator: "LIKE", Value: "A%"},
@@ -291,10 +288,8 @@ func TestTheWeeklyAndMonthlyRanges(t *testing.T) {
 	}
 }
 
-// TestTheWeeklyRangeEndsTodayNotAtTheWeekEnd records that "weekly" means
-// week-to-date: the upper bound is the end of today, not the end of the week.
-// The same holds for "monthly". So the figure grows through the period rather
-// than being a complete-period total.
+// TestTheWeeklyRangeEndsTodayNotAtTheWeekEnd records that "weekly" means week-
+// to-date: the upper bound is the end of today, not the end of the week.
 func TestTheWeeklyRangeEndsTodayNotAtTheWeekEnd(t *testing.T) {
 	qc, out := loggingCounter(t)
 	jst := time.FixedZone("JST", 9*3600)
@@ -355,10 +350,8 @@ func TestTheYesterdayRangeFallsBackToJST(t *testing.T) {
 	}
 }
 
-// TestTwoConditionsOnOneFieldAreReported covers a range — "total > 10 and
-// total < 100", the obvious thing to want. The filter is a map keyed by field
-// name, so the second condition replaced the first and the count was taken with
-// only half the range, without a word.
+// The filter is a map keyed by field name, so the second condition replaced
+// the first and the count was taken with only half the range, without a word.
 func TestTwoConditionsOnOneFieldAreReported(t *testing.T) {
 	qc, _ := loggingCounter(t)
 

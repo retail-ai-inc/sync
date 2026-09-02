@@ -71,9 +71,7 @@ func TestSaveCreatesItsDirectory(t *testing.T) {
 }
 
 // TestAKeyCannotNameAFileOutsideTheStore covers keys derived from database and
-// collection names, which an operator sets through the task configuration. The
-// key used to be joined onto the directory unchecked, so one containing a path
-// separator wrote wherever it liked.
+// collection names, which an operator sets through the task configuration.
 func TestAKeyCannotNameAFileOutsideTheStore(t *testing.T) {
 	root := t.TempDir()
 	inner := filepath.Join(root, "state")
@@ -95,11 +93,9 @@ func TestAKeyCannotNameAFileOutsideTheStore(t *testing.T) {
 	}
 }
 
-// TestSaveIsAtomic covers a crash during the write. Save used to write the
-// destination in place, so an interrupted write left a truncated checkpoint that
-// on restart either would not parse or parsed as an earlier position — which
-// replays events already applied. The write now lands on a temporary file and is
-// renamed over the destination.
+// Save used to write the destination in place, so an interrupted write left a
+// truncated checkpoint that on restart either would not parse or parsed as an
+// earlier position — which replays events already applied.
 func TestSaveIsAtomic(t *testing.T) {
 	dir := t.TempDir()
 	store := NewFileStateStore(dir)

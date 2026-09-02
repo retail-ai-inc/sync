@@ -111,10 +111,9 @@ func TestConvertTimeRangeQuery(t *testing.T) {
 	}
 }
 
-// TestMongoAndMySQLTimeRangesAgree covers the two engines resolving the same
-// configuration. They were separate copies of the same arithmetic and did agree;
-// they now share one implementation, and this is what would catch them drifting
-// apart again.
+// They were separate copies of the same arithmetic and did agree; they now
+// share one implementation, and this is what would catch them drifting apart
+// again.
 func TestMongoAndMySQLTimeRangesAgree(t *testing.T) {
 	query := map[string]interface{}{"created_at": dailyQuery(float64(-3), float64(-1))}
 
@@ -212,9 +211,7 @@ func TestCleanQueryStringValues(t *testing.T) {
 
 // TestCleanQueryStringValuesCorruptsLegitimateQuotes records a defect: the
 // function only checks that a value starts and ends with a quote, without
-// verifying that they are a matching pair. A value that legitimately opens and
-// closes with quoted words loses its outer characters, and a value consisting
-// of a single quote character is emptied entirely.
+// verifying that they are a matching pair.
 func TestCleanQueryStringValuesCorruptsLegitimateQuotes(t *testing.T) {
 	tests := []struct {
 		name     string

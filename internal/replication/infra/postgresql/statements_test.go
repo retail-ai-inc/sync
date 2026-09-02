@@ -90,11 +90,10 @@ func TestHandleInsertWritesNullForANullColumn(t *testing.T) {
 	}
 }
 
-// TestAnUnchangedToastedValueIsLeftAlone covers a data-loss path. The 'u' column
-// type means "unchanged TOASTed value, deliberately not sent", and it used to
-// fall into the same branch as every unrecognised type and be written as NULL —
-// so an update to one column of a row emptied a large text column of the same
-// row that nobody had touched.
+// The 'u' column type means "unchanged TOASTed value, deliberately not sent",
+// and it used to fall into the same branch as every unrecognised type and be
+// written as NULL — so an update to one column of a row emptied a large text
+// column of the same row that nobody had touched.
 func TestAnUnchangedToastedValueIsLeftAlone(t *testing.T) {
 	db := targetDB(t, ordersSchema)
 	if _, err := db.Exec(`INSERT INTO orders VALUES ('1','Ada','ada@example.com')`); err != nil {
@@ -138,11 +137,10 @@ func TestABinaryColumnIsReportedNotDropped(t *testing.T) {
 	}
 }
 
-// TestAValueCannotReachTheStatementText is the injection guard. Every value in a
-// replicated row comes from the source database, and they used to be pasted into
-// the SQL text with a doubled single quote as the only escaping — so the
-// correctness of the target depended on a setting of the source that nothing
-// here checks. They are bound as parameters now.
+// Every value in a replicated row comes from the source database, and they
+// used to be pasted into the SQL text with a doubled single quote as the only
+// escaping — so the correctness of the target depended on a setting of the
+// source that nothing here checks.
 func TestAValueCannotReachTheStatementText(t *testing.T) {
 	db := targetDB(t, ordersSchema)
 	st := stateWith(db, relation(1, "main", "orders", "id", "customer", "email"))
@@ -188,11 +186,8 @@ func TestHandleInsertSkipsAnEmptyTuple(t *testing.T) {
 }
 
 // TestATupleWiderThanItsRelationIsReported covers a row that arrives with more
-// columns than the last relation message described, which is what a source that
-// has added a column and not re-announced the table sends. The builder used to
-// size its slices from the tuple and then skip the columns it could not name,
-// leaving empty strings in the middle of the statement: "INSERT INTO t (a, b, )
-// VALUES ('1','2', )". Replication broke there rather than at the column.
+// columns than the last relation message described, which is what a source
+// that has added a column and not re-announced the table sends.
 func TestATupleWiderThanItsRelationIsReported(t *testing.T) {
 	db := targetDB(t, ordersSchema)
 	st := stateWith(db, relation(1, "main", "orders", "id", "customer"))
@@ -238,8 +233,7 @@ func TestHandleInsertMasksASecuredField(t *testing.T) {
 // TestMaskingIsNotAppliedToANullColumn records that a NULL stays NULL: the
 // masking call sits inside the text branch only, so a secured field that is
 // null is replicated as null rather than as the masked form of the empty
-// string. That is the right answer, and it means null is distinguishable from
-// masked in the target.
+// string.
 func TestMaskingIsNotAppliedToANullColumn(t *testing.T) {
 	db := targetDB(t, ordersSchema)
 	st := stateWith(db, relation(1, "main", "orders", "id", "customer", "email"))
@@ -278,11 +272,10 @@ func TestHandleUpdateRewritesTheRow(t *testing.T) {
 	}
 }
 
-// TestAnUpdateAddressesTheRowByItsKey covers a target that has drifted. The
-// WHERE clause used to be built from every column of the old tuple, so a target
-// row that differed anywhere — drifted once, missed an earlier update, or had a
-// field masked on the way in — matched nothing, and the update was a silent
-// no-op that nothing reported.
+// The WHERE clause used to be built from every column of the old tuple, so a
+// target row that differed anywhere — drifted once, missed an earlier update,
+// or had a field masked on the way in — matched nothing, and the update was a
+// silent no-op that nothing reported.
 func TestAnUpdateAddressesTheRowByItsKey(t *testing.T) {
 	db := targetDB(t, ordersSchema)
 	if _, err := db.Exec(`INSERT INTO orders VALUES ('1','Drifted','ada@example.com')`); err != nil {
@@ -309,10 +302,7 @@ func TestAnUpdateAddressesTheRowByItsKey(t *testing.T) {
 }
 
 // TestAnUpdateWithNoOldTupleUsesTheKeyFromTheNewOne covers REPLICA IDENTITY
-// DEFAULT, where the old tuple is only sent when the key itself changed. The
-// clause used to be built from every column of the new tuple — asking for the
-// row it was about to write — so on a target holding the older revision it
-// matched nothing.
+// DEFAULT, where the old tuple is only sent when the key itself changed.
 func TestAnUpdateWithNoOldTupleUsesTheKeyFromTheNewOne(t *testing.T) {
 	db := targetDB(t, ordersSchema)
 	if _, err := db.Exec(`INSERT INTO orders VALUES ('1','Ada','ada@example.com')`); err != nil {
@@ -375,11 +365,10 @@ func TestAnUpdateThatCannotBeBuiltWritesNothing(t *testing.T) {
 	}
 }
 
-// TestAnUpdateMasksTheSameFieldsAnInsertDoes covers an asymmetry that undid the
-// masking entirely: the insert path masked secured fields and the update path
-// did not, so a row arrived masked and then the first change to it overwrote the
-// masked value with the one from the source. A table configured to hide an email
-// address held the address in plain text as soon as the row changed once.
+// TestAnUpdateMasksTheSameFieldsAnInsertDoes covers an asymmetry that undid
+// the masking entirely: the insert path masked secured fields and the update
+// path did not, so a row arrived masked and then the first change to it
+// overwrote the masked value with the one from the source.
 func TestAnUpdateMasksTheSameFieldsAnInsertDoes(t *testing.T) {
 	db := targetDB(t, ordersSchema)
 	if _, err := db.Exec(`INSERT INTO orders VALUES ('1','Ada','masked')`); err != nil {
@@ -503,11 +492,9 @@ func TestAnUpdateWithNothingToMatchOnIsRefused(t *testing.T) {
 	}
 }
 
-// TestADeleteDoesNotNeedTheSourceConnection covers a DELETE arriving while the
-// source is unreachable. The handler asked PostgreSQL for the table's primary
-// key without checking that the connection was there, so one delete during an
-// outage dereferenced nil and took the whole process down. It now falls back to
-// matching on every column, which is what it does for a table with no key.
+// The handler asked PostgreSQL for the table's primary key without checking
+// that the connection was there, so one delete during an outage dereferenced
+// nil and took the whole process down.
 func TestADeleteDoesNotNeedTheSourceConnection(t *testing.T) {
 	db := targetDB(t, ordersSchema)
 	if _, err := db.Exec(`INSERT INTO orders VALUES ('1','Ada','x')`); err != nil {
@@ -609,10 +596,9 @@ func TestProcessMessageReportsUnparseableWAL(t *testing.T) {
 	}
 }
 
-// TestProcessMessageRecordsTheReceivedLSNBeforeParsing records the ordering: on
-// a parse failure the received LSN is *not* advanced, because the assignment
-// comes after the early return. A message the decoder cannot read therefore
-// leaves the position where it was and the stream retries it.
+// TestProcessMessageRecordsTheReceivedLSNBeforeParsing records the ordering:
+// on a parse failure the received LSN is *not* advanced, because the
+// assignment comes after the early return.
 func TestProcessMessageRecordsTheReceivedLSNBeforeParsing(t *testing.T) {
 	st := stateWith(nil)
 

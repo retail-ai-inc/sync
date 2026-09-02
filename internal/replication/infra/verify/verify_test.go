@@ -148,12 +148,10 @@ func TestTwoIdenticalTablesAgree(t *testing.T) {
 	}
 }
 
-// TestAnIntegerKeyIsNotComparedAsText is the defect this comparison was rebuilt
-// to remove. Merging two ordered streams needs both sides to order keys the way
-// the comparison does; a database orders an integer column numerically while Go
+// Merging two ordered streams needs both sides to order keys the way the
+// comparison does; a database orders an integer column numerically while Go
 // compares the decimal strings, so 10 sorts before 9 and every row after the
-// first disagreement would be reported as both missing and extra. Twelve rows
-// cross that boundary.
+// first disagreement would be reported as both missing and extra.
 func TestAnIntegerKeyIsNotComparedAsText(t *testing.T) {
 	var rows [][2]string
 	for i := 1; i <= 12; i++ {
@@ -987,16 +985,9 @@ func TestAnUnreadableKeyIsStillDescribed(t *testing.T) {
 	}
 }
 
-// TestADocumentHashesTheSameWhicheverShapeItArrivedIn is a regression test for a
-// comparison that would have reported every document with a subdocument as
+// TestADocumentHashesTheSameWhicheverShapeItArrivedIn is a regression test for
+// a comparison that would have reported every document with a subdocument as
 // different from itself.
-//
-// Unmarshalling into a bson.M gives nested documents as bson.M under the MongoDB
-// driver's v1 and as bson.D under its v2. A bson.D had no case here, so it fell
-// to the branch that prints the value — and a printed bson.D carries the order
-// of its fields. Two identical documents whose subdocuments were written in a
-// different order would have compared as differing, on every pass, and repair
-// would have rewritten them for ever.
 func TestADocumentHashesTheSameWhicheverShapeItArrivedIn(t *testing.T) {
 	asMap := bson.M{"_id": 1, "customer": bson.M{"region": "tokyo", "tier": "gold"}}
 	asDoc := bson.M{"_id": 1, "customer": bson.D{

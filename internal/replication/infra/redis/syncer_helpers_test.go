@@ -8,11 +8,7 @@ import (
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
 )
 
-// TestTwoTasksDoNotShareABufferDirectory. The replication stream is written to
-// disk so a briefly unavailable target costs a partial resync rather than a
-// full one. Two tasks writing into one directory would read each other's
-// segments and resume from an offset belonging to a different stream — a
-// silent, total corruption of both.
+// TestTwoTasksDoNotShareABufferDirectory.
 func TestTwoTasksDoNotShareABufferDirectory(t *testing.T) {
 	first := &Syncer{cfg: config.SyncConfig{ID: 51, RedisBufferDir: "/var/lib/sync"}}
 	second := &Syncer{cfg: config.SyncConfig{ID: 52, RedisBufferDir: "/var/lib/sync"}}
@@ -119,8 +115,6 @@ func TestAVersionThatDoesNotParseIsNotTreatedAsOld(t *testing.T) {
 
 // TestCredentialsComeOutOfTheDSN, because the replication connection is made
 // straight to a shard rather than through the client that holds the config.
-// Losing the password here turns into an authentication failure that reads like
-// a network problem.
 func TestCredentialsComeOutOfTheDSN(t *testing.T) {
 	for _, c := range []struct {
 		dsn, user, password string

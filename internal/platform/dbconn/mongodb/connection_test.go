@@ -78,9 +78,8 @@ func TestGetMongoClientRejectsAMalformedURI(t *testing.T) {
 }
 
 // TestGetMongoClientPingsBeforeReturning records that this helper verifies the
-// connection: a well-formed URI pointing nowhere is rejected on the ping rather
-// than on the connect. The server-selection timeout is ten seconds, so a caller
-// blocks for that long whenever MongoDB is down.
+// connection: a well-formed URI pointing nowhere is rejected on the ping
+// rather than on the connect.
 func TestGetMongoClientPingsBeforeReturning(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -190,8 +189,7 @@ func TestTheEngineCheckFoldsCase(t *testing.T) {
 
 // TestItConnectsToTheTargetNotTheSource records that this helper reads the
 // target connection, because the row counts it exists to fetch come from the
-// destination. A task whose target is unreachable cannot report progress even
-// when its source is fine.
+// destination.
 func TestItConnectsToTheTargetNotTheSource(t *testing.T) {
 	db := useTempTaskDB(t)
 	id := insertTask(t, db, `{"type":"mongodb",
@@ -210,10 +208,9 @@ func TestItConnectsToTheTargetNotTheSource(t *testing.T) {
 	}
 }
 
-// TestAMissingTargetConnectionIsReportedAsOne covers a task with no target. The
-// parameters were read out of a map with no checks, so the result was
-// "mongodb://:@:/?authSource=admin" and the failure came back as an error about
-// the URI — which says nothing about what is actually missing.
+// The parameters were read out of a map with no checks, so the result was
+// "mongodb://:@:/?authSource=admin" and the failure came back as an error
+// about the URI — which says nothing about what is actually missing.
 func TestAMissingTargetConnectionIsReportedAsOne(t *testing.T) {
 	db := useTempTaskDB(t)
 	id := insertTask(t, db, `{"type":"mongodb"}`)

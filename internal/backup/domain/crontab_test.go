@@ -62,11 +62,10 @@ func TestAnUnparseableTaskIsSilentlyLeftOutOfTheCrontab(t *testing.T) {
 	}
 }
 
-// TestAScheduleThatIsNotOneIsLeftOut covers one misconfigured job taking every
-// other backup with it. A schedule that is not a cron expression was written out
-// anyway, producing a line that begins with the curl command instead of five
-// time fields — and crontab refuses the whole file when any line is malformed,
-// so every backup schedule on the host disappeared.
+// A schedule that is not a cron expression was written out anyway, producing a
+// line that begins with the curl command instead of five time fields — and
+// crontab refuses the whole file when any line is malformed, so every backup
+// schedule on the host disappeared.
 func TestAScheduleThatIsNotOneIsLeftOut(t *testing.T) {
 	for name, schedule := range map[string]string{
 		"empty":        "",

@@ -65,12 +65,10 @@ func TestConvertTimeRangeQueryForMySQLDailyRange(t *testing.T) {
 	}
 }
 
-// TestTheRowWindowAndTheTableWindowAgree covers what used to be two
-// implementations of the same window inside one backup job. Table selection
-// added one to endOffset and truncated against UTC rather than JST — forty-eight
-// hours, aligned to the wrong day for the nine hours each day when the UTC and
-// JST dates differ, which is when the backup cron usually runs. The WHERE clause
-// resolved the same offsets to twenty-four JST hours. Both now come from timex.
+// Table selection added one to endOffset and truncated against UTC rather than
+// JST — forty-eight hours, aligned to the wrong day for the nine hours each
+// day when the UTC and JST dates differ, which is when the backup cron usually
+// runs.
 func TestTheRowWindowAndTheTableWindowAgree(t *testing.T) {
 	query := map[string]interface{}{"created_at": dailyQuery(float64(-1), float64(0))}
 
@@ -103,10 +101,9 @@ func TestAnEmptyWindowIsRefused(t *testing.T) {
 	}
 }
 
-// TestOffsetsNeedNotBeJSONNumbers covers a configuration written by hand or
-// through a client that quotes its numbers. Anything other than a JSON number
-// used to fall back to the default -1..0 with no error and no log line, so a
-// task asking for the last week quietly backed up yesterday.
+// Anything other than a JSON number used to fall back to the default -1..0
+// with no error and no log line, so a task asking for the last week quietly
+// backed up yesterday.
 func TestOffsetsNeedNotBeJSONNumbers(t *testing.T) {
 	fromNumbers := mustClause(t, map[string]interface{}{
 		"created_at": dailyQuery(float64(-7), float64(0))})
@@ -144,11 +141,9 @@ func TestConvertTimeRangeQueryForMySQLEqualityConditions(t *testing.T) {
 	}
 }
 
-// TestAConditionThatCannotBeRenderedIsAnError covers the difference between a
-// filtered export and a full-table one. An unrecognised condition used to be
-// logged and dropped, which leaves the WHERE clause empty — so the archive was
-// far larger than intended, held rows it was not meant to, and the job still
-// reported success.
+// An unrecognised condition used to be logged and dropped, which leaves the
+// WHERE clause empty — so the archive was far larger than intended, held rows
+// it was not meant to, and the job still reported success.
 func TestAConditionThatCannotBeRenderedIsAnError(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -169,11 +164,9 @@ func TestAConditionThatCannotBeRenderedIsAnError(t *testing.T) {
 	}
 }
 
-// TestTheClauseCannotBeUsedToInjectSQL covers the WHERE clause an operator's
-// backup configuration ends up controlling. Column names were pasted into the
-// SQL with no escaping and no validation, and values were escaped only by
-// doubling the single quote — which MySQL's default backslash handling defeats.
-// The clause is then handed to the mysql client to execute.
+// Column names were pasted into the SQL with no escaping and no validation,
+// and values were escaped only by doubling the single quote — which MySQL's
+// default backslash handling defeats.
 func TestTheClauseCannotBeUsedToInjectSQL(t *testing.T) {
 	t.Run("a column name that is not one is refused", func(t *testing.T) {
 		for _, name := range []string{"1=1 OR id", "id`", "id; DROP TABLE orders", "", "id name"} {
@@ -278,10 +271,8 @@ func TestParseMySQLConnectionURL(t *testing.T) {
 		{"host only", "db.example.com", "db.example.com", "3306"},
 		{"empty falls back to defaults", "", "localhost", "3306"},
 		{"empty port keeps the default", "db.example.com:", "db.example.com", "3306"},
-		// The field is labelled a connection URL in the interface, so this is
-		// what an operator fills in. It used to be split on every colon, so
-		// "mysql://u:p@db:3306" gave the host "mysql" and the port "//u" and
-		// mysqldump went looking for a machine called mysql.
+		// The field is labelled a connection URL in the interface, so this is what
+		// an operator fills in.
 		{"a URL", "mysql://u:p@db.example.com:3307/orders", "db.example.com", "3307"},
 		{"a go-sql-driver DSN", "root:secret@tcp(db:3306)/orders", "db", "3306"},
 		{"credentials and no port", "root:secret@db.example.com", "db.example.com", "3306"},

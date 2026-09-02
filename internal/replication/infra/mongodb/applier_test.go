@@ -23,18 +23,8 @@ func writeEvent(collection, id string) *domain.Event {
 	}
 }
 
-// TestARunIsSplitIntoConsecutiveStretchesOfOneCollection is the grouping that
-// keeps the run in order.
-//
 // BulkWrite addresses one collection, so a run spanning several needs one call
-// each. Gathering every change to a collection into one group — which is what
-// this used to do — puts all of one collection's writes before all of another's,
-// and that is a reordering of the run. It was harmless while a run held at most
-// one change per document and the batch was split into runs that separated
-// them. It is not harmless now that a run is the whole batch, in the order it
-// was read: a payment and the order it belongs to live in different
-// collections, and which lands first decides whether the target is ever in a
-// state the source was not.
+// each.
 func TestARunIsSplitIntoConsecutiveStretchesOfOneCollection(t *testing.T) {
 	groups := groupByCollection([]*domain.Event{
 		writeEvent("orders", "a"),
@@ -130,11 +120,6 @@ func TestAnUnmappedCollectionKeepsItsOwnName(t *testing.T) {
 }
 
 // TestTheTransactionIsOnByDefault pins the default down.
-//
-// The safe setting has to be the one an operator gets without knowing to ask
-// for it. Without a transaction a batch commits an operation at a time, so a
-// partly failed bulk write — an ordinary occurrence, not a crash — leaves the
-// target holding part of a batch, which can be a state the source was never in.
 func TestTheTransactionIsOnByDefault(t *testing.T) {
 	var a Applier
 	if a.NoTransaction {
@@ -218,13 +203,8 @@ type errPlainFailure struct{}
 
 func (errPlainFailure) Error() string { return "E11000 duplicate key error" }
 
-// TestTheEscapeHatchSaysWhatItCosts covers the one environment variable that can
-// turn off the guarantee the rest of this pipeline is built on.
-//
-// It was read once, deep in the applier, and nothing anywhere said it was on: a
-// task applying batches without a transaction looked exactly like a task
-// applying them with one, right up until a batch was interrupted part way and
-// the position moved past changes the target did not hold.
+// TestTheEscapeHatchSaysWhatItCosts covers the one environment variable that
+// can turn off the guarantee the rest of this pipeline is built on.
 func TestTheEscapeHatchSaysWhatItCosts(t *testing.T) {
 	if got := describeNoTransaction(false, 7); got != "" {
 		t.Errorf("a task with the default settings warned about them: %q", got)

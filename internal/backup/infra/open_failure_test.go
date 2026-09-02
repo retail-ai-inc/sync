@@ -49,10 +49,9 @@ func TestEveryStoreCallReportsAnUnopenableDatabase(t *testing.T) {
 	}
 }
 
-// TestSetEnableTagsAnUnopenableDatabase covers the odd one out. SetEnable
-// returned the driver's error untouched, so the endpoint could not tell a
-// database it failed to open from a row it failed to find — both came out as
-// "pause fail".
+// SetEnable returned the driver's error untouched, so the endpoint could not
+// tell a database it failed to open from a row it failed to find — both came
+// out as "pause fail".
 func TestSetEnableTagsAnUnopenableDatabase(t *testing.T) {
 	unopenableDB(t)
 

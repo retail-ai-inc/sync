@@ -103,8 +103,7 @@ func TestGetRowCountWithContext(t *testing.T) {
 	}
 }
 
-// TestAFailureToCountIsNotACount covers rows that look like measurements and are
-// not. Every failure used to be flattened into -1 and returned as a count, so a
+// Every failure used to be flattened into -1 and returned as a count, so a
 // missing table, a permission that was not granted, a dropped connection and a
 // cancelled context were indistinguishable from each other and, once stored,
 // from real data.
@@ -122,10 +121,9 @@ func TestAFailureToCountIsNotACount(t *testing.T) {
 	}
 }
 
-// TestAFailedMeasurementIsRecordedAsOne covers what reaches the dashboard. A row
-// is still written — writing nothing would leave the last good numbers looking
-// current — but under an action that says the counts were not taken, so -1 is
-// no longer something a reader has to guess about.
+// A row is still written — writing nothing would leave the last good numbers
+// looking current — but under an action that says the counts were not taken,
+// so -1 is no longer something a reader has to guess about.
 func TestAFailedMeasurementIsRecordedAsOne(t *testing.T) {
 	conn := useMonitoringDB(t)
 
@@ -155,10 +153,8 @@ func TestAFailedMeasurementIsRecordedAsOne(t *testing.T) {
 	}
 }
 
-// TestATableNameThatIsNotOneIsRefused covers the query fragment a task's
-// configuration used to control. The name was interpolated straight into the SQL
-// text, unquoted and unchecked, and it runs against both the source and the
-// target.
+// The name was interpolated straight into the SQL text, unquoted and
+// unchecked, and it runs against both the source and the target.
 func TestATableNameThatIsNotOneIsRefused(t *testing.T) {
 	conn := useMonitoringDB(t)
 	if _, err := conn.Exec(`INSERT INTO monitoring_log (db_type) VALUES ('a'), ('b'), ('c')`); err != nil {
@@ -232,10 +228,8 @@ func TestStoreMonitoringLogAppends(t *testing.T) {
 	}
 }
 
-// storeMonitoringLog returns nothing and swallows every failure into a log
-// line. If monitoring_log is missing — a fresh database, a failed migration —
-// every monitoring cycle silently records nothing while the caller carries on
-// as if the measurement had been persisted.
+// storeMonitoringLog returns nothing and swallows every failure into a log line,
+// so a missing table is invisible to the caller.
 func TestStoreMonitoringLogSwallowsAMissingTable(t *testing.T) {
 	emptyDB(t)
 
@@ -305,9 +299,8 @@ func TestStoreChangeStreamStatisticsClampsPendingAtZero(t *testing.T) {
 	}
 }
 
-// TestAStreamThatStoppedIsStillRecorded covers a row that used to freeze. An
-// inactive stream was skipped rather than written, so a collection whose change
-// stream had died kept its last numbers forever and the table could not
+// An inactive stream was skipped rather than written, so a collection whose
+// change stream had died kept its last numbers forever and the table could not
 // distinguish "no events since the last cycle" from "this stopped and nobody
 // noticed".
 func TestAStreamThatStoppedIsStillRecorded(t *testing.T) {
@@ -335,13 +328,10 @@ func TestAStreamThatStoppedIsStillRecorded(t *testing.T) {
 	}
 }
 
-// TestTheFiguresComeFromTheReplicationCounters covers where the statistics are
-// built from. They used to come from a registry — RegisterChangeStream and six
-// functions that updated it — which nothing in the tree ever called, so the map
-// was permanently empty: the collector asked a task for its streams, got
-// nothing, wrote nothing, and logged that it had stored them. A copy of the
-// production database shows the result: thirty-three rows created in June 2025,
-// every counter still zero.
+// They used to come from a registry — RegisterChangeStream and six functions
+// that updated it — which nothing in the tree ever called, so the map was
+// permanently empty: the collector asked a task for its streams, got nothing,
+// wrote nothing, and logged that it had stored them.
 func TestTheFiguresComeFromTheReplicationCounters(t *testing.T) {
 	conn := useMonitoringDB(t)
 
@@ -541,10 +531,7 @@ func TestResetDailyStatisticsOnlyTouchesItsOwnTask(t *testing.T) {
 }
 
 // TestATimestampInAnotherLayoutDoesNotStopTheStatistics covers a stored value
-// the writer does not produce — a hand edit, or a row from an older schema. It
-// used to be parsed with one fixed layout and the failure aborted the whole
-// call before anything was written, so one such row stopped that task's
-// statistics permanently.
+// the writer does not produce — a hand edit, or a row from an older schema.
 func TestATimestampInAnotherLayoutDoesNotStopTheStatistics(t *testing.T) {
 	conn := useMonitoringDB(t)
 

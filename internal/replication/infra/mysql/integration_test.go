@@ -98,10 +98,7 @@ func startSyncer(t *testing.T, cfg config.SyncConfig) (stop func()) {
 	logger.SetLevel(logrus.ErrorLevel)
 
 	// NewSyncer, not NewMySQLSyncer: the first is what cmd/sync starts, the
-	// second is the path the shared pipeline replaced. Every test in this file
-	// went through the second one, which is how three separate startup checks
-	// came to be reachable from nowhere the supervisor goes while their tests
-	// went on passing.
+	// second is the path the shared pipeline replaced.
 	syncer := NewSyncer(cfg, logger)
 	if syncer == nil {
 		t.Fatal("NewSyncer returned nil")
@@ -242,10 +239,8 @@ func TestDDLIsPropagated(t *testing.T) {
 	}
 }
 
-// TestADroppedTableStopsReplication is the other half of DDL handling. A DROP
-// at the source is not applied to the disaster-recovery copy, because that copy
-// is what a mistaken DROP would be recovered from. Replication stops instead,
-// which an operator sees.
+// A DROP at the source is not applied to the disaster-recovery copy, because
+// that copy is what a mistaken DROP would be recovered from.
 func TestADroppedTableStopsReplication(t *testing.T) {
 	table := harness.UniqueName("ddldrop")
 	src, tgt := open(t, harness.MySQLSource, sourceDB), open(t, harness.MySQLTarget, targetDB)
@@ -320,10 +315,7 @@ func TestSecurityPolicyIsAppliedToMySQL(t *testing.T) {
 }
 
 // TestWritesDuringInitialSyncAreNotLost exercises F-040, the MySQL counterpart
-// of the MongoDB snapshot gap. The copy reads through a consistent snapshot
-// whose binlog coordinates are pinned before the first row is read, so a write
-// made while the copy is running is replayed by the stream that resumes from
-// those coordinates rather than falling between the two.
+// of the MongoDB snapshot gap.
 func TestWritesDuringInitialSyncAreNotLost(t *testing.T) {
 	table := harness.UniqueName("snapshotgap")
 	src, tgt := open(t, harness.MySQLSource, sourceDB), open(t, harness.MySQLTarget, targetDB)
@@ -373,9 +365,7 @@ func TestWritesDuringInitialSyncAreNotLost(t *testing.T) {
 	})
 
 	// The seeded rows arrive through the copy; the markers arrive afterwards,
-	// through the stream replaying from the coordinates the copy pinned. So this
-	// has to be polled rather than read once: the copy converging says nothing
-	// about the replay having caught up.
+	// through the stream replaying from the coordinates the copy pinned.
 	harness.Eventually(t, 60*time.Second, func() error {
 		if arrived := countRows(t, tgt, table, "name = 'marker'"); arrived != markers {
 			return fmt.Errorf("%d of %d rows written during the initial copy have "+
@@ -437,15 +427,7 @@ func TestResumeFromStoredBinlogPosition(t *testing.T) {
 	})
 }
 
-// TestTransactionBoundariesAreObserved exercises F-045. Row events are buffered
-// and applied inside one target transaction at the XID that closes the source
-// transaction, so a reader on the target cannot observe a state that never
-// existed at the source.
-//
-// The scenario keeps a two-row invariant — the balances must always sum to the
-// same constant — and transfers between the rows inside explicit transactions
-// while polling the target. Any observation with a different sum means the
-// invariant was broken in flight.
+// TestTransactionBoundariesAreObserved exercises F-045.
 func TestTransactionBoundariesAreObserved(t *testing.T) {
 	table := harness.UniqueName("txn")
 	src, tgt := open(t, harness.MySQLSource, sourceDB), open(t, harness.MySQLTarget, targetDB)
@@ -563,11 +545,10 @@ func min(a, b int) int {
 	return b
 }
 
-// TestAStoppedTaskStopsWriting is what makes stopping mean anything. The reader
-// used to be left running when the task's context was cancelled: the supervisor
-// restarting a task then ran a second reader beside the first, and a task edited
-// to point at a different target went on writing to the old one for the life of
-// the process. Nothing reported either.
+// The reader used to be left running when the task's context was cancelled:
+// the supervisor restarting a task then ran a second reader beside the first,
+// and a task edited to point at a different target went on writing to the old
+// one for the life of the process.
 func TestAStoppedTaskStopsWriting(t *testing.T) {
 	table := harness.UniqueName("stopped")
 	src, tgt := open(t, harness.MySQLSource, sourceDB), open(t, harness.MySQLTarget, targetDB)
@@ -598,9 +579,6 @@ func TestAStoppedTaskStopsWriting(t *testing.T) {
 }
 
 // TestTheFinalPositionIsRecordedOnACleanStop pins the other half of stopping.
-// The position is written at most every SYNC_MYSQL_CHECKPOINT_INTERVAL while
-// running, so a clean stop has to record where it actually got to — otherwise
-// every orderly restart replays the last interval.
 func TestTheFinalPositionIsRecordedOnACleanStop(t *testing.T) {
 	table := harness.UniqueName("finalpos")
 	src, tgt := open(t, harness.MySQLSource, sourceDB), open(t, harness.MySQLTarget, targetDB)
@@ -639,11 +617,10 @@ func TestTheFinalPositionIsRecordedOnACleanStop(t *testing.T) {
 	t.Logf("recorded position: %s", payload)
 }
 
-// TestATableTheTaskDoesNotListIsReported covers the gap a named task leaves. A
-// task that names its tables replicates those and no more, which is the point of
-// naming them — but a table added at the source afterwards is then missing from
-// the replica, and "the disaster-recovery copy does not have that table" is not
-// something to find out during a failover.
+// A task that names its tables replicates those and no more, which is the
+// point of naming them — but a table added at the source afterwards is then
+// missing from the replica, and "the disaster-recovery copy does not have that
+// table" is not something to find out during a failover.
 func TestATableTheTaskDoesNotListIsReported(t *testing.T) {
 	listed := harness.UniqueName("listed")
 	unlisted := harness.UniqueName("unlisted")

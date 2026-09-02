@@ -67,8 +67,7 @@ func TestUpdateUserAccessAndStatusAppliesOneField(t *testing.T) {
 
 // TestTheReturnedUserIsThePreUpdateRowWithTheChangesPatchedIn records that the
 // row is read before the update and the new values are written into the map
-// afterwards, rather than being read back. A trigger or a default that changed
-// something else would not show up in the response.
+// afterwards, rather than being read back.
 func TestTheReturnedUserIsThePreUpdateRowWithTheChangesPatchedIn(t *testing.T) {
 	db := useTempDB(t)
 	seedUser(t, db, "alice", domain.AccessGuest, domain.StatusActive)
@@ -106,8 +105,7 @@ func TestUpdateUserAccessAndStatusOnAnUnknownUser(t *testing.T) {
 
 // TestNullColumnsGetTheirFallbacks records the substitutions the read applies:
 // an absent avatar, userId or email becomes the empty string and an absent
-// status becomes "active". A user whose status was cleared therefore reads as
-// active and can sign in (see IsDeactivated).
+// status becomes "active".
 func TestNullColumnsGetTheirFallbacks(t *testing.T) {
 	db := useTempDB(t)
 	if _, err := db.Exec(

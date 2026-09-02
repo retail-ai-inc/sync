@@ -136,11 +136,7 @@ func TestRouterReturns405ForTheWrongMethod(t *testing.T) {
 
 // NewRouter registers no middleware at all: there is no authentication,
 // authorisation, rate limiting, request logging, panic recovery or body-size
-// limit in front of any handler. Every check is left to each handler to
-// / TestEveryRouteIsCoveredByTheAccessRules pins the shape of the permission
-// model: exactly four routes are reachable without a credential, and every
-// other route carries the authentication middleware. A route added without a
-// group is caught here rather than in production.
+// limit in front of any handler.
 func TestEveryRouteIsCoveredByTheAccessRules(t *testing.T) {
 	r, ok := NewRouter().(chi.Routes)
 	if !ok {

@@ -22,10 +22,6 @@ import (
 
 const ordersSchema = `CREATE TABLE orders (id TEXT, customer TEXT, email TEXT)`
 
-// targetDB stands in for the replication target. The handler builds parameterised
-// SQL and hands it to a *sql.DB, so SQLite can execute it — the placeholder
-// syntax is the same and "main" is SQLite's own schema name, so the generated
-// "main.orders" resolves.
 func sqliteTarget(t *testing.T, schemaSQL string) *sql.DB {
 	t.Helper()
 
@@ -96,9 +92,6 @@ func securedTable(source, target string, fields ...string) []config.DatabaseMapp
 	}}
 }
 
-// apply feeds a row event through the handler the way canal does: the rows
-// arrive first and are buffered, then the XID that ends the source transaction
-// commits them on the target.
 // storedCheckpoint reads back what the saver wrote to a file, which is what a
 // test can inspect without a target database.
 func storedCheckpoint(t *testing.T, path string) *binlogCheckpoint {
@@ -224,11 +217,9 @@ func TestOnRowSkipsAnUnmappedTable(t *testing.T) {
 	}
 }
 
-// TestAMappingThatNamesItsDatabaseIsHeldToIt covers a task watching more than
-// one source database. The table used to be matched by name alone — the event's
-// schema was read and then only used for logging — so two databases that both
-// have an "orders" table were replicated into the same target table, one over
-// the other.
+// The table used to be matched by name alone — the event's schema was read and
+// then only used for logging — so two databases that both have an "orders"
+// table were replicated into the same target table, one over the other.
 func TestAMappingThatNamesItsDatabaseIsHeldToIt(t *testing.T) {
 	db := sqliteTarget(t, ordersSchema)
 	h := newHandler(t, db, []config.DatabaseMapping{{
@@ -269,10 +260,9 @@ func TestAMappingWithNoDatabaseMatchesAnyOfThem(t *testing.T) {
 	}
 }
 
-// TestATableCanBeFannedOutToTwoTargets covers a source table listed twice, which
-// is how a fan-out is spelled. The lookup used to stop at the first mapping
-// naming the table, so the second target silently received nothing and the
-// configuration that asked for it looked like it had been accepted.
+// The lookup used to stop at the first mapping naming the table, so the second
+// target silently received nothing and the configuration that asked for it
+// looked like it had been accepted.
 func TestATableCanBeFannedOutToTwoTargets(t *testing.T) {
 	db := sqliteTarget(t, ordersSchema)
 	if _, err := db.Exec(`CREATE TABLE orders_copy (id TEXT PRIMARY KEY, customer TEXT, email TEXT)`); err != nil {
@@ -347,10 +337,9 @@ func TestAnUpdateMatchesOnTheOldPrimaryKey(t *testing.T) {
 	}
 }
 
-// TestAnOddUpdateBatchIsRejected covers a malformed or truncated update event.
-// The loop trusted the binlog to deliver before/after rows in pairs and indexed
-// Rows[i+1] without checking, so an odd count panicked — inside the canal
-// callback, where nothing recovers it, taking the whole process down.
+// The loop trusted the binlog to deliver before/after rows in pairs and
+// indexed Rows[i+1] without checking, so an odd count panicked — inside the
+// canal callback, where nothing recovers it, taking the whole process down.
 func TestAnOddUpdateBatchIsRejected(t *testing.T) {
 	db := sqliteTarget(t, ordersSchema)
 	h := newHandler(t, db, mapTable("orders", "orders"))
@@ -388,9 +377,8 @@ func TestOnRowAppliesADelete(t *testing.T) {
 }
 
 // TestTheDeleteMatchesOnTheKeyAlone records that only the primary key columns
-// reach the WHERE clause, so a target row that has drifted in its other columns
-// is still deleted. That is the opposite trade-off from the PostgreSQL syncer,
-// which matches on every column.
+// reach the WHERE clause, so a target row that has drifted in its other
+// columns is still deleted.
 func TestTheDeleteMatchesOnTheKeyAlone(t *testing.T) {
 	db := sqliteTarget(t, ordersSchema)
 	if _, err := db.Exec(`INSERT INTO orders VALUES ('1','Drifted','z')`); err != nil {
@@ -410,11 +398,8 @@ func TestTheDeleteMatchesOnTheKeyAlone(t *testing.T) {
 	}
 }
 
-// TestAnUnknownActionStopsReplication covers an action this does not understand.
-//
-// It used to be a warning, so an action the library grew later was dropped with
-// a log line nobody reads and the two sides diverged from then on. A change that
-// cannot be replicated must not be reported as replicated.
+// It used to be a warning, so an action the library grew later was dropped
+// with a log line nobody reads and the two sides diverged from then on.
 func TestAnUnknownActionStopsReplication(t *testing.T) {
 	db := sqliteTarget(t, ordersSchema)
 	h := newHandler(t, db, mapTable("orders", "orders"))
@@ -441,15 +426,9 @@ func keylessTable() *schema.Table {
 	return table
 }
 
-// TestAnUpdateWithNoPrimaryKeyStopsReplication covers a table whose rows cannot
-// be addressed on the target.
-//
-// This used to be dropped with one warning: inserts arrived and updates did not,
-// so the target accumulated rows the source had since changed, and the row
-// counts agreed the whole time. MySQL's own answer is sql_require_primary_key,
-// and Group Replication refuses such a table outright. For payment data,
-// refusing is the right severity — a partial copy nobody is told about is worse
-// than a stopped task somebody is.
+// This used to be dropped with one warning: inserts arrived and updates did
+// not, so the target accumulated rows the source had since changed, and the
+// row counts agreed the whole time.
 func TestAnUpdateWithNoPrimaryKeyStopsReplication(t *testing.T) {
 	db := sqliteTarget(t, ordersSchema)
 	if _, err := db.Exec(`INSERT INTO orders VALUES ('1','Ada','x')`); err != nil {
@@ -599,10 +578,8 @@ func TestAnUpdateAlsoMasks(t *testing.T) {
 	}
 }
 
-// TestTheDeleteKeyIsNotMasked records that the delete path passes the raw key
-// values through. That is what makes deletes work at all when the key itself is
-// a secured field — but it also means the raw value reaches the target's query
-// log.
+// That is what makes deletes work at all when the key itself is a secured
+// field — but it also means the raw value reaches the target's query log.
 func TestTheDeleteKeyIsNotMasked(t *testing.T) {
 	db := sqliteTarget(t, ordersSchema)
 	if _, err := db.Exec(`INSERT INTO orders VALUES ('1','Ada','x')`); err != nil {
@@ -634,10 +611,9 @@ func failingEvent() *canal.RowsEvent {
 	}
 }
 
-// TestAFailedStatementIsReportedToCanal pins the contract that keeps the offset
-// honest: the failure reaches canal, which stops rather than reading on past a
-// row that never landed. The statement is buffered by OnRow and rejected when
-// the transaction is applied, so the error surfaces from OnXID.
+// TestAFailedStatementIsReportedToCanal pins the contract that keeps the
+// offset honest: the failure reaches canal, which stops rather than reading on
+// past a row that never landed.
 func TestAFailedStatementIsReportedToCanal(t *testing.T) {
 	db := sqliteTarget(t, ordersSchema)
 	h := newHandler(t, db, mapTable("orders", "orders"))
@@ -772,9 +748,7 @@ func TestOnPosSyncedReportsAnUnwritablePath(t *testing.T) {
 const sampleGTID = "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-5"
 
 // TestTheSavedPositionCarriesTheGTIDSet pins what makes a checkpoint survive a
-// failover. The file-and-offset pair only means something on the server that
-// produced it; the GTID set names the transactions and stays meaningful when
-// the source is failed over to a replica with its own binlog files.
+// failover.
 func TestTheSavedPositionCarriesTheGTIDSet(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "pos.json")
 	h := fileHandler(t, nil, nil, path)

@@ -255,10 +255,9 @@ func TestRemoveUserOnAnUnknownUser(t *testing.T) {
 	}
 }
 
-// TestTheLastAdminCannotBeRemoved covers a door that locked behind you. Nothing
-// stopped the only administrator being deleted, and once that row was gone no
-// account left could grant the level — the only way back in was editing the
-// database by hand.
+// Nothing stopped the only administrator being deleted, and once that row was
+// gone no account left could grant the level — the only way back in was
+// editing the database by hand.
 func TestTheLastAdminCannotBeRemoved(t *testing.T) {
 	db := useTempDB(t)
 	insertUser(t, db, "admin", "secret", "Admin", domain.AccessAdmin)

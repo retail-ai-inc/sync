@@ -139,12 +139,10 @@ func TestValidateUser(t *testing.T) {
 	})
 }
 
-// TestPasswordsAreNotStoredInCleartext covers what anybody who can read the
-// control database used to get. No hashing took place anywhere in the credential
-// path — UpdateUserPassword wrote the value it was given and ValidateUser
-// compared it with == — and the production copy shows the same: an admin
-// password of sixteen printable characters. That file holds the connection
-// strings for both regions' payment databases.
+// No hashing took place anywhere in the credential path — UpdateUserPassword
+// wrote the value it was given and ValidateUser compared it with == — and the
+// production copy shows the same: an admin password of sixteen printable
+// characters.
 func TestPasswordsAreNotStoredInCleartext(t *testing.T) {
 	db := useTempDB(t)
 	insertUser(t, db, "alice", "initial", "Alice", "admin")
@@ -171,9 +169,8 @@ func TestPasswordsAreNotStoredInCleartext(t *testing.T) {
 	}
 }
 
-// TestAPasswordStoredInTheClearIsReplacedOnUse covers the rows that already
-// exist. They go on working, and the first successful login rewrites them as a
-// hash — so the cleartext leaves the file without a migration step or a password
+// They go on working, and the first successful login rewrites them as a hash —
+// so the cleartext leaves the file without a migration step or a password
 // reset.
 func TestAPasswordStoredInTheClearIsReplacedOnUse(t *testing.T) {
 	db := useTempDB(t)
@@ -413,11 +410,7 @@ func TestGetAuthConfigMissingProvider(t *testing.T) {
 
 // TestUpdateAuthConfigMutatesTheCallersMap records a side effect: the function
 // deletes "enabled" from the map it was handed, because that value goes to its
-// own column. A caller that reuses the map afterwards silently loses the field.
-// TestUpdateAuthConfigLeavesTheCallersMapAlone covers a shared map being
-// written to. The enabled flag is stored in its own column, so it is left out of
-// the document — but it used to be deleted from the caller's own map, so a
-// caller that reused it afterwards found the field gone.
+// own column.
 func TestUpdateAuthConfigLeavesTheCallersMapAlone(t *testing.T) {
 	useTempDB(t)
 

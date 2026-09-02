@@ -137,11 +137,9 @@ func TestBuildReadableQueryString(t *testing.T) {
 	})
 }
 
-// TestBuildReadableQueryStringHidesUnrenderableFilters records a reporting
-// defect. A filter whose conditions all render as empty strings produces
-// "countDocuments({})", identical to the no-filter case, so the log line claims
-// an unfiltered count while the real query was filtered. The string is used in
-// operator-facing logs, which makes the two indistinguishable after the fact.
+// A filter whose conditions all render as empty strings produces
+// "countDocuments({})", identical to the no-filter case, so the log line
+// claims an unfiltered count while the real query was filtered.
 func TestBuildReadableQueryStringHidesUnrenderableFilters(t *testing.T) {
 	qc := newCounter(t)
 

@@ -34,8 +34,7 @@ func TestConvertToJST(t *testing.T) {
 // The package carries two JST converters that disagree on both the accepted
 // input and the emitted layout: convertToJST (monitor_handler.go) takes
 // RFC3339 and drops seconds, ConvertTimeToJST (sync_handler.go) takes a SQL
-// timestamp and keeps them. Each silently passes through what the other
-// handles, so the format a field arrives in depends on which handler served it.
+// timestamp and keeps them.
 func TestTheTwoJSTConvertersDisagree(t *testing.T) {
 	const rfc = "2026-08-21T00:30:00Z"
 	const sqlTS = "2026-08-21 00:30:00"
@@ -99,10 +98,9 @@ func TestParseRangeToSinceEmptyIsTheZeroTime(t *testing.T) {
 	}
 }
 
-// TestAnyDurationIsARange covers what a caller is likely to ask for. The switch
-// listed eight spellings and answered anything else with ten hours — a value
-// that appears nowhere in the set it documents — so "30m" and "24h", both
-// perfectly reasonable, silently returned ten hours of data.
+// The switch listed eight spellings and answered anything else with ten hours
+// — a value that appears nowhere in the set it documents — so "30m" and "24h",
+// both perfectly reasonable, silently returned ten hours of data.
 func TestAnyDurationIsARange(t *testing.T) {
 	for input, back := range map[string]time.Duration{
 		"30m":   30 * time.Minute,

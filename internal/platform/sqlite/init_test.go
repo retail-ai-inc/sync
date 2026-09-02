@@ -8,14 +8,8 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-// TestAnUnsetPathDoesNotReachOutsideTheWorkingDirectory covers a deployment
-// that forgets SYNC_DB_PATH.
-//
 // The fallback used to be derived from runtime.Caller — the path of the source
-// file on the machine that compiled the binary. In a container built anywhere
-// else that directory does not exist, so OpenSQLiteDB created it and put an
-// empty database inside it, and the process came up with no sync tasks and
-// nothing anywhere saying why.
+// file on the machine that compiled the binary.
 func TestAnUnsetPathDoesNotReachOutsideTheWorkingDirectory(t *testing.T) {
 	if filepath.IsAbs(DefaultPath) {
 		t.Errorf("DefaultPath = %q, want a path relative to the working directory", DefaultPath)

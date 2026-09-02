@@ -32,10 +32,8 @@ func TestTheProbeRejectsAnUnsupportedEngine(t *testing.T) {
 	}
 }
 
-// TestTheProbeIsCaseSensitiveAboutTheEngine records that the probe compares the
-// engine name verbatim, so the UI has to send it in lower case. The monitor
-// folds case and this does not, which is the same split T-053 records for the
-// syncer dispatch.
+// TestTheProbeIsCaseSensitiveAboutTheEngine records that the probe compares
+// the engine name verbatim, so the UI has to send it in lower case.
 func TestTheProbeIsCaseSensitiveAboutTheEngine(t *testing.T) {
 	code, body := probe(t, `{"dbType":"MySQL","host":"127.0.0.1","port":"1"}`)
 
@@ -73,9 +71,7 @@ func TestAnUnreachableMySQLIsReportedAsAPingFailure(t *testing.T) {
 }
 
 // TestThePingFailureEchoesTheHostAndPort records that the message the probe
-// returns is the driver's, which names the address it could not reach. That is
-// useful to an operator and it also confirms to an unauthenticated caller
-// whether a given host and port answer — the endpoint needs no credentials.
+// returns is the driver's, which names the address it could not reach.
 func TestThePingFailureEchoesTheHostAndPort(t *testing.T) {
 	_, body := probe(t,
 		`{"dbType":"mysql","host":"127.0.0.1","port":"1","user":"u","password":"p","database":"d"}`)
@@ -111,9 +107,7 @@ func TestAnUnreachablePostgreSQLIsReported(t *testing.T) {
 
 // TestAnUnreachableMongoDBIsReported takes ten seconds on purpose: the MongoDB
 // branch builds its own context with a hardcoded ten-second timeout from
-// context.Background(), ignoring the request context entirely. A caller that
-// disconnects therefore leaves the probe dialling for the full ten seconds, and
-// a test cannot shorten it.
+// context.Background(), ignoring the request context entirely.
 func TestAnUnreachableMongoDBIsReported(t *testing.T) {
 	code, body := probe(t,
 		`{"dbType":"mongodb","host":"127.0.0.1","port":"1","user":"","password":"","database":"d"}`)
@@ -139,9 +133,7 @@ func TestAnUnreachableRedisIsReported(t *testing.T) {
 
 // TestTheRedisBranchNeverReportsTables records the shape of a successful Redis
 // probe: Redis has no tables, so the branch answers success with an empty list
-// rather than, say, the keyspace or the database count. The UI's table picker is
-// therefore always empty for a Redis task, and the operator has to type the key
-// patterns by hand.
+// rather than, say, the keyspace or the database count.
 func TestTheRedisBranchNeverReportsTables(t *testing.T) {
 	// The success path needs a live Redis, which this suite does not have. What
 	// can be pinned without one is that the branch has no query at all: the only
@@ -158,10 +150,9 @@ func TestTheRedisBranchNeverReportsTables(t *testing.T) {
 	}
 }
 
-// TestTheProbeStopsWhenTheRequestDoes covers a caller that gives up. Every
-// branch built its context from context.Background() rather than from the
-// request, so cancelling the request did not stop the probe — the MongoDB branch
-// ran for its full ten seconds however long the caller had been gone.
+// Every branch built its context from context.Background() rather than from
+// the request, so cancelling the request did not stop the probe — the MongoDB
+// branch ran for its full ten seconds however long the caller had been gone.
 func TestTheProbeStopsWhenTheRequestDoes(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	// An address that will not answer, so only the cancellation can end this.

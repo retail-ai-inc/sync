@@ -30,10 +30,9 @@ func TestGetRedisClientRejectsAMalformedDSN(t *testing.T) {
 	}
 }
 
-// TestGetRedisClientPingsBeforeReturning records that this helper does connect:
-// a well-formed DSN pointing nowhere is rejected, with a three-second ceiling on
-// how long that takes. Every caller therefore blocks for up to three seconds
-// when Redis is down.
+// TestGetRedisClientPingsBeforeReturning records that this helper does
+// connect: a well-formed DSN pointing nowhere is rejected, with a three-second
+// ceiling on how long that takes.
 func TestGetRedisClientPingsBeforeReturning(t *testing.T) {
 	start := time.Now()
 
@@ -63,13 +62,8 @@ func TestThePasswordIsNotEchoedInTheError(t *testing.T) {
 	}
 }
 
-// TestAMultiSeedClusterDSNReachesEverySeed covers the shape a real cluster is
-// configured with.
-//
-// A URL has room for one authority, so the builder joins the seeds with commas —
-// and go-redis takes that whole string as a single address. The result is a
-// client that dials "a:1,b:2,c:3" and reports no such host, which reads as the
-// cluster being unreachable rather than as the DSN being mangled.
+// A URL has room for one authority, so the builder joins the seeds with commas
+// — and go-redis takes that whole string as a single address.
 func TestAMultiSeedClusterDSNReachesEverySeed(t *testing.T) {
 	got := splitSeeds([]string{"127.0.0.1:7001,127.0.0.1:7002,127.0.0.1:7003"})
 	want := []string{"127.0.0.1:7001", "127.0.0.1:7002", "127.0.0.1:7003"}

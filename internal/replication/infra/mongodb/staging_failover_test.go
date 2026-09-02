@@ -1,14 +1,9 @@
 //go:build staging
 
 // The failover case, kept in its own file because it is the only one here that
-// disturbs anything outside the two databases this suite owns: asking a shard's
-// primary to stand down interrupts writes for every database on that shard for
-// the length of an election.
-//
-// It is what has never been exercised. Every fixture test pins one node with
-// directConnection, so the driver was never asked to notice an election and
-// follow the new primary — and that is exactly what a regional failover is made
-// of.
+// disturbs anything outside the two databases this suite owns: asking a
+// shard's primary to stand down interrupts writes for every database on that
+// shard for the length of an election.
 package mongodb
 
 import (
@@ -28,16 +23,11 @@ import (
 	"github.com/retail-ai-inc/sync/test/harness"
 )
 
-// TestAShardFailoverLosesNothing answers the question the whole exercise exists
-// for: when a shard elects a new primary, does the replica lose changes?
-//
-// Guarded twice over, because the effect reaches beyond this suite's own
-// databases: SYNC_STG_ALLOW_FAILOVER has to be set, and the members have to be
-// named rather than discovered.
-//
-//	SYNC_STG_ALLOW_FAILOVER=true \
-//	SYNC_STG_SHARD_MEMBERS=10.0.0.1:27017,10.0.0.2:27017,10.0.0.3:27017 \
-//	  go test -tags staging -run TestAShardFailoverLosesNothing ...
+// TestAShardFailoverLosesNothing answers the question the whole exercise
+// exists for: when a shard elects a new primary, does the replica lose
+// changes?  Guarded twice over, because the effect reaches beyond this suite's
+// own databases: SYNC_STG_ALLOW_FAILOVER has to be set, and the members have
+// to be named rather than discovered.
 func TestAShardFailoverLosesNothing(t *testing.T) {
 	if os.Getenv("SYNC_STG_ALLOW_FAILOVER") != "true" {
 		t.Skip("SYNC_STG_ALLOW_FAILOVER is not set; this test interrupts writes " +

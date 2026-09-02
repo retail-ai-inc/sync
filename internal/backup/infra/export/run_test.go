@@ -75,8 +75,7 @@ func TestGetBackupTaskReadsEveryColumn(t *testing.T) {
 
 // TestTheStoredTimestampsAreReadAsUTC records that the executor parses the
 // stored strings with no zone, so they come back as UTC whatever zone the
-// scheduler wrote them in. Every writer in the tree uses UTC, so the round trip
-// holds — but nothing in the schema enforces it.
+// scheduler wrote them in.
 func TestTheStoredTimestampsAreReadAsUTC(t *testing.T) {
 	db := taskDB(t)
 	id := insertBackupTask(t, db, 1, `{}`)
@@ -142,10 +141,9 @@ func TestExecuteReportsAnUnparseableConfiguration(t *testing.T) {
 	}
 }
 
-// TestSelectingNothingIsNotASuccessfulBackup covers a task naming no tables. The
-// group map came back empty, the loop body never ran and the call reported
-// success, so a misconfigured task looked like a clean backup to the scheduler —
-// which then stamped last_backup_time on a backup that does not exist.
+// The group map came back empty, the loop body never ran and the call reported
+// success, so a misconfigured task looked like a clean backup to the scheduler
+// — which then stamped last_backup_time on a backup that does not exist.
 func TestSelectingNothingIsNotASuccessfulBackup(t *testing.T) {
 	db := taskDB(t)
 	id := insertBackupTask(t, db, 1, `{"name":"empty","sourceType":"mysql"}`)
@@ -155,9 +153,8 @@ func TestSelectingNothingIsNotASuccessfulBackup(t *testing.T) {
 	}
 }
 
-// TestAnUnsupportedEngineFailsTheBackup covers a per-group failure reaching the
-// caller. An unknown sourceType — like every other failure inside the group loop
-// — used to be logged and stepped over, so Execute returned nil and the task was
+// An unknown sourceType — like every other failure inside the group loop —
+// used to be logged and stepped over, so Execute returned nil and the task was
 // recorded as backed up.
 func TestAnUnsupportedEngineFailsTheBackup(t *testing.T) {
 	db := taskDB(t)
@@ -370,10 +367,9 @@ func TestExpandAndGroupTablesReportsAnUnreachableMySQL(t *testing.T) {
 	}
 }
 
-// TestRegexModeNeedsAPattern covers a job set to select its tables by pattern
-// that has lost its pattern. The mode flag alone used to fall through to the
-// manual branch, quietly backing up whatever tables happened to be left in the
-// list — which is not what the job says it does.
+// The mode flag alone used to fall through to the manual branch, quietly
+// backing up whatever tables happened to be left in the list — which is not
+// what the job says it does.
 func TestRegexModeNeedsAPattern(t *testing.T) {
 	cfg := ExecutorBackupConfig{SourceType: "mysql", TableSelectionMode: "regex"}
 	cfg.Database.Tables = []string{"orders"}

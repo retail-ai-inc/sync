@@ -29,8 +29,8 @@ import (
 // The applier notices once and writes per collection from then on, which is what
 // it did before.
 
-// clientBulkUnsupported is set once a target has been found not to have the
-// bulkWrite command, so the fallback is chosen without another failed attempt.
+// clientBulkSupport remembers that a target lacks the bulkWrite command, so the
+// fallback is chosen without another failed attempt.
 type clientBulkSupport struct{ unsupported atomic.Bool }
 
 // writeRunAsOne writes one run in a single request, whatever collections it

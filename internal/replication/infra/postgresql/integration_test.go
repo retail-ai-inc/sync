@@ -66,9 +66,7 @@ func countRows(t *testing.T, db *sql.DB, table, where string, args ...interface{
 }
 
 // sourceTable creates a table on the source, publishes it, and removes the
-// table, the publication and the replication slot afterwards. A slot left
-// behind is not harmless: PostgreSQL keeps every WAL segment the slot has not
-// consumed, so an abandoned one fills the disk of the server it was made on.
+// table, the publication and the replication slot afterwards.
 func sourceTable(t *testing.T, src, tgt *sql.DB, table, publication, slot string) {
 	t.Helper()
 
@@ -153,10 +151,9 @@ func TestInitialSyncCreatesTargetTableAndCopiesRows(t *testing.T) {
 	})
 }
 
-// TestIncrementalSyncAppliesInsertUpdateDelete covers the stream. The update and
-// the delete are the ones worth having: they used to be written with a WHERE
-// naming every column, so a row the target had drifted on was updated nowhere
-// and the statement still reported success.
+// The update and the delete are the ones worth having: they used to be written
+// with a WHERE naming every column, so a row the target had drifted on was
+// updated nowhere and the statement still reported success.
 func TestIncrementalSyncAppliesInsertUpdateDelete(t *testing.T) {
 	table, publication, slot := names(t, "pg_incremental")
 	src, tgt := open(t, harness.PostgresSource, sourceDatabase), open(t, harness.PostgresTarget, targetDatabase)
@@ -203,10 +200,8 @@ func TestIncrementalSyncAppliesInsertUpdateDelete(t *testing.T) {
 	})
 }
 
-// TestReplicationResumesFromTheStoredPosition covers what a restart in the other
-// region depends on. The position is recorded on the target, so a syncer that
-// comes back finds it there and replays from it rather than from the beginning
-// or from nothing.
+// The position is recorded on the target, so a syncer that comes back finds it
+// there and replays from it rather than from the beginning or from nothing.
 func TestReplicationResumesFromTheStoredPosition(t *testing.T) {
 	table, publication, slot := names(t, "pg_resume")
 	src, tgt := open(t, harness.PostgresSource, sourceDatabase), open(t, harness.PostgresTarget, targetDatabase)

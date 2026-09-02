@@ -202,8 +202,6 @@ func (c *Checkpoints) Save(ctx context.Context, _, payload string) error {
 	return nil
 }
 
-// markersFor hands the applier the cache, loading a fresh one if Load was never
-// called.
 // Refresh forgets the in-memory slot markers so the next batch reads them from
 // the target again.
 //

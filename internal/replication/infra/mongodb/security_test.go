@@ -10,14 +10,8 @@ import (
 
 // ------------------------------------------- the shape the driver decodes into
 
-// TestMaskingReachesADocumentTheDriverDecodedAsABsonD is a regression test for a
-// security setting that stopped working without saying so.
-//
-// Unmarshalling into a bson.M gives nested documents as bson.M under the
-// MongoDB driver's v1 and as bson.D under its v2. A change stream event's
-// fullDocument therefore changed shape when the driver was upgraded, fell
-// through the type switch, and was returned untouched — so a task configured to
-// mask a field replicated it in the clear, with nothing anywhere to show it.
+// TestMaskingReachesADocumentTheDriverDecodedAsABsonD is a regression test for
+// a security setting that stopped working without saying so.
 func TestMaskingReachesADocumentTheDriverDecodedAsABsonD(t *testing.T) {
 	syncer := &MongoDBSyncer{cfg: config.SyncConfig{
 		Mappings: []config.DatabaseMapping{{Tables: []config.TableMapping{{

@@ -31,8 +31,7 @@ func mustValue(t *testing.T, name string, labels Labels) float64 {
 
 // TestEventsAreCountedByOperation is the Debezium split that a single applied
 // counter cannot give: three attributes there, one metric with an op label
-// here. It matters because "10,000 changes applied" hides the case where every
-// one of them was a delete.
+// here.
 func TestEventsAreCountedByOperation(t *testing.T) {
 	labels := Labels{"task": "opsplit", "engine": "mysql"}
 	c := NewEventCounters(labels)
@@ -88,15 +87,8 @@ func TestAnUnpreparedOperationIsStillCounted(t *testing.T) {
 	}
 }
 
-// TestTransactionsAndEventsAreCountedSeparately is the pair that catches a
-// whole source transaction going missing.
-//
 // This codebase shipped with exactly that defect: a checkpoint moved past a
-// transaction whose rows were never read, and nothing said so. Events alone
-// would not have shown it — the events that did arrive were applied correctly.
-// Transactions alone would not have shown it either. The two together do:
-// events per transaction drops, or the transaction count stops advancing while
-// the source's own count climbs.
+// transaction whose rows were never read, and nothing said so.
 func TestTransactionsAndEventsAreCountedSeparately(t *testing.T) {
 	labels := Labels{"task": "tx", "engine": "mysql"}
 

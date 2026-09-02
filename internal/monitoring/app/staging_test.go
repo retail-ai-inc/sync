@@ -1,10 +1,7 @@
 //go:build staging
 
 // The scheduled consistency check, run against the real MongoDB 8.0 sharded
-// cluster rather than the fixture. What it establishes is narrow but not
-// covered anywhere else: that turning SYNC_VERIFY_INTERVAL on actually compares
-// a sharded collection against its replica, reports the difference it finds, and
-// records the number a dashboard would read.
+// cluster rather than the fixture.
 package app
 
 import (

@@ -15,14 +15,8 @@ import (
 	"github.com/retail-ai-inc/sync/test/harness"
 )
 
-// The checks in preflight.go are only worth anything if the path production
-// takes reaches them.
-//
 // They did not, for a while: they lived in the old syncer's Start, the shared
-// pipeline replaced it, and the functions stayed behind with no callers. Every
-// test still passed, because the integration tests went in through the old
-// constructor too. So these go in through Syncer.Start — the exact function
-// cmd/sync/supervisor.go calls — and would fail again if the wiring were lost.
+// pipeline replaced it, and the functions stayed behind with no callers.
 
 // TestAMinimalRowImageStopsTheTaskBeforeItCopiesAnything is the one failure in
 // this package that corrupts data without producing an error: with anything

@@ -25,14 +25,9 @@ func table() *commandTable {
 	}
 }
 
-// TestEmptyingTheSourceIsNeverReplicated is the single most consequential
-// decision this table makes.
-//
 // FLUSHALL on the source and FLUSHALL typed by mistake are indistinguishable
 // from here, and replicating it would mean one fat-fingered command in Tokyo
-// destroys the disaster-recovery copy in Osaka at the same moment. The task
-// stops instead and a human decides. Measured live: a source FLUSHALL cleared
-// 158,117 keys and the target kept every one of them.
+// destroys the disaster-recovery copy in Osaka at the same moment.
 func TestEmptyingTheSourceIsNeverReplicated(t *testing.T) {
 	for _, name := range []string{"FLUSHALL", "flushall", "FLUSHDB", "SWAPDB"} {
 		t.Run(name, func(t *testing.T) {
@@ -51,10 +46,9 @@ func TestEmptyingTheSourceIsNeverReplicated(t *testing.T) {
 	}
 }
 
-// TestTheCommandsThatCarryNoDataAreRecognised keeps the stream's bookkeeping
-// out of the target. A PING is proof the link is alive; REPLCONF is the
-// protocol talking to itself; PUBLISH is not state at all — forwarding it would
-// deliver the message twice to anything listening in both regions.
+// A PING is proof the link is alive; REPLCONF is the protocol talking to
+// itself; PUBLISH is not state at all — forwarding it would deliver the
+// message twice to anything listening in both regions.
 func TestTheCommandsThatCarryNoDataAreRecognised(t *testing.T) {
 	for _, c := range []struct {
 		name string
@@ -98,9 +92,7 @@ func TestAWriteReportsTheKeyThatNamesItsSlot(t *testing.T) {
 
 // TestACommandTheTargetDoesNotKnowIsRefusedLoudly: guessing which key an
 // unknown command touches would put its marker in the wrong slot, and applying
-// it would fail anyway. The two sides running different versions or different
-// modules is a real deployment mistake, and it has to be said out loud rather
-// than skipped.
+// it would fail anyway.
 func TestACommandTheTargetDoesNotKnowIsRefusedLoudly(t *testing.T) {
 	class, _, err := table().classify(context.Background(), nil, cmd("JSON.SET", "doc", "$", "1"))
 	if class != classRefused {

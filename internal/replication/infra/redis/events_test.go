@@ -6,13 +6,8 @@ import (
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
 )
 
-// TestARemovalIsCountedApartFromAWrite keeps the one operation Redis can
-// actually distinguish visible on its own.
-//
-// A SET creates or overwrites and the stream does not say which, so every write
-// is an update. A removal is knowable — and a delete rate that climbs by itself
-// is the shape of an eviction storm or a mistaken FLUSH, which counting it in
-// with the writes would hide.
+// A SET creates or overwrites and the stream does not say which, so every
+// write is an update.
 func TestARemovalIsCountedApartFromAWrite(t *testing.T) {
 	for _, c := range []struct {
 		name string

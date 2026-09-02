@@ -6,17 +6,8 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
-// TestAnIdSurvivesBeingWrittenDownAndReadBack is what lets a re-copy resume.
-//
 // The progress of a chunked copy is one thing: the _id of the last document
-// read. It is written to a checkpoint and read back after a restart, and the
-// next chunk asks for documents after it. An _id that does not come back
-// exactly re-reads documents already copied, or worse skips the ones between —
-// and a re-copy exists precisely because somebody already doubts the data.
-//
-// MongoDB's _id is any BSON type, so the round trip has to hold each of them
-// without collapsing one into another. An ObjectId that came back as its
-// hexadecimal string would sort differently and quietly skip a range.
+// read.
 func TestAnIdSurvivesBeingWrittenDownAndReadBack(t *testing.T) {
 	oid := bson.NewObjectID()
 	for _, c := range []struct {

@@ -44,13 +44,6 @@ func useTempJobDB(t *testing.T) *sql.DB {
 
 // jobDBDir returns a throwaway directory that is removed on a best-effort
 // basis rather than by t.TempDir.
-//
-// SubmitRun starts the executor in a goroutine that outlives the test, and that
-// goroutine opens the same SQLite file — creating -wal and -shm alongside it.
-// t.TempDir's cleanup fails the test when it finds those files after it has
-// begun deleting the directory, which made every submitting test flaky. Nothing
-// is asserted about the directory afterwards, so a best-effort removal is
-// enough.
 func jobDBDir(t *testing.T) string {
 	t.Helper()
 

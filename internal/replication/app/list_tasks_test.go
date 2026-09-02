@@ -140,8 +140,7 @@ func TestALiveCountIsOnlyAttemptedForMongoDB(t *testing.T) {
 
 // TestAMongoDBTaskFallsBackToTheLogWhenTheConnectionFails records that a
 // MongoDB task whose source is unreachable is reported with the logged figures
-// and no error. The response cannot be told apart from one where the live count
-// agreed with the log.
+// and no error.
 func TestAMongoDBTaskFallsBackToTheLogWhenTheConnectionFails(t *testing.T) {
 	db := useTempTaskDB(t)
 	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)

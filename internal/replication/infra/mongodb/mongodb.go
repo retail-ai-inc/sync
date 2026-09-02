@@ -381,7 +381,6 @@ func (s *MongoDBSyncer) claimDirection(ctx context.Context, sourceDBName, target
 // for ones that have appeared since it started.
 const discoveryInterval = time.Minute
 
-// hasConfiguredCollections reports whether the task names any collection. The
 // unlistedScanEvery is how often a task that names its collections is compared
 // against what the source actually holds.
 const unlistedScanEvery = 5 * time.Minute

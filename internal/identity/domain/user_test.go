@@ -11,11 +11,10 @@ import (
 // handler it mirrors.
 func fmtSscan(s string, a ...interface{}) (int, error) { return fmt.Sscan(s, a...) }
 
-// TestGeneratedPasswordsAreNotGuessable covers the password a new Google user
-// is given. It used to be the current time to the second with a "google_"
-// prefix and no randomness at all — and password login is accepted for Google
-// accounts too, so knowing roughly when an account was created put it within a
-// few hundred guesses, and two accounts created in the same second shared one.
+// It used to be the current time to the second with a "google_" prefix and no
+// randomness at all — and password login is accepted for Google accounts too,
+// so knowing roughly when an account was created put it within a few hundred
+// guesses, and two accounts created in the same second shared one.
 func TestGeneratedPasswordsAreNotGuessable(t *testing.T) {
 	first := GenerateRandomPassword()
 	second := GenerateRandomPassword()
@@ -85,11 +84,10 @@ func TestPublicUsersDropsSensitiveColumns(t *testing.T) {
 	}
 }
 
-// TestTheCallersRowsAreNotTouched covers redaction that reached back into the
-// caller. The sensitive columns were removed with delete on the caller's own
-// maps, so the slice handed in came back stripped — and only the rows on the
-// page that had been asked for, which meant whether a row still carried its
-// password depended on which page somebody requested.
+// The sensitive columns were removed with delete on the caller's own maps, so
+// the slice handed in came back stripped — and only the rows on the page that
+// had been asked for, which meant whether a row still carried its password
+// depended on which page somebody requested.
 func TestTheCallersRowsAreNotTouched(t *testing.T) {
 	rows := users(25)
 

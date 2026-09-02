@@ -22,12 +22,7 @@ func schemaEvent(t *testing.T, kind string, description bson.D) bson.Raw {
 	return rawEvent(t, doc)
 }
 
-// TestAnAddedIndexTravels is what C4 exists for.
-//
-// Indexes were copied once, by the initial snapshot, and never again. An index
-// is usually added because a query became too slow, so the moment the target
-// most needed it was exactly the moment it did not have it — and a target that
-// answers too slowly to serve is as much an outage as one missing rows.
+// Indexes were copied once, by the initial snapshot, and never again.
 func TestAnAddedIndexTravels(t *testing.T) {
 	raw := schemaEvent(t, "createIndexes", bson.D{
 		{Key: "indexes", Value: bson.A{
@@ -79,11 +74,9 @@ func TestACollModTravels(t *testing.T) {
 	}
 }
 
-// TestADropIsRefused is the policy that matters most.
-//
-// A drop arriving unattended removes data from the disaster-recovery copy at the
-// moment that copy may be the only thing left of it — and a mistaken drop at the
-// source is one of the reasons the copy exists.
+// A drop arriving unattended removes data from the disaster-recovery copy at
+// the moment that copy may be the only thing left of it — and a mistaken drop
+// at the source is one of the reasons the copy exists.
 func TestADropIsRefused(t *testing.T) {
 	for _, kind := range []string{"drop", "dropDatabase", "rename"} {
 		_, decision, reason := planSchemaChange(schemaEvent(t, kind, nil), "orders")
@@ -156,15 +149,8 @@ func TestTheSchemaChangeIsAppliedUnderTheMappedName(t *testing.T) {
 
 // ---------------------------------------------------------- positions
 
-// TestAPinnedClusterTimeIsRecognisedAsOne is the handoff the unit tests used to
-// step straight over.
-//
 // The snapshot pins a cluster time and the reader opens the stream from the
-// stored position. Both sides used one opaque string and each assumed its own
-// format, so the pinned time was handed to the server as a resume token: "Bad
-// resume token: _data of missing or of wrong type", over and over, while the
-// task looked as though it were restarting for a transient reason. Nothing
-// caught it until the pipeline was pointed at a real cluster.
+// stored position.
 func TestAPinnedClusterTimeIsRecognisedAsOne(t *testing.T) {
 	payload, err := encodeClusterTime(bson.Timestamp{T: 1787547851, I: 13})
 	if err != nil {
@@ -220,14 +206,8 @@ func TestAPositionThatIsNeitherIsRefused(t *testing.T) {
 
 // ------------------------------------------------------------ index keys
 
-// TestAnIndexKeyIsReadWhateverShapeItArrivesIn is the defect the driver upgrade
-// introduced and a real cluster showed.
-//
 // Asked to decode a document into an interface, the driver's v1 gave a bson.M
-// here and its v2 gives a bson.D. The code asserted the map, so every index
-// silently stopped being copied — one warning per index about a format it did
-// not recognise, and a failover target that would answer correctly and far too
-// slowly to serve.
+// here and its v2 gives a bson.D.
 func TestAnIndexKeyIsReadWhateverShapeItArrivesIn(t *testing.T) {
 	shapes := map[string]interface{}{
 		"bson.D": bson.D{{Key: "customer", Value: int32(1)}},

@@ -26,14 +26,8 @@ func readerFor(mappings []config.DatabaseMapping, sourceDSN string) *Reader {
 	}}
 }
 
-// TestOneStreamCoversEveryMappedDatabase is the point of the single-stream
-// design on the MySQL side.
-//
 // The binlog is one log per server, but the include list used to be built from
-// the single database named in the connection string. Replicating three
-// databases off one server therefore meant three tasks, three canal instances
-// and three binlog dump connections all reading the same bytes — the source did
-// the work once for each of them.
+// the single database named in the connection string.
 func TestOneStreamCoversEveryMappedDatabase(t *testing.T) {
 	r := readerFor([]config.DatabaseMapping{
 		{SourceDatabase: "shop", Tables: []config.TableMapping{{SourceTable: "orders"}}},
@@ -207,14 +201,8 @@ func parseOne(t *testing.T, query string) ast.StmtNode {
 	return stmts[0]
 }
 
-// TestAMoveIsRecognised covers the one schema change that corrupts rows without
-// saying anything.
-//
 // A ROW binlog event carries positions, not names, and the names come from
-// asking the source for its current shape. A statement that moves a column
-// without changing how many there are therefore makes every row read before it,
-// since the stream resumed, decode one or more columns out of place — and write
-// cleanly, with the row counts still agreeing afterwards.
+// asking the source for its current shape.
 func TestAMoveIsRecognised(t *testing.T) {
 	moving := []string{
 		"ALTER TABLE orders MODIFY COLUMN amount DECIMAL(12,2) AFTER customer",
@@ -292,13 +280,8 @@ func TestAMoveOnlyMattersAfterRowsHaveBeenApplied(t *testing.T) {
 // ------------------------------------------------- closing the stream
 
 // TestHandingOverAfterCloseDoesNotPanic is a regression test for a crash that
-// took the whole process down, every other task with it.
-//
-// canal.Close calls OnPosSynced one last time on its way out. The reader used to
-// close its event channel from the goroutine running the stream, and that
-// goroutine had usually got there first — so the final handover was a send on a
-// closed channel. Nothing caught it: no MySQL test went in through the syncer
-// the supervisor actually builds, so the shutdown path was never exercised.
+// took the whole process down, every other task with it.  canal.Close calls
+// OnPosSynced one last time on its way out.
 func TestHandingOverAfterCloseDoesNotPanic(t *testing.T) {
 	r := &Reader{Config: config.SyncConfig{
 		Type:             "mysql",
@@ -350,15 +333,8 @@ func TestNextReportsAClosedReaderRatherThanBlocking(t *testing.T) {
 }
 
 // TestACheckpointWithoutAGTIDKeepsTheOneBefore covers the position degrading
-// from GTID to file and offset.
-//
-// canal does not carry a GTID set on every position it reports. Recording only
-// what the current call carried meant one such call overwrote the stored GTID
-// with nothing; the next restart then resumed from file and offset, which canal
-// does not track GTIDs for, so every later checkpoint lost it too. Measured on
-// Cloud SQL, the stored position after a few restarts was
-// {"Name":"mysql-bin.000037","Pos":41017161} with no GTID at all — a position
-// local to one server, useless the moment it fails over.
+// from GTID to file and offset.  canal does not carry a GTID set on every
+// position it reports.
 func TestACheckpointWithoutAGTIDKeepsTheOneBefore(t *testing.T) {
 	r := &Reader{source: "10.0.0.1:3306/bench", flavor: "mysql"}
 
@@ -388,17 +364,10 @@ func TestACheckpointWithoutAGTIDKeepsTheOneBefore(t *testing.T) {
 }
 
 // TestAPositionInsideATransactionIsNotHandedOver is the silent row loss this
-// package existed with until it was measured.
-//
-// canal reports a position at the BEGIN of every transaction, and go-mysql has
-// already added that transaction's GTID to the set by then — it adds it when it
-// reads the GTID event, which comes before the rows. With nothing accumulated
-// yet the reader used to hand that over as a heartbeat, so a checkpoint saying
-// the transaction was done reached the target before a single one of its rows
-// did. A clean stop never showed it, because the rows followed a moment later.
-// A kill did: the restart resumed past a transaction the target never got, and
-// no amount of comparing counts afterwards would say which rows were gone.
-// Measured at 1,000 tx/s with a kill every 15s, a handful of rows per run.
+// package existed with until it was measured.  canal reports a position at the
+// BEGIN of every transaction, and go-mysql has already added that
+// transaction's GTID to the set by then — it adds it when it reads the GTID
+// event, which comes before the rows.
 func TestAPositionInsideATransactionIsNotHandedOver(t *testing.T) {
 	r := &Reader{
 		source: "10.0.0.1:3306/bench", flavor: "mysql",
@@ -443,10 +412,8 @@ func TestAPositionInsideATransactionIsNotHandedOver(t *testing.T) {
 	}
 }
 
-// TestTheCapturedTableCountIsPublished is Debezium's CapturedTables. It catches
-// the change nothing else reports: a mapping edit that quietly drops a table.
-// Replication stays healthy-looking — lag zero, task up — and that table simply
-// stops being copied, which is only discovered after a failover.
+// It catches the change nothing else reports: a mapping edit that quietly
+// drops a table.
 func TestTheCapturedTableCountIsPublished(t *testing.T) {
 	r := readerFor([]config.DatabaseMapping{
 		{Tables: []config.TableMapping{
@@ -463,13 +430,8 @@ func TestTheCapturedTableCountIsPublished(t *testing.T) {
 	}
 }
 
-// TestTheSourceInfoIsPublishedOnlyWhenTheLogFileChanges is the cardinality
-// guard. The offset moves with every transaction and is published as a number;
-// the file name moves every few hours and is published as a label. Publishing
-// the file on every hand-over would be harmless, but publishing anything that
-// moves per transaction as a label would make one series per transaction and
-// take the scrape target down with it — so the code tracks the last file it
-// published, and this pins that behaviour.
+// The offset moves with every transaction and is published as a number; the
+// file name moves every few hours and is published as a label.
 func TestTheSourceInfoIsPublishedOnlyWhenTheLogFileChanges(t *testing.T) {
 	r := &Reader{
 		source: "10.0.0.1:3306/bench", flavor: "mysql",

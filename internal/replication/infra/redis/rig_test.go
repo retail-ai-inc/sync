@@ -20,19 +20,10 @@ import (
 )
 
 // What the integration tests are built out of.
-//
-// One set of helpers covers a single server and a cluster alike, because both
-// satisfy goredis.UniversalClient and the scan already knows the difference.
-// Keeping two sets was worse than the duplication suggests: the cluster copy
-// drifted a race into its key scan that the single-node copy did not have, and
-// the bug looked like data missing from the source.
 
 // ------------------------------------------------------------------ clients
 
 // redisAt opens a client for one or more addresses.
-//
-// More than one address means a cluster, which is the same rule the DSN layer
-// uses.
 func redisAt(t *testing.T, addrs []string) goredis.UniversalClient {
 	t.Helper()
 	var client goredis.UniversalClient
@@ -81,9 +72,6 @@ func emptyBoth(t *testing.T, source, target goredis.UniversalClient) {
 
 // widenBacklogs gives the source room to hold history across a disconnect, and
 // leaves the fork delay alone.
-//
-// Setting repl-diskless-sync-delay to zero looks like an optimisation and makes
-// a master accept a replica, report it online, and then send nothing at all.
 func widenBacklogs(t *testing.T, source goredis.UniversalClient) {
 	t.Helper()
 	ctx := context.Background()
@@ -220,10 +208,6 @@ func (r *rig) skipped() int {
 
 // inCommandPhase reports whether every shard has passed the end of its first
 // copy, which is when replaying commands starts.
-//
-// The crashes only mean something after that: while the stream is still inside
-// the copy's window, changes are applied by re-reading values, which is
-// idempotent whatever the position logic does.
 func (r *rig) inCommandPhase(target goredis.UniversalClient, taskID int) bool {
 	ctx := context.Background()
 	for _, shard := range r.shards {
@@ -266,10 +250,6 @@ func (r *rig) reachCommandPhase(t *testing.T, source, target goredis.UniversalCl
 // ------------------------------------------------------------------ workload
 
 // workload writes commands that cannot be replayed safely.
-//
-// INCR, RPUSH, ZINCRBY and APPEND are the whole point: each applied twice leaves
-// a different result from each applied once, and none of them says so. A test
-// built on SET would pass whether the position logic worked or not.
 func workload(ctx context.Context, client goredis.UniversalClient, spread int) func() int {
 	inner, cancel := context.WithCancel(ctx)
 	written := make(chan int, 1)

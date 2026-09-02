@@ -167,10 +167,9 @@ func TestNothingNewIsReportedTwice(t *testing.T) {
 	}
 }
 
-// TestUnlistedReportsWhatATaskDoesNotCarry covers the gap a named task leaves.
-// The task replicates what it names, which is the point of naming — but a table
-// added at the source afterwards is then absent from the replica, and a failover
-// is a bad time to discover that.
+// The task replicates what it names, which is the point of naming — but a
+// table added at the source afterwards is then absent from the replica, and a
+// failover is a bad time to discover that.
 func TestUnlistedReportsWhatATaskDoesNotCarry(t *testing.T) {
 	listed := map[string]bool{"orders": true, "payments": true}
 	reported := map[string]bool{}

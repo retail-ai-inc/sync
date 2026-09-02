@@ -46,9 +46,8 @@ func TestAConfiguredSecretIsUsed(t *testing.T) {
 	}
 }
 
-// TestAnUnsetSecretIsGeneratedRatherThanGuessable is the fix for F-252. The
-// fallback used to be a constant compiled into the binary and committed to the
-// repository, so anybody who had read it could mint an admin token for any
+// The fallback used to be a constant compiled into the binary and committed to
+// the repository, so anybody who had read it could mint an admin token for any
 // deployment that had not set the variable — offline, for any day.
 func TestAnUnsetSecretIsGeneratedRatherThanGuessable(t *testing.T) {
 	t.Setenv("SYNC_TOKEN_SECRET", "")
@@ -201,9 +200,8 @@ func TestATokenVariesByIdentity(t *testing.T) {
 // ------------------------------------------------------------- admin token
 
 // TestGenerateAdminTokenEqualsAdminUserToken records that the admin token is
-// not a distinct credential: it is the user token for the pair
-// ("admin", "admin"). Any account named admin whose access level is admin
-// therefore holds the token ValidateAdminToken accepts.
+// not a distinct credential: it is the user token for the pair ("admin",
+// "admin").
 func TestGenerateAdminTokenEqualsAdminUserToken(t *testing.T) {
 	username, access, ok := ParseUserToken(GenerateAdminToken())
 	if !ok {
@@ -266,9 +264,8 @@ func TestExtractTokenFromHeader(t *testing.T) {
 }
 
 // TestTokenSecretIsCapturedAtInit records that the signing secret is read once
-// during initialisation, so changing SYNC_TOKEN_SECRET at runtime has no effect
-// on issued tokens. Rotating it requires a restart, and the running process
-// gives no sign that the environment and the key in use have diverged.
+// during initialisation, so changing SYNC_TOKEN_SECRET at runtime has no
+// effect on issued tokens.
 func TestTokenSecretIsCapturedAtInit(t *testing.T) {
 	before := GenerateUserToken("alice", "guest")
 

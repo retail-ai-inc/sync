@@ -7,14 +7,8 @@ import (
 	mysqldriver "github.com/go-sql-driver/mysql"
 )
 
-// TestTLSVerifiesTheServerItConnectedTo is the difference between an encrypted
-// connection and a secure one.
-//
 // The replication stream carries every row of a payment database across a
-// region boundary. Encrypting it without checking who is on the other end
-// protects it from a passive listener and not from anybody able to answer in
-// the server's place, which on a private network is the threat that is left.
-// So the certificate is checked against the host the DSN named.
+// region boundary.
 func TestTLSVerifiesTheServerItConnectedTo(t *testing.T) {
 	cfg := &mysqldriver.Config{TLSConfig: "true", Addr: "10.60.0.5:3306"}
 

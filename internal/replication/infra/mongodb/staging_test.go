@@ -1,29 +1,8 @@
 //go:build staging
 
 // These tests run against a real MongoDB 8.0 sharded cluster rather than the
-// hermetic fixture, because three things cannot be exercised against a
-// single-node replica set on loopback:
-//
-//   - topology discovery. The fixture advertises 127.0.0.1:27017, an address
-//     reachable only inside its own container, so every fixture test pins one
-//     node with directConnection. Production must not, and the path where the
-//     driver finds the set for itself and follows an election was therefore
-//     never run.
-//   - a sharded collection. A change stream opened through mongos merges the
-//     streams of every shard, and the resume token it hands back is a composite
-//     of all of them. Ordering, resumption and the snapshot's cluster time all
-//     behave differently from the single-shard case.
-//   - failover. An election only happens where there is a set to hold one.
-//
-// They are behind their own build tag so they never run in CI, and they only
-// ever read or write the two databases named by SYNC_STG_SOURCE_DB and
-// SYNC_STG_TARGET_DB.
-//
-// Run with:
-//
-//	kubectl port-forward svc/mongodb-sharded 27500:27017
-//	SYNC_STG_MONGO=127.0.0.1:27500 SYNC_STG_USER=root SYNC_STG_PASS=... \
-//	  go test -tags staging -v -timeout 30m ./internal/replication/infra/mongodb/
+// hermetic fixture, because three things cannot be exercised against a single-
+// node replica set on loopback:  - topology discovery.
 package mongodb
 
 import (
@@ -98,9 +77,7 @@ func stgConnect(t *testing.T, database string) *mongo.Client {
 }
 
 // stgTask configures one collection, the way the loader would from a stored
-// task. The buffer directory is a temporary one per test: on the cluster it
-// belongs on a persistent volume, which is a deployment matter rather than
-// something a test can assert.
+// task.
 func stgTask(t *testing.T, collection string) config.SyncConfig {
 	t.Helper()
 
@@ -141,9 +118,7 @@ func stgStart(t *testing.T, cfg config.SyncConfig) (stop func()) {
 }
 
 // stgCollection makes a sharded collection in the source database and removes
-// both sides afterwards. Sharded because that is the shape of the data this has
-// to replicate, and because an unsharded collection would only ever exercise
-// one shard's change stream.
+// both sides afterwards.
 func stgCollection(t *testing.T, prefix string) (name string, source, target *mongo.Collection) {
 	t.Helper()
 
@@ -201,7 +176,6 @@ func payment(seq int) bson.M {
 
 // ------------------------------------------------------------- the cluster
 
-// TestTheClusterIsFoundWithoutPinningANode is the path the fixture cannot run.
 // A driver given directConnection stops writing after an election instead of
 // following the new primary, so production must discover the topology — and
 // until now nothing had checked that the syncer's own connection string does.
@@ -311,9 +285,7 @@ func TestAShardedCollectionIsCopiedAndFollowed(t *testing.T) {
 }
 
 // TestTheTwoSidesAreIdentical runs the consistency comparison over real
-// sharded data. It is the check an operator would run before declaring the
-// replica usable, and it exercises the document digest against _ids the fixture
-// never produces.
+// sharded data.
 func TestTheTwoSidesAreIdentical(t *testing.T) {
 	name, source, target := stgCollection(t, "payments_verify")
 	ctx := context.Background()
@@ -417,24 +389,7 @@ func TestTheCheckpointIsOnTheTargetAndResumesFromIt(t *testing.T) {
 
 // ------------------------------------------------------------------ the lag
 
-// TestTheLagIsMeasuredUnderLoad is the RPO measurement: how far behind the
-// target is while the source is being written to. Whatever that interval is when
-// the source region disappears is what is lost.
-//
-// Two things are measured, because one number alone is misleading:
-//
-//   - the latency of individual documents, by polling the target for one
-//     document in every sampleEvery. Polling rather than watching the target,
-//     because a change stream on this cluster has a delivery floor of its own —
-//     watching the target would charge the syncer for the cluster's latency
-//     twice.
-//   - the backlog once a second, which says whether the pipeline keeps up at
-//     all. A backlog that grows through the run means the lag figures are a
-//     property of the run's length rather than of the pipeline.
-//
-// Rate and duration stay deliberately low: this cluster is shared and not fast,
-// and a load test that disturbs its other databases is not a measurement anybody
-// wants. SYNC_STG_RATE and SYNC_STG_SECONDS scale it.
+// Whatever that interval is when the source region disappears is what is lost.
 func TestTheLagIsMeasuredUnderLoad(t *testing.T) {
 	name, source, target := stgCollection(t, "payments_lag")
 	ctx := context.Background()
@@ -613,11 +568,10 @@ func maskPassword(uri string) string {
 	return strings.ReplaceAll(uri, stgPassword, "***")
 }
 
-// TestTheTargetIsShardedLikeTheSource is why this suite needs a sharded cluster.
 // A sharded source replicated into an unsharded target is not the same
-// collection: every document lands on whichever shard is primary for the target
-// database, so the copy has one shard's capacity where the source had three. The
-// region it exists to stand in for could not be stood in for.
+// collection: every document lands on whichever shard is primary for the
+// target database, so the copy has one shard's capacity where the source had
+// three.
 func TestTheTargetIsShardedLikeTheSource(t *testing.T) {
 	name, source, target := stgCollection(t, "payments_sharded")
 	ctx := context.Background()
@@ -669,21 +623,8 @@ func TestTheTargetIsShardedLikeTheSource(t *testing.T) {
 	t.Logf("the target's documents are spread over %d shards", len(stats))
 }
 
-// TestAChunkMigrationIsNotReplicated is the one behaviour in this design that
-// was asserted from documentation and never tested.
-//
-// The balancer moves a chunk by inserting the documents on the destination shard
-// and deleting them on the source. Both go to the oplog, so a change stream that
-// carried them would deliver a delete and an insert per document — work that
-// achieves nothing, and a window in which the document is absent from the
-// target. MongoDB marks such oplog entries fromMigrate and a change stream drops
-// them, but that is a claim about somebody else's code, and the balancer is on in
-// every cluster this will run against.
-//
-// The end state cannot catch it: a delete followed by an insert of the same
-// document leaves the collection exactly as it was. What has to be checked is
-// that the applier was given nothing at all, which is what the event counter is
-// for.
+// The balancer moves a chunk by inserting the documents on the destination
+// shard and deleting them on the source.
 func TestAChunkMigrationIsNotReplicated(t *testing.T) {
 	name, source, target := stgCollection(t, "orders_migrating")
 	ctx := context.Background()

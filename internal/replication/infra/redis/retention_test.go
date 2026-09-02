@@ -22,13 +22,8 @@ func readerOverBuffer(t *testing.T) *Reader {
 	return &Reader{Shard: "0-16383", Link: &link{buffer: b}}
 }
 
-// TestTheFirstMeasurementRefusesToGuessARate is what keeps a headroom figure
-// honest.
-//
 // The retention headroom is read by somebody deciding whether there is still
-// time to restart the task or whether a fresh copy is now unavoidable. A rate
-// invented from a single sample would put a number on that decision that
-// nothing supports, and a wrong number is worse than none.
+// time to restart the task or whether a fresh copy is now unavoidable.
 func TestTheFirstMeasurementRefusesToGuessARate(t *testing.T) {
 	r := readerOverBuffer(t)
 
@@ -41,10 +36,7 @@ func TestTheFirstMeasurementRefusesToGuessARate(t *testing.T) {
 	}
 }
 
-// TestAQuietSourceHasNoRateRatherThanAnInfiniteWindow. Nothing written means
-// dividing by zero, and an unbounded window would report "you have for ever to
-// restart" at the exact moment that is least true — a source can be quiet for a
-// minute and busy the next.
+// TestAQuietSourceHasNoRateRatherThanAnInfiniteWindow.
 func TestAQuietSourceHasNoRateRatherThanAnInfiniteWindow(t *testing.T) {
 	r := readerOverBuffer(t)
 

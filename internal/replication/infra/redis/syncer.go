@@ -131,10 +131,6 @@ type shard struct {
 	addr string
 }
 
-// shardsOf finds the masters of a source.
-//
-// A shard is named by the slots it owns rather than by its address, so that a
-// shard which fails over to another node keeps its position. The tests use this
 // sourceAddr is the address a single-server source is dialled at.
 //
 // It must be host:port and nothing else. dsn.Endpoint appends the database,
@@ -146,8 +142,9 @@ func (s *Syncer) sourceAddr() string {
 	return dsn.HostPort("redis", s.cfg.SourceConnection)
 }
 
-// too: the identity a position is filed under has to be the same one in both
-// places, or a test would be exercising a shard naming that production does not.
+// shardsOf finds the masters of a source. A shard is named by the slots it owns
+// rather than by its address, so that a shard which fails over to another node
+// keeps its position.
 func shardsOf(ctx context.Context, source goredis.UniversalClient, single string) ([]shard, error) {
 	cluster, ok := source.(*goredis.ClusterClient)
 	if !ok {

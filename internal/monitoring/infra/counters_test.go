@@ -42,10 +42,8 @@ func oneMapping() []config.DatabaseMapping {
 	}}
 }
 
-// TestTheMySQLCounterReportsAnUnreachableSource records that a monitoring pass
-// against a source that is down logs and returns. Nothing is written to
-// monitoring_log, so the dashboard keeps showing the last figures it had with
-// no indication that they are stale.
+// Nothing is written to monitoring_log, so the dashboard keeps showing the
+// last figures it had with no indication that they are stale.
 func TestTheMySQLCounterReportsAnUnreachableSource(t *testing.T) {
 	logger, out := captureLog()
 
@@ -94,12 +92,10 @@ func TestTheMySQLCounterStopsAtTheTarget(t *testing.T) {
 	}
 }
 
-// TestThePostgreSQLCounterOpensItsOwnDriver covers a dependency this package
-// used to take on trust. It calls sql.Open("postgres", ...) without importing a
-// driver: in the production binary the replication syncer happens to import one,
-// so the counter worked — but nothing here guaranteed it, and dropping that
-// import elsewhere would have broken monitoring at runtime with "unknown
-// driver". The MySQL counter had the same dependency.
+// It calls sql.Open("postgres", ...) without importing a driver: in the
+// production binary the replication syncer happens to import one, so the
+// counter worked — but nothing here guaranteed it, and dropping that import
+// elsewhere would have broken monitoring at runtime with "unknown driver".
 func TestThePostgreSQLCounterOpensItsOwnDriver(t *testing.T) {
 	logger, out := captureLog()
 
@@ -134,14 +130,9 @@ func TestTheRedisCounterReportsAnUnparseableDSN(t *testing.T) {
 	}
 }
 
-// TestTheRedisCounterAcceptsAClusterDSN records that a DSN naming more than one
-// host is read as a cluster rather than refused.
-//
 // It used to go through go-redis's ParseURL, which takes a single host: the
 // Tokyo and Osaka clusters both have several, so the comparison never ran at
-// all — one parse error per interval in the log and no row written. Reaching a
-// connect failure here rather than a parse failure is what says the DSN was
-// understood; nothing is listening on these ports.
+// all — one parse error per interval in the log and no row written.
 func TestTheRedisCounterAcceptsAClusterDSN(t *testing.T) {
 	logger, out := captureLog()
 
@@ -208,13 +199,8 @@ func TestTheMongoDBCounterReportsAnInvalidURI(t *testing.T) {
 }
 
 // TestTheMongoDBCounterRecordsMinusOneForAFailedCount records what the MongoDB
-// counter does that the other three do not: it writes a monitoring_log row even
-// when the count failed, carrying -1 as the row count. So the dashboard shows
-// -1 documents rather than the last good figure — visible, unlike the silent
-// staleness of the SQL counters (T-194), but not labelled as a failure either.
-//
-// The temporary database matters here: without it the counter's writer opens the
-// sync.db tracked in this repository and inserts into it.
+// counter does that the other three do not: it writes a monitoring_log row
+// even when the count failed, carrying -1 as the row count.
 func TestTheMongoDBCounterRecordsMinusOneForAFailedCount(t *testing.T) {
 	conn := useMonitoringDB(t)
 	logger, out := captureLog()

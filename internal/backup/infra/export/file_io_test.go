@@ -194,10 +194,9 @@ func TestReadJSONFileSkipsBlankLines(t *testing.T) {
 	}
 }
 
-// TestADamagedExportIsReportedNotTrimmed covers a truncated or partly corrupt
-// mongoexport. A line that would not parse used to be logged at warn level and
-// dropped while the read still returned success, so the archive was restored
-// with documents silently missing and nothing downstream could tell how many.
+// A line that would not parse used to be logged at warn level and dropped
+// while the read still returned success, so the archive was restored with
+// documents silently missing and nothing downstream could tell how many.
 func TestADamagedExportIsReportedNotTrimmed(t *testing.T) {
 	e := newExecutor()
 	dir := t.TempDir()
@@ -249,8 +248,7 @@ func TestCountRecordsInFileReportsAMissingFile(t *testing.T) {
 // The count is "lines beginning with {", so anything else in the export is
 // invisible: a pretty-printed document counts once for its opening brace and
 // zero for its remaining lines, and a JSON array wrapper counts as zero
-// records. The number is only correct for the JSONL that mongoexport emits by
-// default.
+// records.
 func TestCountRecordsMiscountsNonJSONL(t *testing.T) {
 	e := newExecutor()
 	dir := t.TempDir()
@@ -280,11 +278,9 @@ func TestCountRecordsMiscountsNonJSONL(t *testing.T) {
 	}
 }
 
-// TestCountRecordsHandlesALargeDocument covers a document bigger than the
-// scanner's buffer. That buffer used to be a megabyte while a MongoDB document
-// may be sixteen, so one large document turned the record count for the whole
-// file into an error — and the count is what the caller reports as the size of
-// the backup.
+// That buffer used to be a megabyte while a MongoDB document may be sixteen,
+// so one large document turned the record count for the whole file into an
+// error — and the count is what the caller reports as the size of the backup.
 func TestCountRecordsHandlesALargeDocument(t *testing.T) {
 	e := newExecutor()
 	path := filepath.Join(t.TempDir(), "big.json")

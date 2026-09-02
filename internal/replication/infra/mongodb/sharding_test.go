@@ -10,9 +10,8 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo"
 )
 
-// TestADatabaseAlreadyShardedIsNotAFailure covers the state this is trying to
-// reach. Enabling sharding on a database that already has it is an error the
-// server reports and this has to ignore, or every restart logs a warning about
+// Enabling sharding on a database that already has it is an error the server
+// reports and this has to ignore, or every restart logs a warning about
 // something being right.
 func TestADatabaseAlreadyShardedIsNotAFailure(t *testing.T) {
 	for name, err := range map[string]error{
@@ -47,10 +46,9 @@ func TestARealFailureIsNotMistakenForSuccess(t *testing.T) {
 	}
 }
 
-// TestThePlanFollowsFromTheTwoSides covers every state the two sides can be in.
 // The one that matters is a sharded source with an unsharded target: the copy
-// then holds the whole collection on one shard, which is not the same collection
-// and not a replacement for the region it stands in for.
+// then holds the whole collection on one shard, which is not the same
+// collection and not a replacement for the region it stands in for.
 func TestThePlanFollowsFromTheTwoSides(t *testing.T) {
 	key := &shardKey{}
 
@@ -85,7 +83,6 @@ func TestThePlanFollowsFromTheTwoSides(t *testing.T) {
 	}
 }
 
-// keyOf builds a shard key over the named fields, in order.
 func keyOn(t *testing.T, fields ...string) *shardKey {
 	t.Helper()
 
@@ -102,13 +99,7 @@ func keyOn(t *testing.T, fields ...string) *shardKey {
 
 // ------------------------------------------------- addressing a document
 
-// TestTheFilterCarriesTheShardKey is the difference between a write mongos can
-// route and one it refuses.
-//
-// An upsert on a sharded collection has to name the whole shard key. Without it
-// the server answers "could not extract exact shard key" and replication stops
-// on the first document — so a collection sharded on anything but its _id was
-// unreplicable, while every test passed because they all sharded on {_id}.
+// An upsert on a sharded collection has to name the whole shard key.
 func TestTheFilterCarriesTheShardKey(t *testing.T) {
 	address := documentAddress{Paths: []string{"merchant_id"}}
 

@@ -28,11 +28,10 @@ func TestReadOAuthConfig(t *testing.T) {
 	}
 }
 
-// TestTheClientSecretIsMaskedOnTheWayOut is the fix for a credential the read
-// path used to publish. The endpoint has to stay reachable without a token,
-// because the sign-in page needs the client id before anybody has one, so
-// answering with the secret as well handed the whole OAuth credential to any
-// caller that could reach the port.
+// The endpoint has to stay reachable without a token, because the sign-in page
+// needs the client id before anybody has one, so answering with the secret as
+// well handed the whole OAuth credential to any caller that could reach the
+// port.
 func TestTheClientSecretIsMaskedOnTheWayOut(t *testing.T) {
 	db := useTempDB(t)
 	if _, err := db.Exec(
@@ -215,10 +214,8 @@ func TestWriteOAuthConfigRefusesAnIncompleteEnabledProvider(t *testing.T) {
 	}
 }
 
-// TestADisabledProviderIsStoredWithoutValidation records that the completeness
-// check only runs for an enabled Google provider. A disabled one can be stored
-// with nothing in it, and enabling it later goes through this same path, so the
-// gap closes on the way in.
+// A disabled one can be stored with nothing in it, and enabling it later goes
+// through this same path, so the gap closes on the way in.
 func TestADisabledProviderIsStoredWithoutValidation(t *testing.T) {
 	useTempDB(t)
 
@@ -280,8 +277,7 @@ func TestAuthoriseAdmin(t *testing.T) {
 
 // TestAdminAuthorisationReadsTheAccessLevelNotTheUsername records that unlike
 // the admin-token endpoint, this check accepts any user whose access level is
-// admin. The two admin checks in this context still disagree about what an
-// administrator is: this one asks for the level, the other for the name too.
+// admin.
 func TestAdminAuthorisationReadsTheAccessLevelNotTheUsername(t *testing.T) {
 	db := useTempDB(t)
 	insertUser(t, db, "alice", "secret", "Alice", domain.AccessAdmin)
@@ -299,11 +295,10 @@ func TestAdminAuthorisationReadsTheAccessLevelNotTheUsername(t *testing.T) {
 	}
 }
 
-// TestOnlyTheSignInFieldsAreServed covers an endpoint any unauthenticated
-// caller can reach. It used to answer with the whole stored document, client
-// secret included; the secret is masked now, and the rest is an allow-list — so
-// a field added to the document later does not start being served to the world
-// because nobody remembered to add it to a deny-list.
+// It used to answer with the whole stored document, client secret included;
+// the secret is masked now, and the rest is an allow-list — so a field added
+// to the document later does not start being served to the world because
+// nobody remembered to add it to a deny-list.
 func TestOnlyTheSignInFieldsAreServed(t *testing.T) {
 	useTempDB(t)
 

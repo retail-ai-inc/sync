@@ -84,15 +84,9 @@ func TestNewConfigReadsBothTables(t *testing.T) {
 	}
 }
 
-// TestAnEmptyConfigGlobalTableIsReported is the fix for a start-up that could
-// not be recovered from. The load answered sql.ErrNoRows with log.Fatalf, so a
-// database with the tables but no settings row killed the process — including
-// the API server that could have been used to fix the configuration. A fresh
-// install, or a migration that created the schema without seeding it, simply
-// would not start.
-//
-// The supervisor also re-reads the configuration every ten seconds, so one
-// locked file or moment of disk trouble took replication down with it.
+// The load answered sql.ErrNoRows with log.Fatalf, so a database with the
+// tables but no settings row killed the process — including the API server
+// that could have been used to fix the configuration.
 func TestAnEmptyConfigGlobalTableIsReported(t *testing.T) {
 	useTempConfigDB(t)
 

@@ -182,9 +182,8 @@ func TestAMalformedPositionIsReported(t *testing.T) {
 	}
 }
 
-// TestAPositionFromAnotherSourceIsIgnored is the guard that matters most here.
-// An LSN means nothing on another server: read there it addresses unrelated WAL
-// and the read succeeds, so the task resumes from somewhere arbitrary with
+// An LSN means nothing on another server: read there it addresses unrelated
+// WAL and the read succeeds, so the task resumes from somewhere arbitrary with
 // nothing to show for it.
 func TestAPositionFromAnotherSourceIsIgnored(t *testing.T) {
 	s, _ := fileBacked(t, "postgres://u:p@tokyo:5432/shop")
@@ -262,11 +261,10 @@ func TestBuildReplicationDSNReportsAnUnparseableURL(t *testing.T) {
 	}
 }
 
-// TestBuildReplicationDSNAcceptsAKeywordDSN covers libpq's other connection
-// string form. "host=x dbname=y" parses as a relative URL path rather than
-// failing, so the replication parameter used to be appended as a query string
-// onto something that has no query string, and the connection was refused with
-// an error naming neither.
+// "host=x dbname=y" parses as a relative URL path rather than failing, so the
+// replication parameter used to be appended as a query string onto something
+// that has no query string, and the connection was refused with an error
+// naming neither.
 func TestBuildReplicationDSNAcceptsAKeywordDSN(t *testing.T) {
 	s := newSyncer(t, config.SyncConfig{})
 

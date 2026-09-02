@@ -36,12 +36,8 @@ func call(t *testing.T, method, path, body, token string) *httptest.ResponseReco
 func withUsers(t *testing.T) (adminToken, guestToken string) {
 	t.Helper()
 
-	// The production work factor costs most of a second per login, and signing
-	// in is the first thing most of these tests do. Worse than slow: the seeded
-	// rows hold plain passwords, so the first successful login rehashes them and
-	// writes the hash back — through a pool that holds one connection and a
-	// busy timeout of five seconds. Under a parallel suite that is a race
-	// against the timeout, and losing it looks like a rejected password.
+	// The production work factor costs most of a second per login, and signing in
+	// is the first thing most of these tests do.
 	t.Setenv("SYNC_PASSWORD_ITERATIONS", "1")
 
 	db := useTempDB(t)
@@ -88,10 +84,9 @@ var adminRoutes = []struct{ method, path string }{
 	{http.MethodPost, "/backup/execute/1"},
 }
 
-// TestNoRouteAnswersWithoutACredential is the whole point of the change. Four
-// handlers used to check the Authorization header for themselves and the other
-// twenty-six did not, so anybody who could reach the port could list every
-// replication task with its credentials, create and delete tasks, read
+// Four handlers used to check the Authorization header for themselves and the
+// other twenty-six did not, so anybody who could reach the port could list
+// every replication task with its credentials, create and delete tasks, read
 // schemas, drive the connection prober at arbitrary hosts, and list the users.
 func TestNoRouteAnswersWithoutACredential(t *testing.T) {
 	withUsers(t)
@@ -143,8 +138,7 @@ func TestAGuestReachesTheReadRoutes(t *testing.T) {
 
 // TestAGuestCannotChangeAnything is the other half: everything that mutates,
 // and the two endpoints that connect to a database the caller names, are held
-// to administrators. The prober takes a host, a port and credentials and dials
-// them, which is a network scanner in the hands of anyone who can call it.
+// to administrators.
 func TestAGuestCannotChangeAnything(t *testing.T) {
 	_, guest := withUsers(t)
 

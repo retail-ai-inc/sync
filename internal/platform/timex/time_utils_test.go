@@ -35,11 +35,9 @@ func TestReplaceDatePlaceholdersWithDate(t *testing.T) {
 	}
 }
 
-// TestOrdinaryWordsAreLeftAlone covers a rewrite with a wide blast radius. The
-// bare forms — YYYY, MM, DD and their lower-case spellings — used to be replaced
-// as plain substrings, and "mm" and "dd" occur in ordinary English, so any
-// wording in a file-name pattern came back written in digits. That name is what
-// the archive is stored under.
+// The bare forms — YYYY, MM, DD and their lower-case spellings — used to be
+// replaced as plain substrings, and "mm" and "dd" occur in ordinary English,
+// so any wording in a file-name pattern came back written in digits.
 func TestOrdinaryWordsAreLeftAlone(t *testing.T) {
 	for _, word := range []string{
 		"summary", "address", "middleware", "comment", "recommended", "orders", "payments",
@@ -85,10 +83,8 @@ func TestTheDatePartIsReplacedAndTheRestIsNot(t *testing.T) {
 	}
 }
 
-// TestDailyOffsetsAcceptsEverySpellingOfANumber covers a configuration written
-// by hand or through a client that quotes its numbers. An offset that was not a
-// JSON number used to fall back to the default with nothing said, so a task
-// asking for the last week backed up yesterday.
+// An offset that was not a JSON number used to fall back to the default with
+// nothing said, so a task asking for the last week backed up yesterday.
 func TestDailyOffsetsAcceptsEverySpellingOfANumber(t *testing.T) {
 	for name, spec := range map[string]map[string]interface{}{
 		"json numbers": {"startOffset": float64(-7), "endOffset": float64(0)},

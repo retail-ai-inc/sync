@@ -26,11 +26,7 @@ type discard struct{}
 
 func (discard) Write(p []byte) (int, error) { return len(p), nil }
 
-// targetDB stands in for the replication target. The handlers build plain SQL
-// text and hand it to a *sql.DB, so SQLite can accept it as long as the
-// statements avoid PostgreSQL-only syntax — which is itself worth knowing.
-// SQLite calls its own schema "main", so relations are declared in that
-// namespace and the generated "main.orders" resolves.
+// targetDB stands in for the replication target.
 func targetDB(t *testing.T, schema string) *sql.DB {
 	t.Helper()
 

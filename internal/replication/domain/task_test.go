@@ -42,9 +42,7 @@ func TestRequestNormaliseFillsInDefaults(t *testing.T) {
 
 // TestNormaliseKeepsAnUnrecognisedStatusButTreatsItAsStopped records that the
 // status is a free-text field: only "running" in any casing enables the task,
-// and every other string is stored verbatim while the task stays disabled. A
-// caller that sends "Started" gets a task that reports "Started" and never
-// runs.
+// and every other string is stored verbatim while the task stays disabled.
 func TestNormaliseKeepsAnUnrecognisedStatusButTreatsItAsStopped(t *testing.T) {
 	req := Request{Status: "Started"}
 
@@ -99,10 +97,8 @@ func TestConfigFromCarriesEveryField(t *testing.T) {
 	}
 }
 
-// TestConfigFromIsAReplacementNotAMerge records that building a configuration
-// from a request discards anything the request omits. The update endpoint has
-// no way to change one field: a PUT carrying only a schedule wipes the
-// connections, the mappings and the position paths.
+// The update endpoint has no way to change one field: a PUT carrying only a
+// schedule wipes the connections, the mappings and the position paths.
 func TestConfigFromIsAReplacementNotAMerge(t *testing.T) {
 	partial := Request{TaskName: "orders", SourceType: "mongodb"}
 

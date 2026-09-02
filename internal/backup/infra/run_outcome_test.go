@@ -7,11 +7,10 @@ import (
 	"github.com/retail-ai-inc/sync/internal/backup/domain"
 )
 
-// TestARunOutcomeSurvivesTheProcess is the fix for a failure nobody could see
-// after a restart. Whether a backup had worked lived in an in-process map, so a
-// job that failed overnight and a pod that restarted in the morning left the
-// dashboard showing only the timestamp of the last run that succeeded — which
-// reads as "a few days old" rather than "failing since Tuesday".
+// Whether a backup had worked lived in an in-process map, so a job that failed
+// overnight and a pod that restarted in the morning left the dashboard showing
+// only the timestamp of the last run that succeeded — which reads as "a few
+// days old" rather than "failing since Tuesday".
 func TestARunOutcomeSurvivesTheProcess(t *testing.T) {
 	db := useTempJobDB(t)
 	id := int(insertJob(t, db, 1, `{"name":"nightly"}`))

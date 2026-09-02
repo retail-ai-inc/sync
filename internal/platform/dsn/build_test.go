@@ -139,9 +139,7 @@ func TestBuildDSNRoundTripsDatabaseName(t *testing.T) {
 // TestTheDefaultIsEncryptionWhereItCannotBreakAnything records the choice made
 // for the two engines whose drivers can negotiate: MySQL asks for "preferred"
 // and PostgreSQL for "prefer", so a server offering a certificate is used
-// encrypted and one that offers none still connects. Neither existing
-// deployment has to change, and neither carries payment data in the clear
-// across regions when the server is set up for it.
+// encrypted and one that offers none still connects.
 func TestTheDefaultIsEncryptionWhereItCannotBreakAnything(t *testing.T) {
 	if got := buildDSNByType("mysql", conn("root", "root", "h", "3306", "db")); !strings.Contains(got, "tls=preferred") {
 		t.Errorf("mysql DSN = %q, want tls=preferred", got)
@@ -217,10 +215,9 @@ func TestAnExplicitSSLModeWins(t *testing.T) {
 
 // ---------------------------------------------------------------- MongoDB
 
-// TestDirectConnectionIsNoLongerForced is the fix for F-034. Pinning the driver
-// to one node disables topology discovery, so it neither finds the rest of the
-// replica set nor follows an election: against the Osaka cluster it would stop
-// writing the moment the primary changed.
+// Pinning the driver to one node disables topology discovery, so it neither
+// finds the rest of the replica set nor follows an election: against the Osaka
+// cluster it would stop writing the moment the primary changed.
 func TestDirectConnectionIsNoLongerForced(t *testing.T) {
 	for _, c := range []map[string]string{
 		conn("root", "root", "localhost", "27017", "source_db"),
@@ -243,9 +240,7 @@ func TestDirectConnectionCanStillBeAskedFor(t *testing.T) {
 }
 
 // TestTheWriteConcernIsMajority pins what makes an acknowledged write survive
-// the failover the replica exists for. Without it a failover can roll back
-// writes the target already reported as applied, after the checkpoint has moved
-// past them.
+// the failover the replica exists for.
 func TestTheWriteConcernIsMajority(t *testing.T) {
 	got := buildDSNByType("mongodb", conn("", "", "h", "27017", "db"))
 

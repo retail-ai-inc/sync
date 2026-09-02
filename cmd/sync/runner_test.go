@@ -110,10 +110,7 @@ func TestRunSyncTasksStartsMonitoringWhenEnabled(t *testing.T) {
 }
 
 // TestTheConfigurationIsRereadEveryTenSeconds records the reload cadence, and
-// that a change is only acted on when configsEqual says the tasks differ. Ten
-// seconds is also the longest a started or stopped task waits to take effect —
-// except that the syncers are rebuilt from the configuration, so a task started
-// through the API does begin replicating on the next reload after all.
+// that a change is only acted on when configsEqual says the tasks differ.
 func TestTheConfigurationIsRereadEveryTenSeconds(t *testing.T) {
 	db := useTempConfigDB(t)
 

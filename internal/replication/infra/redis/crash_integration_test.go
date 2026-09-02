@@ -15,28 +15,12 @@ import (
 )
 
 // The test that decides whether the design works.
-//
-// Everything else in this package is in service of one claim: that a command
-// stream can be replayed into a Redis cluster exactly once, without the atomic
-// unit that MySQL and MongoDB have. If that claim is false the replay is silent
-// and the damage is a counter that is quietly wrong or a payment queued twice, so
-// it is not enough to test the happy path — the crash has to be provoked, over
-// and over, while non-idempotent commands are in flight.
-//
-// This runs against a single server owning every slot. The same test against
-// three masters is in cluster_integration_test.go, where the constraint the whole
-// design is shaped around actually applies.
 
 const crashTaskID = 1
 
 // TestCommandsAreAppliedExactlyOnceAcrossCrashes kills the pipeline repeatedly
-// while non-idempotent commands are in flight, and insists the two sides end up
-// identical.
-//
-// A crash here is the context being cancelled part way through applying a batch,
-// followed by every piece of in-memory state being thrown away and rebuilt from
-// what survived: the markers in the target and the segments on disk. That is what
-// a killed process leaves behind.
+// while non-idempotent commands are in flight, and insists the two sides end
+// up identical.
 func TestCommandsAreAppliedExactlyOnceAcrossCrashes(t *testing.T) {
 	sourceAddrs := addrsFrom(t, "SYNC_REDIS_SOURCE")
 	source := redisAt(t, sourceAddrs)
@@ -120,9 +104,7 @@ func TestCommandsAreAppliedExactlyOnceAcrossCrashes(t *testing.T) {
 	}
 
 	// A check that the test tested anything, which it silently failed to before
-	// this was here. The value phase applies changes by re-reading the key, which
-	// is idempotent however often it happens — so a run that never leaves it
-	// would pass with the skip removed entirely, and did.
+	// this was here.
 	phase := recordedPhase(t, target, crashTaskID, "0")
 	if phase != phaseCommand {
 		t.Errorf("the position is still in the %q phase, so the run never replayed "+

@@ -17,13 +17,6 @@ import (
 )
 
 // The same claim, against a cluster that really has more than one node.
-//
-// The single-node tests exercise the position arithmetic but not the reason it
-// exists: on one node a transaction spanning slots simply works, so the per-slot
-// grouping was never really under test. Here the slots are spread over three
-// masters, a transaction reaching across them is refused by the server, and the
-// source's stream arrives on three separate connections with a buffer and a
-// position each.
 
 const clusterTaskID = 2
 
@@ -35,17 +28,9 @@ func targetCluster(t *testing.T) goredis.UniversalClient {
 	return redisAt(t, addrsFrom(t, "SYNC_REDIS_TARGET_CLUSTER"))
 }
 
-// TestACrossSlotTransactionIsRefusedByTheServer is the premise, checked rather
-// than assumed.
-//
 // If a cluster allowed one transaction to span slots, none of the per-slot
 // machinery would be needed: a batch could be committed with its position in a
-// single unit, exactly as it is for MySQL and MongoDB. It does not, and this says
-// so — so that if a future version relaxes it, the reason for the complexity is
-// on record and can be removed deliberately.
-//
-// The commands go straight to one node, unrouted. Asking the cluster client to do
-// it proves nothing, for the reason the next test explains.
+// single unit, exactly as it is for MySQL and MongoDB.
 func TestACrossSlotTransactionIsRefusedByTheServer(t *testing.T) {
 	addrs := addrsFrom(t, "SYNC_REDIS_TARGET_CLUSTER")
 	node := goredis.NewClient(&goredis.Options{Addr: addrs[0]})
@@ -85,15 +70,8 @@ func TestACrossSlotTransactionIsRefusedByTheServer(t *testing.T) {
 	node.Do(ctx, "DISCARD")
 }
 
-// TestAClusterClientSplitsACrossSlotTransactionSilently records the trap that
-// makes the explicit per-slot grouping necessary.
-//
 // Handing every slot's commands to one TxPipeline looks tidier and appears to
 // work: the client sorts them by slot and sends a separate MULTI to each node.
-// So there is no error, and no atomicity across slots either — the convenience
-// hides exactly the property being relied on. The applier therefore builds one
-// transaction per slot itself, and does not depend on a client library's
-// grouping staying what it is today.
 func TestAClusterClientSplitsACrossSlotTransactionSilently(t *testing.T) {
 	client := targetCluster(t)
 	ctx := context.Background()
@@ -224,21 +202,13 @@ func TestAClusterIsReplicatedExactlyOnceAcrossCrashes(t *testing.T) {
 	}
 	// Whether a crash produces a replay depends on where it landed: a kill
 	// between batches leaves the floor exactly where the markers are, and there
-	// is nothing to re-read. So this is reported rather than required, and the
-	// replay itself is tested deliberately below.
+	// is nothing to re-read.
 	t.Logf("%d commands skipped as already applied", skipped)
 }
 
-// TestReplayingAnAppliedRangeChangesNothing tests the property directly instead
-// of hoping a crash produces it.
-//
 // The resume floor is written after each batch on a best-effort basis: losing
-// that write costs a longer replay next time and nothing else, which is the whole
-// reason it is allowed to fail. So rewinding it by hand is not an artificial
-// scenario — it is the scenario, arranged on purpose rather than waited for.
-//
-// The commands in the replayed range are INCR, RPUSH and ZINCRBY. If the skip
-// does not work, every one of them lands a second time and the two sides differ.
+// that write costs a longer replay next time and nothing else, which is the
+// whole reason it is allowed to fail.
 func TestReplayingAnAppliedRangeChangesNothing(t *testing.T) {
 	source, target := sourceCluster(t), targetCluster(t)
 	emptyBoth(t, source, target)
@@ -340,12 +310,8 @@ func TestReplayingAnAppliedRangeChangesNothing(t *testing.T) {
 		skipped)
 }
 
-// TestTheComparisonFindsAndFixesADifference covers the backstop.
-//
-// It is the one thing in this package that does not share the assumptions of the
-// replication path, so it is what would catch a case nobody thought of. That
-// makes it worth testing directly rather than trusting it to be exercised by the
-// crash tests, where by construction there is nothing for it to find.
+// It is the one thing in this package that does not share the assumptions of
+// the replication path, so it is what would catch a case nobody thought of.
 func TestTheComparisonFindsAndFixesADifference(t *testing.T) {
 	source, target := sourceCluster(t), targetCluster(t)
 	emptyBoth(t, source, target)

@@ -25,8 +25,7 @@ func mongoMergedConfig(gcsPath string) ExecutorBackupConfig {
 
 // TestTheMergedMongoExportJoinsEveryCollection covers the path a job takes as
 // soon as its pattern matches more than one collection — which for a monthly
-// naming scheme is every job, on the first of the month. Nothing exercised it
-// before: an operator would have found out when the cross-month backup ran.
+// naming scheme is every job, on the first of the month.
 func TestTheMergedMongoExportJoinsEveryCollection(t *testing.T) {
 	binDir := stubPATH(t)
 	// mongoexport writes JSONL to the file named by --out. The stub finds that
@@ -79,10 +78,8 @@ echo zipped > "$out"
 	}
 }
 
-// TestTheMergedMongoExportSkipsTheUploadWithoutABucket is the fix for a job that
-// worked until the day it matched a second collection. The single-collection
-// path checks whether a GCS destination is configured; this one did not, so it
-// ran gsutil against "/name.zip" and failed the whole backup.
+// TestTheMergedMongoExportSkipsTheUploadWithoutABucket is the fix for a job
+// that worked until the day it matched a second collection.
 func TestTheMergedMongoExportSkipsTheUploadWithoutABucket(t *testing.T) {
 	binDir := stubPATH(t)
 	stubBin(t, binDir, "mongoexport", `
@@ -143,10 +140,9 @@ esac
 	}
 }
 
-// TestAnEmptyTableGroupIsRefused records that the merged paths report an empty
-// group rather than panicking on tables[0]. The file name is derived from the
-// first table, so an index out of range would take the process down — every
-// other sync task with it — instead of failing one backup.
+// The file name is derived from the first table, so an index out of range
+// would take the process down — every other sync task with it — instead of
+// failing one backup.
 func TestAnEmptyTableGroupIsRefused(t *testing.T) {
 	stubPATH(t)
 	e := newExecutor()
@@ -223,10 +219,9 @@ func TestNoCredentialsFileWithoutAPassword(t *testing.T) {
 	}
 }
 
-// TestTheCredentialsFileQuotesThePassword covers what mysqldump reads. A
-// password holding a quote or a backslash would otherwise truncate the option
-// file and the dump would fail to authenticate — with the password already out
-// of the argument list, that failure would have no obvious cause.
+// A password holding a quote or a backslash would otherwise truncate the
+// option file and the dump would fail to authenticate — with the password
+// already out of the argument list, that failure would have no obvious cause.
 func TestTheCredentialsFileQuotesThePassword(t *testing.T) {
 	path, remove, err := mysqlCredentialsFile(`pa"ss\word`)
 	if err != nil {

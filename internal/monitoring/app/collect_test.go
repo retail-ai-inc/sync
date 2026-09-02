@@ -21,10 +21,8 @@ func capturingLogger() (*logrus.Logger, *bytes.Buffer) {
 	return l, buf
 }
 
-// TestCountAndLogTablesIgnoresUnknownEngines records that the dispatcher answers
-// an engine it does not know with one debug line and nothing else. A task
-// configured with a typo in its type is never measured, and the only trace is a
-// message at a level production does not log.
+// TestCountAndLogTablesIgnoresUnknownEngines records that the dispatcher
+// answers an engine it does not know with one debug line and nothing else.
 func TestCountAndLogTablesIgnoresUnknownEngines(t *testing.T) {
 	for _, engine := range []string{"cassandra", "", "mongo", "MySQL2", "postgres"} {
 		t.Run(engine, func(t *testing.T) {
@@ -109,10 +107,9 @@ func TestDisabledTasksAreNotMeasured(t *testing.T) {
 	time.Sleep(80 * time.Millisecond)
 }
 
-// TestTheDailySummarySaysWhatItLeftOut covers a summary that was only ever
-// implemented for MongoDB. It printed "Daily summary completed" whatever had
-// happened, so a MySQL task with a dateRange condition was missing from a
-// summary that reported itself complete.
+// It printed "Daily summary completed" whatever had happened, so a MySQL task
+// with a dateRange condition was missing from a summary that reported itself
+// complete.
 func TestTheDailySummarySaysWhatItLeftOut(t *testing.T) {
 	log, buf := capturingLogger()
 	cfg := &config.Config{SyncConfigs: []config.SyncConfig{
@@ -140,10 +137,8 @@ func TestTheDailySummarySaysWhatItLeftOut(t *testing.T) {
 	}
 }
 
-// TestTheDailySummaryIsScheduledForJSTMidnight records that the summary runs at
-// 00:05 JST, computed from the machine's clock at start-up. The schedule is
-// recalculated after each run, so a process that starts at 00:06 waits almost a
-// full day for its first summary.
+// TestTheDailySummaryIsScheduledForJSTMidnight records that the summary runs
+// at 00:05 JST, computed from the machine's clock at start-up.
 func TestTheDailySummaryIsScheduledForJSTMidnight(t *testing.T) {
 	jst, err := time.LoadLocation("Asia/Tokyo")
 	if err != nil {

@@ -14,10 +14,8 @@ import (
 	goredis "github.com/redis/go-redis/v9"
 )
 
-// These tests speak the protocol directly rather than through the pipeline, so
-// they need one address and one plain client. Set SYNC_REDIS_SOURCE to a
-// cluster-enabled instance owning every slot; a single node with
-// CLUSTER ADDSLOTSRANGE 0 16383 is enough.
+// Set SYNC_REDIS_SOURCE to a cluster-enabled instance owning every slot; a
+// single node with CLUSTER ADDSLOTSRANGE 0 16383 is enough.
 func oneSource(t *testing.T) (string, *goredis.Client) {
 	t.Helper()
 	addr := addrsFrom(t, "SYNC_REDIS_SOURCE")[0]
@@ -28,14 +26,6 @@ func oneSource(t *testing.T) (string, *goredis.Client) {
 	}
 
 	// Start from an empty source.
-	//
-	// These tests take a full resync, which means the master dumps everything it
-	// holds before the stream begins. Run on their own they pass; run after the
-	// crash and cluster suites, which leave thousands of keys behind, the dump
-	// grows until the read deadline is hit and the failure reads as "the source
-	// said nothing" — a connection problem that is not one. The suite has to
-	// give each of these a clean server, and the flush guard is already required
-	// to run any of this.
 	emptyOne(t, client)
 	return addr, client
 }
@@ -50,18 +40,7 @@ func emptyOne(t *testing.T, client *goredis.Client) {
 	}
 }
 
-// masterOffset reads what the source thinks its own offset is.
 // keepAcking acknowledges on a ticker, the way the real relay does.
-//
-// A diskless full resync ends with the master saying "waiting for REPLCONF ACK
-// from slave to enable streaming": it will not send a single command until the
-// replica acknowledges. The client sends one acknowledgement as soon as it has
-// read the data set, and that one can arrive before the master has set the flag
-// it is meant to clear — after which the master waits for the next one. In the
-// relay there always is a next one, because it acknowledges on a ticker. A test
-// driving the Stream directly has to do the same or it waits for ever, which is
-// how these two tests failed: "the source said nothing for 15s", against a
-// master that had the data and was holding it back.
 func keepAcking(t *testing.T, stream *Stream) func() {
 	t.Helper()
 	done := make(chan struct{})
@@ -81,13 +60,6 @@ func keepAcking(t *testing.T, stream *Stream) func() {
 }
 
 // waitOnline waits until the master counts this replica as caught up.
-//
-// A diskless full resync sends the data set without a length, so the master
-// only marks the replica online once it has acknowledged. Writing before that
-// happens leaves the commands buffered against a replica the master still
-// considers loading, and the read then times out with "the source said nothing"
-// — a connection failure that is not one. Two of these tests failed that way on
-// redis:7.0, where diskless sync is the default.
 func waitOnline(t *testing.T, client *goredis.Client) {
 	t.Helper()
 	ctx := context.Background()
@@ -106,11 +78,6 @@ func waitOnline(t *testing.T, client *goredis.Client) {
 }
 
 // masterOffsetOf reads the source's own write offset.
-//
-// Named apart from the production masterOffset in link.go: the two do the same
-// thing for different callers, and having both in one package broke the
-// integration build from the commit that added the production one until this
-// one was renamed. Nobody saw it because the integration suite only runs in CI.
 func masterOffsetOf(t *testing.T, client *goredis.Client) int64 {
 	t.Helper()
 	info, err := client.Info(context.Background(), "replication").Result()
@@ -132,14 +99,8 @@ func masterOffsetOf(t *testing.T, client *goredis.Client) int64 {
 	return 0
 }
 
-// TestTheOffsetAgreesWithARealMaster is the test that decides whether any of
-// this works.
-//
 // Every position this package records is a byte count of the replication
-// stream, and the source is the authority on what that count is. If this side
-// arrives at a different number, resuming asks for the wrong byte and the
-// acknowledgements are lies — and both failures are silent. So: replicate a real
-// master, apply real commands, and check the two counts match exactly.
+// stream, and the source is the authority on what that count is.
 func TestTheOffsetAgreesWithARealMaster(t *testing.T) {
 	addr, client := oneSource(t)
 	ctx := context.Background()
@@ -223,11 +184,8 @@ func TestTheOffsetAgreesWithARealMaster(t *testing.T) {
 	}
 }
 
-// TestAPartialResyncPicksUpExactlyWhereItStopped covers a reconnect, which is
-// what every restart and every network blip looks like.
-//
 // The offset has to continue rather than restart, and nothing may be delivered
-// twice or skipped. This is the property that makes the buffer worth having.
+// twice or skipped.
 func TestAPartialResyncPicksUpExactlyWhereItStopped(t *testing.T) {
 	addr, client := oneSource(t)
 	ctx := context.Background()

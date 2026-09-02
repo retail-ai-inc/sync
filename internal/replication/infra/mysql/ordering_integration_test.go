@@ -14,21 +14,9 @@ import (
 	"github.com/retail-ai-inc/sync/test/harness"
 )
 
-// TestAUniqueValueHandedFromOneRowToAnother is why the statements of a batch go
-// to the target in the order the binlog held them.
-//
 // The pipeline can split a batch into runs that may be applied independently,
 // and it decides independence by the primary key: two changes to one row keep
-// their order, everything else may move. That is not enough. Two rows are not
-// independent when a unique index relates them — and handing a unique value from
-// one row to another is an ordinary thing for an application to do.
-//
-// Here the split moves the INSERT that takes the value ahead of the UPDATE that
-// frees it. The INSERT is an upsert, because replication is replayed, so it does
-// not fail: ON DUPLICATE KEY UPDATE fires on the unique index instead of the
-// primary key and rewrites the row that still holds the value, changing its
-// primary key. The UPDATE that follows then matches nothing. Two rows on the
-// source, one on the target, no error anywhere.
+// their order, everything else may move.
 func TestAUniqueValueHandedFromOneRowToAnother(t *testing.T) {
 	src, tgt := open(t, harness.MySQLSource, sourceDB), open(t, harness.MySQLTarget, targetDB)
 

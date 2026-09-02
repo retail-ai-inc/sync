@@ -100,10 +100,9 @@ func TestAnUnclaimedPairIsAcquired(t *testing.T) {
 	}
 }
 
-// TestAPromotedTargetIsRefused is the failure this package exists for. Tokyo
-// goes down, Osaka is promoted and starts taking payments, Tokyo comes back and
-// the old task resumes — overwriting everything Osaka has written since, with
-// data that is both older and wrong.
+// Tokyo goes down, Osaka is promoted and starts taking payments, Tokyo comes
+// back and the old task resumes — overwriting everything Osaka has written
+// since, with data that is both older and wrong.
 func TestAPromotedTargetIsRefused(t *testing.T) {
 	source := newStore("tokyo:3306/shop")
 	target := newStore("osaka:3306/shop", claim(2, RoleSource, "tokyo:3306/shop", time.Minute))
@@ -162,10 +161,7 @@ func TestTwoTasksWritingOneTargetAreRefused(t *testing.T) {
 }
 
 // ownClaim is a claim this guard's own process left behind, which is what a
-// restart finds. The owner is what tells that apart from a second process
-// running the same task, and this fixture used to get it wrong: it named another
-// process and the test passed anyway, because a claim for the same task was
-// skipped whoever held it. That was the hole.
+// restart finds.
 func ownClaim(role Role, peer string, age time.Duration) Claim {
 	c := claim(1, role, peer, age)
 	c.Owner = "syncer-osaka-0"
@@ -187,10 +183,8 @@ func TestTheSameTaskReacquiresItsOwnClaim(t *testing.T) {
 	}
 }
 
-// TestAnotherProcessHoldingTheSameTaskIsRefused is the other half, and the one
-// the fixture above used to model by accident. Two writers replaying one stream
-// from different offsets apply an older version of a record after a newer one,
-// which idempotence does not undo.
+// Two writers replaying one stream from different offsets apply an older
+// version of a record after a newer one, which idempotence does not undo.
 func TestAnotherProcessHoldingTheSameTaskIsRefused(t *testing.T) {
 	// claim() names syncer-tokyo-0; the guard is syncer-osaka-0.
 	source := newStore("tokyo:3306/shop", claim(1, RoleSource, "osaka:3306/shop", time.Minute))
@@ -354,11 +348,10 @@ func TestTheStalenessWindowCanBeOverridden(t *testing.T) {
 
 // ---------------------------------------------------------------- release
 
-// TestReleasingLetsTheOppositeDirectionStartAtOnce is what makes a planned
-// failover quick. Without it the claims sit there until they go stale, so an
-// operator who has stopped Tokyo → Osaka and wants to start Osaka → Tokyo is
-// refused for the length of the staleness window — a quarter of an hour of a
-// runbook spent waiting for a timeout.
+// Without it the claims sit there until they go stale, so an operator who has
+// stopped Tokyo → Osaka and wants to start Osaka → Tokyo is refused for the
+// length of the staleness window — a quarter of an hour of a runbook spent
+// waiting for a timeout.
 func TestReleasingLetsTheOppositeDirectionStartAtOnce(t *testing.T) {
 	tokyo, osaka := newStore("tokyo:3306/shop"), newStore("osaka:3306/shop")
 
@@ -457,11 +450,10 @@ func (w *recordingWarner) all() []string {
 	return append([]string(nil), w.messages...)
 }
 
-// TestHoldClaimsAndReleases covers the lifecycle every engine used to carry its
-// own copy of. The claim is taken while the task runs and given up when it
-// stops, which is what makes a planned failover quick: without the release the
-// claims sit there until they go stale, and an operator who has stopped
-// Tokyo → Osaka and wants to start Osaka → Tokyo waits a quarter of an hour.
+// The claim is taken while the task runs and given up when it stops, which is
+// what makes a planned failover quick: without the release the claims sit
+// there until they go stale, and an operator who has stopped Tokyo → Osaka and
+// wants to start Osaka → Tokyo waits a quarter of an hour.
 func TestHoldClaimsAndReleases(t *testing.T) {
 	source, target := newStore("tokyo:27017"), newStore("osaka:27017")
 	guard := guardFor(source, target)
@@ -526,10 +518,9 @@ func TestHoldRefusesAReversedPair(t *testing.T) {
 	}
 }
 
-// TestHoldReportsAFailedRelease records that a release that does not land is
-// said out loud. A claim nobody could remove blocks the reverse direction until
-// it goes stale, and an operator following a failover runbook needs to know that
-// is why they are being refused.
+// A claim nobody could remove blocks the reverse direction until it goes
+// stale, and an operator following a failover runbook needs to know that is
+// why they are being refused.
 func TestHoldReportsAFailedRelease(t *testing.T) {
 	source, target := newStore("tokyo:27017"), newStore("osaka:27017")
 	guard := guardFor(source, target)
@@ -554,10 +545,9 @@ func TestHoldReportsAFailedRelease(t *testing.T) {
 	}
 }
 
-// TestHoldStopsTheHeartbeatWithTheContext records that cancelling the task's
-// context ends the refresh. A heartbeat outliving its task keeps a claim alive
-// on an endpoint nothing is replicating, which is the one thing worse than a
-// claim that expires too early.
+// A heartbeat outliving its task keeps a claim alive on an endpoint nothing is
+// replicating, which is the one thing worse than a claim that expires too
+// early.
 func TestHoldStopsTheHeartbeatWithTheContext(t *testing.T) {
 	source, target := newStore("tokyo:27017"), newStore("osaka:27017")
 	guard := guardFor(source, target)
@@ -584,17 +574,8 @@ func TestHoldStopsTheHeartbeatWithTheContext(t *testing.T) {
 
 // ------------------------------------------------- two instances, one task
 
-// TestASecondProcessRunningTheSameTaskIsRefused is the hole the direction lock
-// left open.
-//
 // A claim for this task was skipped outright, so that a task restarted after a
-// crash could take its own claim back without waiting a quarter of an hour. That
-// is right, and it also let two processes run the same task at once: each read
-// the other's claim, saw its own task id, and carried on.
-//
-// Two writers replaying one stream from different offsets eventually apply an
-// older version of a record after a newer one, which no amount of idempotence
-// undoes.
+// crash could take its own claim back without waiting a quarter of an hour.
 func TestASecondProcessRunningTheSameTaskIsRefused(t *testing.T) {
 	source, target := newStore("tokyo"), newStore("osaka")
 
@@ -677,12 +658,10 @@ func TestADirectionConflictIsNotRetryable(t *testing.T) {
 	}
 }
 
-// TestAnUnreachableEndpointIsRetryable is the defect a 120-second outage of the
-// Osaka mongos exposed: the guard reads its claims out of the databases, so
-// while the target is down every Acquire fails, and the caller classified any
-// non-concurrent failure as needing intervention. Replication stopped for good
-// the first time the target bounced, which is precisely the outage the claim on
-// the target exists to survive.
+// TestAnUnreachableEndpointIsRetryable is the defect a 120-second outage of
+// the Osaka mongos exposed: the guard reads its claims out of the databases,
+// so while the target is down every Acquire fails, and the caller classified
+// any non-concurrent failure as needing intervention.
 func TestAnUnreachableEndpointIsRetryable(t *testing.T) {
 	unreachable := errors.New("server selection error: context deadline exceeded")
 

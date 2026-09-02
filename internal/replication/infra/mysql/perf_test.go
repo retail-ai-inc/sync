@@ -1,25 +1,6 @@
 //go:build perf
 
 // Performance of the MySQL path against a real pair of servers.
-//
-// Function is covered by the integration suite; what is missing is a number. A
-// disaster-recovery plan for a payment ledger needs to say how much is lost when
-// the source region disappears, and that is a measurement, not an opinion.
-//
-// Three things are measured:
-//
-//   - latency, by tracing sampled rows from the moment the source acknowledged
-//     the write to the moment they can be read on the target. Sampled rows are
-//     polled with a SELECT rather than watched, so the measurement does not
-//     depend on a second replication path.
-//   - the backlog while writing, which says whether the pipeline holds the rate
-//     or merely defers it.
-//   - apply throughput, by handing it a batch far larger than it can absorb at
-//     once and timing the catch-up.
-//
-// Run with:
-//
-//	go test -tags perf -v -timeout 30m ./internal/replication/infra/mysql/
 package mysql
 
 import (

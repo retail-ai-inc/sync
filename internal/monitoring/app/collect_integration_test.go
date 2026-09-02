@@ -186,9 +186,7 @@ func TestCountAndLogMySQLRecordsBothSides(t *testing.T) {
 }
 
 // A table named in the configuration but absent from the database yields the
-// -1 sentinel, which is stored as though it were a row count. A typo in a task
-// definition produces monitoring rows that read as "minus one row" rather than
-// an error, and nothing anywhere reports the misconfiguration.
+// -1 sentinel, which is stored as though it were a row count.
 func TestAMissingTableIsRecordedAsMinusOne(t *testing.T) {
 	conn := useMonitoringDB(t)
 
@@ -396,10 +394,9 @@ func TestRedisMonitoringDuplicatesRowsPerMapping(t *testing.T) {
 	}
 }
 
-// TestARedisTaskWithoutMappingsIsStillMonitored covers a task that was silently
-// unmeasured. The DBSize calls ran and their results were thrown away, because
-// the only write sat inside a loop over the mappings — and a mapping means
-// nothing to a Redis task, which replicates the whole keyspace.
+// The DBSize calls ran and their results were thrown away, because the only
+// write sat inside a loop over the mappings — and a mapping means nothing to a
+// Redis task, which replicates the whole keyspace.
 func TestARedisTaskWithoutMappingsIsStillMonitored(t *testing.T) {
 	conn := useMonitoringDB(t)
 
@@ -433,8 +430,8 @@ func TestCountAndLogTablesIgnoresUnknownTypes(t *testing.T) {
 	}
 }
 
-// countAndLogTables lower-cases the type before dispatching, unlike
-// startSyncTasks in cmd/sync, which matches case-sensitively (T-094). The same
+// T-094: countAndLogTables lower-cases the type before dispatching, unlike
+// startSyncTasks in cmd/sync, which matches case-sensitively. The same
 // configuration value therefore reaches the monitor but not the syncer.
 func TestTheMonitorAcceptsCasingTheSyncerRejects(t *testing.T) {
 	conn := useMonitoringDB(t)
@@ -565,11 +562,9 @@ func TestStartRowCountMonitoringStopsOnCancel(t *testing.T) {
 	}
 }
 
-// TestAMeasurementIsTakenAtStartup covers a process that restarts more often
-// than its monitor interval. The ticker fires only after the first interval
-// elapses and nothing was recorded before it, so with the production interval
-// such a process produced no measurement at all — and a restart is exactly when
-// somebody wants one.
+// The ticker fires only after the first interval elapses and nothing was
+// recorded before it, so with the production interval such a process produced
+// no measurement at all — and a restart is exactly when somebody wants one.
 func TestAMeasurementIsTakenAtStartup(t *testing.T) {
 	conn := useMonitoringDB(t)
 
@@ -737,11 +732,9 @@ func TestAnUnreachablePostgreSQLSourceIsReported(t *testing.T) {
 	}
 }
 
-// TestTheServerSideChangeStreamProbeRuns covers the branch that asks MongoDB
-// itself what change streams are open. It only runs once the task's own metrics
-// say it has streams, so the counters are seeded first — which is also what the
-// statistics table is now built from, after a year of it holding nothing but
-// zeroes.
+// It only runs once the task's own metrics say it has streams, so the counters
+// are seeded first — which is also what the statistics table is now built
+// from, after a year of it holding nothing but zeroes.
 func TestTheServerSideChangeStreamProbeRuns(t *testing.T) {
 	conn := useMonitoringDB(t)
 
@@ -802,9 +795,8 @@ func TestTheServerSideChangeStreamProbeRuns(t *testing.T) {
 }
 
 // TestLogYesterdayMongoDBVolumeCountsTheDayThatEnded covers the daily summary,
-// which is the number a switchover decision is read off: how much of yesterday's
-// data reached the target. It only applies to collections whose count query
-// carries a dateRange condition.
+// which is the number a switchover decision is read off: how much of
+// yesterday's data reached the target.
 func TestLogYesterdayMongoDBVolumeCountsTheDayThatEnded(t *testing.T) {
 	// The summary reports a difference through the Slack path, which reads the
 	// global settings — without a control database of its own it would build one

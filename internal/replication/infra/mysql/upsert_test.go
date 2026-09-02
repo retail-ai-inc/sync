@@ -10,10 +10,7 @@ import (
 	"github.com/go-mysql-org/go-mysql/canal"
 )
 
-// keyedSchema has the primary key the production target has. The shared
-// ordersSchema deliberately has none, because several tests exercise what the
-// handler does without one; an upsert only means anything when there is a key
-// to conflict on.
+// keyedSchema has the primary key the production target has.
 const keyedSchema = `CREATE TABLE orders (id TEXT PRIMARY KEY, customer TEXT, email TEXT)`
 
 func keyedTarget(t *testing.T) *sql.DB {
@@ -84,11 +81,8 @@ func TestAnEmptyBatchStillRendersOneRow(t *testing.T) {
 
 // ------------------------------------------------------------ idempotency
 
-// TestAReplayedInsertDoesNotLoseTheRow is the point of the whole change. The
-// binlog position is written periodically, so a restart replays the last
-// stretch of events. Under a plain INSERT the replay raised a duplicate-key
-// error, which RetryDBOperation does not retry, so the row was dropped and the
-// error flag raised.
+// The binlog position is written periodically, so a restart replays the last
+// stretch of events.
 func TestAReplayedInsertDoesNotLoseTheRow(t *testing.T) {
 	db := keyedTarget(t)
 	h := newHandler(t, db, mapTable("orders", "orders"))

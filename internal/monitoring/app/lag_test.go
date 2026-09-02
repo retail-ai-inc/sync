@@ -185,11 +185,10 @@ func deadLettersFor(t *testing.T, task string, count float64) metrics.Labels {
 	return labels
 }
 
-// TestADeadLetteredChangeIsReported covers the alert on the hole a dead letter
-// leaves. The operation is on the source and not on the target, and it lived in
-// a file on the syncer's own disk with a counter nobody watched — so the copy
-// that exists to be switched to could be missing rows and the first anybody
-// heard of it was after the switch.
+// The operation is on the source and not on the target, and it lived in a file
+// on the syncer's own disk with a counter nobody watched — so the copy that
+// exists to be switched to could be missing rows and the first anybody heard
+// of it was after the switch.
 func TestADeadLetteredChangeIsReported(t *testing.T) {
 	deadLettersFor(t, "dl-1", 4)
 	n := &recordingNotifier{configured: true}

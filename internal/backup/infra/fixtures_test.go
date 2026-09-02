@@ -94,10 +94,7 @@ func itoa(id int64) string { return strconv.FormatInt(id, 10) }
 func errNoRows() error { return sql.ErrNoRows }
 
 // readTimestamp reads one of the DATETIME columns back as the string the store
-// wrote. The go-sqlite3 driver converts a DATETIME to time.Time, so scanning
-// straight into a string yields RFC 3339 rather than the value that went in;
-// scanning into a time.Time and formatting back avoids asserting on the
-// driver's rendering.
+// wrote.
 func readTimestamp(t *testing.T, db *sql.DB, column string, id int64) string {
 	t.Helper()
 

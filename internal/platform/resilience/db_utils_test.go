@@ -48,9 +48,7 @@ func TestIsConnectionError(t *testing.T) {
 
 // A failure that no amount of waiting can fix must not be retried: the backoff
 // is spent for nothing and the message somebody needs to read is buried under
-// three identical warnings. The old classifier scanned the error text for
-// "connection" and "EOF", so a malformed connection string and a truncated
-// configuration document both looked transient.
+// three identical warnings.
 func TestAFailureWaitingCannotFixIsNotRetried(t *testing.T) {
 	permanent := []error{
 		errors.New(`invalid connection string: missing "@"`),
@@ -69,8 +67,7 @@ func TestAFailureWaitingCannotFixIsNotRetried(t *testing.T) {
 
 // These are what the drivers say while a replica set elects a new primary or a
 // managed instance restarts for maintenance — the moments this tool exists to
-// survive. None of them matched the old substring list, so each was given up on
-// at the first attempt.
+// survive.
 func TestTheFailuresOfAFailoverAreRetried(t *testing.T) {
 	transient := []error{
 		errors.New("server selection error: context deadline exceeded"),
@@ -191,12 +188,8 @@ func TestRetryMongoOperationDelegatesToRetryDBOperation(t *testing.T) {
 	}
 }
 
-// The backoff used to sleep after every failed attempt including the last, so a
-// call that exhausted its three attempts spent 1s + 2s + 4s = 7s waiting. The
-// final four seconds bought nothing — the loop was over and the same error came
-// back regardless — and during a failover, when every operation is failing,
-// each retried call held its goroutine for more than twice as long as it needed
-// to.
+// The backoff used to sleep after every failed attempt including the last, so
+// a call that exhausted its three attempts spent 1s + 2s + 4s = 7s waiting.
 func TestTheLastAttemptDoesNotWaitBeforeReporting(t *testing.T) {
 	calls := 0
 	start := time.Now()

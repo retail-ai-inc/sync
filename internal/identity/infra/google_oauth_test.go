@@ -30,18 +30,7 @@ func serve(t *testing.T, status int, body string) string {
 	return server.URL
 }
 
-// TestARefusedCodeIsNotAnIdentity covers a way into the system with no
-// credentials at all.
-//
-// Neither call looked at the HTTP status. Google answers an authorization code
-// it does not recognise with 400 and an error document; http.PostForm reports no
-// error for that, and the error document decodes cleanly into the token struct,
-// leaving the access token empty. The user-info request then went out with an
-// empty bearer token, Google answered 401 with another error document, and that
-// decoded just as cleanly — leaving the email and the name empty. The flow
-// carried on: a row was written for that empty identity, found again, and a
-// token minted for it. Anyone who posted {"code":"x"} got an account and a
-// token that validates.
+// Neither call looked at the HTTP status.
 func TestARefusedCodeIsNotAnIdentity(t *testing.T) {
 	refused := serve(t, http.StatusBadRequest, `{"error":"invalid_grant"}`)
 	pointAt(t, refused, refused)

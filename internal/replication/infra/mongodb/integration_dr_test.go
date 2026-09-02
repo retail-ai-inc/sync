@@ -17,16 +17,7 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// TestSameDocumentUpdatesConverge exercises F-029. The syncer applies a batch
-// with options.BulkWrite().SetOrdered(false), so MongoDB may execute the
-// operations in any order. When several updates to the same document land in
-// one batch, an older value could be written last and stay there — the stream
-// carries no further event to correct it. The batch is now split into runs that
-// hold at most one write per document, so a document's own changes cannot cross.
-//
-// The scenario drives many rapid updates to a single document and then waits
-// for the target to reach the final value. A timeout here means the target
-// settled on a stale value, which is the defect.
+// TestSameDocumentUpdatesConverge exercises F-029.
 func TestSameDocumentUpdatesConverge(t *testing.T) {
 	collection := harness.UniqueName("ordering")
 	src, tgt := connect(t, harness.MongoSource), connect(t, harness.MongoTarget)
@@ -72,13 +63,7 @@ func TestSameDocumentUpdatesConverge(t *testing.T) {
 	})
 }
 
-// TestWritesDuringInitialSyncAreNotLost exercises F-020. The source's cluster
-// time is read before the copy begins and the change stream starts from it, so
-// a write made while the copy is running is replayed by the stream rather than
-// falling between the two.
-//
-// The source is seeded large enough that the snapshot takes seconds, then a
-// marker is written while it runs. The marker must reach the target.
+// TestWritesDuringInitialSyncAreNotLost exercises F-020.
 func TestWritesDuringInitialSyncAreNotLost(t *testing.T) {
 	collection := harness.UniqueName("snapshotgap")
 	src, tgt := connect(t, harness.MongoSource), connect(t, harness.MongoTarget)
@@ -127,8 +112,7 @@ func TestWritesDuringInitialSyncAreNotLost(t *testing.T) {
 
 	// The seeded documents arrive through the copy; the markers arrive
 	// afterwards, through the stream replaying from the cluster time the copy
-	// pinned. So this has to be polled rather than read once: the copy
-	// converging says nothing about the replay having caught up.
+	// pinned.
 	harness.Eventually(t, 60*time.Second, func() error {
 		arrived := countIn(t, tgt, targetDB, collection, bson.M{"marker": bson.M{"$exists": true}})
 		if arrived != int64(markers) {
@@ -198,9 +182,7 @@ func TestResumeAfterRestart(t *testing.T) {
 }
 
 // TestIgnoreDeleteOpsLeavesDeletedDocuments pins F-033: with the option on, a
-// document removed at the source stays on the target for good. That is the
-// documented intent for an archive, and it is also why a task using it can
-// never serve as a failover replica.
+// document removed at the source stays on the target for good.
 func TestIgnoreDeleteOpsLeavesDeletedDocuments(t *testing.T) {
 	collection := harness.UniqueName("ignoredelete")
 	src, tgt := connect(t, harness.MongoSource), connect(t, harness.MongoTarget)
@@ -240,11 +222,7 @@ func TestIgnoreDeleteOpsLeavesDeletedDocuments(t *testing.T) {
 }
 
 // TestInsertThenDeleteInSameBatch targets F-029 from the angle that
-// SetFullDocument(UpdateLookup) cannot mask. Repeated updates all resolve to
-// the same looked-up document, so their order stops mattering; a create paired
-// with a delete does not. The syncer turns inserts into ReplaceOne with upsert
-// and deletes into DeleteOne, and applies the batch with SetOrdered(false), so
-// the server may run the delete first and let the upsert recreate the document.
+// SetFullDocument(UpdateLookup) cannot mask.
 func TestInsertThenDeleteInSameBatch(t *testing.T) {
 	collection := harness.UniqueName("insertdelete")
 	src, tgt := connect(t, harness.MongoSource), connect(t, harness.MongoTarget)
@@ -385,10 +363,9 @@ func TestAnUnshardedSourceIsLeftAlone(t *testing.T) {
 	})
 }
 
-// TestACollectionTheTaskDoesNotListIsReported covers the gap a named task
-// leaves. A task that names its collections replicates those and no more, which
-// is the point of naming them — but a collection added at the source afterwards
-// is then missing from the replica, and a failover is a bad time to find out.
+// A task that names its collections replicates those and no more, which is the
+// point of naming them — but a collection added at the source afterwards is
+// then missing from the replica, and a failover is a bad time to find out.
 func TestACollectionTheTaskDoesNotListIsReported(t *testing.T) {
 	listed := harness.UniqueName("listed")
 	unlisted := harness.UniqueName("unlisted")

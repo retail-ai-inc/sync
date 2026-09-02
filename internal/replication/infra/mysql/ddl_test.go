@@ -65,14 +65,9 @@ func TestTheTargetNameFromTheMappingIsUsed(t *testing.T) {
 	}
 }
 
-// TestALiteralDefaultSurvivesTheRewrite covers a statement carrying a literal.
-//
-// The parser needs a driver registered before it can build a literal value, and
-// without one every literal restored as nothing at all: a column declared
-// DEFAULT 'new' was rewritten as "DEFAULT" with no value. MySQL answered 1064,
-// the task stopped, and it stopped again on every restart, because the offset is
-// deliberately not advanced past a statement that failed to apply. A single
-// CREATE TABLE with a string default was enough to wedge replication for good.
+// The parser needs a driver registered before it can build a literal value,
+// and without one every literal restored as nothing at all: a column declared
+// DEFAULT 'new' was rewritten as "DEFAULT" with no value.
 func TestALiteralDefaultSurvivesTheRewrite(t *testing.T) {
 	h := newHandler(t, nil, mapTable("orders", "orders"))
 
@@ -86,11 +81,7 @@ func TestALiteralDefaultSurvivesTheRewrite(t *testing.T) {
 	}
 }
 
-// TestALiteralDefaultKeepsNoCharsetIntroducer covers how the literal is spelled.
-//
-// The driver renders a string as _UTF8MB4'new'. MySQL accepts that, but it makes
-// every rewritten statement differ from the one it came from, which is the first
-// thing anybody compares when a target's schema is doubted.
+// The driver renders a string as _UTF8MB4'new'.
 func TestALiteralDefaultKeepsNoCharsetIntroducer(t *testing.T) {
 	h := newHandler(t, nil, mapTable("orders", "orders"))
 
@@ -146,14 +137,9 @@ func planFrom(t *testing.T, h *MyEventHandler, defaultSchema, query string) ddlD
 	return decisions[0]
 }
 
-// TestADDLInAnotherDatabaseIsSkipped covers a source server hosting more than
-// one database, which is the ordinary case.
-//
 // The table reference used to be matched on its name alone and its database
 // thrown away, so this statement — which has nothing to do with the task — was
-// rewritten as one against the target and applied. The schema of the
-// disaster-recovery copy could be changed by any database on the source that
-// happened to hold a table of the same name.
+// rewritten as one against the target and applied.
 func TestADDLInAnotherDatabaseIsSkipped(t *testing.T) {
 	h := newHandler(t, nil, mapTable("orders", "orders"))
 
@@ -210,10 +196,7 @@ func TestDiscoveryDoesNotReachIntoAnotherDatabase(t *testing.T) {
 	}
 }
 
-// TestWithNoSourceDatabaseTheNameStillMatches pins the fallback down. A handler
-// built without a source database cannot tell one from another, and refusing
-// every statement there would be a worse failure than the one being fixed: the
-// target's schema would silently stop tracking the source's.
+// TestWithNoSourceDatabaseTheNameStillMatches pins the fallback down.
 func TestWithNoSourceDatabaseTheNameStillMatches(t *testing.T) {
 	h := newHandler(t, nil, mapTable("orders", "orders"))
 	h.sourceDatabase = ""
@@ -435,10 +418,8 @@ func TestADDLWithNoTargetConnectionIsReported(t *testing.T) {
 
 // -------------------------------------------------------------- discovery
 
-// TestADiscoveredTableIsReplicatedUnderItsOwnName covers the task that lists no
-// tables. Every table it sees is replicated, including one created after the
-// task started — which used simply not to be replicated, with no warning
-// anywhere.
+// Every table it sees is replicated, including one created after the task
+// started — which used simply not to be replicated, with no warning anywhere.
 func TestADiscoveredTableIsReplicatedUnderItsOwnName(t *testing.T) {
 	db := sqliteTarget(t, ordersSchema)
 	h := newHandler(t, db, nil)

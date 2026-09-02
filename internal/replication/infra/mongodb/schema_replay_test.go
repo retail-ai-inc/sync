@@ -8,16 +8,8 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo"
 )
 
-// TestAReplayedSchemaChangeIsNotAFailure is what keeps a restart from blocking
-// on work it already did.
-//
 // A batch is replayed after an unclean stop — that is the whole basis of
-// resuming from a position deliberately behind the truth. Rows replay cleanly
-// because the writes are idempotent, but a schema change is not: creating a
-// collection that exists, or dropping an index that is already gone, comes back
-// as an error. Treating those as real would stop the task for ever on something
-// that is already true; treating every error as benign would swallow the ones
-// that matter. The codes are the line between them.
+// resuming from a position deliberately behind the truth.
 func TestAReplayedSchemaChangeIsNotAFailure(t *testing.T) {
 	for _, c := range []struct {
 		code int

@@ -12,10 +12,7 @@ import (
 	"github.com/retail-ai-inc/sync/internal/replication/infra/checkpoint"
 )
 
-// The applier is driven against SQLite here. The statements it executes are
-// built by the caller, the placeholder syntax is the same, and the checkpoint
-// store's write is one REPLACE — so every path that matters is the one
-// production takes, without needing a MySQL to talk to.
+// The applier is driven against SQLite here.
 
 func applierTarget(t *testing.T) *sql.DB {
 	t.Helper()
@@ -121,18 +118,10 @@ func TestAFailedBatchLeavesNothingBehind(t *testing.T) {
 	}
 }
 
-// TestAFailedPositionWriteRollsBackTheData is the test that tells the two
-// designs apart.
-//
-// If the position is written on its own connection after the data has committed,
-// a failure at that moment leaves the rows on the target with the position still
-// pointing before them — so a restart replays them, and on a table without a
-// primary key that means duplicates. Writing the position inside the same
-// transaction makes that combination impossible: the failure takes the data with
-// it.
-//
-// The checkpoint table is dropped to make the position write fail, which is what
-// a permissions change or a dropped table looks like in production.
+// If the position is written on its own connection after the data has
+// committed, a failure at that moment leaves the rows on the target with the
+// position still pointing before them — so a restart replays them, and on a
+// table without a primary key that means duplicates.
 func TestAFailedPositionWriteRollsBackTheData(t *testing.T) {
 	db := applierTarget(t)
 	applier, _ := newApplier(t, db)

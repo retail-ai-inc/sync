@@ -25,11 +25,9 @@ func TestAFailoverIsReportedAsAMovedMaster(t *testing.T) {
 	}
 }
 
-// TestAReshardIsReportedAsNewAndDepartedShards covers the dangerous change.
-//
-// Slots moving between shards is what deletes keys from one master and restores
-// them on another, down two connections with no ordering between them. It has to
-// be noticed, which means being described rather than silently tolerated.
+// Slots moving between shards is what deletes keys from one master and
+// restores them on another, down two connections with no ordering between
+// them.
 func TestAReshardIsReportedAsNewAndDepartedShards(t *testing.T) {
 	before := map[string]string{"0-8191": "a:6379", "8192-16383": "b:6379"}
 	after := map[string]string{
@@ -53,14 +51,9 @@ func TestNoChangeIsReportedAsNothing(t *testing.T) {
 	}
 }
 
-// TestASingleServerSourceIsDialledWithoutItsDatabase covers the address the
-// syncer hands a standalone source's shard.
-//
 // The rig builds its shards from a seed the test supplies, so every existing
 // case passes a clean host:port and none of them exercised what production
-// passes. Production took dsn.Endpoint, which appends the database, and every
-// task against a standalone Redis with a database configured — which is what
-// the UI writes by default — stopped on "lookup tcp/6379/0: unknown port".
+// passes.
 func TestASingleServerSourceIsDialledWithoutItsDatabase(t *testing.T) {
 	s := &Syncer{cfg: config.SyncConfig{
 		SourceConnection: "redis://10.105.174.243:6379/0",

@@ -45,12 +45,10 @@ func TestAnUnknownSyncTypeIsDropped(t *testing.T) {
 	}
 }
 
-// TestTheEngineNameIsMatchedWithoutRegardToCase covers a task that was measured
-// but never replicated. The monitoring side folds case and this switch did not,
-// so a type stored as "MongoDB" — which is how the interface spells it — had its
-// row counts recorded every minute, appeared on the dashboard for both sides,
-// and never had a syncer started for it. The API stores what the interface sends
-// and nothing normalises it on the way in.
+// The monitoring side folds case and this switch did not, so a type stored as
+// "MongoDB" — which is how the interface spells it — had its row counts
+// recorded every minute, appeared on the dashboard for both sides, and never
+// had a syncer started for it.
 func TestTheEngineNameIsMatchedWithoutRegardToCase(t *testing.T) {
 	for _, engine := range []string{
 		"MongoDB", "MySQL", "MariaDB", "PostgreSQL", "Redis", " mysql ", "MONGODB",
@@ -267,11 +265,10 @@ func settled(t *testing.T, s *supervisor, id int) *runningTask {
 	}
 }
 
-// TestATaskThatStopsByItselfIsRestarted is the gap this closes. A task whose
-// goroutine returned stayed in the running map with its fingerprint unchanged,
-// so it was never looked at again — and replication was made to stop
-// deliberately on a failed write, so one connection reset across the region
-// boundary left the task dead until somebody edited it.
+// A task whose goroutine returned stayed in the running map with its
+// fingerprint unchanged, so it was never looked at again — and replication was
+// made to stop deliberately on a failed write, so one connection reset across
+// the region boundary left the task dead until somebody edited it.
 func TestATaskThatStopsByItselfIsRestarted(t *testing.T) {
 	starts := make(chan int, 8)
 	s := runWith(t, exitingTask(starts, errors.New("connection reset by peer")))

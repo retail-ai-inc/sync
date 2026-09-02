@@ -8,15 +8,7 @@ import (
 )
 
 // TestSlotOfAgreesWithTheServer pins the hash against values read from a real
-// Redis 8.10.1 with CLUSTER KEYSLOT. Three thousand further random keys,
-// including braces in every awkward position, were checked against the same
-// server and agreed; these are the ones worth keeping in front of a reader.
-//
-// Agreement here is not cosmetic. The slot decides which node a key lives on,
-// and the whole design rests on a position marker landing in the same slot as
-// the data it accounts for — get this function wrong by one and the marker is
-// committed in a separate transaction, which is exactly the failure the
-// per-slot position exists to prevent.
+// Redis 8.10.1 with CLUSTER KEYSLOT.
 func TestSlotOfAgreesWithTheServer(t *testing.T) {
 	cases := map[string]int{
 		"foo":               12182,
@@ -99,17 +91,7 @@ func TestEveryTagHashesToItsOwnSlot(t *testing.T) {
 	}
 }
 
-// TestTheSlotTagTableIsStable is the most important test in this file, and the
-// least obvious.
-//
-// These tags name the keys that hold how far each slot has been applied. If a
-// later version generates a different table, every one of those markers is
-// abandoned: the task finds no position, resumes from further back, and replays
-// history that has already been applied — silently, and for non-idempotent
-// commands, wrongly. The table is therefore frozen, and this digest is the lock.
-//
-// A failure here means the generation walk changed. That is either a mistake, or
-// a migration that has to move the existing markers before it ships.
+// These tags name the keys that hold how far each slot has been applied.
 func TestTheSlotTagTableIsStable(t *testing.T) {
 	const want = "6b728ddecb7be57061f8d2dbdbfe6db2d82aaabcccdc8ed4eb5e8f0231c325a0"
 

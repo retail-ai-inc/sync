@@ -282,10 +282,7 @@ func verifyCollections(t *testing.T, collection string) (source, target *mongo.C
 }
 
 // TestTwoIdenticalCollectionsCompareEqual covers the MongoDB half of the
-// periodic comparison, which had no test against a server at all. It is the
-// check that answers "is the copy we would switch to actually complete", and a
-// comparison that reports differences between two identical collections is as
-// useless as one that reports none between two that differ.
+// periodic comparison, which had no test against a server at all.
 func TestTwoIdenticalCollectionsCompareEqual(t *testing.T) {
 	collection := harness.UniqueName("verify_mongo")
 	source, target := verifyCollections(t, collection)
@@ -404,8 +401,6 @@ func TestAMongoRepairMakesTheTargetMatch(t *testing.T) {
 
 // TestTheCollectionsAreDiscoveredWhenTheTaskListsNone records that a task with
 // no table mappings compares everything the source holds, rather than nothing.
-// A task configured to copy a whole database would otherwise be verified by a
-// comparison that silently checked no collections at all.
 func TestTheCollectionsAreDiscoveredWhenTheTaskListsNone(t *testing.T) {
 	collection := harness.UniqueName("verify_mongo_discover")
 	source, _ := verifyCollections(t, collection)

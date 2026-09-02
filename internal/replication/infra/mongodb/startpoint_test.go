@@ -72,11 +72,8 @@ func TestATimestampOfTheWrongTypeIsReported(t *testing.T) {
 
 // -------------------------------------------------- unrecoverable positions
 
-// TestALostChangeStreamPositionIsRecognised is the distinction the supervisor
-// acts on. The oplog is capped: a task stopped for longer than it covers comes
-// back to find its resume point gone. Retrying fails identically every time, and
-// the tempting repair — dropping the token and watching from now — silently
-// skips everything in between.
+// The oplog is capped: a task stopped for longer than it covers comes back to
+// find its resume point gone.
 func TestALostChangeStreamPositionIsRecognised(t *testing.T) {
 	for _, text := range []string{
 		"(ChangeStreamHistoryLost) Resume of change stream was not possible, as the resume point may no longer be in the oplog.",

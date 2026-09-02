@@ -9,10 +9,7 @@ import (
 	"testing"
 )
 
-// stubBin installs an executable stub on PATH under the given name. The stub
-// appends its arguments to <dir>/<name>.args, runs the supplied shell body, and
-// exits with the given status. Returns the directory so callers can read the
-// recorded arguments.
+// stubBin installs an executable stub on PATH under the given name.
 func stubBin(t *testing.T, dir, name, body string, exitCode int) {
 	t.Helper()
 

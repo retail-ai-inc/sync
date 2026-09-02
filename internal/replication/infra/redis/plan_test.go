@@ -6,8 +6,6 @@ import (
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
 )
 
-// markers builds a per-slot marker table with everything at zero except the
-// slots named.
 func markersWith(pairs map[int]int64) []int64 {
 	m := make([]int64, 16384)
 	for slot, at := range pairs {
@@ -28,14 +26,8 @@ func repairAt(slot int, offset int64, key string) *domain.Event {
 	return &domain.Event{Payload: &valueRepair{key: []byte(key), slot: slot, offset: offset}}
 }
 
-// TestACommandAlreadyOnTheTargetIsSkipped is the rule that makes replaying the
-// stream safe.
-//
 // After a restart the stream is re-read from a floor that is deliberately
-// behind the truth, so commands the target already has arrive again. Each
-// slot's marker is committed with that slot's data, so it is the one record
-// that cannot disagree with the target — anything at or before it has landed,
-// and replaying it would apply a non-idempotent command like INCR twice.
+// behind the truth, so commands the target already has arrive again.
 func TestACommandAlreadyOnTheTargetIsSkipped(t *testing.T) {
 	a := &Applier{}
 	jobs, err := a.plan([]*domain.Event{
@@ -62,10 +54,8 @@ func TestACommandAlreadyOnTheTargetIsSkipped(t *testing.T) {
 	}
 }
 
-// TestEachSlotBecomesItsOwnTransaction is the atomicity the Redis path can
-// actually offer. Keys in different slots cannot share a transaction on a
-// cluster, so the batch is grouped by slot and each group commits with its own
-// marker.
+// Keys in different slots cannot share a transaction on a cluster, so the
+// batch is grouped by slot and each group commits with its own marker.
 func TestEachSlotBecomesItsOwnTransaction(t *testing.T) {
 	a := &Applier{}
 	jobs, err := a.plan([]*domain.Event{
@@ -114,8 +104,6 @@ func TestARepairedKeyIsOnlyCopiedOnce(t *testing.T) {
 
 // TestARepairWithNoOffsetIsAlwaysDone: a repair that did not come from the
 // stream carries no offset, and comparing it against a marker would drop it.
-// Those are the repairs the reconciler asks for, and dropping one leaves the
-// difference it found unfixed.
 func TestARepairWithNoOffsetIsAlwaysDone(t *testing.T) {
 	a := &Applier{}
 	jobs, err := a.plan([]*domain.Event{

@@ -5,10 +5,9 @@ import (
 	"testing"
 )
 
-// TestAPositionSurvivesBeingWrittenDownAndReadBack is the round trip a restart
-// depends on. Every field has to come back: the replication id decides whether
-// a partial resync is even offered, and the value-phase window decides whether
-// a change is replayed by command or by re-reading the key.
+// Every field has to come back: the replication id decides whether a partial
+// resync is even offered, and the value-phase window decides whether a change
+// is replayed by command or by re-reading the key.
 func TestAPositionSurvivesBeingWrittenDownAndReadBack(t *testing.T) {
 	want := streamPosition{
 		ReplID:     "8a1c0f2b7d4e",
@@ -30,10 +29,9 @@ func TestAPositionSurvivesBeingWrittenDownAndReadBack(t *testing.T) {
 	}
 }
 
-// TestALargeOffsetIsNotRounded guards the one thing JSON gets wrong about
-// numbers. A Redis replication offset passes 2^53 on a busy source, and a
-// decoder that reads it as a float would round it — resuming a few bytes off,
-// which is either a repeated command or a skipped one.
+// A Redis replication offset passes 2^53 on a busy source, and a decoder that
+// reads it as a float would round it — resuming a few bytes off, which is
+// either a repeated command or a skipped one.
 func TestALargeOffsetIsNotRounded(t *testing.T) {
 	const offset int64 = 9007199254740993 // 2^53 + 1, the first integer a float64 cannot hold
 
@@ -65,11 +63,6 @@ func TestAnEmptyPositionAsksForEverything(t *testing.T) {
 
 // TestAPositionWithNoReplicationIdIsRefused is the case that would otherwise
 // resume from an offset belonging to a different history.
-//
-// An offset only means anything relative to the replication id it was taken
-// under. After a failover the id changes and the same number points somewhere
-// else entirely, so a stored position missing its id has to be refused rather
-// than trusted.
 func TestAPositionWithNoReplicationIdIsRefused(t *testing.T) {
 	_, err := decodePosition(`{"offset":12345}`)
 	if err == nil {
@@ -90,13 +83,8 @@ func TestUnreadablePositionIsRefused(t *testing.T) {
 	}
 }
 
-// TestTheValuePhaseEndsWhereTheCopyDid pins the rule that keeps an initial copy
-// from double-applying.
-//
-// While the stream is still inside the window the copy read, a change is
-// applied by re-reading the key rather than by replaying the command: replaying
-// an INCR that the copy already picked up would add it twice. Past the window,
-// commands are replayed as they came.
+// TestTheValuePhaseEndsWhereTheCopyDid pins the rule that keeps an initial
+// copy from double-applying.
 func TestTheValuePhaseEndsWhereTheCopyDid(t *testing.T) {
 	p := streamPosition{ReplID: "abc", Phase: phaseValue, ValueUntil: 1000}
 

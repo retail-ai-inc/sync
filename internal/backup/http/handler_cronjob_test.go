@@ -96,10 +96,9 @@ func TestBackupExecuteHandlerRejectsANonNumericID(t *testing.T) {
 	}
 }
 
-// TestTwoRunsOfOneJobGetDistinctIDs covers two submissions of the same job
-// inside one second. The id was the backup id and a one-second timestamp, so
-// both produced the same one and the second silently replaced the first's
-// record — the caller that submitted first then polled somebody else's run.
+// The id was the backup id and a one-second timestamp, so both produced the
+// same one and the second silently replaced the first's record — the caller
+// that submitted first then polled somebody else's run.
 func TestTwoRunsOfOneJobGetDistinctIDs(t *testing.T) {
 	app.ForgetRuns()
 	t.Cleanup(app.ForgetRuns)

@@ -192,9 +192,8 @@ func TestUpdateOAuthConfigRequiresAnAdminToken(t *testing.T) {
 	})
 }
 
-// TestTheAdminEndpointNeedsACredential is the fix for T-070 at the HTTP edge.
-// The session used to be a pair of package-level variables, so once anybody had
-// signed in as admin this handler issued an admin token to a caller who
+// The session used to be a pair of package-level variables, so once anybody
+// had signed in as admin this handler issued an admin token to a caller who
 // presented nothing at all.
 func TestTheAdminEndpointNeedsACredential(t *testing.T) {
 	db := useTempDB(t)
@@ -237,10 +236,9 @@ func TestTheAdminEndpointAnswersACredentialledCaller(t *testing.T) {
 	}
 }
 
-// TestOneCallersLogoutDoesNotSignAnybodyElseOut records that logging out is now
-// a client-side act: the token is the identity and nothing on the server holds
-// a session to clear. It used to clear the one session pair, so one client's
-// logout revoked the session every other client was riding on.
+// TestOneCallersLogoutDoesNotSignAnybodyElseOut records that logging out is
+// now a client-side act: the token is the identity and nothing on the server
+// holds a session to clear.
 func TestOneCallersLogoutDoesNotSignAnybodyElseOut(t *testing.T) {
 	db := useTempDB(t)
 	insertUser(t, db, "admin", "adminpw", "Admin", domain.AccessAdmin)

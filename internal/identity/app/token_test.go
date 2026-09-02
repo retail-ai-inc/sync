@@ -41,10 +41,7 @@ func TestValidateUserToken(t *testing.T) {
 
 // TestValidateUserTokenIsBoundToTheStoredAccessLevel records that the access
 // level is part of the token input, so changing a user's permissions
-// invalidates their current token. That is a reasonable property on its own,
-// but combined with the daily rotation it means tokens behave like short-lived
-// derivations rather than sessions: there is no way to revoke one without
-// changing the user's stored access level or waiting for midnight.
+// invalidates their current token.
 func TestValidateUserTokenIsBoundToTheStoredAccessLevel(t *testing.T) {
 	db := useTempDB(t)
 	insertUser(t, db, "alice", "secret", "Alice", "guest")
@@ -68,11 +65,9 @@ func TestValidateUserTokenIsBoundToTheStoredAccessLevel(t *testing.T) {
 	}
 }
 
-// TestValidateUserTokenScansEveryUser records that validation is a linear scan:
-// for each request it loads every user and recomputes that user's token until
-// one matches. Cost grows with the size of the user table on every
-// authenticated call, and each call also opens its own SQLite connection while
-// the pool is limited to one.
+// TestValidateUserTokenScansEveryUser records that validation is a linear
+// scan: for each request it loads every user and recomputes that user's token
+// until one matches.
 func TestValidateUserTokenScansEveryUser(t *testing.T) {
 	db := useTempDB(t)
 	for i := 0; i < 50; i++ {

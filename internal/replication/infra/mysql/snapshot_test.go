@@ -209,12 +209,9 @@ func TestTheBinlogConnectionFollowsTheDSN(t *testing.T) {
 
 // ------------------------------------------------- checkpoints and sources
 
-// TestACheckpointFromAnotherSourceIsIgnored covers the one way a binlog offset
-// can be actively harmful. A file and offset mean nothing on another server:
-// read against a different one they address unrelated bytes, and the read
-// succeeds, so the task resumes from somewhere arbitrary with nothing to show
-// that it happened. That is reachable by repointing a task at another source,
-// and by a task id being reused after the configuration database is restored.
+// A file and offset mean nothing on another server: read against a different
+// one they address unrelated bytes, and the read succeeds, so the task resumes
+// from somewhere arbitrary with nothing to show that it happened.
 func TestACheckpointFromAnotherSourceIsIgnored(t *testing.T) {
 	s := newSyncer(t)
 	s.cfg.SourceConnection = "u:p@tcp(osaka:3306)/shop"
@@ -292,11 +289,10 @@ func TestACheckpointWithNoSourceIsStillUsed(t *testing.T) {
 
 // ------------------------------------------------------------- row images
 
-// TestOnlyFullRowImagesAreAccepted is the guard against a silent corruption.
 // With anything but FULL the binlog carries only the columns that changed plus
 // the primary key, and the driver fills the rest with nils; the UPDATE this
 // syncer builds sets every column, so those nils go to the target as NULL over
-// values that never changed. The row counts still match and nothing errors.
+// values that never changed.
 func TestOnlyFullRowImagesAreAccepted(t *testing.T) {
 	for _, image := range []string{"FULL", "full", "Full"} {
 		if err := requireFullRowImage(image); err != nil {
@@ -341,12 +337,8 @@ func TestMariaDBIsNotAsked(t *testing.T) {
 
 // -------------------------------------------------- unrecoverable positions
 
-// TestAPurgedBinlogIsUnrecoverable is the distinction the supervisor acts on.
-// Cloud SQL expires binary logs on a schedule, so a task stopped for longer than
-// that comes back to find its offset gone. Retrying cannot help — the bytes are
-// not there — and looping on it hides the one thing an operator needs to know,
-// which is that a fresh copy is required and the replica is falling behind until
-// it is made.
+// Cloud SQL expires binary logs on a schedule, so a task stopped for longer
+// than that comes back to find its offset gone.
 func TestAPurgedBinlogIsUnrecoverable(t *testing.T) {
 	errors := []string{
 		"ERROR 1236 (HY000): Could not find first log file name in binary log index file",

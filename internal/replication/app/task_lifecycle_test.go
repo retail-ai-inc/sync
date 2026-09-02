@@ -121,11 +121,10 @@ func TestAnUpdateWipesWhateverTheRequestOmits(t *testing.T) {
 	}
 }
 
-// TestAnUpdateKeepsTheStoredNameAndStatus covers what omitting a field means on
-// an update. The create-time defaults used to be applied, so a request that only
-// meant to change the mappings renamed the task to "Sync Task" and stopped it —
-// while the backup update, for the same omission, read the stored name and
-// status back. The two endpoints disagreed about the same thing.
+// The create-time defaults used to be applied, so a request that only meant to
+// change the mappings renamed the task to "Sync Task" and stopped it — while
+// the backup update, for the same omission, read the stored name and status
+// back.
 func TestAnUpdateKeepsTheStoredNameAndStatus(t *testing.T) {
 	db := useTempTaskDB(t)
 	id := insertTask(t, db, 1, `{"taskName":"orders","type":"mongodb","status":"Running"}`)
@@ -225,11 +224,9 @@ func TestStartAndStopFlipTheStoredStatus(t *testing.T) {
 	}
 }
 
-// TestStartingATaskDoesNotStartASyncer records T-009 and T-010: the endpoints
-// write the status and nothing else. The syncers are constructed once, at
-// process start, from the configuration as it was then, so a task started here
-// does not begin replicating and a task stopped here keeps going until the
-// process restarts.
+// The syncers are constructed once, at process start, from the configuration
+// as it was then, so a task started here does not begin replicating and a task
+// stopped here keeps going until the process restarts.
 func TestStartingATaskDoesNotStartASyncer(t *testing.T) {
 	db := useTempTaskDB(t)
 	id := insertTask(t, db, 0, `{"taskName":"orders","type":"mongodb","status":"Stopped"}`)

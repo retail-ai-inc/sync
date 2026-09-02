@@ -71,8 +71,7 @@ func TestTheFingerprintNoticesAChange(t *testing.T) {
 
 // TestTheFingerprintIsSensitiveToTimestamps records that the bookkeeping
 // columns are part of it, so a write that only touches last_run_time restarts
-// that task. It is now one task rather than all of them, which is what makes
-// the remaining spurious restart tolerable.
+// that task.
 func TestTheFingerprintIsSensitiveToTimestamps(t *testing.T) {
 	touched := baseTask()
 	touched.LastRunTime = "2026-08-21 10:00:00"

@@ -9,14 +9,8 @@ import (
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
 )
 
-// TestAPurgedBinlogIsNotSomethingToRetry is the difference between waiting and
-// acting.
-//
 // Almost every stream failure is worth retrying: the network drops, the source
-// restarts, the connection comes back. A purged binlog is not — the position no
-// longer exists, so every attempt fails identically, and the only way forward
-// is a fresh copy that a human has to decide on. Retrying it forever instead
-// leaves the task looking alive while nothing replicates.
+// restarts, the connection comes back.
 func TestAPurgedBinlogIsNotSomethingToRetry(t *testing.T) {
 	r := &Reader{Labels: metrics.Labels{"task": t.Name()}}
 	defer metrics.Default.Forget(r.Labels)
@@ -98,12 +92,6 @@ func TestNoFailureIsNoFailure(t *testing.T) {
 
 // TestASourceWithoutGTIDsIsWarnedAboutAtStartup, because the alternative is
 // finding out during the failover this deployment exists for.
-//
-// A file-and-offset position only means something on the server that produced
-// it. After a failover to a new primary it either cannot be found or points at
-// unrelated bytes, and recovering means a fresh copy of a live payment
-// database. Replication works either way, so this is a warning and not a
-// refusal — but a silent one would be useless.
 func TestASourceWithoutGTIDsIsWarnedAboutAtStartup(t *testing.T) {
 	warning := describeGTIDMode("OFF", false)
 	if warning == "" {

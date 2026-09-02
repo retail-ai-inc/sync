@@ -18,8 +18,4 @@ func TestNewCronManagerKeepsItsArguments(t *testing.T) {
 // executeCommand and executeCommandStreaming are deliberately untested: they
 // have no callers anywhere in the repository (executeCommand only calls
 // executeCommandStreaming, and nothing calls executeCommand), and the comment
-// on executeCommand marks it deprecated. Exercising them is worse than
-// pointless — their drain goroutines are never joined while cmd.Wait() runs,
-// which os/exec documents as incorrect, so any test that reads the collected
-// output is an unsynchronised read and fails the package under -race. See
-// T-090 in docs/TEST_FINDINGS.md.
+// on executeCommand marks it deprecated.

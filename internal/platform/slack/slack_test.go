@@ -161,11 +161,9 @@ func TestIsConfigured(t *testing.T) {
 	}
 }
 
-// TestWithoutTheScriptTheWebhookIsUsed covers every deployment that does not
-// ship cloudbuild.sh at one of three hardcoded paths. IsConfigured returned
-// false, SendNotification returned nil, and the only trace was a debug line — so
-// every alert, including "replication has stopped", was dropped while the caller
-// was told it had been sent.
+// IsConfigured returned false, SendNotification returned nil, and the only
+// trace was a debug line — so every alert, including "replication has
+// stopped", was dropped while the caller was told it had been sent.
 func TestWithoutTheScriptTheWebhookIsUsed(t *testing.T) {
 	chdirWithoutScript(t)
 

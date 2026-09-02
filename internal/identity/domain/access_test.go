@@ -26,8 +26,7 @@ func TestIsValidAccess(t *testing.T) {
 
 // TestUserIsNotAValidAccessLevel records that the only levels a user may be
 // given are admin and guest, while the login path stores whatever the users
-// table holds. A row whose access column says "user" therefore authenticates
-// and is treated as authenticated, but no request can set that value.
+// table holds.
 func TestUserIsNotAValidAccessLevel(t *testing.T) {
 	if IsValidAccess("user") {
 		t.Fatal(`"user" is accepted now; the vocabulary appears to have grown, ` +
@@ -75,10 +74,9 @@ func TestIsDeactivated(t *testing.T) {
 	}
 }
 
-// TestAnEmptyStatusIsNotDeactivated records that a users row with a NULL status
-// signs in: the reader substitutes "active" for NULL, and IsDeactivated only
-// refuses the literal "inactive". An account can therefore never be locked out
-// by clearing its status.
+// TestAnEmptyStatusIsNotDeactivated records that a users row with a NULL
+// status signs in: the reader substitutes "active" for NULL, and IsDeactivated
+// only refuses the literal "inactive".
 func TestAnEmptyStatusIsNotDeactivated(t *testing.T) {
 	if IsDeactivated("") {
 		t.Fatal("an empty status is refused now; assert the new rule")

@@ -13,11 +13,6 @@ import (
 
 // fakeMaster is enough of a Redis master to exercise the handshake and the
 // stream parser.
-//
-// The script is a list of steps: each reads the command it expects and writes
-// what a master would answer. A real master is used in the integration tests;
-// this is for the shapes a real one is hard to provoke — a refused PSYNC, a
-// diskless data set, a keepalive in the wrong place.
 type fakeMaster struct {
 	t        *testing.T
 	listener net.Listener
@@ -177,10 +172,6 @@ func TestAFullResyncSetsTheStartingOffset(t *testing.T) {
 
 // TestAResumeAsksForTheByteAfterWhatWasRead pins the one place the protocol is
 // off by one from the position.
-//
-// A replica asks for the first byte it wants, which is one past what it holds.
-// Asking for the offset itself would re-deliver a byte and put every subsequent
-// offset one behind the master's.
 func TestAResumeAsksForTheByteAfterWhatWasRead(t *testing.T) {
 	master := startFakeMaster(t, []string{
 		"+OK\r\n", "+OK\r\n", "+CONTINUE\r\n",
@@ -256,11 +247,8 @@ func TestANewReplicationIDFromAPartialResyncIsAdopted(t *testing.T) {
 	}
 }
 
-// TestAManagedInstanceRefusingPSYNCStopsRatherThanRetries covers Memorystore and
-// its equivalents, which disable the replication commands.
-//
-// Retrying cannot help, and the fallback is a different reader entirely, so this
-// has to be unrecoverable rather than a transient failure the supervisor spins on.
+// TestAManagedInstanceRefusingPSYNCStopsRatherThanRetries covers Memorystore
+// and its equivalents, which disable the replication commands.
 func TestAManagedInstanceRefusingPSYNCStopsRatherThanRetries(t *testing.T) {
 	master := startFakeMaster(t, []string{
 		"+OK\r\n", "+OK\r\n",
@@ -437,13 +425,9 @@ func TestTheOffsetIsTheSumOfTheBytesReceived(t *testing.T) {
 	}
 }
 
-// TestArgumentsSurviveTheNextCommand covers a bug this parser is easy to write:
-// handing out arguments that point into the scratch buffer the next command
-// overwrites.
-//
-// The applier holds a whole batch before writing any of it, so every command in
-// the batch has to still mean what it said when it was read. Aliased arguments
-// would corrupt writes in a way no test of a single command could see.
+// TestArgumentsSurviveTheNextCommand covers a bug this parser is easy to
+// write: handing out arguments that point into the scratch buffer the next
+// command overwrites.
 func TestArgumentsSurviveTheNextCommand(t *testing.T) {
 	stream, first, second := twoCommandStream(t,
 		resp("SET", "first-key", "first-value"),
@@ -511,9 +495,6 @@ func TestABinaryArgumentIsCarriedUnchanged(t *testing.T) {
 
 // TestAQuietSourceIsReportedAsADeadLink covers the case monitoring cannot see
 // otherwise: a connection that has gone away without closing.
-//
-// A master pings its replicas every ten seconds, so silence is not a quiet
-// database — it is a link that needs re-establishing.
 func TestAQuietSourceIsReportedAsADeadLink(t *testing.T) {
 	master := startFakeMaster(t, []string{
 		"+OK\r\n", "+OK\r\n", "+FULLRESYNC abc 0\r\n",
@@ -598,13 +579,9 @@ func TestGarbageInTheStreamIsRefusedRatherThanGuessedAt(t *testing.T) {
 	}
 }
 
-// TestKeepalivesBeforeTheAnswerToPSYNCAreSkipped covers what a real master does
-// and a scripted one does not.
-//
 // A master that has to wait for its background save sends newlines to hold the
 // connection open, and they arrive *before* the answer to PSYNC — not only
-// before the data set. Reading one line and treating it as the reply passed
-// every unit test here and failed against the first real server.
+// before the data set.
 func TestKeepalivesBeforeTheAnswerToPSYNCAreSkipped(t *testing.T) {
 	master := startFakeMaster(t, []string{
 		"+OK\r\n", "+OK\r\n",
@@ -621,14 +598,9 @@ func TestKeepalivesBeforeTheAnswerToPSYNCAreSkipped(t *testing.T) {
 	}
 }
 
-// TestTheDataSetIsAcknowledgedSoTheStreamStarts covers the other thing a
-// scripted master will never tell you.
-//
-// A data set streamed without a length gives the master no way to know when the
-// replica finished loading it, so it holds the command stream back until the
-// first REPLCONF ACK. Skip the acknowledgement and the connection stays open,
-// the master's offset climbs, and not one command is ever delivered — which is
-// indistinguishable from a source nobody is writing to.
+// A data set streamed without a length gives the master no way to know when
+// the replica finished loading it, so it holds the command stream back until
+// the first REPLCONF ACK.
 func TestTheDataSetIsAcknowledgedSoTheStreamStarts(t *testing.T) {
 	marker := strings.Repeat("m", 40)
 	after := []byte("$EOF:" + marker + "\r\nDATA" + marker)

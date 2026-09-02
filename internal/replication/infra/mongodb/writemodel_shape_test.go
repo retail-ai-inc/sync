@@ -7,13 +7,6 @@ import (
 )
 
 // TestANestedDocumentIsReadWhicheverShapeTheDriverGaveIt.
-//
-// The same change stream event reaches this code as bson.M, bson.D, bson.Raw or
-// a plain map depending on how it was decoded and which path it came down —
-// a document read from the stream, one built for a repair, one round-tripped
-// through a checkpoint. A shape this misses returns nil, and a nil update
-// document writes nothing while reporting success: the replica quietly stops
-// receiving a field, and only a comparison much later finds it.
 func TestANestedDocumentIsReadWhicheverShapeTheDriverGaveIt(t *testing.T) {
 	raw, err := bson.Marshal(bson.M{"city": "Osaka", "postcode": "530-0001"})
 	if err != nil {
@@ -45,10 +38,7 @@ func TestANestedDocumentIsReadWhicheverShapeTheDriverGaveIt(t *testing.T) {
 	}
 }
 
-// TestReadingADocumentDoesNotShareItsStorage. The map is handed to the driver to
-// build an update from; if it aliased the event's own map, a later change to
-// either would show up in the other, and the write would carry a value the
-// source never had at that point in the stream.
+// TestReadingADocumentDoesNotShareItsStorage.
 func TestReadingADocumentDoesNotShareItsStorage(t *testing.T) {
 	original := bson.M{"city": "Osaka"}
 
