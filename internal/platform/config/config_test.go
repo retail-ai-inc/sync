@@ -361,8 +361,6 @@ func TestLoadSyncTasksNumericDurationSurvives(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------- encrypted credentials
-
 // TestASealedPasswordIsOpenedBeforeItIsUsed keeps the encryption invisible to
 // the replication path, which would otherwise connect with a ciphertext for a
 // password.

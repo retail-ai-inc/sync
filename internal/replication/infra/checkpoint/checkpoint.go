@@ -32,8 +32,6 @@ type Store interface {
 	Save(ctx context.Context, key, payload string) error
 }
 
-// ------------------------------------------------------------------- SQL
-
 type SQLStore struct {
 	DB *sql.DB
 	// Schema is the database the table lives in; empty addresses it unqualified.
@@ -146,8 +144,6 @@ func (s *SQLStore) upsert() string {
 		s.qualified(), s.arg(1), s.arg(2), s.arg(3))
 }
 
-// --------------------------------------------------------------- MongoDB
-
 type MongoStore struct {
 	Database *mongo.Database
 	TaskID   int
@@ -191,8 +187,6 @@ func (s *MongoStore) SaveIn(ctx context.Context, key, payload string) error {
 	return s.Save(ctx, key, payload)
 }
 
-// ----------------------------------------------------------------- Redis
-
 type RedisStore struct {
 	Client goredis.UniversalClient
 	TaskID int
@@ -223,8 +217,6 @@ func (s *RedisStore) Save(ctx context.Context, key, payload string) error {
 	}
 	return nil
 }
-
-// ----------------------------------------------------------------- layers
 
 // Layered reads from the first store that has an answer and writes to all of
 // them. It exists for the migration: a deployment upgrading from the file-only
@@ -309,8 +301,6 @@ func Decode(payload string, v interface{}) (bool, error) {
 	}
 	return true, nil
 }
-
-// ------------------------------------------------------------------ file
 
 // FileStore keeps a checkpoint in a file on local disk, which is where every
 // checkpoint used to live. It stays for one reason: an existing deployment has

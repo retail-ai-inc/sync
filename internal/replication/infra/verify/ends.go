@@ -13,8 +13,6 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
-// --------------------------------------------------------------- MongoDB
-
 // MongoEnd streams and looks up documents of one collection.
 //
 // The key is the BSON encoding of the document's _id rather than its printed

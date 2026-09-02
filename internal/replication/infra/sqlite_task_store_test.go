@@ -640,8 +640,6 @@ func TestFaultCarriesItsStageAndCause(t *testing.T) {
 	}
 }
 
-// ------------------------------------------------------ credentials at rest
-
 // withSealedCredentials configures a key for the duration of one test, so the
 // store encrypts what it writes.
 func withSealedCredentials(t *testing.T) {
@@ -767,8 +765,6 @@ func TestWithNoKeyTheStoreBehavesAsItAlwaysDid(t *testing.T) {
 		t.Errorf("the stored document = %s", stored)
 	}
 }
-
-// ------------------------------------------------------- stored credentials
 
 // withKey points the credential keeper at a fixed test key for one test. The
 // package-level keeper is built from the environment at init, so a test that

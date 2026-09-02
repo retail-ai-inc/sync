@@ -174,8 +174,6 @@ func payment(seq int) bson.M {
 	}
 }
 
-// ------------------------------------------------------------- the cluster
-
 // A driver given directConnection stops writing after an election instead of
 // following the new primary, so production must discover the topology — and
 // until now nothing had checked that the syncer's own connection string does.
@@ -221,8 +219,6 @@ func TestTheClusterIsFoundWithoutPinningANode(t *testing.T) {
 	}
 	t.Logf("cluster: mongos, %d shards", len(list))
 }
-
-// ---------------------------------------------------------------- the sync
 
 // TestAShardedCollectionIsCopiedAndFollowed is the whole path in one: a
 // snapshot of a collection spread over three shards, then the changes made
@@ -386,8 +382,6 @@ func TestTheCheckpointIsOnTheTargetAndResumesFromIt(t *testing.T) {
 		return nil
 	})
 }
-
-// ------------------------------------------------------------------ the lag
 
 // Whatever that interval is when the source region disappears is what is lost.
 func TestTheLagIsMeasuredUnderLoad(t *testing.T) {

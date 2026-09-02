@@ -122,8 +122,6 @@ func TestAMultiLineGTIDSetIsFlattened(t *testing.T) {
 	}
 }
 
-// -------------------------------------------------------- checkpoint file
-
 func TestTheCheckpointFileRoundTrips(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nested", "pos.json")
 	want := binlogCheckpoint{
@@ -160,8 +158,6 @@ func TestAnUnwritableCheckpointPathIsReported(t *testing.T) {
 		t.Error("writing under a regular file returned no error")
 	}
 }
-
-// -------------------------------------------------------------- source TLS
 
 // TestTheBinlogConnectionFollowsTheDSN covers the connection database/sql never
 // sees: canal dials the source itself, so the DSN's tls parameter has to be
@@ -206,8 +202,6 @@ func TestTheBinlogConnectionFollowsTheDSN(t *testing.T) {
 		})
 	}
 }
-
-// ------------------------------------------------- checkpoints and sources
 
 // A file and offset mean nothing on another server: read against a different
 // one they address unrelated bytes, and the read succeeds, so the task resumes
@@ -287,8 +281,6 @@ func TestACheckpointWithNoSourceIsStillUsed(t *testing.T) {
 	}
 }
 
-// ------------------------------------------------------------- row images
-
 // With anything but FULL the binlog carries only the columns that changed plus
 // the primary key, and the driver fills the rest with nils; the UPDATE this
 // syncer builds sets every column, so those nils go to the target as NULL over
@@ -334,8 +326,6 @@ func TestMariaDBIsNotAsked(t *testing.T) {
 		t.Errorf("checkRowImage for MariaDB = %v", err)
 	}
 }
-
-// -------------------------------------------------- unrecoverable positions
 
 // Cloud SQL expires binary logs on a schedule, so a task stopped for longer
 // than that comes back to find its offset gone.

@@ -220,8 +220,6 @@ func keysOf(batch []Row) []string {
 	return keys
 }
 
-// ------------------------------------------------------------------- keys
-
 // encodeKey renders a row's key columns as one string. Each part carries its
 // length, so two rows whose key columns run together the same way — ("ab",
 // "c") and ("a", "bc") — do not collide, and a NULL is distinguished from an

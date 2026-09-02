@@ -108,8 +108,6 @@ func TestATaskWithNothingToReadIsRefused(t *testing.T) {
 	}
 }
 
-// ------------------------------------------------------------- record keys
-
 func eventFor(action string, pk []int, rows ...[]interface{}) *canal.RowsEvent {
 	table := &schema.Table{
 		Schema:    "shop",
@@ -173,8 +171,6 @@ func TestAKeylessTableHasNoRecordKey(t *testing.T) {
 	}
 }
 
-// ------------------------------------------------------------- operations
-
 func TestTheOperationIsReadOffTheStatement(t *testing.T) {
 	cases := map[string]domain.Op{
 		"INSERT INTO a.b (x) VALUES (?)":   domain.OpInsert,
@@ -189,8 +185,6 @@ func TestTheOperationIsReadOffTheStatement(t *testing.T) {
 		}
 	}
 }
-
-// ------------------------------------------------------- column reordering
 
 func parseOne(t *testing.T, query string) ast.StmtNode {
 	t.Helper()
@@ -276,8 +270,6 @@ func TestAMoveOnlyMattersAfterRowsHaveBeenApplied(t *testing.T) {
 		t.Errorf("error = %v, want it to say what to do", err)
 	}
 }
-
-// ------------------------------------------------- closing the stream
 
 // TestHandingOverAfterCloseDoesNotPanic is a regression test for a crash that
 // took the whole process down, every other task with it.  canal.Close calls

@@ -21,8 +21,6 @@ import (
 
 // What the integration tests are built out of.
 
-// ------------------------------------------------------------------ clients
-
 // redisAt opens a client for one or more addresses.
 func redisAt(t *testing.T, addrs []string) goredis.UniversalClient {
 	t.Helper()
@@ -90,8 +88,6 @@ func widenBacklogs(t *testing.T, source goredis.UniversalClient) {
 		t.Fatalf("widen the backlog: %v", err)
 	}
 }
-
-// ------------------------------------------------------------------- the rig
 
 // rig is one assembly of the pipeline — one runner per source shard — built and
 // thrown away per crash.
@@ -247,8 +243,6 @@ func (r *rig) reachCommandPhase(t *testing.T, source, target goredis.UniversalCl
 	}
 }
 
-// ------------------------------------------------------------------ workload
-
 // workload writes commands that cannot be replayed safely.
 func workload(ctx context.Context, client goredis.UniversalClient, spread int) func() int {
 	inner, cancel := context.WithCancel(ctx)
@@ -276,8 +270,6 @@ func workload(ctx context.Context, client goredis.UniversalClient, spread int) f
 		return <-written
 	}
 }
-
-// ---------------------------------------------------------------- comparison
 
 // compare checks every key of the source against the target, by value rather
 // than by serialisation: two servers may legitimately encode the same list or

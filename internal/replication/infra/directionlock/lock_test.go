@@ -79,8 +79,6 @@ func claim(taskID int, role Role, peer string, age time.Duration) Claim {
 	}
 }
 
-// ---------------------------------------------------------------- acquire
-
 func TestAnUnclaimedPairIsAcquired(t *testing.T) {
 	source, target := newStore("tokyo:3306/shop"), newStore("osaka:3306/shop")
 	g := guardFor(source, target)
@@ -245,8 +243,6 @@ func TestTheStalenessWindowIsLongerThanTheHeartbeat(t *testing.T) {
 	}
 }
 
-// -------------------------------------------------------------- failures
-
 func TestAnUnreadableTargetStopsTheTask(t *testing.T) {
 	target := newStore("osaka:3306/shop")
 	target.readErr = errors.New("connection refused")
@@ -285,8 +281,6 @@ func TestAnUnwritableClaimStopsTheTask(t *testing.T) {
 	}
 }
 
-// ------------------------------------------------------------- heartbeat
-
 func TestKeepAliveStopsWithTheContext(t *testing.T) {
 	g := guardFor(newStore("tokyo:3306/shop"), newStore("osaka:3306/shop"))
 
@@ -304,8 +298,6 @@ func TestKeepAliveStopsWithTheContext(t *testing.T) {
 		t.Fatal("KeepAlive did not stop when the context was cancelled")
 	}
 }
-
-// ---------------------------------------------------------------- claims
 
 func TestFreshnessIsMeasuredFromTheHeartbeat(t *testing.T) {
 	c := claim(1, RoleSource, "peer", time.Minute)
@@ -345,8 +337,6 @@ func TestTheStalenessWindowCanBeOverridden(t *testing.T) {
 		t.Errorf("staleAfter() = %v", got)
 	}
 }
-
-// ---------------------------------------------------------------- release
 
 // Without it the claims sit there until they go stale, so an operator who has
 // stopped Tokyo → Osaka and wants to start Osaka → Tokyo is refused for the
@@ -430,8 +420,6 @@ func TestAFailedReleaseIsReportedButStillTriesBothEnds(t *testing.T) {
 		t.Error("the reachable endpoint's claim was left behind")
 	}
 }
-
-// ------------------------------------------------------------------- hold
 
 type recordingWarner struct {
 	mu       sync.Mutex
@@ -571,8 +559,6 @@ func TestHoldStopsTheHeartbeatWithTheContext(t *testing.T) {
 		t.Logf("goroutines: %d before, %d after", before, after)
 	}
 }
-
-// ------------------------------------------------- two instances, one task
 
 // A claim for this task was skipped outright, so that a task restarted after a
 // crash could take its own claim back without waiting a quarter of an hour.

@@ -173,8 +173,6 @@ func TestTheRegistryIsSafeForConcurrentUse(t *testing.T) {
 	}
 }
 
-// ------------------------------------------------------------- the syncer API
-
 func TestTheSyncerHelpersRecordIntoTheDefaultRegistry(t *testing.T) {
 	labels := Labels{"task": "helpers-test"}
 	t.Cleanup(func() { Default.Forget(labels) })
@@ -211,8 +209,6 @@ func TestTheSyncerHelpersRecordIntoTheDefaultRegistry(t *testing.T) {
 	}
 }
 
-// ----------------------------------------------------------------- handler
-
 func TestTheHandlerServesTheExposition(t *testing.T) {
 	labels := Labels{"task": "handler-test"}
 	t.Cleanup(func() { Default.Forget(labels) })
@@ -231,8 +227,6 @@ func TestTheHandlerServesTheExposition(t *testing.T) {
 		t.Errorf("body =\n%s", rec.Body.String())
 	}
 }
-
-// ---------------------------------------------------------------- snapshot
 
 // TestASnapshotReportsWhatAScrapeWouldSee is what lets the lag alerter act on
 // the same numbers Prometheus reads, rather than keeping a second copy of them
@@ -278,8 +272,6 @@ func TestASnapshotDoesNotShareItsLabels(t *testing.T) {
 		t.Errorf("the registry's labels were rewritten through a snapshot: %+v", again[0])
 	}
 }
-
-// ------------------------------------------------------------- supervision
 
 // TestARestartIsCounted matters because one restart is noise and a hundred is
 // an incident, and only a counter tells them apart.

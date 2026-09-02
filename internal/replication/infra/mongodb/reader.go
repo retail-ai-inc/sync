@@ -512,8 +512,6 @@ func (r *Reader) mappedDatabases() []string {
 	return dbs
 }
 
-// ------------------------------------------------------------- event reading
-
 func namespaceOf(raw bson.Raw) (domain.Namespace, bool) {
 	value, err := raw.LookupErr("ns")
 	if err != nil {
@@ -588,8 +586,6 @@ func transactionOf(raw bson.Raw) string {
 	}
 	return fmt.Sprintf("%x/%d", session.Value, n)
 }
-
-// ------------------------------------------------------------------- tokens
 
 // streamPosition is how a MongoDB stream's position is stored. Two kinds, not
 // interchangeable, which is what this type exists to stop anybody forgetting:

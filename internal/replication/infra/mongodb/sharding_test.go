@@ -97,8 +97,6 @@ func keyOn(t *testing.T, fields ...string) *shardKey {
 	return &shardKey{Key: raw}
 }
 
-// ------------------------------------------------- addressing a document
-
 // An upsert on a sharded collection has to name the whole shard key.
 func TestTheFilterCarriesTheShardKey(t *testing.T) {
 	address := documentAddress{Paths: []string{"merchant_id"}}

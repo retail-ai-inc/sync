@@ -173,8 +173,6 @@ func nullable(v sql.NullString) interface{} {
 	return v.String
 }
 
-// ---------------------------------------------------------------- repair
-
 type SQLRepairer struct {
 	Source *SQLEnd
 	Target *SQLEnd

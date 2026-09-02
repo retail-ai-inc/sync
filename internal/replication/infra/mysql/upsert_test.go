@@ -28,8 +28,6 @@ func keyedTarget(t *testing.T) *sql.DB {
 	return db
 }
 
-// ------------------------------------------------------ statement rendering
-
 func TestTheMySQLInsertIsAnUpsert(t *testing.T) {
 	got := upsertStatement(dialectMySQL, "shop", "orders", []string{"id", "customer"}, 1)
 
@@ -78,8 +76,6 @@ func TestAnEmptyBatchStillRendersOneRow(t *testing.T) {
 		t.Errorf("statement = %q, want %q", got, want)
 	}
 }
-
-// ------------------------------------------------------------ idempotency
 
 // The binlog position is written periodically, so a restart replays the last
 // stretch of events.

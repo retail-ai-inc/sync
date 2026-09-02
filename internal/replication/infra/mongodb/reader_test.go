@@ -32,8 +32,6 @@ func changeDoc(db, coll, op string, key bson.D) bson.D {
 	}
 }
 
-// ------------------------------------------------------------------ keys
-
 // Two changes to one document may never be reordered against each other, and
 // on a sharded collection two documents can share an _id while differing in
 // the shard key.
@@ -74,8 +72,6 @@ func TestAnEventWithNoDocumentKeyHasNoKey(t *testing.T) {
 		t.Errorf("key = %q, want empty", got)
 	}
 }
-
-// ---------------------------------------------------------- transactions
 
 // TestEventsOfOneTransactionShareAnIdentity is what makes a transaction's
 // boundary visible from outside, and so what lets a batch avoid being cut inside
@@ -121,8 +117,6 @@ func TestAnEventOutsideATransactionIsItsOwnBoundary(t *testing.T) {
 	}
 }
 
-// ----------------------------------------------------------- namespaces
-
 func TestTheNamespaceIsReadOffTheEvent(t *testing.T) {
 	raw := rawEvent(t, changeDoc("shop", "orders", "insert", bson.D{{Key: "_id", Value: "a"}}))
 	ns, ok := namespaceOf(raw)
@@ -149,8 +143,6 @@ func TestTheOperationIsReadOffTheEvent(t *testing.T) {
 		}
 	}
 }
-
-// ------------------------------------------------------------- filtering
 
 // TestOneStreamStillOnlyReplicatesWhatTheTaskNames is what makes a single
 // deployment-wide stream safe: it sees everything and carries only the mapped
@@ -252,8 +244,6 @@ func TestATaskThatNamesNothingReplicatesEverythingInItsDatabase(t *testing.T) {
 		}
 	}
 }
-
-// ------------------------------------------------------- transaction buffering
 
 func txEvent(t *testing.T, coll, id, session string, number int64) bson.Raw {
 	t.Helper()
@@ -398,8 +388,6 @@ func quietLog() *logrus.Logger {
 	l.SetLevel(logrus.PanicLevel)
 	return l
 }
-
-// ------------------------------------------------- the write filter
 
 // Every write here is an upsert, because replication is replayed.
 func TestTheWriteFilterCarriesTheShardKey(t *testing.T) {

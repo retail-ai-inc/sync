@@ -441,8 +441,6 @@ func (s *Stream) Close() error {
 	return err
 }
 
-// ------------------------------------------------------------------ plumbing
-
 func (s *Stream) call(args ...[]byte) (string, error) {
 	s.writing.Lock()
 	err := s.write(args)

@@ -320,8 +320,6 @@ func TestExtractSequenceName(t *testing.T) {
 	}
 }
 
-// ------------------------------------------------------- the position store
-
 // TestThePositionIsRecordedOnTheTarget is the reason the store is layered. The
 // file alone was the problem: the syncer runs beside the source, so the outage
 // this setup exists to survive takes the record of what has been applied with

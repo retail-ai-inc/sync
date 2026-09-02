@@ -78,8 +78,6 @@ func countRows(t *testing.T, conn *sql.DB, table string) int {
 	return n
 }
 
-// ---------------------------------------------------------------- row counting
-
 func TestGetRowCountWithContext(t *testing.T) {
 	conn := useMonitoringDB(t)
 	if _, err := conn.Exec(`INSERT INTO monitoring_log (db_type) VALUES ('mysql'), ('mongodb')`); err != nil {
@@ -179,8 +177,6 @@ func TestATableNameThatIsNotOneIsRefused(t *testing.T) {
 	}
 }
 
-// ------------------------------------------------------------ monitoring_log
-
 func TestStoreMonitoringLogWritesEveryColumn(t *testing.T) {
 	conn := useMonitoringDB(t)
 
@@ -236,8 +232,6 @@ func TestStoreMonitoringLogSwallowsAMissingTable(t *testing.T) {
 	// No panic, no error, no way for the caller to notice.
 	storeMonitoringLog(1, "mysql", "s", "orders", 10, "t", "orders", 10, "row_count_minutely")
 }
-
-// --------------------------------------------------- changestream_statistics
 
 func TestStoreChangeStreamStatisticsUpserts(t *testing.T) {
 	conn := useMonitoringDB(t)
@@ -421,8 +415,6 @@ func TestStoreChangeStreamStatisticsSeparatesTasks(t *testing.T) {
 	}
 }
 
-// ------------------------------------------------------------- daily reset
-
 func TestResetDailyStatisticsIsANoOpWithNoRecords(t *testing.T) {
 	conn := useMonitoringDB(t)
 
@@ -573,5 +565,3 @@ func TestAnUnreadableTimestampIsStillNotSilent(t *testing.T) {
 		}
 	}
 }
-
-// ------------------------------------------------------ in-memory reset

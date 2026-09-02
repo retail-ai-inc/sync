@@ -357,8 +357,6 @@ func (r *Reader) converter() *MyEventHandler {
 	return h
 }
 
-// ------------------------------------------------------- canal callbacks
-
 func (r *Reader) OnRow(e *canal.RowsEvent) error {
 	before := len(r.tx)
 	if err := r.conv.OnRow(e); err != nil {

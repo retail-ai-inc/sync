@@ -129,8 +129,6 @@ func keyOf(id string) string {
 	return encodeKey([]sql.NullString{{String: id, Valid: true}})
 }
 
-// ------------------------------------------------------------- comparison
-
 func TestTwoIdenticalTablesAgree(t *testing.T) {
 	source := ordersEnd(t, "source", [2]string{"1", "100"}, [2]string{"2", "200"})
 	target := ordersEnd(t, "target", [2]string{"1", "100"}, [2]string{"2", "200"})
@@ -337,8 +335,6 @@ func TestAnUnreadableTargetIsReported(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------- composite keys
-
 // TestACompositeKeyIsCompared is why the key is encoded rather than taken as a
 // column value. A payment ledger's tables are commonly keyed by a pair, and
 // refusing them left exactly the tables that matter most unverifiable.
@@ -424,8 +420,6 @@ func TestACompositeKeyIsRepaired(t *testing.T) {
 	}
 }
 
-// -------------------------------------------------------------------- keys
-
 // TestTheKeySeparatesItsParts pins why each part carries its length: without it
 // ("ab", "c") and ("a", "bc") encode the same, and two different ledger entries
 // would compare as one.
@@ -487,8 +481,6 @@ func TestAMalformedKeyIsReported(t *testing.T) {
 	}
 }
 
-// ----------------------------------------------------------------- digests
-
 // TestTheDigestSeparatesTheCells pins why each cell carries its length: without
 // it ("ab", "c") and ("a", "bc") hash the same, and a row whose values shifted
 // between two columns would compare as identical.
@@ -533,8 +525,6 @@ func TestValuesAndCellsAgree(t *testing.T) {
 		t.Error("the two digest helpers disagree about the same row")
 	}
 }
-
-// ------------------------------------------------------------------ repair
 
 // upsertFor renders the statement the repairer writes with. SQLite spells it
 // this way; the syncer supplies its own for MySQL.
@@ -717,8 +707,6 @@ func TestComparingWithoutRepairingChangesNothing(t *testing.T) {
 	}
 }
 
-// ------------------------------------------------------------------- shape
-
 func TestTheEndNamesItself(t *testing.T) {
 	if got := (&SQLEnd{Table: "orders"}).Name(); got != "orders" {
 		t.Errorf("Name() = %q", got)
@@ -787,8 +775,6 @@ func TestDifferencesSortByKey(t *testing.T) {
 		t.Errorf("order = %+v", differences)
 	}
 }
-
-// --------------------------------------------------------- document digests
 
 func TestTheFieldOrderDoesNotChangeTheDigest(t *testing.T) {
 	first := canonical(bson.M{"a": 1, "b": 2})
@@ -900,8 +886,6 @@ func TestAnUnreadableIdKeyIsReported(t *testing.T) {
 		}
 	}
 }
-
-// ------------------------------------------------------- describing a key
 
 // TestAKeyIsDescribedForAPerson covers what an operator actually sees. The
 // encoded forms exist to round-trip, and an alert naming a row as

@@ -123,8 +123,6 @@ func readMonitoringLog(t *testing.T, conn *sql.DB) []monitoringRow {
 	return out
 }
 
-// ------------------------------------------------------------------- MySQL
-
 func TestCountAndLogMySQLRecordsBothSides(t *testing.T) {
 	conn := useMonitoringDB(t)
 
@@ -240,8 +238,6 @@ func TestAnUnreachableSourceWritesNothing(t *testing.T) {
 	}
 }
 
-// ----------------------------------------------------------------- MongoDB
-
 func TestCountAndLogMongoDBRecordsBothSides(t *testing.T) {
 	conn := useMonitoringDB(t)
 
@@ -300,8 +296,6 @@ func TestCountAndLogMongoDBRecordsBothSides(t *testing.T) {
 		t.Errorf("db_type = %q, want MONGODB", found.DBType)
 	}
 }
-
-// ------------------------------------------------------------------- Redis
 
 func TestCountAndLogRedisRecordsDatabaseSizes(t *testing.T) {
 	conn := useMonitoringDB(t)
@@ -415,8 +409,6 @@ func TestARedisTaskWithoutMappingsIsStillMonitored(t *testing.T) {
 	}
 }
 
-// ------------------------------------------------------------ dispatch
-
 func TestCountAndLogTablesIgnoresUnknownTypes(t *testing.T) {
 	conn := useMonitoringDB(t)
 
@@ -472,8 +464,6 @@ func TestTheMonitorAcceptsCasingTheSyncerRejects(t *testing.T) {
 		t.Errorf("db_type = %q, want MYSQL", got[0].DBType)
 	}
 }
-
-// -------------------------------------------------------- monitoring loop
 
 func TestStartRowCountMonitoringWritesOnEachTick(t *testing.T) {
 	conn := useMonitoringDB(t)
@@ -602,8 +592,6 @@ func recordingLogger() (*logrus.Logger, *bytes.Buffer) {
 	l.SetFormatter(&logrus.JSONFormatter{})
 	return l, &out
 }
-
-// ---------------------------------------------------------------- PostgreSQL
 
 func postgresDSN(endpoint, database string) string {
 	return fmt.Sprintf("postgres://root:root@%s/%s?sslmode=disable", endpoint, database)

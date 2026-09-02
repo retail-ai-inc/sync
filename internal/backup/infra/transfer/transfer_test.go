@@ -115,8 +115,6 @@ func TestExecuteExternalZipRejectsAMissingArchive(t *testing.T) {
 	}
 }
 
-// ------------------------------------------------------------ gsutil wiring
-
 // archive writes a local file for an upload to carry, and returns its path and
 // size.
 func archive(t *testing.T, name string) (string, int) {

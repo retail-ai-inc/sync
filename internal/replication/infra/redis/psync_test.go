@@ -143,8 +143,6 @@ func dialFake(t *testing.T, m *fakeMaster) *Stream {
 	return stream
 }
 
-// ------------------------------------------------------------------ handshake
-
 // TestAFullResyncSetsTheStartingOffset covers a first connection: the master
 // names the history and the offset its data set was taken at, and the stream
 // counts from there.
@@ -295,8 +293,6 @@ func TestWrongCredentialsStopRatherThanRetry(t *testing.T) {
 	}
 }
 
-// ------------------------------------------------------------- the data set
-
 // TestALengthPrefixedDataSetIsConsumedWithoutBeingParsed covers the ordinary
 // full resync. The bytes have to leave the wire because the command stream is
 // behind them, and nothing here understands the format on purpose.
@@ -386,8 +382,6 @@ func TestNewlinesWhileTheMasterForksAreSkipped(t *testing.T) {
 		t.Fatalf("SkipRDB: %v", err)
 	}
 }
-
-// ------------------------------------------------------------ the stream
 
 // TestTheOffsetIsTheSumOfTheBytesReceived is the arithmetic everything else
 // depends on. The master counts the bytes it wrote into its backlog; this side

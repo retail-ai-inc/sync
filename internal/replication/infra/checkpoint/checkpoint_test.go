@@ -48,8 +48,6 @@ func (s *stubStore) Save(_ context.Context, key, payload string) error {
 	return nil
 }
 
-// ------------------------------------------------------------------- SQL
-
 func TestTheSQLStoreCreatesItsOwnTable(t *testing.T) {
 	s := sqlStore(t, 1)
 
@@ -167,8 +165,6 @@ func TestAClosedDatabaseIsReported(t *testing.T) {
 	}
 }
 
-// ------------------------------------------------------------------ file
-
 func TestTheFileStoreRoundTrips(t *testing.T) {
 	s := &FileStore{Path: filepath.Join(t.TempDir(), "nested", "pos.json")}
 	ctx := context.Background()
@@ -242,8 +238,6 @@ func TestAnUnwritableFileIsReported(t *testing.T) {
 		t.Error("writing under a regular file returned no error")
 	}
 }
-
-// ---------------------------------------------------------------- layered
 
 // TestTheFirstStoreWithACheckpointWins is the migration path: a deployment
 // upgrading from the file-only version has its position on disk and nothing on
@@ -362,8 +356,6 @@ func TestOneUnreadableStoreDoesNotHideAnother(t *testing.T) {
 		t.Errorf("payload = %q", got)
 	}
 }
-
-// ---------------------------------------------------------------- payloads
 
 func TestAPayloadRoundTrips(t *testing.T) {
 	type position struct {

@@ -157,8 +157,6 @@ func describe(sample []verify.Difference) string {
 	return strings.Join(parts, ", ")
 }
 
-// -------------------------------------------------------------------- SQL
-
 func checkSQLTask(ctx context.Context, task config.SyncConfig, n notifier, log *logrus.Logger) {
 	source, err := sql.Open("mysql", task.SourceConnection)
 	if err != nil {
@@ -283,8 +281,6 @@ func mysqlUpsert(schema, table string, columns []string) string {
 		name, strings.Join(columns, ", "), strings.Join(placeholders, ", "),
 		strings.Join(assignments, ", "))
 }
-
-// ---------------------------------------------------------------- MongoDB
 
 func checkMongoTask(ctx context.Context, task config.SyncConfig, n notifier, log *logrus.Logger) {
 	source, err := mongo.Connect(mongooptions.Client().ApplyURI(task.SourceConnection))

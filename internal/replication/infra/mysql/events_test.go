@@ -145,8 +145,6 @@ func rows(t *testing.T, db *sql.DB) []string {
 	return out
 }
 
-// -------------------------------------------------------------- dispatch
-
 func TestOnRowAppliesAnInsert(t *testing.T) {
 	db := sqliteTarget(t, ordersSchema)
 	h := newHandler(t, db, mapTable("orders", "orders"))
@@ -419,8 +417,6 @@ func TestAnUnknownActionStopsReplication(t *testing.T) {
 	}
 }
 
-// -------------------------------------------------------- keyless tables
-
 func keylessTable() *schema.Table {
 	table := sourceTable("orders", "id", "customer", "email")
 	table.PKColumns = nil
@@ -530,8 +526,6 @@ func TestAnInsertWithNoPrimaryKeyStillRuns(t *testing.T) {
 	}
 }
 
-// ------------------------------------------------------------- masking
-
 func TestAnInsertMasksASecuredField(t *testing.T) {
 	db := sqliteTarget(t, ordersSchema)
 	h := newHandler(t, db, securedTable("orders", "orders", "email"))
@@ -601,8 +595,6 @@ func TestTheDeleteKeyIsNotMasked(t *testing.T) {
 		t.Errorf("rows = %v, want the row deleted with the raw key", got)
 	}
 }
-
-// ---------------------------------------------------------- error flag
 
 // failingEvent is a row event the target cannot apply, because it names a
 // column the target table does not have.
@@ -701,8 +693,6 @@ func TestThePositionIsNotWrittenAfterAFailure(t *testing.T) {
 			"past a row that never reached the target", got.Pos)
 	}
 }
-
-// ------------------------------------------------------ position saving
 
 func TestOnPosSyncedWritesThePosition(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nested", "pos.json")
@@ -874,8 +864,6 @@ func TestTheHandlerNamesItself(t *testing.T) {
 		t.Errorf("String() = %q", got)
 	}
 }
-
-// -------------------------------------------------------- batch insert
 
 func TestBatchInsertWritesEveryRow(t *testing.T) {
 	db := sqliteTarget(t, ordersSchema)

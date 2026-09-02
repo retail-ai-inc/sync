@@ -74,7 +74,6 @@ func rowCountAction(srcOK, tgtOK bool) string {
 	return actionCountFailed
 }
 
-// ------------------------------------------------------------------
 // Added function: Insert monitoring results into the monitoring_log table
 func storeMonitoringLog(syncTaskID int, dbType, srcDB, srcTable string, srcCount int64,
 	tgtDB, tgtTable string, tgtCount int64, action string) {

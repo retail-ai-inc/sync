@@ -244,8 +244,6 @@ func TestARepairMakesTheTargetMatch(t *testing.T) {
 	}
 }
 
-// ------------------------------------------------------------------ MongoDB
-
 // verifyMongoTask describes a comparison of one collection against a live
 // MongoDB pair.
 func verifyMongoTask(t *testing.T, collection string) config.SyncConfig {

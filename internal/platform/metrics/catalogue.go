@@ -5,8 +5,6 @@ package metrics
 
 import "time"
 
-// ---------------------------------------------------------------- connector
-
 // Whether the task is running at all, and whether it is running because
 // somebody restarted it. Debezium answers this through Kafka Connect's
 // connector state rather than an MBean; the distinction between "stopped and
@@ -53,8 +51,6 @@ func setBool(name, help string, labels Labels, on bool) {
 	}
 	Default.SetGauge(name, help, labels, v)
 }
-
-// ---------------------------------------------------------------- streaming
 
 // What the stream is delivering and how far behind it is. This is the context
 // an operator watches once replication is steady.
@@ -232,8 +228,6 @@ func withLabel(labels Labels, name, value string) Labels {
 	return out
 }
 
-// ------------------------------------------------------------------ position
-
 // Where in the source's log the task has got to. Only a number can be graphed,
 // so the position is bytes; slow-changing strings go on an info series and the
 // GTID set stays in the logs, where it cannot leak cardinality.
@@ -275,8 +269,6 @@ func SetSourceInfo(labels Labels, file, server string) {
 	Default.SetGauge(SourceInfo, helpSourceInfo, with, 1)
 }
 
-// -------------------------------------------------------------------- queue
-
 // The reader's hand-off to the applier. Debezium exposes QueueTotalCapacity,
 // QueueRemainingCapacity, CurrentQueueSizeInBytes and MaxQueueSizeInBytes; a
 // queue that is persistently full is the signal that the target, not the
@@ -311,8 +303,6 @@ func SetQueue(labels Labels, used, capacity int) {
 func SetQueueBytes(labels Labels, bytes int64) {
 	Default.SetGauge(QueueBytes, helpQueueBytes, labels, float64(bytes))
 }
-
-// ----------------------------------------------------------------- snapshot
 
 // The initial copy. Debezium's snapshot context answers "is it running, how far
 // has it got, did it finish or give up" — questions this codebase could not
@@ -365,8 +355,6 @@ func SnapshotFinished(labels Labels, completed bool, elapsed float64) {
 	}
 }
 
-// ----------------------------------------------------------- schema history
-
 // Schema changes. Debezium's schema-history context reports what it has
 // recovered and applied; here the number that matters is how many DDL
 // statements have been carried to the target and when the last one landed,
@@ -400,8 +388,6 @@ func CountSchemaRefused(labels Labels, reason string) {
 		withLabel(labels, "reason", reason), 1)
 }
 
-// ------------------------------------------------------- source retention
-
 // How long a stopped task has before its position is unusable. On Memorystore
 // the backlog measured five to twenty kilobytes — a fraction of a second at
 // load — so this decides whether a restart is routine or means a re-copy.
@@ -419,8 +405,6 @@ func SetRetention(labels Labels, window, headroom float64) {
 	Default.SetGauge(RetentionWindowSeconds, helpRetentionWindow, labels, window)
 	Default.SetGauge(RetentionHeadroomSeconds, helpRetentionHeadroom, labels, headroom)
 }
-
-// ------------------------------------------------------------ correctness
 
 // What comparing the two sides found, and what had to be set aside. Every
 // stream defect found here was found by comparing, not by the stream saying so.
@@ -461,8 +445,6 @@ func SetUnreplicated(labels Labels, count float64) {
 	Default.SetGauge(Unreplicated, helpUnreplicated, labels, count)
 }
 
-// ----------------------------------------------------------- Redis stream
-
 // The Redis relay measures progress in stream bytes, because a Redis
 // replication stream carries no timestamps. These are the byte-denominated
 // equivalents of the position metrics above, kept under their own names because
@@ -500,8 +482,6 @@ func SetAppliedOffset(labels Labels, offset int64) {
 	Default.SetGauge(AppliedOffsetBytes, helpAppliedOffset, labels, float64(offset))
 	SetAppliedPosition(labels, offset)
 }
-
-// ------------------------------------------------------------------ batch
 
 // What one batch cost. Debezium has no batch: it emits records one at a time
 // and Kafka does the grouping. Here a batch is the unit of atomicity, so its

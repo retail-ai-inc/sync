@@ -45,8 +45,6 @@ func (q schemaQuerier) QueryContext(ctx context.Context, query string, args ...i
 		strings.ReplaceAll(query, "information_schema.tables", "information_schema_tables"), args...)
 }
 
-// ------------------------------------------------------------------ MySQL
-
 func TestTheBaseTablesOfOneDatabaseAreListed(t *testing.T) {
 	db := informationSchema(t,
 		[3]string{"shop", "orders", "BASE TABLE"},
@@ -120,8 +118,6 @@ func TestAnUnreadableSchemaIsReported(t *testing.T) {
 	}
 }
 
-// ----------------------------------------------------------------- naming
-
 func TestTheSyncersOwnNamesAreRecognised(t *testing.T) {
 	for name, want := range map[string]bool{
 		"_sync_direction_lock": true,
@@ -140,8 +136,6 @@ func TestTheSyncersOwnNamesAreRecognised(t *testing.T) {
 		})
 	}
 }
-
-// ------------------------------------------------------------------ added
 
 // TestOnlyTheNewNamesAreReported is what turns a periodic rescan into "start
 // replicating the collections that have appeared" rather than "start them all

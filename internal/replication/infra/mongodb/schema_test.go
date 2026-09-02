@@ -147,8 +147,6 @@ func TestTheSchemaChangeIsAppliedUnderTheMappedName(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------- positions
-
 // The snapshot pins a cluster time and the reader opens the stream from the
 // stored position.
 func TestAPinnedClusterTimeIsRecognisedAsOne(t *testing.T) {
@@ -203,8 +201,6 @@ func TestAPositionThatIsNeitherIsRefused(t *testing.T) {
 		t.Fatal("a position holding neither kind decoded as though it held one")
 	}
 }
-
-// ------------------------------------------------------------ index keys
 
 // Asked to decode a document into an interface, the driver's v1 gave a bson.M
 // here and its v2 gives a bson.D.

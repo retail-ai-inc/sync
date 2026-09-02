@@ -200,8 +200,6 @@ func alreadySharded(err error) bool {
 	return command.Code == 23 || command.HasErrorMessage("already enabled")
 }
 
-// ------------------------------------------------- addressing a document
-
 // A write to a sharded collection has to say which shard it is for.  mongos
 // routes by the shard key, so a filter that carries only the _id cannot be
 // routed: an updateOne or a deleteOne is broadcast to every shard, and an

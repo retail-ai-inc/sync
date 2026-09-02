@@ -57,8 +57,6 @@ func deleteMessage(relID uint32, oldTup *pglogrepl.TupleData) *pglogrepl.DeleteM
 	return msg
 }
 
-// ------------------------------------------------------------------- insert
-
 func TestHandleInsertWritesTheRow(t *testing.T) {
 	db := targetDB(t, ordersSchema)
 	rel := relation(1, "main", "orders", "id", "customer", "email")
@@ -248,8 +246,6 @@ func TestMaskingIsNotAppliedToANullColumn(t *testing.T) {
 	}
 }
 
-// ------------------------------------------------------------------- update
-
 func TestHandleUpdateRewritesTheRow(t *testing.T) {
 	db := targetDB(t, ordersSchema)
 	if _, err := db.Exec(`INSERT INTO orders VALUES ('1','Ada','ada@example.com')`); err != nil {
@@ -399,8 +395,6 @@ func TestAnUpdateMasksTheSameFieldsAnInsertDoes(t *testing.T) {
 	}
 }
 
-// ------------------------------------------------------------------- delete
-
 func TestADeleteWithNoKeyMatchesOnEveryColumn(t *testing.T) {
 	db := targetDB(t, ordersSchema)
 	if _, err := db.Exec(`INSERT INTO orders VALUES ('1','Ada','x'), ('2','Grace','y')`); err != nil {
@@ -531,8 +525,6 @@ func TestHandleDeleteSkipsAnEmptyOldTuple(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------- where clauses
-
 func TestTheClauseBindsItsValues(t *testing.T) {
 	rel := relation(1, "main", "orders", "id", "customer")
 
@@ -583,8 +575,6 @@ func TestAKeyThatIsNullIsMatchedAsNull(t *testing.T) {
 		t.Errorf("query = %q, want the null column matched as NULL", query)
 	}
 }
-
-// -------------------------------------------------------------- dispatch
 
 func TestProcessMessageReportsUnparseableWAL(t *testing.T) {
 	st := stateWith(nil)

@@ -382,8 +382,6 @@ func (b *Buffer) trimLocked() error {
 	return nil
 }
 
-// ------------------------------------------------------------------- reading
-
 type Cursor struct {
 	buffer *Buffer
 
@@ -600,8 +598,6 @@ func (c *Cursor) Close() error {
 	c.file = nil
 	return err
 }
-
-// ------------------------------------------------------------------- segments
 
 func segmentNames(dir string) ([]string, error) {
 	entries, err := os.ReadDir(dir)

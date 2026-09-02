@@ -134,8 +134,6 @@ func TestBuildDSNRoundTripsDatabaseName(t *testing.T) {
 	}
 }
 
-// -------------------------------------------------------------------- TLS
-
 // TestTheDefaultIsEncryptionWhereItCannotBreakAnything records the choice made
 // for the two engines whose drivers can negotiate: MySQL asks for "preferred"
 // and PostgreSQL for "prefer", so a server offering a certificate is used
@@ -212,8 +210,6 @@ func TestAnExplicitSSLModeWins(t *testing.T) {
 		t.Errorf("postgresql DSN = %q", got)
 	}
 }
-
-// ---------------------------------------------------------------- MongoDB
 
 // Pinning the driver to one node disables topology discovery, so it neither
 // finds the rest of the replica set nor follows an election: against the Osaka
@@ -322,8 +318,6 @@ func TestCredentialsAreEscaped(t *testing.T) {
 		t.Errorf("mongodb DSN = %q; the credential separator is ambiguous", got)
 	}
 }
-
-// ------------------------------------------------------------------ shape
 
 // TestTheQueryOrderIsStable matters because config change detection compares
 // the built strings: an unstable order would restart every task every ten

@@ -233,8 +233,6 @@ func TestTheMongoDBCounterRecordsMinusOneForAFailedCount(t *testing.T) {
 	}
 }
 
-// ------------------------------------------------------------- slack
-
 // TestANegativeCountSkipsTheNotification records the guard that keeps a failed
 // count from being reported as a discrepancy: -1 is the counters' failure value,
 // and a notification built from it would claim a difference of billions.

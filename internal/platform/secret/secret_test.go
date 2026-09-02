@@ -34,8 +34,6 @@ func withDefault(t *testing.T, k *Keeper) {
 	t.Cleanup(func() { Default = previous })
 }
 
-// ------------------------------------------------------------------- keys
-
 func TestNoKeyMeansNoKeeper(t *testing.T) {
 	t.Setenv("SYNC_CONFIG_KEY", "")
 
@@ -91,8 +89,6 @@ func TestAShortKeyIsRefused(t *testing.T) {
 		})
 	}
 }
-
-// ------------------------------------------------------------ seal and open
 
 func TestAValueRoundTrips(t *testing.T) {
 	k := keeper(t)
@@ -236,8 +232,6 @@ func TestAMalformedSealedValueIsReported(t *testing.T) {
 		})
 	}
 }
-
-// -------------------------------------------------------- task documents
 
 const taskConfig = `{
   "type": "mysql",

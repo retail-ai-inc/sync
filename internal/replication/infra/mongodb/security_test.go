@@ -8,8 +8,6 @@ import (
 	"github.com/retail-ai-inc/sync/internal/platform/config"
 )
 
-// ------------------------------------------- the shape the driver decodes into
-
 // TestMaskingReachesADocumentTheDriverDecodedAsABsonD is a regression test for
 // a security setting that stopped working without saying so.
 func TestMaskingReachesADocumentTheDriverDecodedAsABsonD(t *testing.T) {

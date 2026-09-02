@@ -75,8 +75,6 @@ func TestAnEngineThisDoesNotReplicateIsStillUnknown(t *testing.T) {
 	}
 }
 
-// ------------------------------------------------------------ supervision
-
 // stubTask replaces a real syncer with one that blocks until its context is
 // cancelled, so the supervisor's lifecycle can be exercised without a database.
 func stubTask(started chan<- int) func(config.SyncConfig, *config.Config, *logrus.Logger) func(context.Context) error {
@@ -232,8 +230,6 @@ func drain(t *testing.T, started <-chan int, n int) {
 		}
 	}
 }
-
-// ----------------------------------------------------- supervised restart
 
 // exitingTask returns a syncer that stops by itself with the given error, and
 // counts how many times it was started.

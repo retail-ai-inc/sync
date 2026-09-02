@@ -20,8 +20,6 @@ import (
 // being replaced, moved to another region, or run twice by mistake.
 const tableName = "_sync_direction_lock"
 
-// ------------------------------------------------------------------- SQL
-
 type SQLStore struct {
 	DB *sql.DB
 	// Schema is the database the table lives in. It may be empty, in which case
@@ -138,8 +136,6 @@ func (s *SQLStore) Remove(ctx context.Context, taskID int) error {
 	return nil
 }
 
-// --------------------------------------------------------------- MongoDB
-
 type MongoStore struct {
 	Database *mongo.Database
 	Address  string
@@ -199,8 +195,6 @@ func (s *MongoStore) Remove(ctx context.Context, taskID int) error {
 	}
 	return nil
 }
-
-// ----------------------------------------------------------------- Redis
 
 type RedisStore struct {
 	Client  goredis.UniversalClient

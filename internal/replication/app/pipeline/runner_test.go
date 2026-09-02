@@ -14,8 +14,6 @@ import (
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
 )
 
-// ------------------------------------------------------------------ fixtures
-
 // fakeReader hands out a fixed list of events and then blocks until cancelled,
 // which is what a live stream with nothing to say looks like.
 type fakeReader struct {
@@ -192,8 +190,6 @@ func runFor(t *testing.T, r *Runner, d time.Duration) error {
 	}
 }
 
-// ------------------------------------------------------- transaction cutting
-
 // A transaction split across two batches shows the target the order without
 // its payment — a state the source was never in, and one nothing downstream is
 // written to cope with.
@@ -266,8 +262,6 @@ func TestARunawayTransactionIsRefusedRatherThanBuffered(t *testing.T) {
 	}
 }
 
-// ------------------------------------------------------------ position moves
-
 // TestThePositionIsNotRecordedWhenTheApplyFails is what keeps a restart from
 // resuming past changes that never reached the target.
 func TestThePositionIsNotRecordedWhenTheApplyFails(t *testing.T) {
@@ -318,8 +312,6 @@ func TestAnApplierThatCannotCommitThePositionHasItRecordedForIt(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------- heartbeats
-
 // TestAHeartbeatIsNotWrittenToTheTarget covers the event the syncer makes up
 // itself. Applying it would replicate the syncer's own bookkeeping into the
 // payment data.
@@ -354,8 +346,6 @@ func TestAHeartbeatStillMovesThePosition(t *testing.T) {
 		t.Errorf("recorded position %q, want hb1", got)
 	}
 }
-
-// ------------------------------------------------------------------- gauges
 
 // The applied lag used to be set only when a batch landed, so a task that had
 // stopped applying left it frozen at whatever it last was.
@@ -422,8 +412,6 @@ func gauge(t *testing.T, name string, labels metrics.Labels) float64 {
 	t.Fatalf("no sample for %s", name)
 	return 0
 }
-
-// ------------------------------------------------------------------ snapshot
 
 // TestTheSnapshotPinsBeforeItCopies is the ordering that decides whether the
 // writes made during the copy belong to anybody. Reading the position
@@ -511,8 +499,6 @@ func TestAQuietSourceDoesNotLookLikeALag(t *testing.T) {
 			"an hour old is not a lag", got)
 	}
 }
-
-// ------------------------------------------------------- retention headroom
 
 type windowedReader struct {
 	*fakeReader
@@ -1070,8 +1056,6 @@ func TestPermanentApplyFailureIsDecidedBySQLState(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------- what the stream carried
-
 func counter(t *testing.T, name string, labels metrics.Labels) float64 {
 	t.Helper()
 	for _, s := range metrics.Default.Snapshot(name) {
@@ -1200,8 +1184,6 @@ func TestAnOrdinaryMongoDBFailureStaysRetryable(t *testing.T) {
 		}
 	}
 }
-
-// ------------------------------------------------------------------ stopping
 
 // driverApplier refuses a call on a cancelled context, which is what every
 // database driver does and what the fixtures above do not: fakeApplier ignores

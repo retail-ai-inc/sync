@@ -230,8 +230,6 @@ func TestTheRefusalSaysWhy(t *testing.T) {
 	}
 }
 
-// ----------------------------------------------------------------- probes
-
 func TestTheProbesAnswer(t *testing.T) {
 	for name, handler := range map[string]http.HandlerFunc{
 		"healthz": Health,

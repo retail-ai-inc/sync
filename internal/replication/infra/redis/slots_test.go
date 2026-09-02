@@ -68,8 +68,6 @@ func TestCRC16IsXMODEM(t *testing.T) {
 	}
 }
 
-// ------------------------------------------------------------- the slot table
-
 // TestEverySlotHasATag is the table's basic obligation: a position marker has to
 // be placeable in any slot, because the source decides which slots see writes.
 func TestEverySlotHasATag(t *testing.T) {
@@ -122,8 +120,6 @@ func TestTheTagsAreShort(t *testing.T) {
 		}
 	}
 }
-
-// ------------------------------------------------------------- marker naming
 
 func TestAMarkerIsRecognisable(t *testing.T) {
 	key := OffsetKey(1234, 7)

@@ -90,8 +90,6 @@ func TestAnEventWithoutAWriteModelIsSkipped(t *testing.T) {
 	}
 }
 
-// ------------------------------------------------------------- target names
-
 func TestTheTargetNameComesFromTheMapping(t *testing.T) {
 	a := &Applier{Mappings: []config.DatabaseMapping{
 		{Tables: []config.TableMapping{{SourceTable: "orders", TargetTable: "orders_archive"}}},
@@ -126,8 +124,6 @@ func TestTheTransactionIsOnByDefault(t *testing.T) {
 		t.Error("the zero value skips the transaction; the default has to be the safe one")
 	}
 }
-
-// ------------------------------------------------- cross-collection writes
 
 // TestAReplaceIsCarriedAsACrossCollectionWrite covers the mapping the 8.0
 // bulkWrite command needs: the same write, addressed by a namespace given

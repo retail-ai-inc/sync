@@ -185,8 +185,6 @@ func TestTheRepairStatementIsAnUpsert(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------- primary keys
-
 func keyUsage(t *testing.T, rows ...[4]string) *sql.DB {
 	t.Helper()
 
@@ -284,8 +282,6 @@ func TestATableWithNoPrimaryKeyIsRefused(t *testing.T) {
 		t.Error("a table with no primary key was accepted")
 	}
 }
-
-// ------------------------------------------------------------- scheduling
 
 func TestStartConsistencyChecksIsANoOpWhenOff(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())

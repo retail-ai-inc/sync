@@ -300,8 +300,6 @@ func (a *Applier) readRepairs(ctx context.Context, job work) ([]*repairedValue, 
 	return readValues(ctx, a.Source, job.repairs)
 }
 
-// ------------------------------------------------------------------- helpers
-
 func flatten(runs [][]*domain.Event) []*domain.Event {
 	if len(runs) == 1 {
 		return runs[0]

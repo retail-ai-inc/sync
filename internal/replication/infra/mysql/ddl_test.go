@@ -29,8 +29,6 @@ func query(sql string) *replication.QueryEvent {
 	return &replication.QueryEvent{Schema: []byte("shop"), Query: []byte(sql)}
 }
 
-// ------------------------------------------------------------- planning
-
 func TestAnAddedColumnIsRewrittenForTheTarget(t *testing.T) {
 	h := newHandler(t, nil, mapTable("orders", "orders"))
 
@@ -287,8 +285,6 @@ func TestAnUnparseableStatementIsReported(t *testing.T) {
 	}
 }
 
-// -------------------------------------------------------------- OnDDL
-
 func TestOnDDLAppliesTheChangeToTheTarget(t *testing.T) {
 	db := sqliteTarget(t, ordersSchema)
 	h := newHandler(t, db, mapTable("orders", "orders"))
@@ -415,8 +411,6 @@ func TestADDLWithNoTargetConnectionIsReported(t *testing.T) {
 		t.Errorf("error = %v", err)
 	}
 }
-
-// -------------------------------------------------------------- discovery
 
 // Every table it sees is replicated, including one created after the task
 // started — which used simply not to be replicated, with no warning anywhere.

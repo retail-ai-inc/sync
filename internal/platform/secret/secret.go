@@ -128,8 +128,6 @@ func (k *Keeper) Open(stored string) (string, error) {
 
 func IsSealed(stored string) bool { return strings.HasPrefix(stored, prefix) }
 
-// ---------------------------------------------------------- task documents
-
 // credentialKeys are the fields of a task's connection settings that are worth
 // protecting. The host and the database name are not secrets and an operator
 // reading the file needs to be able to tell which task is which.

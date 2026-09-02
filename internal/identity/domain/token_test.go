@@ -30,8 +30,6 @@ func claimsOf(t *testing.T, token string) tokenClaims {
 	return claims
 }
 
-// ------------------------------------------------------------- the secret
-
 // TestAConfiguredSecretIsUsed pins the one supported way of setting the signing
 // key.
 func TestAConfiguredSecretIsUsed(t *testing.T) {
@@ -75,8 +73,6 @@ func TestTheEphemeralSecretIsReported(t *testing.T) {
 	// is only that the state is readable at all, because startup logs it.
 	_ = SecretIsEphemeral()
 }
-
-// -------------------------------------------------------------- the token
 
 func TestATokenNamesItsBearer(t *testing.T) {
 	token := GenerateUserToken("alice", "guest")
@@ -197,8 +193,6 @@ func TestATokenVariesByIdentity(t *testing.T) {
 	}
 }
 
-// ------------------------------------------------------------- admin token
-
 // TestGenerateAdminTokenEqualsAdminUserToken records that the admin token is
 // not a distinct credential: it is the user token for the pair ("admin",
 // "admin").
@@ -233,8 +227,6 @@ func TestValidateAdminToken(t *testing.T) {
 		})
 	}
 }
-
-// -------------------------------------------------------------- the header
 
 func TestExtractTokenFromHeader(t *testing.T) {
 	tests := []struct {

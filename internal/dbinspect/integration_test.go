@@ -305,8 +305,6 @@ func TestGetMySQLSchemaOnTheSeededTables(t *testing.T) {
 	}
 }
 
-// ------------------------------------------------------------- MongoDB
-
 func openSchemaMongo(t *testing.T) *mongo.Client {
 	t.Helper()
 

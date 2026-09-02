@@ -19,8 +19,6 @@ func hello(t *testing.T, doc bson.M) bson.Raw {
 	return raw
 }
 
-// ----------------------------------------------------------- cluster time
-
 func TestTheClusterTimeComesFromTheReply(t *testing.T) {
 	want := bson.Timestamp{T: 1755800000, I: 7}
 
@@ -69,8 +67,6 @@ func TestATimestampOfTheWrongTypeIsReported(t *testing.T) {
 		t.Fatal("a non-timestamp cluster time returned no error")
 	}
 }
-
-// -------------------------------------------------- unrecoverable positions
 
 // The oplog is capped: a task stopped for longer than it covers comes back to
 // find its resume point gone.

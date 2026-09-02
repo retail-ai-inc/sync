@@ -71,8 +71,6 @@ func mysqlBackupConfig(format, compression, gcsPath string) ExecutorBackupConfig
 	return cfg
 }
 
-// ------------------------------------------------------- mysqldump wiring
-
 func TestExecuteExternalMySQLDumpBuildsItsArguments(t *testing.T) {
 	binDir := stubPATH(t)
 	stubBin(t, binDir, "mysqldump", "echo '-- dump'", 0)
@@ -279,8 +277,6 @@ func TestExecuteExternalMySQLDumpReportsAnUncreatableOutput(t *testing.T) {
 	stubWasNotInvoked(t, binDir, "mysqldump")
 }
 
-// ------------------------------------------------------------- zip wiring
-
 // TestAnUploadThatDidNotLandIsNotASuccess covers the entry a backup list holds.
 // gsutil's exit status used to be the only signal, so a gsutil that exits 0
 // without doing anything — or a local file that was never written — was recorded
@@ -344,8 +340,6 @@ func TestAnUploadThatDidNotLandIsNotASuccess(t *testing.T) {
 		}
 	})
 }
-
-// ------------------------------------------------- the full MySQL workflow
 
 func TestTheMySQLBackupWorkflowRunsAllThreeSteps(t *testing.T) {
 	binDir := stubPATH(t)
@@ -517,8 +511,6 @@ func indexOfArg(args []string, want string) int {
 	return -1
 }
 
-// ------------------------------------------------ mongoexport workflow
-
 func mongoBackupConfig(gcsPath string) ExecutorBackupConfig {
 	var cfg ExecutorBackupConfig
 	cfg.SourceType = "mongodb"
@@ -655,8 +647,6 @@ func TestExecuteExternalMongoExportWithOptionsAppliesAQuery(t *testing.T) {
 		t.Errorf("the query was not passed: %s", joined)
 	}
 }
-
-// -------------------------------------------------------- CSV export path
 
 func TestExecuteExternalMySQLCSVPipesThroughPython(t *testing.T) {
 	binDir := stubPATH(t)

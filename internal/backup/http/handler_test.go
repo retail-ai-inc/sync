@@ -40,8 +40,6 @@ func backupConfig(t *testing.T, conn *sql.DB, id int) map[string]interface{} {
 	return cfg
 }
 
-// ------------------------------------------------------------- BackupRun
-
 func emptyTaskDB(t *testing.T) {
 	t.Helper()
 	isolateCrontab(t)
@@ -109,8 +107,6 @@ func TestBackupRunHandlerActuallyRunsTheJob(t *testing.T) {
 	// so it has to finish before that is taken away.
 	settle(t, taskID)
 }
-
-// ---------------------------------------------------------- BackupUpdate
 
 func TestBackupUpdateHandlerReplacesTheConfig(t *testing.T) {
 	conn := useTempTaskDB(t)
