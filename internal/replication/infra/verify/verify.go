@@ -1,5 +1,5 @@
-// Package verify compares a replicated table against its source. Replication
-// reports that it applied what it read.
+// Package verify compares a replicated table against its source, because
+// replication only reports that it applied what it read.
 package verify
 
 import (
@@ -13,22 +13,19 @@ import (
 	"strings"
 )
 
-// DefaultChunkSize is how many rows are read from each side at a time. It is a
-// compromise: larger chunks mean fewer round trips, smaller ones mean less held
-// in memory while comparing a table that does not fit in it.
+// DefaultChunkSize is how many rows are read from each side at a time: larger
+// means fewer round trips, smaller means less held in memory.
 const DefaultChunkSize = 1000
 
-// DefaultReportLimit caps how many differing keys are named. A comparison that
-// finds a million differences has told the operator what they need to know by
-// the hundredth; carrying the rest would turn a report into a data dump.
+// DefaultReportLimit caps how many differing keys are named. The hundredth has
+// told the operator what they need; the rest would be a data dump.
 const DefaultReportLimit = 100
 
 // Row is one row as the comparison sees it: what identifies it, and a hash of
 // everything else.
 type Row struct {
-	// Key identifies the row. It is only ever tested for equality, never
-	// ordered, so it may be any rendering that is one-to-one with the row's
-	// identity — which is what lets a composite primary key be used at all.
+	// Key is only ever tested for equality, never ordered, so any one-to-one
+	// rendering will do — which is what lets a composite primary key be used.
 	Key string
 	// Digest is a hash of the row's contents.
 	Digest string
@@ -46,8 +43,8 @@ const (
 	// Missing: the source has the row and the target does not. This is the one
 	// that means data loss.
 	Missing Kind = "missing"
-	// Extra: the target has a row the source does not. Either a delete was lost
-	// or somebody wrote to the replica.
+	// Extra: the target has a row the source does not — a lost delete, or somebody
+	// wrote to the replica.
 	Extra Kind = "extra"
 	// Differing: both sides have the row and its contents disagree.
 	Differing Kind = "differing"
@@ -57,7 +54,7 @@ type Result struct {
 	// SourceRows and TargetRows are how many rows each side held.
 	SourceRows int64
 	TargetRows int64
-	// Missing, Extra and Differing count every difference found, even the ones
+	// Missing, Extra and Differing count every difference found, including those
 	// past the report limit.
 	Missing   int64
 	Extra     int64
@@ -67,8 +64,8 @@ type Result struct {
 	Sample []Difference
 	// Truncated says the sample is not the whole story.
 	Truncated bool
-	// Repaired and RepairFailed count what a repair pass managed. They are zero
-	// when the comparison was only asked to look.
+	// Repaired and RepairFailed count what a repair pass managed; zero when the
+	// comparison was only asked to look.
 	Repaired     int64
 	RepairFailed int64
 }
@@ -88,11 +85,9 @@ func (r Result) Summary() string {
 		r.Total(), r.SourceRows, r.TargetRows, r.Missing, r.Extra, r.Differing)
 }
 
-// recorder returns the function a comparison calls for each difference it finds.
-//
-// It counts every difference, keeps the first DefaultReportLimit of them for the
-// report, and — when a repair was asked for — fixes each one as it is found
-// rather than from the capped sample afterwards.
+// recorder returns the function a comparison calls per difference: it counts
+// every one, keeps the first DefaultReportLimit, and repairs as it goes rather
+// than from the capped sample afterwards.
 func (r *Result) recorder(fix func(Difference) error) func(string, Kind) {
 	return func(key string, kind Kind) {
 		switch kind {
@@ -114,9 +109,8 @@ func (r *Result) recorder(fix func(Difference) error) func(string, Kind) {
 		if fix == nil {
 			return
 		}
-		// A repair that fails is counted and the walk carries on: stopping at
-		// the first failure would leave the rest of the table wrong for the sake
-		// of one row.
+		// A repair that fails is counted and the walk carries on: stopping at the
+		// first would leave the rest of the table wrong for one row.
 		if err := fix(difference); err != nil {
 			r.RepairFailed++
 			return
@@ -144,12 +138,9 @@ func Compare(ctx context.Context, source, target End, chunkSize int) (Result, er
 	return CompareAndRepair(ctx, source, target, chunkSize, nil)
 }
 
-// CompareAndRepair walks both sides and hands each difference to fix as it is
-// found.
-//
-// Repairing from the reported sample instead would only ever fix the first
-// hundred: a table a thousand rows apart needed ten passes to converge, and
-// nothing said how far along it was.
+// CompareAndRepair hands each difference to fix as it is found. Repairing from
+// the sample instead only ever fixed the first hundred, so a table a thousand
+// rows apart needed ten passes to converge.
 func CompareAndRepair(ctx context.Context, source, target End, chunkSize int, fix func(Difference) error) (Result, error) {
 	if chunkSize <= 0 {
 		chunkSize = DefaultChunkSize
@@ -158,8 +149,8 @@ func CompareAndRepair(ctx context.Context, source, target End, chunkSize int, fi
 	var result Result
 	record := result.recorder(fix)
 
-	// Walk the source: anything the target does not have is missing, anything it
-	// has with a different digest is differing.
+	// Walk the source: what the target lacks is missing, what it has with a
+	// different digest is differing.
 	for {
 		batch, err := source.Next(ctx, chunkSize)
 		if err != nil {
@@ -185,8 +176,8 @@ func CompareAndRepair(ctx context.Context, source, target End, chunkSize int, fi
 		}
 	}
 
-	// Walk the target for rows the source does not have. The digests were
-	// already compared above, so this pass only asks whether the key exists.
+	// Walk the target for rows the source does not have; the digests were compared
+	// above, so this only asks whether the key exists.
 	for {
 		batch, err := target.Next(ctx, chunkSize)
 		if err != nil {
@@ -220,10 +211,9 @@ func keysOf(batch []Row) []string {
 	return keys
 }
 
-// encodeKey renders a row's key columns as one string. Each part carries its
-// length, so two rows whose key columns run together the same way — ("ab",
-// "c") and ("a", "bc") — do not collide, and a NULL is distinguished from an
-// empty string.
+// encodeKey renders key columns as one string, each part carrying its length so
+// ("ab","c") and ("a","bc") cannot collide and a NULL differs from an empty
+// string.
 func encodeKey(values []sql.NullString) string {
 	parts := make([]string, len(values))
 	for i, v := range values {
@@ -269,9 +259,8 @@ func decodeKey(key string) ([]sql.NullString, error) {
 		case rest == "":
 			return values, nil
 		case rest[0] == '|':
-			// A separator has to be followed by another part. A trailing one
-			// would otherwise decode as if it were not there, and a key one part
-			// short of the table's would then be looked up as a valid one.
+			// A separator has to be followed by another part: a trailing one would
+			// decode as if absent, and a key one part short would be looked up as valid.
 			if rest = rest[1:]; rest == "" {
 				return nil, malformed()
 			}
@@ -281,12 +270,9 @@ func decodeKey(key string) ([]sql.NullString, error) {
 	}
 }
 
-// DescribeKey renders a comparison key for a person to read.
-//
-// The encoded forms are built to round-trip, not to be read: a composite SQL key
-// carries its lengths and a document's _id is the hex of its BSON. Neither tells
-// an operator which row an alert is about, and an alert nobody can act on is
-// most of the way to no alert at all.
+// DescribeKey renders a comparison key for a person to read. The encoded forms
+// round-trip rather than read — a composite key carries its lengths, an _id is
+// hex BSON — and an alert nobody can act on is most of the way to no alert.
 func DescribeKey(key string) string {
 	if values, err := decodeKey(key); err == nil {
 		parts := make([]string, 0, len(values))
@@ -308,11 +294,8 @@ func DescribeKey(key string) string {
 	return key
 }
 
-// Digest hashes a row's cells.
-//
-// Each cell is written with its length in front, so two rows whose cells run
-// together the same way — ("ab", "c") and ("a", "bc") — hash differently. A NULL
-// is distinguished from an empty string for the same reason.
+// Digest hashes a row's cells, each with its length in front so ("ab","c") and
+// ("a","bc") differ, and a NULL differs from an empty string.
 func Digest(cells []sql.NullString) string {
 	h := sha256.New()
 	for _, cell := range cells {
@@ -339,8 +322,8 @@ func DigestValues(values []interface{}) string {
 	return Digest(cells)
 }
 
-// SQLColumns reports the columns of a table, in the order the server lists
-// them, so both sides hash the same thing in the same order.
+// SQLColumns reports a table's columns in the server's own order, so both sides
+// hash the same thing in the same order.
 func SQLColumns(ctx context.Context, db *sql.DB, schema, table string) ([]string, error) {
 	rows, err := db.QueryContext(ctx,
 		`SELECT column_name FROM information_schema.columns

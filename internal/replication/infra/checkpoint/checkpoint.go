@@ -1,9 +1,7 @@
-// Package checkpoint stores how far a replication task has got.
-//
-// It belongs with the target, which is the side that survives the outage and
-// the side it is true about. On the syncer's own disk — where every checkpoint
-// used to live — the outage takes the record of what was applied with it, and a
-// replacement started in Osaka has no way to know where to resume.
+// Package checkpoint stores how far a replication task has got. It belongs with
+// the target, which is the side that survives the outage and the side it is
+// true about: on the syncer's own disk the outage takes it away, and a
+// replacement in Osaka cannot know where to resume.
 package checkpoint
 
 import (
@@ -24,9 +22,8 @@ import (
 
 const tableName = "_sync_checkpoint"
 
-// Store reads and writes checkpoints for one task. A key names which one: a
-// task has one for its binlog position, or one per collection for its resume
-// tokens.
+// Store reads and writes checkpoints for one task; a key names which one — a
+// binlog position, or one per collection for resume tokens.
 type Store interface {
 	Load(ctx context.Context, key string) (string, error)
 	Save(ctx context.Context, key, payload string) error
@@ -37,8 +34,8 @@ type SQLStore struct {
 	// Schema is the database the table lives in; empty addresses it unqualified.
 	Schema string
 	TaskID int
-	// NumberedPlaceholders spells parameters as $1, $2 rather than ?, which is
-	// what PostgreSQL takes. MySQL and SQLite take the question marks.
+	// NumberedPlaceholders spells parameters as $1, $2 for PostgreSQL; MySQL and
+	// SQLite take question marks.
 	NumberedPlaceholders bool
 }
 
@@ -56,9 +53,8 @@ func (s *SQLStore) qualified() string {
 	return s.Schema + "." + tableName
 }
 
-// ensure creates the table if it is not there. The column types are spelled so
-// both MySQL and SQLite accept them, since the hermetic suite drives this
-// against SQLite.
+// ensure creates the table if absent, with column types both MySQL and SQLite
+// accept, since the hermetic suite drives this against SQLite.
 func (s *SQLStore) ensure(ctx context.Context) error {
 	_, err := s.DB.ExecContext(ctx, fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
 		task_id INTEGER NOT NULL,
@@ -95,11 +91,9 @@ func (s *SQLStore) Save(ctx context.Context, key, payload string) error {
 		return err
 	}
 
-	// One statement rather than a delete and an insert inside a transaction.
-	// This runs once per source transaction on the MySQL path, and the extra
-	// commit was costing an fsync on the target for every transaction
-	// replicated: measured against MySQL 8.1, the apply rate went from 47 rows a
-	// second to 96 by removing it.
+	// One statement rather than a delete and an insert in a transaction: this runs
+	// per source transaction, and the extra commit cost an fsync each time —
+	// measured on MySQL 8.1, 47 rows a second became 96 without it.
 	if _, err := s.DB.ExecContext(ctx, s.upsert(), s.TaskID, key, payload); err != nil {
 		return fmt.Errorf("write %s: %w", s.qualified(), err)
 	}
@@ -112,14 +106,11 @@ type Execer interface {
 	ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error)
 }
 
-// SaveTx records the position through a caller's transaction, so it commits with
-// whatever else that transaction is applying — the way a MySQL replica keeps its
-// own position honest. Saving on a separate connection, as Save does, lets a
-// crash land between the data and the position, and replaying the difference is
-// safe only where the writes are idempotent.
-//
-// The table has to exist already: creating it here would be DDL inside the
-// caller's transaction, which MySQL commits implicitly. Call Ensure first.
+// SaveTx records the position through the caller's transaction so it commits
+// with the data, the way a MySQL replica keeps its own position honest; a
+// separate connection lets a crash land between the two. The table must exist
+// already — creating it here would be DDL inside that transaction, which MySQL
+// commits implicitly, so call Ensure first.
 func (s *SQLStore) SaveTx(ctx context.Context, tx Execer, key, payload string) error {
 	if _, err := tx.ExecContext(ctx, s.upsert(), s.TaskID, key, payload); err != nil {
 		return fmt.Errorf("write %s: %w", s.qualified(), err)
@@ -129,10 +120,9 @@ func (s *SQLStore) SaveTx(ctx context.Context, tx Execer, key, payload string) e
 
 func (s *SQLStore) Ensure(ctx context.Context) error { return s.ensure(ctx) }
 
-// upsert renders the write. REPLACE rather than ON DUPLICATE KEY UPDATE so one
-// statement serves MySQL, MariaDB and SQLite alike — the hermetic tests run
-// against SQLite, and a store whose only exercised path is the untested one is
-// not worth having.
+// upsert uses REPLACE rather than ON DUPLICATE KEY UPDATE so one statement
+// serves MySQL, MariaDB and SQLite alike; the hermetic tests run against
+// SQLite.
 func (s *SQLStore) upsert() string {
 	if s.NumberedPlaceholders {
 		return fmt.Sprintf(
@@ -180,9 +170,8 @@ func (s *MongoStore) Save(ctx context.Context, key, payload string) error {
 }
 
 // SaveIn records the position through a caller's session, so it commits with
-// whatever else that session's transaction is applying. A change stream
-// applier writes several collections per batch and MongoDB gives no atomicity
-// across them outside a transaction.
+// that transaction: a change stream applier writes several collections per
+// batch, and MongoDB gives no atomicity across them otherwise.
 func (s *MongoStore) SaveIn(ctx context.Context, key, payload string) error {
 	return s.Save(ctx, key, payload)
 }
@@ -192,8 +181,8 @@ type RedisStore struct {
 	TaskID int
 }
 
-// redisKey is the hash the checkpoints live in. The name is deliberately not
-// one a keyspace replication task would copy across.
+// redisKey is the hash the checkpoints live in, named so a keyspace replication
+// task would not copy it across.
 const redisKey = "_sync:checkpoint"
 
 func (s *RedisStore) field(key string) string {
@@ -218,14 +207,13 @@ func (s *RedisStore) Save(ctx context.Context, key, payload string) error {
 	return nil
 }
 
-// Layered reads from the first store that has an answer and writes to all of
-// them. It exists for the migration: a deployment upgrading from the file-only
-// version has its position on local disk and nothing on the target, so the
-// file is read once and every write from then on lands in both places.
+// Layered reads from the first store with an answer and writes to all of them,
+// for the migration: a deployment upgrading from the file-only version has its
+// position on disk and nothing on the target.
 type Layered struct {
 	Stores []Store
 	// OnError is called for a store that fails, so a degraded layer is visible
-	// rather than silent. It may be nil.
+	// rather than silent. May be nil.
 	OnError func(error)
 }
 
@@ -249,18 +237,16 @@ func (l *Layered) Load(ctx context.Context, key string) (string, error) {
 		}
 	}
 	if lastErr != nil {
-		// Every store either failed or had nothing. Reporting the failure
-		// matters: "no checkpoint" and "could not read the checkpoint" lead to
-		// opposite decisions, and confusing them re-copies a whole database or,
-		// worse, skips what was in flight.
+		// Every store failed or had nothing. Reporting the failure matters: "no
+		// checkpoint" and "could not read it" lead to opposite decisions, and
+		// confusing them re-copies a database or skips what was in flight.
 		return "", lastErr
 	}
 	return "", nil
 }
 
-// Save writes to every store, reporting a failure only when none of them took
-// it. One store being unreachable must not stop the checkpoint being recorded
-// in the others.
+// Save writes to every store, failing only when none took it: one unreachable
+// store must not stop the others recording.
 func (l *Layered) Save(ctx context.Context, key, payload string) error {
 	var lastErr error
 	saved := 0
@@ -289,9 +275,9 @@ func Encode(v interface{}) (string, error) {
 	return string(encoded), nil
 }
 
-// Decode reads a payload back. An empty payload leaves the destination alone
-// and reports false, which is how "there is no checkpoint" is told apart from
-// "the checkpoint says the zero value".
+// Decode leaves the destination alone on an empty payload and reports false,
+// which is how "no checkpoint" differs from "the checkpoint says the zero
+// value".
 func Decode(payload string, v interface{}) (bool, error) {
 	if payload == "" {
 		return false, nil
@@ -302,13 +288,12 @@ func Decode(payload string, v interface{}) (bool, error) {
 	return true, nil
 }
 
-// FileStore keeps a checkpoint in a file on local disk, which is where every
-// checkpoint used to live. It stays for one reason: an existing deployment has
-// its position there and has to be able to resume from it once.
+// FileStore keeps a checkpoint on local disk, where every checkpoint used to
+// live. It stays so an existing deployment can resume from its position once.
 type FileStore struct {
 	// Path names the file for the empty key; any other key is stored beside it
 	// with the key appended, which is how one task keeps a checkpoint per
-	// collection or per stream.
+	// collection.
 	Path string
 }
 

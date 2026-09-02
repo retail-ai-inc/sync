@@ -16,37 +16,36 @@ import (
 )
 
 const (
-	// configReloadInterval is how often the stored configuration is re-read. It
-	// is also how often a task that stopped by itself is considered for a
-	// restart.
+	// configReloadInterval is how often the stored configuration is re-read, and
+	// how often a task that stopped by itself is considered for restart.
 	configReloadInterval = 10 * time.Second
 	// drainTimeout is how long a task is given to finish what it was applying
 	// after being asked to stop.
 	drainTimeout = 30 * time.Second
-	// restartBackoff is how long to wait before starting a task that stopped on
-	// its own, doubling each time it stops again.
+	// restartBackoff is the wait before restarting a task that stopped on its own,
+	// doubling each time it stops again.
 	restartBackoff = 10 * time.Second
-	// maxRestartBackoff caps that wait. A source that is down for an hour should
-	// be retried every few minutes, not once more at the end of the day.
+	// maxRestartBackoff caps that wait: a source down for an hour should be
+	// retried every few minutes, not once more at day's end.
 	maxRestartBackoff = 5 * time.Minute
 )
 
 type runningTask struct {
-	// fingerprint is the configuration the task was started from. A task whose
-	// fingerprint no longer matches the stored configuration is restarted; one
-	// whose fingerprint is unchanged is left alone.
+	// fingerprint is the configuration the task was started from. One that no
+	// longer matches the stored configuration is restarted; an unchanged one is
+	// left alone.
 	fingerprint string
 	cancel      context.CancelFunc
 	done        chan struct{}
 	// err is why the task stopped, written before done is closed and read only
-	// after, so the channel close orders the two.
+	// after, so the close orders the two.
 	err error
 
 	// attempts counts consecutive stops, and nextAttempt is when to try again.
 	attempts    int
 	nextAttempt time.Time
-	// blocked means the task stopped for a reason retrying cannot fix, so it is
-	// left stopped until somebody changes something.
+	// blocked means the task stopped for a reason retrying cannot fix, so it stays
+	// stopped until somebody changes something.
 	blocked bool
 }
 
@@ -62,17 +61,16 @@ func (t *runningTask) exited() bool {
 func fingerprint(sc config.SyncConfig) string {
 	encoded, err := json.Marshal(sc)
 	if err != nil {
-		// An unencodable configuration is treated as changed, which restarts
-		// the task rather than leaving it running on something unknown.
+		// An unencodable configuration counts as changed, restarting the task rather
+		// than leaving it on something unknown.
 		return time.Now().String()
 	}
 	return string(encoded)
 }
 
-// globalFingerprint renders the settings that belong to the process rather than
-// to one task. The reload used to compare only the task list, so changing the
-// monitor interval, the Slack webhook or the log level took effect on the next
-// restart and not before.
+// globalFingerprint renders the settings belonging to the process rather than
+// one task. Comparing only the task list meant a changed monitor interval or
+// webhook took effect on the next restart and not before.
 func globalFingerprint(cfg *config.Config) string {
 	encoded, err := json.Marshal(struct {
 		Monitoring bool
@@ -91,24 +89,21 @@ func globalFingerprint(cfg *config.Config) string {
 }
 
 // supervisor keeps the running syncers in step with the stored configuration.
-//
-// It used to hold one context for all of them: any change to any task cancelled
-// every syncer and started them all again, so editing one task's table list
-// stopped replication for every other task — including the ones carrying
-// payments — for as long as their initial checks took.
+// One context for all of them meant any change cancelled every syncer, so
+// editing one task's tables stopped replication for every other task, payments
+// included.
 type supervisor struct {
 	log *logrus.Logger
-	// global is the configuration the syncers read process-wide settings from,
-	// currently the Slack credentials the MongoDB syncer alerts through.
+	// global is where syncers read process-wide settings from, currently the Slack
+	// credentials the MongoDB syncer alerts through.
 	global  *config.Config
 	running map[int]*runningTask
 
 	monitorFingerprint string
 	monitorCancel      context.CancelFunc
 
-	// build resolves a task's configuration to the function that runs it. It is
-	// a field so a test can substitute a stub for the real syncers, which need
-	// databases.
+	// build resolves a task's configuration to the function that runs it, a field
+	// so a test can substitute a stub for syncers that need databases.
 	build func(config.SyncConfig, *config.Config, *logrus.Logger) func(context.Context) error
 }
 
@@ -153,16 +148,16 @@ func (s *supervisor) apply(ctx context.Context, cfg *config.Config) {
 }
 
 // reconsider decides what to do about a task that stopped by itself. Nothing
-// used to: a task whose goroutine returned stayed in the running map with its
-// fingerprint unchanged, so it was never looked at again.
+// used to: its goroutine returned, its fingerprint was unchanged, and it was
+// never looked at again.
 func (s *supervisor) reconsider(ctx context.Context, sc config.SyncConfig, task *runningTask) {
 	if task.blocked {
 		return
 	}
 
 	if domain.IsUnrecoverable(task.err) {
-		// Restarting would fail identically for as long as anybody let it, and
-		// the looping would bury the one thing somebody needs to be told.
+		// Restarting would fail identically for as long as anybody let it, and the
+		// looping would bury the one thing somebody needs to be told.
 		task.blocked = true
 		metrics.SetTaskBlocked(taskLabels(sc), true)
 		s.log.Errorf("Task %d has stopped and will not be restarted: %v. "+
@@ -191,9 +186,8 @@ func (s *supervisor) reconsider(ctx context.Context, sc config.SyncConfig, task 
 	}
 }
 
-// taskLabels identify a task in the metrics the supervisor records. They are
-// deliberately the subset every engine agrees on, so a dashboard can sum across
-// them.
+// taskLabels identify a task in the supervisor's metrics — deliberately the
+// subset every engine agrees on, so a dashboard can sum across them.
 func taskLabels(sc config.SyncConfig) metrics.Labels {
 	return metrics.Labels{
 		"task":   strconv.Itoa(sc.ID),
@@ -237,7 +231,7 @@ func (s *supervisor) stop(id int) {
 	}
 }
 
-// stopAll asks every task to stop and waits for them together, so shutting down
+// stopAll asks every task to stop and waits for them together, so shutdown
 // takes one drain timeout rather than one per task.
 func (s *supervisor) stopAll() {
 	for _, task := range s.running {
@@ -260,16 +254,14 @@ func (s *supervisor) stopAll() {
 		s.monitorCancel = nil
 	}
 	// Cancelling only asks. Every monitor writes to the control database, so
-	// returning before they have noticed leaves goroutines opening SQLite after
-	// the process believes it has stopped.
+	// returning early leaves goroutines opening SQLite after the process believes
+	// it stopped.
 	app.WaitForWatchers()
 }
 
-// applyMonitoring brings the process-wide watchers into line with the settings.
-//
-// Lag alerting runs whatever the row-count switch says: how far behind the
-// disaster-recovery copy is, is not an optional statistic, and the check costs
-// one pass over the recorded metrics a minute.
+// applyMonitoring brings the process-wide watchers into line. Lag alerting runs
+// whatever the row-count switch says: how far behind the copy is, is not an
+// optional statistic.
 func (s *supervisor) applyMonitoring(ctx context.Context, cfg *config.Config) {
 	wanted := globalFingerprint(cfg)
 	if wanted == s.monitorFingerprint && s.monitorCancel != nil {
@@ -285,17 +277,17 @@ func (s *supervisor) applyMonitoring(ctx context.Context, cfg *config.Config) {
 
 	app.StartLagAlerting(monitorCtx, cfg, s.log)
 	app.StartConsistencyChecks(monitorCtx, cfg, s.log)
-	// Trimming runs whether or not row-count monitoring is on: rows written
-	// before it was turned off do not remove themselves.
+	// Trimming runs whether or not row-count monitoring is on: rows written before
+	// it was turned off do not remove themselves.
 	app.StartMonitoringRetention(monitorCtx, s.log)
 	if cfg.EnableTableRowCountMonitoring {
 		app.StartRowCountMonitoring(monitorCtx, cfg, s.log, cfg.MonitorInterval)
 	}
 }
 
-// syncerFor reports the Start function for a task's engine, or nil when the
-// engine is not one this build replicates. The comparison folds case, as the
-// monitoring side already did.
+// syncerFor reports the Start function for a task's engine, or nil when this
+// build does not replicate it. The comparison folds case, as the monitoring
+// side already did.
 func syncerFor(sc config.SyncConfig, global *config.Config, log *logrus.Logger) func(context.Context) error {
 	switch strings.ToLower(strings.TrimSpace(sc.Type)) {
 	case "mongodb":
@@ -335,8 +327,8 @@ func runSyncTasks(parentCtx context.Context, log *logrus.Logger, cfg *config.Con
 		case <-ticker.C:
 			newConfig, err := config.NewConfig()
 			if err != nil {
-				// One unreadable read is not a reason to stop replicating; the
-				// tasks go on running on the configuration they have.
+				// One unreadable read is no reason to stop replicating; the tasks go on
+				// with the configuration they have.
 				log.Errorf("Could not re-read the configuration, keeping the "+
 					"running tasks as they are: %v", err)
 				continue
