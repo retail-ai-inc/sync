@@ -509,3 +509,20 @@ func TestAPositionFromThisServerResumes(t *testing.T) {
 		}
 	}
 }
+
+// The shape the UI's "replicate the whole database" switch saves: one mapping
+// carrying no tables. It is the contract between the form and the reader, so it
+// is pinned here -- a table list that arrives empty must mean everything, not
+// nothing.
+func TestTheWholeDatabaseSwitchesShapeTakesEverything(t *testing.T) {
+	r := readerFor([]config.DatabaseMapping{{Tables: []config.TableMapping{}}},
+		"u:p@tcp(h:3306)/shop")
+
+	includes, err := r.includeTables()
+	if err != nil {
+		t.Fatalf("includeTables: %v", err)
+	}
+	if len(includes) != 1 || includes[0] != `shop\..*` {
+		t.Errorf("include list = %v, want every table of shop", includes)
+	}
+}

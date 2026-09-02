@@ -563,3 +563,31 @@ func TestATaskWithNoMappingsCapturesNothing(t *testing.T) {
 		t.Errorf("capturedCollections() = %d, want 0", got)
 	}
 }
+
+// The same contract on the MongoDB side: the UI's whole-database switch saves
+// one mapping with no collections, and that has to mean every collection of the
+// database the connection names -- including ones created later, which is the
+// half picking collections by hand cannot do.
+func TestTheWholeDatabaseSwitchesShapeTakesEveryCollection(t *testing.T) {
+	r := &Reader{Config: config.SyncConfig{
+		Type:             "mongodb",
+		SourceConnection: "mongodb://h:27017/shop",
+		Mappings:         []config.DatabaseMapping{{Tables: []config.TableMapping{}}},
+	}}
+	r.mapped = r.mappedCollections()
+	r.databases = r.mappedDatabaseSet()
+
+	for _, collection := range []string{"orders", "payments", "created_later"} {
+		if !r.replicates(domain.Namespace{DB: "shop", Object: collection}) {
+			t.Errorf("%s is not replicated, but no collection list means all of them", collection)
+		}
+	}
+	// The syncer's own bookkeeping still stays out of it.
+	if r.replicates(domain.Namespace{DB: "shop", Object: "_sync_checkpoint"}) {
+		t.Error("the syncer's own checkpoint collection is being replicated")
+	}
+	// And another database is still not this task's business.
+	if r.replicates(domain.Namespace{DB: "other", Object: "orders"}) {
+		t.Error("a collection outside the mapped database is being replicated")
+	}
+}
