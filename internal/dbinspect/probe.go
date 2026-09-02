@@ -18,6 +18,15 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
+// probeTimeout bounds server selection and the dial. A probe answers a person
+// waiting in a browser, so it is short.
+const probeTimeout = 5 * time.Second
+
+// teardownTimeout is how long the handler waits for the client to close before
+// leaving it to finish on its own. Short because it is paid after the answer is
+// already decided.
+const teardownTimeout = 500 * time.Millisecond
+
 // TestConnectionHandler POST /api/test-connection
 func TestConnectionHandler(w http.ResponseWriter, r *http.Request) {
 	var req struct {
@@ -95,13 +104,39 @@ func TestConnectionHandler(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		defer cancel()
 
-		client, err := mongo.Connect(options.Client().ApplyURI(uri))
+		// The driver's own deadlines, not just the request's. Without them the
+		// topology monitor keeps dialling an address that will not answer, and
+		// Disconnect waits for it: measured at 30 seconds against an unroutable
+		// host, holding the request goroutine long after the caller had gone.
+		client, err := mongo.Connect(options.Client().ApplyURI(uri).
+			SetServerSelectionTimeout(probeTimeout).
+			SetConnectTimeout(probeTimeout))
 		if err != nil {
 			httpx.ErrorJSON(w, "MongoDB connection error", err)
 			return
 		}
 		defer func() {
-			_ = client.Disconnect(ctx)
+			// Disconnect on its own goroutine, and do not wait for it beyond
+			// teardownTimeout.
+			//
+			// It does not honour the context it is given: the topology monitor
+			// is still dialling an address that will never answer, and the close
+			// waits for that regardless -- measured at 5 seconds with a bounded
+			// context and 30 without, on a probe whose caller had already gone.
+			// The request must not be held for either.
+			//
+			// Leaking the goroutine is the lesser cost: it ends when the driver's
+			// own dial times out, and a probe is one request by one operator, not
+			// something on a hot path.
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				_ = client.Disconnect(context.WithoutCancel(ctx))
+			}()
+			select {
+			case <-done:
+			case <-time.After(teardownTimeout):
+			}
 		}()
 
 		if err = client.Ping(ctx, nil); err != nil {
