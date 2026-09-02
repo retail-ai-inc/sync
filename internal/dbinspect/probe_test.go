@@ -199,10 +199,14 @@ func TestAFailureIsAnsweredAsJSON(t *testing.T) {
 	}
 }
 
-// The task list masks stored passwords, so an edit form carries the mask.
-// Probing with it is an authentication failure that reads as "wrong
-// credentials" when none were sent, so it is refused by name instead.
-func TestTheMaskIsRefusedRatherThanProbedWith(t *testing.T) {
+// A mask with no task behind it cannot be resolved into anything, so it is
+// refused by name rather than used as a password -- authenticating with
+// "********" fails as though the credentials were wrong.
+func TestAMaskWithNoTaskIsRefused(t *testing.T) {
+	previous := StoredPassword
+	StoredPassword = nil
+	t.Cleanup(func() { StoredPassword = previous })
+
 	req := httptest.NewRequest(http.MethodPost, "/test-connection",
 		strings.NewReader(`{"dbType":"mongodb","host":"h","port":"27017","user":"root",
 			"password":"********","database":"x"}`))
@@ -217,9 +221,62 @@ func TestTheMaskIsRefusedRatherThanProbedWith(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("the response is not JSON: %s", err)
 	}
-	reason, _ := body["error"].(string)
-	if !strings.Contains(reason, "mask") {
-		t.Errorf("the reason does not mention the mask, so it does not say what to "+
-			"do: %q", reason)
+	if reason, _ := body["error"].(string); !strings.Contains(reason, "mask") {
+		t.Errorf("the reason does not mention the mask: %q", reason)
+	}
+}
+
+// The edit form probes on open to list the source's tables, and it is filled
+// from a list that masks passwords. Refusing that outright made opening a task
+// report "Source DB connection failed (auto load)" every time. A mask means the
+// stored password, which is what saving an untouched field already does.
+func TestAMaskIsResolvedAgainstTheSavedTask(t *testing.T) {
+	var askedID, askedRole string
+	previous := StoredPassword
+	StoredPassword = func(id, role string) (string, bool) {
+		askedID, askedRole = id, role
+		return "the-stored-one", true
+	}
+	t.Cleanup(func() { StoredPassword = previous })
+
+	// An address nothing answers on: the probe gets past the mask and fails at
+	// the connection, which is what proves the mask was resolved rather than
+	// refused.
+	req := httptest.NewRequest(http.MethodPost, "/test-connection",
+		strings.NewReader(`{"dbType":"mongodb","host":"10.255.255.1","port":"27017",
+			"user":"root","password":"********","database":"x",
+			"taskId":"39","role":"source"}`))
+	rec := httptest.NewRecorder()
+
+	TestConnectionHandler(rec, req)
+
+	if askedID != "39" || askedRole != "source" {
+		t.Errorf("resolved against task %q role %q, want 39/source", askedID, askedRole)
+	}
+	var body map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("the response is not JSON: %s", err)
+	}
+	if reason, _ := body["error"].(string); strings.Contains(reason, "mask") {
+		t.Errorf("the probe still refused the mask instead of resolving it: %q", reason)
+	}
+}
+
+// A task the resolver does not know is refused rather than probed with the
+// mask: a task id that resolves to nothing is not a password.
+func TestAMaskForAnUnknownTaskIsRefused(t *testing.T) {
+	previous := StoredPassword
+	StoredPassword = func(string, string) (string, bool) { return "", false }
+	t.Cleanup(func() { StoredPassword = previous })
+
+	req := httptest.NewRequest(http.MethodPost, "/test-connection",
+		strings.NewReader(`{"dbType":"mongodb","host":"h","port":"27017","user":"root",
+			"password":"********","database":"x","taskId":"999","role":"source"}`))
+	rec := httptest.NewRecorder()
+
+	TestConnectionHandler(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rec.Code)
 	}
 }

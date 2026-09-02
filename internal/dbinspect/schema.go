@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/retail-ai-inc/sync/internal/platform/httpx"
 	"github.com/sirupsen/logrus"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
@@ -27,6 +28,10 @@ type SchemaRequest struct {
 		Database string `json:"database"`
 	} `json:"connection"`
 	TableName string `json:"tableName"`
+	// TaskID and Role name the saved task an edit form was filled from, so the
+	// masked password it carries can be resolved. See TestConnectionHandler.
+	TaskID string `json:"taskId"`
+	Role   string `json:"role"`
 }
 
 type Field struct {
@@ -44,8 +49,27 @@ func GetTableSchemaHandler(w http.ResponseWriter, r *http.Request) {
 	var req SchemaRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		logrus.Errorf("[Schema] Failed to parse request: %v", err)
-		http.Error(w, "Invalid request parameters", http.StatusBadRequest)
+		httpx.ErrorJSONStatus(w, http.StatusBadRequest,
+			"the request body could not be read", err)
 		return
+	}
+
+	// The same mask the probe deals with: this endpoint is called from the same
+	// edit form, to list a table's fields, and would otherwise authenticate with
+	// "********".
+	if req.Connection.Password == httpx.RedactedPassword {
+		stored, ok := "", false
+		if StoredPassword != nil && req.TaskID != "" {
+			stored, ok = StoredPassword(req.TaskID, req.Role)
+		}
+		if !ok {
+			httpx.ErrorJSONStatus(w, http.StatusBadRequest,
+				"the password field holds the mask the task list answers with, and "+
+					"there is no saved task to resolve it against. Type the password "+
+					"to read this table", nil)
+			return
+		}
+		req.Connection.Password = stored
 	}
 
 	logrus.Infof("[Schema] Received table structure request: %s, %s.%s", req.SourceType, req.Connection.Database, req.TableName)

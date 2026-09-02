@@ -41,3 +41,29 @@ func UpdateTask(id string, req domain.Request) (stored domain.Request, err error
 }
 
 func DeleteTask(id string) error { return infra.DeleteTask(id) }
+
+// StoredEndpointPassword reports the password a saved task holds for one of its
+// endpoints, "source" or "target".
+//
+// The list endpoint masks passwords, so an edit form is filled with the mask
+// rather than a credential. Saving an untouched field keeps what is stored;
+// this is the same rule for the connection probe, which the edit form runs on
+// open to list the source's tables. Without it, opening a task to look at it
+// asks the operator to retype a password.
+//
+// It reports false rather than an error for every failure: the caller's next
+// move is the same in each case — refuse the probe and say the mask could not
+// be resolved.
+func StoredEndpointPassword(taskID, role string) (string, bool) {
+	config, err := infra.ReadTaskConfig(taskID)
+	if err != nil {
+		return "", false
+	}
+
+	connection := config.SourceConn
+	if role == "target" {
+		connection = config.TargetConn
+	}
+	password := connection["password"]
+	return password, password != ""
+}

@@ -9,6 +9,7 @@ import (
 	"github.com/retail-ai-inc/sync/internal/dbinspect"
 	identityhttp "github.com/retail-ai-inc/sync/internal/identity/http"
 	monitoringhttp "github.com/retail-ai-inc/sync/internal/monitoring/http"
+	replicationapp "github.com/retail-ai-inc/sync/internal/replication/app"
 	replicationhttp "github.com/retail-ai-inc/sync/internal/replication/http"
 )
 
@@ -26,6 +27,11 @@ import (
 // Before this split each handler decided for itself, and most did not, so
 // anyone who could reach the port could read every task's credentials.
 func NewRouter() http.Handler {
+	// The probe is a leaf: it connects to whatever it is handed and knows
+	// nothing about tasks. This lets it resolve the mask an edit form carries
+	// against the task that form was filled from.
+	dbinspect.StoredPassword = replicationapp.StoredEndpointPassword
+
 	r := chi.NewRouter()
 
 	// 1) Public: what a caller with no token legitimately needs.

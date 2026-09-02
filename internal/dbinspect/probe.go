@@ -27,6 +27,15 @@ const probeTimeout = 5 * time.Second
 // already decided.
 const teardownTimeout = 500 * time.Millisecond
 
+// StoredPassword resolves the password a saved task holds for one of its two
+// endpoints, so a probe from an edit form can test the connection the task
+// actually uses.
+//
+// It is a variable rather than an import because this package is a leaf: it
+// probes whatever it is handed and knows nothing about tasks. The router wires
+// it. Left nil, a masked password is refused rather than resolved.
+var StoredPassword func(taskID, role string) (string, bool)
+
 // TestConnectionHandler POST /api/test-connection
 func TestConnectionHandler(w http.ResponseWriter, r *http.Request) {
 	var req struct {
@@ -36,6 +45,10 @@ func TestConnectionHandler(w http.ResponseWriter, r *http.Request) {
 		User     string `json:"user"`
 		Password string `json:"password"`
 		Database string `json:"database"`
+		// TaskID and Role name the saved task an edit form was filled from, so
+		// the mask it carries can be resolved to what that task stores.
+		TaskID string `json:"taskId"`
+		Role   string `json:"role"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		httpx.ErrorJSONStatus(w, http.StatusBadRequest, "the request body could not be read", err)
@@ -43,16 +56,26 @@ func TestConnectionHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// The list endpoints mask stored passwords, so an edit form filled from one
-	// carries the mask rather than a password. Probing with it fails as an
-	// authentication error, which reads as "the credentials are wrong" when what
-	// happened is that none were sent. Saying so is the difference between an
-	// operator retyping the password and an operator changing it on the server.
+	// carries the mask rather than a password. Probing with it authenticates
+	// with "********", which fails as though the credentials were wrong.
+	//
+	// A mask means "the one already stored", which is what saving an untouched
+	// field does, so the probe resolves it the same way. The edit form probes on
+	// open to list the source's tables, and that must keep working without
+	// making somebody retype a password to see them.
 	if req.Password == httpx.RedactedPassword {
-		httpx.ErrorJSONStatus(w, http.StatusBadRequest,
-			"the password field still holds the mask the task list answers with, "+
-				"not a password. Type the password to test this connection; leaving "+
-				"the field alone keeps the stored one when the task is saved", nil)
-		return
+		stored, ok := "", false
+		if StoredPassword != nil && req.TaskID != "" {
+			stored, ok = StoredPassword(req.TaskID, req.Role)
+		}
+		if !ok {
+			httpx.ErrorJSONStatus(w, http.StatusBadRequest,
+				"the password field holds the mask the task list answers with, and "+
+					"there is no saved task to resolve it against. Type the password "+
+					"to test this connection", nil)
+			return
+		}
+		req.Password = stored
 	}
 
 	var (
