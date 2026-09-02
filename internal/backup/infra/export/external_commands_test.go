@@ -516,6 +516,12 @@ func mongoBackupConfig(gcsPath string) ExecutorBackupConfig {
 	return cfg
 }
 
+func mongoBackupConfigWithCompression(gcsPath, compressionType string) ExecutorBackupConfig {
+	cfg := mongoBackupConfig(gcsPath)
+	cfg.CompressionType = compressionType
+	return cfg
+}
+
 const zipStubBody = `for a in "$@"; do case "$a" in *.zip) touch "$a";; esac; done`
 
 // mongoexportStubBody produces the --out file, which mongoexport writes itself
@@ -817,5 +823,54 @@ func TestTheUploadedObjectKeepsItsName(t *testing.T) {
 	want := "gs://bucket/backups/orders" + ZIPFilenameSeparator + yesterday + ".zip"
 	if got := stubArgs(t, binDir, "gsutil"); got[2] != want {
 		t.Errorf("uploaded to %q, want %q", got[2], want)
+	}
+}
+
+// compressionType=none was implemented for MySQL and never for MongoDB, so a
+// job asking for an uncompressed export got a zip anyway -- measured on
+// staging, where job 14 asks for none and uploaded RetailerCouponUsages.zip.
+func TestTheMongoBackupWorkflowSkipsCompressionWhenDisabled(t *testing.T) {
+	binDir := stubPATH(t)
+	tempDir := t.TempDir()
+
+	stubBin(t, binDir, "mongoexport", mongoexportStubBody, 0)
+	stubBin(t, binDir, "zip", zipStubBody, 0)
+	stubBin(t, binDir, "gsutil", "", 0)
+
+	e := newExecutor()
+	if err := e.executeExternalMongoExportSimple(context.Background(),
+		"mongodb://tokyo:27017/app", "app", "orders", tempDir,
+		mongoBackupConfigWithCompression("gs://bucket/backups", "none")); err != nil {
+		t.Fatalf("executeExternalMongoExportSimple: %v", err)
+	}
+
+	stubWasNotInvoked(t, binDir, "zip")
+
+	gsutil := stubArgs(t, binDir, "gsutil")
+	if !strings.HasSuffix(gsutil[2], ".json") {
+		t.Errorf("upload target = %q, want the uncompressed .json", gsutil[2])
+	}
+}
+
+// The default stays a zip: a job that says nothing about compression must keep
+// behaving as it did.
+func TestTheMongoBackupWorkflowStillZipsByDefault(t *testing.T) {
+	binDir := stubPATH(t)
+	tempDir := t.TempDir()
+
+	stubBin(t, binDir, "mongoexport", mongoexportStubBody, 0)
+	stubBin(t, binDir, "zip", zipStubBody, 0)
+	stubBin(t, binDir, "gsutil", "", 0)
+
+	e := newExecutor()
+	if err := e.executeExternalMongoExportSimple(context.Background(),
+		"mongodb://tokyo:27017/app", "app", "orders", tempDir,
+		mongoBackupConfigWithCompression("gs://bucket/backups", "")); err != nil {
+		t.Fatalf("executeExternalMongoExportSimple: %v", err)
+	}
+
+	stubArgs(t, binDir, "zip")
+	if gsutil := stubArgs(t, binDir, "gsutil"); !strings.HasSuffix(gsutil[2], ".zip") {
+		t.Errorf("upload target = %q, want a .zip", gsutil[2])
 	}
 }

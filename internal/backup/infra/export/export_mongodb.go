@@ -56,9 +56,8 @@ func (e *BackupExecutor) executeExternalMongoExportSimple(ctx context.Context, c
 
 	e.logMemoryUsage("AFTER_EXTERNAL_EXPORT")
 
-	// The MongoDB paths compress regardless of the job's compressionType, which
-	// is what they have always done.
-	if _, err := e.compressAndUpload(ctx, tempDir, outputPath, zipPath, true, config); err != nil {
+	if _, err := e.compressAndUpload(ctx, tempDir, outputPath, zipPath,
+		!isCompressionDisabled(config.CompressionType), config); err != nil {
 		return err
 	}
 
@@ -244,7 +243,8 @@ func (e *BackupExecutor) exportMongoDBMergedTables(ctx context.Context, connStr,
 
 	e.logMemoryUsage("AFTER_MERGE")
 
-	if _, err := e.compressAndUpload(ctx, tempDir, mergedJsonPath, zipPath, true, config); err != nil {
+	if _, err := e.compressAndUpload(ctx, tempDir, mergedJsonPath, zipPath,
+		!isCompressionDisabled(config.CompressionType), config); err != nil {
 		return err
 	}
 
