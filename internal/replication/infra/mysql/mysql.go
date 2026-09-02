@@ -96,12 +96,6 @@ func (s *MySQLSyncer) Start(ctx context.Context) error {
 	}
 	cfg.IncludeTableRegex = includeTables
 
-	if !discovering {
-		// The task names its tables, so anything added at the source afterwards
-		// is simply absent from the replica. Nothing used to say so.
-		go s.warnAboutUnlistedTables(ctx, sourceDBName)
-	}
-
 	var c *canal.Canal
 	err := resilience.Retry(ctx, 5, 2*time.Second, 2.0, func() error {
 		var e error
@@ -1562,56 +1556,6 @@ func (s *MySQLSyncer) hasConfiguredTables() bool {
 		}
 	}
 	return false
-}
-
-// unlistedScanEvery is how often a task that names its tables is compared
-// against what the source actually holds.
-const unlistedScanEvery = 5 * time.Minute
-
-// warnAboutUnlistedTables reports the tables the source has and this task does
-// not replicate.
-//
-// It does not start replicating them: a task that names its tables means it, and
-// quietly widening the scope would be worse than the gap. What it does is make
-// the gap visible, because the alternative is finding out during a failover that
-// the copy is missing a table nobody added to the task.
-func (s *MySQLSyncer) warnAboutUnlistedTables(ctx context.Context, sourceDBName string) {
-	listed := map[string]bool{}
-	for _, mapping := range s.cfg.Mappings {
-		for _, table := range mapping.Tables {
-			if table.SourceTable != "" {
-				listed[strings.ToLower(table.SourceTable)] = true
-			}
-		}
-	}
-
-	source, err := sql.Open("mysql", s.cfg.SourceConnection)
-	if err != nil {
-		s.logger.Debugf("[MySQL] Could not open the source to check which tables it "+
-			"holds: %v", err)
-		return
-	}
-	defer source.Close()
-
-	warned := map[string]bool{}
-	scan := func() {
-		tables, err := discovery.MySQLTables(ctx, source, sourceDBName)
-		if err != nil {
-			s.logger.Debugf("[MySQL] Could not list the tables in %s: %v", sourceDBName, err)
-			return
-		}
-		missing := discovery.Unlisted(listed, warned, tables)
-		if len(missing) == 0 {
-			return
-		}
-		s.logger.Warnf("[MySQL] %s holds %d tables this task does not replicate: %v. "+
-			"They are not in the disaster-recovery copy. Add them to the task, or "+
-			"remove every table from it to replicate the database as a whole.",
-			sourceDBName, len(missing), missing)
-		metrics.SetUnreplicated(s.metricLabels(), float64(len(warned)))
-	}
-
-	discovery.Poll(ctx, unlistedScanEvery, scan)
 }
 
 // resolveMappings reports the tables to copy, discovering them from the source

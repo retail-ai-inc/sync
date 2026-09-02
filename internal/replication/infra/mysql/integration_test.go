@@ -655,8 +655,10 @@ func TestATableTheTaskDoesNotListIsReported(t *testing.T) {
 	logger.SetLevel(logrus.WarnLevel)
 
 	cfg := syncTask(t, listed)
-	syncer := NewMySQLSyncer(cfg, logger)
-	stop := harness.RunSyncer(t, syncer.Start)
+	// Through NewSyncer, which is what the supervisor starts. This test used to
+	// start the old syncer instead, and so went on passing for as long as the
+	// warning it covers was reachable from nowhere the supervisor goes.
+	stop := harness.RunSyncer(t, NewSyncer(cfg, logger).Start)
 	t.Cleanup(stop)
 
 	harness.Eventually(t, 45*time.Second, func() error {
@@ -680,7 +682,7 @@ func TestATableTheTaskDoesNotListIsReported(t *testing.T) {
 		return nil
 	})
 
-	labels := syncer.metricLabels()
+	labels := metrics.Labels{"task": fmt.Sprint(cfg.ID), "engine": "mysql"}
 	var reported bool
 	for _, sample := range metrics.Default.Snapshot(metrics.Unreplicated) {
 		if sample.Labels.Key() == labels.Key() && sample.Value > 0 {

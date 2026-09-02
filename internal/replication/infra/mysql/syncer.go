@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -16,6 +17,7 @@ import (
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/checkpoint"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/directionlock"
+	"github.com/retail-ai-inc/sync/internal/replication/infra/discovery"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/security"
 )
 
@@ -178,6 +180,11 @@ func (s *Syncer) Start(ctx context.Context) error {
 	reader := &Reader{Config: s.cfg, Logger: s.logger, Labels: labels}
 	defer reader.Close()
 
+	// A task that names its tables means it, so nothing here widens the scope.
+	// What it does is say which tables are not in the copy, because the
+	// alternative is finding out during a failover.
+	go s.warnAboutUnlistedTables(ctx, dsn.GetDatabaseName(s.cfg.Type, s.cfg.SourceConnection), labels)
+
 	runner := &pipeline.Runner{
 		Reader: reader,
 		Applier: &Applier{
@@ -269,4 +276,64 @@ func (s *Syncer) resyncs(store *checkpoint.SQLStore) []*pipeline.Resync {
 		s.logger.Infof("[MySQL] %s is listed for a re-copy alongside the stream", ns)
 	}
 	return out
+}
+
+// unlistedScanEvery is how often a task that names its tables is compared
+// against what the source actually holds.
+const unlistedScanEvery = 5 * time.Minute
+
+// warnAboutUnlistedTables reports the tables the source has and this task does
+// not replicate.
+//
+// It does not start replicating them: a task that names its tables means it, and
+// quietly widening the scope would be worse than the gap. What it does is make
+// the gap visible, because the alternative is finding out during a failover that
+// the copy is missing a table nobody added to the task.
+//
+// This lived on the old syncer, which the shared pipeline replaced, so for as
+// long as the new path has been the one that runs, sync_unreplicated_tables has
+// read zero for every MySQL task whatever the source held — and the integration
+// test that covers it went on passing, because it started the old syncer. It is
+// a method on this type now so that deleting the old path cannot take it away
+// again.
+func (s *Syncer) warnAboutUnlistedTables(ctx context.Context, sourceDBName string,
+	labels metrics.Labels) {
+
+	listed := map[string]bool{}
+	for _, mapping := range s.cfg.Mappings {
+		for _, table := range mapping.Tables {
+			if table.SourceTable != "" {
+				listed[strings.ToLower(table.SourceTable)] = true
+			}
+		}
+	}
+	if len(listed) == 0 {
+		return // the task replicates the database as a whole
+	}
+
+	source, err := sql.Open("mysql", s.cfg.SourceConnection)
+	if err != nil {
+		s.logger.Debugf("[MySQL] Could not open the source to check which tables it "+
+			"holds: %v", err)
+		return
+	}
+	defer source.Close()
+
+	warned := map[string]bool{}
+	discovery.Poll(ctx, unlistedScanEvery, func() {
+		tables, err := discovery.MySQLTables(ctx, source, sourceDBName)
+		if err != nil {
+			s.logger.Debugf("[MySQL] Could not list the tables in %s: %v", sourceDBName, err)
+			return
+		}
+		missing := discovery.Unlisted(listed, warned, tables)
+		if len(missing) == 0 {
+			return
+		}
+		s.logger.Warnf("[MySQL] %s holds %d tables this task does not replicate: %v. "+
+			"They are not in the disaster-recovery copy. Add them to the task, or "+
+			"remove every table from it to replicate the database as a whole.",
+			sourceDBName, len(missing), missing)
+		metrics.SetUnreplicated(labels, float64(len(warned)))
+	})
 }
