@@ -20,24 +20,21 @@ import (
 	"github.com/retail-ai-inc/sync/internal/replication/infra/checkpoint"
 )
 
-// Applier writes one batch to a MongoDB target, by default inside a transaction
-// so the batch and its position land together or not at all.
-//
-// MongoDB gives atomicity for a single document and nothing wider. A partly
-// failed BulkWrite is ordinary rather than a crash, and because one batch may
-// touch several collections in source order, what remains can be a state the
-// source was never in — the payment present, its order absent. A comparison by
-// document count does not see it. A secondary gets this free by holding its
-// readable timestamp at the batch boundary; a client cannot, so a transaction is
-// the only way to say "these writes become visible together".
+// Applier writes one batch to a MongoDB target, by default in a transaction so
+// the batch and its position land together or not at all. MongoDB gives
+// atomicity for one document and nothing wider, and a partly failed BulkWrite
+// is ordinary — leaving a state the source was never in, the payment present
+// and its order absent, which a count comparison cannot see. A secondary gets
+// this free by holding its readable timestamp at the batch boundary; a client
+// can only get it from a transaction.
 type Applier struct {
 	Client *mongo.Client
 	// TargetDatabase is the database the events are written to.
 	TargetDatabase string
 	// Mappings resolve a source collection to its target name.
 	Mappings []config.DatabaseMapping
-	// Checkpoints records the position. Nil means the runner records it, which
-	// is the weaker at-least-once guarantee.
+	// Checkpoints records the position. Nil means the runner does, which is the
+	// weaker at-least-once guarantee.
 	Checkpoints   *checkpoint.MongoStore
 	CheckpointKey string
 	Logger        logrus.FieldLogger
@@ -45,14 +42,11 @@ type Applier struct {
 
 	// NoTransaction applies the batch as bare bulk writes. The zero value keeps
 	// the transaction, because the safe setting is the one an operator gets
-	// without knowing to ask for it. Turning it off is the trade AWS DMS spells
-	// BatchApplyEnabled: more throughput, and in their words temporary lapses in
-	// transactional integrity.
+	// without asking. Turning it off is the trade AWS DMS calls BatchApplyEnabled.
 	NoTransaction bool
 
 	// bulk remembers whether the target has the cross-collection bulkWrite
-	// command, so a target without it is discovered once rather than on every
-	// batch.
+	// command, so a target without it is discovered once rather than per batch.
 	bulk clientBulkSupport
 }
 
@@ -64,8 +58,8 @@ func (a *Applier) Apply(ctx context.Context, runs [][]*domain.Event, pos domain.
 		return false, nil
 	}
 
-	// A schema change stands alone in its batch and runs outside a transaction:
-	// MongoDB's catalogue is not transactional, so a DDL inside one is refused.
+	// A schema change stands alone and runs outside a transaction: MongoDB's
+	// catalogue is not transactional, so a DDL inside one is refused.
 	if schema, ok := onlySchemaChange(runs); ok {
 		return false, a.applySchemaChange(ctx, schema)
 	}
@@ -90,22 +84,19 @@ func (a *Applier) Apply(ctx context.Context, runs [][]*domain.Event, pos domain.
 
 	committed := false
 	trips := 0
-	// writing is the time inside the transaction's body. What is left of the
-	// total is the commit, which on a sharded target is a two-phase protocol
-	// when the batch spans shards — the number that decides whether applying
-	// batches concurrently could help or would only make commits contend.
+	// writing is the time inside the transaction body; the rest is the commit,
+	// which on a sharded target is two-phase when the batch spans shards.
 	var writing time.Duration
 
-	// Majority on both sides: a batch acknowledged by less than a majority can
-	// be rolled back by an election, and this target exists to survive one.
+	// Majority on both sides: a batch acknowledged by less than a majority can be
+	// rolled back by an election, and this target exists to survive one.
 	txOpts := options.Transaction().
 		SetReadConcern(readconcern.Snapshot()).
 		SetWriteConcern(writeconcern.Majority())
 
-	// The callback is handed a context carrying the session, so every write it
-	// makes joins the transaction. In the driver's v1 this was a distinct
-	// SessionContext type; in v2 it is an ordinary context and the session is
-	// recovered from it when needed.
+	// The callback gets a context carrying the session, so every write joins the
+	// transaction. In driver v1 this was a SessionContext type; in v2 it is an
+	// ordinary context.
 	_, err = session.WithTransaction(ctx, func(sc context.Context) (interface{}, error) {
 		bodyStarted := time.Now()
 		written, err := a.write(sc, runs)
@@ -125,9 +116,8 @@ func (a *Applier) Apply(ctx context.Context, runs [][]*domain.Event, pos domain.
 	}, txOpts)
 	if err != nil {
 		// WithTransaction has already aborted, so nothing of the batch is on the
-		// target. Reporting committed as false would be a lie of a different
-		// kind — the caller must not record a position for a batch that did not
-		// land — so it is reset here.
+		// target and committed is reset: the caller must not record a position for a
+		// batch that did not land.
 		return false, fmt.Errorf("apply the batch: %w", err)
 	}
 
@@ -141,8 +131,8 @@ func (a *Applier) Apply(ctx context.Context, runs [][]*domain.Event, pos domain.
 }
 
 // shapeOf reports how many changes a batch carries and how many objects they
-// touch. The second number is what decides whether a write that spans objects
-// would save a round trip, and how often a sharded commit spans shards.
+// touch — the second decides whether a cross-object write saves a round trip,
+// and how often a sharded commit spans shards.
 func shapeOf(runs [][]*domain.Event) (events, namespaces int) {
 	seen := map[string]bool{}
 	for _, run := range runs {
@@ -154,9 +144,9 @@ func shapeOf(runs [][]*domain.Event) (events, namespaces int) {
 	return events, len(seen)
 }
 
-// onlySchemaChange reports the batch's single schema change, when that is all it
-// holds. The pipeline gives a schema change a batch of its own, so anything else
-// alongside one is a bug worth failing on rather than guessing at.
+// onlySchemaChange reports the batch's single schema change when that is all it
+// holds. The pipeline gives one its own batch, so anything alongside is a bug
+// worth failing on.
 func onlySchemaChange(runs [][]*domain.Event) (*domain.Event, bool) {
 	var found *domain.Event
 	count := 0
@@ -202,8 +192,7 @@ func (a *Applier) write(ctx context.Context, runs [][]*domain.Event) (roundTrips
 			collection := a.Client.Database(a.TargetDatabase).Collection(target)
 
 			// Ordered, for the reason writeRunAsOne is: two documents are not
-			// independent when a unique index relates them, so the order they
-			// were read in is the only one known to be correct.
+			// independent when a unique index relates them.
 			roundTrips++
 			if _, err := collection.BulkWrite(ctx, group.models, options.BulkWrite().SetOrdered(true)); err != nil {
 				return roundTrips, fmt.Errorf("write %d changes to %s.%s: %w",
@@ -219,15 +208,11 @@ type collectionGroup struct {
 	models     []mongo.WriteModel
 }
 
-// groupByCollection splits a run into consecutive stretches of one collection.
-// BulkWrite addresses one collection, so a run spanning several needs one call
-// each, made in sequence.
-//
-// Consecutive, not gathered: putting every change to a collection in one group
-// wherever it appeared would send all of one collection's writes before all of
-// another's. A payment and the order it belongs to live in different
-// collections, and which lands first decides whether the target is ever in a
-// state the source was not.
+// groupByCollection splits a run into consecutive stretches of one collection,
+// because BulkWrite addresses one. Consecutive, not gathered: grouping every
+// change to a collection wherever it appeared would send all of one
+// collection's writes before another's, and a payment and its order live in
+// different collections.
 func groupByCollection(run []*domain.Event) []collectionGroup {
 	var groups []collectionGroup
 
@@ -259,10 +244,9 @@ func (a *Applier) targetFor(source string) string {
 	return source
 }
 
-// noTransaction reads the escape hatch from the environment.
-// SYNC_MONGO_NO_TRANSACTION=1 applies batches as bare bulk writes. It exists
-// because a batch spanning shards is a two-phase commit, and whether that cost
-// is affordable is a measurement rather than an opinion.
+// noTransaction reads the escape hatch. SYNC_MONGO_NO_TRANSACTION=1 applies
+// bare bulk writes; it exists because a batch spanning shards is a two-phase
+// commit, and that cost is a measurement rather than an opinion.
 func noTransaction() bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("SYNC_MONGO_NO_TRANSACTION"))) {
 	case "1", "true", "yes":
@@ -271,11 +255,10 @@ func noTransaction() bool {
 	return false
 }
 
-// describeNoTransaction reports what setting the escape hatch costs, or ""
-// when it is not set. Separate from noTransaction so it can be tested without
-// a cluster, and said at startup rather than left to whoever reads the code:
-// the variable is read once, deep in here, and a task started with it set
-// looked exactly like a task without it.
+// describeNoTransaction reports what the escape hatch costs, or "" when unset.
+// Separate so it can be tested without a cluster, and said at startup: the
+// variable is read once, deep in here, and a task with it set looked like one
+// without.
 func describeNoTransaction(bare bool, taskID int) string {
 	if !bare {
 		return ""

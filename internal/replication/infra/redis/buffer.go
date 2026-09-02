@@ -17,24 +17,16 @@ import (
 	"time"
 )
 
-// The replication stream, written to disk on the way through.
-//
-// A Redis master keeps its backlog in memory, one megabyte by default, and a
-// replica that falls further behind gets a full resync — tens of gigabytes
-// across regions, into a target that has to be emptied first. Buffering to disk
-// turns "the link was down for twenty minutes" into a partial resync, and is
-// the whole reason this relay exists rather than a replica pointed at the
-// source.
-//
-// The stream is a contiguous byte sequence, so offsets are arithmetic: a segment
-// records the absolute offset it starts at and every frame accounts for its own
-// length. Nothing stores an offset per frame.
+// The replication stream, written to disk on the way through. A Redis master
+// keeps one megabyte of backlog in memory and a replica further behind gets a
+// full resync — tens of gigabytes across regions, into a target emptied first.
+// Buffering to disk makes that a partial resync, and is the whole reason this
+// relay exists. Offsets are arithmetic: a segment records where it starts and
+// every frame accounts for its own length.
 
-// ErrTruncated says the requested offset is older than anything still held.
-//
-// It is not a failure to retry: the bytes are gone. The caller repairs by value
-// instead, which is what keeps a lost position from turning into an emptied
-// target.
+// ErrTruncated says the requested offset is older than anything still held. Not
+// worth retrying — the bytes are gone — so the caller repairs by value instead,
+// which keeps a lost position from emptying the target.
 var ErrTruncated = errors.New("the replication buffer no longer reaches back that far")
 
 const (
@@ -42,8 +34,8 @@ const (
 	defaultSegmentBytes = 64 << 20
 	defaultMaxBytes     = 8 << 30
 	segmentSuffix       = ".log"
-	// maxFrameBytes bounds what a single frame may claim, so a corrupt header
-	// cannot make recovery allocate wildly.
+	// maxFrameBytes bounds what one frame may claim, so a corrupt header cannot
+	// make recovery allocate wildly.
 	maxFrameBytes = 512 << 20
 )
 
@@ -52,11 +44,11 @@ type BufferOptions struct {
 	Dir string
 	// MaxBytes is roughly how much history to keep. Zero means the default.
 	MaxBytes int64
-	// MaxAge discards segments older than this regardless of size. Zero means
-	// no age limit.
+	// MaxAge discards segments older than this regardless of size; zero means no
+	// age limit.
 	MaxAge time.Duration
-	// SegmentBytes is the size a segment grows to before the next one starts.
-	// Zero means the default.
+	// SegmentBytes is the size a segment grows to before the next starts; zero
+	// means the default.
 	SegmentBytes int64
 }
 
@@ -74,26 +66,23 @@ func (o BufferOptions) segmentBytes() int64 {
 	return defaultSegmentBytes
 }
 
-// Buffer is the on-disk replication stream for one source shard.
-//
-// One writer appends; any number of cursors read, blocking when they reach the
-// end and waking when more arrives.
+// Buffer is the on-disk replication stream for one source shard: one writer
+// appends, any number of cursors read, blocking at the end and waking when more
+// arrives.
 type Buffer struct {
 	opts BufferOptions
 
 	mu sync.Mutex
-	// grown is broadcast when bytes are appended or the buffer is closed, so a
-	// cursor waiting at the end wakes.
+	// grown is broadcast when bytes are appended or the buffer closes, so a cursor
+	// waiting at the end wakes.
 	grown *sync.Cond
 
 	segments []*segment
 	active   *segment
 	closed   bool
-	// sealed says the writer has finished, so a cursor that reaches the end has
-	// reached the end for good rather than being merely up to date. Without it, a
-	// connection that dies while a cursor is waiting leaves the cursor waiting
-	// for ever: the condition it blocks on is only signalled by an append, and
-	// there will not be another one.
+	// sealed says the writer has finished, so the end is the end for good. Without
+	// it a connection dying under a waiting cursor leaves it waiting for ever:
+	// only an append signals the condition, and none is coming.
 	sealed bool
 }
 
@@ -104,9 +93,9 @@ type segment struct {
 	// end is the absolute stream offset after its last complete frame.
 	end int64
 
-	// overhead is the framing bytes already on disk ahead of end: one header
-	// per intact frame. A segment's file is longer than the stream bytes it
-	// holds, so recovery needs this to truncate to a byte position.
+	// overhead is the framing bytes on disk ahead of end, one header per intact
+	// frame — a segment file is longer than the stream bytes it holds, so recovery
+	// needs this to truncate to a byte position.
 	overhead int64
 
 	file *os.File
@@ -118,11 +107,9 @@ func (s *segment) fileBytes() int64 { return s.end - s.start + s.overhead }
 
 func (s *segment) bytes() int64 { return s.end - s.start }
 
-// OpenBuffer opens or recovers the buffer in a directory.
-//
-// Recovery walks the newest segment and truncates it at the last complete,
-// intact frame. A process killed mid-append leaves a partial frame; keeping it
-// would hand the reader a fragment of a command.
+// OpenBuffer opens or recovers the buffer in a directory, truncating the newest
+// segment at the last complete frame: a process killed mid-append leaves a
+// partial one, and keeping it hands the reader half a command.
 func OpenBuffer(opts BufferOptions) (*Buffer, error) {
 	if opts.Dir == "" {
 		return nil, fmt.Errorf("the replication buffer needs a directory")
@@ -168,10 +155,8 @@ func OpenBuffer(opts BufferOptions) (*Buffer, error) {
 	return b, nil
 }
 
-// Append writes one frame: a contiguous run of stream bytes.
-//
-// A frame is whatever the caller chose to hand over — for this package, one
-// parsed command, so a cursor never sees half of one.
+// Append writes one frame, a contiguous run of stream bytes — here one parsed
+// command, so a cursor never sees half of one.
 func (b *Buffer) Append(payload []byte) error {
 	if len(payload) == 0 {
 		return nil
@@ -213,10 +198,8 @@ func (b *Buffer) Append(payload []byte) error {
 	return b.trimLocked()
 }
 
-// Seal says no more will be appended, waking anything waiting at the end.
-//
-// It is called when the connection filling the buffer stops, for any reason. The
-// buffer itself stays readable and on disk.
+// Seal says no more will be appended, waking anything waiting at the end. The
+// buffer stays readable and on disk.
 func (b *Buffer) Seal() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -224,11 +207,9 @@ func (b *Buffer) Seal() {
 	b.grown.Broadcast()
 }
 
-// Sync flushes the active segment to disk.
-//
-// Called once per applied batch rather than once per frame: the point of the
-// buffer is that a crash does not cost a full resync, and one fsync per batch
-// bounds the loss to that batch — which is re-read from the source anyway.
+// Sync flushes the active segment. Once per applied batch rather than per
+// frame: that bounds a crash's loss to one batch, which is re-read from the
+// source anyway.
 func (b *Buffer) Sync() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -242,11 +223,9 @@ func (b *Buffer) Sync() error {
 	return nil
 }
 
-// Reset discards everything and starts again at an offset.
-//
-// A full resync gives a new replication id and a new offset, so the bytes
-// already held belong to a history the source no longer continues. Keeping them
-// would let a cursor read across the seam.
+// Reset discards everything and restarts at an offset. A full resync gives a
+// new replication id, so the bytes held belong to a history the source no
+// longer continues and a cursor could read across the seam.
 func (b *Buffer) Reset(start int64) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -393,12 +372,9 @@ type Cursor struct {
 	offset  int64
 }
 
-// Cursor opens a reader positioned at an offset.
-//
-// An offset inside a frame rather than on its boundary yields that whole frame,
-// so the caller may see a little already-applied history. That is deliberate:
-// the applier skips what a slot has already recorded, and re-reading is always
-// safer than guessing where a command started.
+// Cursor opens a reader at an offset. One inside a frame yields that whole
+// frame, so the caller may re-see a little history: the applier skips what a
+// slot recorded, and re-reading beats guessing where a command started.
 func (b *Buffer) Cursor(offset int64) (*Cursor, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -478,10 +454,8 @@ func (c *Cursor) peekLength() (int, error) {
 	return length, nil
 }
 
-// Next returns the next frame and the stream offset after it.
-//
-// It blocks while the cursor is at the end of the stream, waking when the writer
-// appends or the buffer closes.
+// Next returns the next frame and the offset after it, blocking at the end of
+// the stream until the writer appends or the buffer closes.
 func (c *Cursor) Next(ctx context.Context) ([]byte, int64, error) {
 	for {
 		payload, end, err := c.read()
@@ -502,8 +476,8 @@ func (c *Cursor) Next(ctx context.Context) ([]byte, int64, error) {
 	}
 }
 
-// read pulls one frame, returning io.EOF when the cursor is at the end of the
-// segment's written bytes.
+// read pulls one frame, returning io.EOF at the end of the segment's written
+// bytes.
 func (c *Cursor) read() ([]byte, int64, error) {
 	c.buffer.mu.Lock()
 	limit := c.segment.end
@@ -535,8 +509,8 @@ func (c *Cursor) read() ([]byte, int64, error) {
 	return payload, c.offset, nil
 }
 
-// waitOrAdvance moves to the next segment when one exists, and otherwise waits
-// for the writer. It reports whether the cursor can read again.
+// waitOrAdvance moves to the next segment when one exists and otherwise waits
+// for the writer, reporting whether the cursor can read again.
 func (c *Cursor) waitOrAdvance(ctx context.Context) (bool, error) {
 	c.buffer.mu.Lock()
 
@@ -575,7 +549,7 @@ func (c *Cursor) waitOrAdvance(ctx context.Context) (bool, error) {
 }
 
 // nextSegmentLocked returns the segment after the one being read, if the cursor
-// has reached the end of it and another exists.
+// has finished it and another exists.
 func (c *Cursor) nextSegmentLocked() *segment {
 	if c.offset < c.segment.end {
 		return nil
@@ -628,11 +602,9 @@ func offsetFromName(name string) (int64, error) {
 	return offset, nil
 }
 
-// scanSegment walks a segment's frames and reports the stream offset after the
-// last intact one, recording how much framing overhead precedes it.
-//
-// It stops at the first frame that is short or fails its checksum, which is what
-// a process killed mid-append leaves behind.
+// scanSegment walks a segment's frames and reports the offset after the last
+// intact one, plus the framing overhead before it. It stops at the first short
+// or bad-checksum frame, which is what a kill mid-append leaves.
 func scanSegment(path string, start int64) (end, overhead int64, err error) {
 	file, err := os.Open(path)
 	if err != nil {

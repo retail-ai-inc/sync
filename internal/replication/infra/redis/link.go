@@ -17,16 +17,12 @@ import (
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
 )
 
-// One shard's replication connection, and the disk behind it.
-//
-// The snapshot and the reader share it. The snapshot opens it — the handshake
-// pins the point the first copy is taken against — and the copy then runs while
-// the connection is already filling the buffer, so the source need only hold
-// history for the handshake, not for the copy.
-//
-// Nothing on this side waits for the target. That separation is the reason to
-// relay at all: a target that is slow or unreachable cannot make the source drop
-// this replica and force a full resync.
+// One shard's replication connection and the disk behind it, shared by the
+// snapshot and the reader: the snapshot's handshake pins the point the first
+// copy is taken against, and the copy runs while the connection already fills
+// the buffer. Nothing here waits for the target — that separation is the reason
+// to relay at all, because a slow target cannot make the source drop this
+// replica.
 type link struct {
 	opts   StreamOptions
 	buffer *Buffer
@@ -34,9 +30,9 @@ type link struct {
 	logger logrus.FieldLogger
 	labels metrics.Labels
 
-	// node is a plain connection to the same master, used only to read its own
-	// write offset. The replication connection cannot answer: once it is a
-	// replica link it takes no ordinary commands.
+	// node is a plain connection to the same master, only for reading its own
+	// write offset: the replication connection takes no ordinary commands once it
+	// is a replica link.
 	node goredis.UniversalClient
 
 	mu     sync.Mutex
@@ -48,14 +44,12 @@ type link struct {
 	// received is how far the stream has been read and written to the buffer.
 	received atomic.Int64
 	// lagTicks counts acknowledgement ticks, so the source is asked for its own
-	// offset every few of them rather than every one.
+	// offset every few rather than every one.
 	lagTicks int
 
-	// applied is how far the target has been written, stored by the applier. It
-	// lives here so that it and durable are published from one place at one
-	// instant: published separately, at the rates their own code runs at, the
-	// applied offset routinely appeared ahead of the received one and the byte
-	// lag came out negative.
+	// applied is how far the target has been written, kept here so it and durable
+	// are published at one instant: published separately, applied routinely
+	// appeared ahead of received and the byte lag came out negative.
 	applied atomic.Int64
 
 	pumping   sync.WaitGroup
@@ -64,17 +58,11 @@ type link struct {
 	closeOnce sync.Once
 }
 
-// start opens the connection, positions it, and begins filling the buffer,
-// reporting the position the stream now stands at. A zero position asks the
-// source for everything, which is what pins the point a first copy is taken
-// against.
-//
-// It continues from the end of the disk, not from the applied position. Those
-// are two clocks and confusing them corrupts the buffer: the disk holds
-// everything received, the position what reached the target, and the second is
-// always behind — so resuming from it re-sends bytes the disk already has and
-// appends them after the ones there, the same commands twice at offsets that
-// now mean nothing.
+// start opens the connection, positions it and begins filling the buffer. It
+// continues from the end of the disk, never from the applied position: the disk
+// holds everything received and the position only what reached the target, so
+// resuming from the latter re-sends bytes the disk already has and appends them
+// at offsets that mean nothing.
 func (l *link) start(ctx context.Context, from streamPosition) (streamPosition, error) {
 	resume := from
 	if !from.IsZero() {
@@ -82,9 +70,9 @@ func (l *link) start(ctx context.Context, from streamPosition) (streamPosition, 
 		case head > from.Offset:
 			resume.Offset = head
 		case head == 0:
-			// Nothing on disk — a replaced volume, or a first run after the
-			// position was recorded. Appends have to start where the position
-			// says, or every offset after them is wrong.
+			// Nothing on disk — a replaced volume, or a first run after the position was
+			// recorded. Appends must start where the position says or every later offset
+			// is wrong.
 			if err := l.buffer.Reset(from.Offset); err != nil {
 				return streamPosition{}, err
 			}
@@ -105,9 +93,9 @@ func (l *link) start(ctx context.Context, from streamPosition) (streamPosition, 
 	at := from
 	switch {
 	case agreed.Full && from.ReplID == "":
-		// A first connection. The data set on the wire is consumed and thrown
-		// away: the first copy is taken with SCAN and DUMP instead, so that
-		// nothing here has to understand a format that changes every release.
+		// A first connection. The data set on the wire is thrown away: the first copy
+		// uses SCAN and DUMP, so nothing here has to understand a format that changes
+		// every release.
 		if _, err := stream.SkipRDB(ctx); err != nil {
 			stream.Close()
 			return streamPosition{}, err
@@ -123,9 +111,9 @@ func (l *link) start(ctx context.Context, from streamPosition) (streamPosition, 
 		}
 
 	case agreed.Full:
-		// The source would not continue from where this task had reached: its
-		// backlog no longer covers the gap. Emptying the target and copying
-		// everything again is the one thing not to do here.
+		// The source will not continue from where this task reached; its backlog no
+		// longer covers the gap. Emptying the target and copying everything again is
+		// the one thing not to do here.
 		stream.Close()
 		return streamPosition{}, domain.Unrecoverable(
 			"the source will not resume shard %s from offset %d and offered to send "+
@@ -144,7 +132,7 @@ func (l *link) start(ctx context.Context, from streamPosition) (streamPosition, 
 	l.mu.Unlock()
 	metrics.SetConnected(l.labels, true)
 
-	// Acknowledgements report what is on disk, which is where the connection was
+	// Acknowledgements report what is on disk, which is where the connection
 	// resumed from rather than what has been applied.
 	l.durable.Store(l.buffer.Newest())
 	l.received.Store(l.buffer.Newest())
@@ -159,9 +147,9 @@ func (l *link) start(ctx context.Context, from streamPosition) (streamPosition, 
 	go func() {
 		defer l.pumping.Done()
 		err := l.pump(pumpCtx, stream)
-		// Waking the readers matters as much as reporting the reason. A cursor
-		// waiting at the end of the buffer is woken by an append, and there will
-		// not be another one, so without this the task hangs instead of failing.
+		// Waking the readers matters as much as reporting why: a cursor waiting at
+		// the end of the buffer is woken by an append, and there will not be another
+		// one.
 		l.buffer.Seal()
 		l.pumpErr <- err
 	}()
@@ -174,12 +162,10 @@ func (l *link) start(ctx context.Context, from streamPosition) (streamPosition, 
 	return at, nil
 }
 
-// pump writes what arrives to disk and acknowledges it.
-//
-// The acknowledgement reports what is on disk, not what has been applied. Once a
-// command is durable here it will be applied, so reporting less would have the
-// source keep history this side no longer needs — and in the other direction,
-// reporting more would let it drop history this side still does.
+// pump writes what arrives to disk and acknowledges it. The acknowledgement
+// reports what is durable, not what is applied: reporting less makes the source
+// keep history this side no longer needs, reporting more lets it drop history
+// this side still does.
 func (l *link) pump(ctx context.Context, stream *Stream) error {
 	ticker := time.NewTicker(ackPeriod)
 	defer ticker.Stop()
@@ -204,16 +190,15 @@ func (l *link) pump(ctx context.Context, stream *Stream) error {
 			return err
 		}
 		unsynced = true
-		// Recorded per command, not per flush. It is what the acknowledgement
-		// reports, and a value up to a second stale would have the source keep
-		// history this side no longer needs.
+		// Recorded per command, not per flush: it is what the acknowledgement
+		// reports, and a value a second stale makes the source keep history this side
+		// no longer needs.
 		l.received.Store(cmd.End)
 
 		select {
 		case <-ticker.C:
-			// One flush per tick rather than one per command. The source can
-			// always send the tail again, so what a crash costs is bounded and
-			// small, while an fsync per command is not.
+			// One flush per tick rather than per command. The source can resend the
+			// tail, so a crash costs little, while an fsync per command does not.
 			if unsynced {
 				if err := l.buffer.Sync(); err != nil {
 					return err
@@ -226,9 +211,8 @@ func (l *link) pump(ctx context.Context, stream *Stream) error {
 	}
 }
 
-// acknowledge reports the durable offset to the source once a second, whether
-// or not anything has arrived. It runs on its own goroutine, and that is the
-// point.
+// acknowledge reports the durable offset once a second whether or not anything
+// arrived, on its own goroutine, which is the point.
 func (l *link) acknowledge(ctx context.Context, stream *Stream) {
 	ticker := time.NewTicker(ackPeriod)
 	defer ticker.Stop()
@@ -238,19 +222,19 @@ func (l *link) acknowledge(ctx context.Context, stream *Stream) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			// Both numbers from one place at one instant, so that subtracting
-			// them means something.
+			// Both numbers from one place at one instant, so subtracting them means
+			// something.
 			metrics.SetStreamOffset(l.labels, l.received.Load(), l.buffer.Held())
 			metrics.SetAppliedOffset(l.labels, l.applied.Load())
-			// The same numbers under the engine-neutral names, so one dashboard
-			// panel covers every engine instead of one panel per engine.
+			// The same numbers under engine-neutral names, so one dashboard panel covers
+			// every engine.
 			metrics.SetSourcePosition(l.labels, l.received.Load())
 			metrics.SetQueueBytes(l.labels, l.buffer.Held())
 			l.publishSourceLag(ctx)
 
 			if err := stream.Ack(l.durable.Load()); err != nil {
-				// The pump will report the connection going away; there is
-				// nothing useful to add from here.
+				// The pump will report the connection going away; there is nothing to add
+				// from here.
 				return
 			}
 		}
@@ -303,14 +287,13 @@ func (l *link) close() {
 	})
 }
 
-// sourceLagPeriod is how often the source is asked for its own offset. The
-// acknowledgement runs every second and this does not need to be that often.
+// sourceLagPeriod is how often the source is asked for its own offset — less
+// often than the once-a-second acknowledgement.
 const sourceLagPeriod = 5
 
 // publishSourceLag reports how far the target is behind the source's own write
-// offset, which is the only lag that keeps growing while this process is
-// stuck. The difference between what this process received and what it applied
-// only describes the part of the backlog it is already holding.
+// offset, the only lag that keeps growing while this process is stuck. Received
+// minus applied only describes the backlog already held.
 func (l *link) publishSourceLag(ctx context.Context) {
 	if l.node == nil {
 		return
@@ -321,8 +304,8 @@ func (l *link) publishSourceLag(ctx context.Context) {
 	}
 	offset, err := masterOffset(ctx, l.node)
 	if err != nil {
-		// The source not answering is itself reported by the connection
-		// counters; a lag of "unknown" must not be published as zero.
+		// The source not answering is reported by the connection counters; an unknown
+		// lag must not be published as zero.
 		return
 	}
 	if applied := l.applied.Load(); offset >= applied {

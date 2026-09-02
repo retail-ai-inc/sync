@@ -1,11 +1,8 @@
-// Package directionlock records which way a task replicates, on both of the
-// databases it touches, so the direction cannot silently reverse.
-//
-// The failure it prevents follows a regional outage: Tokyo goes down, Osaka is
-// promoted and takes payments, Tokyo comes back and the Tokyo → Osaka task
-// resumes from its stored position — overwriting everything Osaka wrote since
-// the promotion with data that is older and wrong. Nothing in the replication
-// protocol notices; it looks like catching up.
+// Package directionlock records which way a task replicates, on both databases,
+// so the direction cannot silently reverse. Without it: Tokyo falls over, Osaka
+// is promoted and takes payments, Tokyo returns and the old task resumes from
+// its position — overwriting everything Osaka wrote with older, wrong data, and
+// the protocol calls it catching up.
 package directionlock
 
 import (
@@ -28,10 +25,8 @@ const (
 )
 
 // DefaultStaleAfter is how long a claim survives without a heartbeat.
-//
-// It has to be comfortably longer than the heartbeat interval, because a claim
-// that expires while its owner is still running is worse than no claim at all:
-// another task would take the endpoint and the two would write over each other.
+// Comfortably longer than the interval, because a claim expiring under a live
+// owner lets another task take the endpoint and both write over each other.
 const DefaultStaleAfter = 15 * time.Minute
 
 const HeartbeatInterval = time.Minute
@@ -41,8 +36,8 @@ type Claim struct {
 	Role   Role `json:"role"`
 	// Peer identifies the endpoint on the other side, without credentials.
 	Peer string `json:"peer"`
-	// Owner names the process holding the claim, so a stale one can be traced
-	// to something an operator can look at.
+	// Owner names the process holding the claim, so a stale one can be traced to
+	// something an operator can look at.
 	Owner     string    `json:"owner"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -89,12 +84,10 @@ func (g *Guard) staleAfter() time.Duration {
 	return DefaultStaleAfter
 }
 
-// owner names the process holding a claim, which is what tells a restarted
-// instance apart from a second one. The hostname is the default: a restarted
-// pod keeps its name and may take its own claim back at once, while a second
-// replica has a different name and is refused. SYNC_INSTANCE overrides it where
-// the hostname is not distinctive — two instances on one machine, or a
-// container sharing the host's.
+// owner tells a restarted instance apart from a second one. The hostname by
+// default — a restarted pod keeps its name and takes its claim back, a second
+// replica is refused; SYNC_INSTANCE overrides it where the hostname is not
+// distinctive.
 func (g *Guard) owner() string {
 	if g.Owner != "" {
 		return g.Owner
@@ -116,10 +109,8 @@ type Conflict struct {
 	Existing Claim
 	Reason   string
 	// Concurrent marks the one conflict that resolves itself: another process
-	// running this same task. The direction conflicts need somebody to decide
-	// which side is authoritative; this one only needs the other process to
-	// finish exiting, which is what a rolling update looks like from the new
-	// pod's side.
+	// running this task, which only needs the other to finish exiting. The
+	// direction conflicts need somebody to decide which side is authoritative.
 	Concurrent bool
 }
 
@@ -130,16 +121,11 @@ func (c *Conflict) Error() string {
 		c.Existing.Peer, c.Existing.Owner, c.Existing.UpdatedAt.Format(time.RFC3339))
 }
 
-// concurrentWith reports a claim held by another process running this same
-// task. Skipping every claim carrying this task's id — which is what let a
-// crashed task take its own claim back at once — also let two processes run it
-// at the same time.
-//
-// Two writers replaying one stream from different offsets eventually apply an
-// older version of a record after a newer one, and idempotence does not save
-// that: an upsert of the older version is a regression. They agree only once
-// both reach the end of the log, so at any moment in between — the moment of a
-// failover included — the target can hold stale values.
+// concurrentWith reports a claim held by another process running this task.
+// Skipping every claim with this task's id, which is what let a crashed task
+// reclaim at once, also let two processes run it together — and two writers
+// replaying one stream from different offsets eventually apply an older version
+// of a record after a newer one, which idempotence does not save.
 func (g *Guard) concurrentWith(existing Claim, now time.Time, endpoint string) *Conflict {
 	if existing.TaskID != g.TaskID || existing.Owner == g.owner() {
 		return nil
@@ -159,30 +145,25 @@ func (g *Guard) concurrentWith(existing Claim, now time.Time, endpoint string) *
 }
 
 // IsConcurrent reports whether a failure is another process running the same
-// task, which is worth retrying rather than stopping for.
+// task, worth retrying rather than stopping for.
 func IsConcurrent(err error) bool {
 	var conflict *Conflict
 	return errors.As(err, &conflict) && conflict.Concurrent
 }
 
-// IsBlocking reports whether a failure is a direction conflict that no amount
-// of retrying resolves, and so must stop the task rather than restart it.
-//
-// Everything else is transient, the unreachable endpoint most of all: reading a
-// claim needs the very database the outage took away, and treating that as
-// permanent stopped replication for good the first time Osaka bounced. A
-// concurrent claim clears when the other process exits.
+// IsBlocking reports whether a failure is a direction conflict retrying cannot
+// resolve. Everything else is transient, the unreachable endpoint most of all:
+// reading a claim needs the database the outage took away, and calling that
+// permanent stopped replication for good the first time Osaka bounced.
 func IsBlocking(err error) bool {
 	var conflict *Conflict
 	return errors.As(err, &conflict) && !conflict.Concurrent
 }
 
-// ConcurrentAfter is how recently another process must have refreshed its claim
-// for this one to treat it as still running.
-//
-// Three heartbeats: long enough that a process which is actually alive has
-// certainly refreshed within it, short enough that a genuine handover to another
-// host is not blocked for the quarter of an hour a direction claim survives.
+// ConcurrentAfter is how recently another process must have refreshed to count
+// as running. Three heartbeats: long enough that a live process has certainly
+// refreshed, short enough not to block a genuine handover for the staleness
+// window.
 const ConcurrentAfter = 3 * HeartbeatInterval
 
 // Acquire checks both endpoints and records this task's direction.
@@ -253,7 +234,7 @@ func (g *Guard) Acquire(ctx context.Context) error {
 }
 
 // Heartbeat refreshes both claims, which is what keeps them from going stale
-// while the task is running.
+// while the task runs.
 func (g *Guard) Heartbeat(ctx context.Context) error {
 	now := g.now()
 	owner := g.owner()
@@ -280,11 +261,10 @@ func (g *Guard) Heartbeat(ctx context.Context) error {
 	return nil
 }
 
-// KeepAlive refreshes the claims until the context is cancelled.
-//
-// A failure to refresh is logged by the caller rather than stopping the task:
-// the endpoint being briefly unreachable is not evidence the direction has
-// changed, and the claim outlives several missed heartbeats.
+// KeepAlive refreshes the claims until the context is cancelled. A failed
+// refresh is logged rather than fatal: a briefly unreachable endpoint is not
+// evidence the direction changed, and the claim outlives several missed
+// heartbeats.
 func (g *Guard) KeepAlive(ctx context.Context, onError func(error)) {
 	ticker := time.NewTicker(HeartbeatInterval)
 	defer ticker.Stop()
@@ -302,9 +282,9 @@ func (g *Guard) KeepAlive(ctx context.Context, onError func(error)) {
 }
 
 // Release discards this task's claims, which is what makes a planned failover
-// quick: without it an operator switching Tokyo → Osaka round waits out the
-// staleness window. A crash deliberately does not release them — a claim
-// outliving the process that died is the whole reason the heartbeat exists.
+// quick rather than a wait on the staleness window. A crash deliberately does
+// not release them — a claim outliving a dead process is why the heartbeat
+// exists.
 func (g *Guard) Release(ctx context.Context) error {
 	var firstErr error
 	for _, store := range []Store{g.Source, g.Target} {
@@ -315,23 +295,20 @@ func (g *Guard) Release(ctx context.Context) error {
 	return firstErr
 }
 
-// releaseTimeout bounds the release. It needs a deadline of its own because the
-// task's context is already cancelled by the time the release runs — passing
-// that one in would abandon every claim on the way out.
+// releaseTimeout bounds the release, which needs a deadline of its own because
+// the task's context is already cancelled by then.
 const releaseTimeout = 5 * time.Second
 
-// Warner is the part of a logger this package uses. Taking an interface rather
-// than logrus keeps the lock free of a logging dependency, and lets a test see
-// what was reported.
+// Warner is the part of a logger this package uses, an interface so the lock
+// carries no logging dependency and a test can see what was reported.
 type Warner interface {
 	Warnf(format string, args ...interface{})
 }
 
-// Hold acquires the claims, keeps them refreshed for as long as the context
-// lives, and returns the function that gives them up. Every engine did this
-// itself, in fourteen identical lines each, and the parts that are easy to get
-// wrong were the parts being copied: the heartbeat has to stop before the
-// release, and the release needs a deadline that is not the cancelled one.
+// Hold acquires the claims, keeps them refreshed while the context lives, and
+// returns the function that gives them up. The order is the part every engine
+// got wrong on its own: the heartbeat stops before the release, and the release
+// needs a deadline that is not the cancelled one.
 func Hold(ctx context.Context, guard *Guard, log Warner, engine string) (release func(), err error) {
 	if err := guard.Acquire(ctx); err != nil {
 		return nil, err

@@ -15,14 +15,12 @@ import (
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
 )
 
-// The replication protocol, spoken from the replica's side. This is what makes
-// the relay a replica rather than a client watching for changes.
+// The replication protocol from the replica's side, which is what makes this a
+// replica rather than a client watching for changes.
 
-// Point is a position in a master's replication stream.
-//
-// ReplID identifies the history the offset belongs to. A master that has been
-// failed over continues a different history, so an offset without its
-// replication id is meaningless.
+// Point is a position in a master's replication stream. ReplID identifies the
+// history it belongs to: a failed-over master continues a different one, so an
+// offset alone is meaningless.
 type Point struct {
 	ReplID string
 	Offset int64
@@ -32,7 +30,7 @@ func (p Point) IsZero() bool { return p.ReplID == "" }
 
 type Handshake struct {
 	// Full says the master would not continue from the offset asked for and is
-	// sending its whole data set instead.
+	// sending its whole data set.
 	Full bool
 	// ReplID is the history the stream now belongs to.
 	ReplID string
@@ -43,8 +41,8 @@ type Handshake struct {
 type Command struct {
 	// Args is the command and its arguments, as the master sent them.
 	Args [][]byte
-	// Raw is the bytes it occupied in the stream. The offset arithmetic and the
-	// buffer both work in these, so they are kept exactly as received.
+	// Raw is the bytes it occupied in the stream, kept exactly as received because
+	// the offset arithmetic and the buffer both work in them.
 	Raw []byte
 	// End is the absolute stream offset after this command.
 	End int64
@@ -60,27 +58,26 @@ func (c *Command) Name() string {
 type StreamOptions struct {
 	// Addr is the master to replicate from, as host:port.
 	Addr string
-	// Username and Password authenticate. An empty username with a password
-	// sends the old two-argument AUTH.
+	// Username and Password authenticate; an empty username with a password sends
+	// the old two-argument AUTH.
 	Username string
 	Password string
 	// DialTimeout bounds connecting. Zero means the default.
 	DialTimeout time.Duration
-	// IdleTimeout is how long the master may say nothing before the link is
-	// treated as dead. A healthy master pings every repl-ping-replica-period,
-	// ten seconds by default, so silence past this is not quietness — it is a
-	// connection that has gone away without saying so. Zero means the default.
+	// IdleTimeout is how long the master may say nothing before the link counts as
+	// dead. A healthy one pings every ten seconds, so longer silence is a
+	// connection gone away quietly. Zero means the default.
 	IdleTimeout time.Duration
-	// ListeningPort is reported to the master so it appears in INFO replication.
-	// Zero is allowed and means this replica serves nothing.
+	// ListeningPort is reported to the master so it appears in INFO replication;
+	// zero means this replica serves nothing.
 	ListeningPort int
 }
 
 const (
 	defaultDialTimeout = 10 * time.Second
 	defaultIdleTimeout = 60 * time.Second
-	// ackPeriod is how often the applied offset is reported back. One second is
-	// what a real replica uses.
+	// ackPeriod is how often the applied offset is reported back — one second, as
+	// a real replica does.
 	ackPeriod = time.Second
 )
 
@@ -98,18 +95,16 @@ func (o StreamOptions) idleTimeout() time.Duration {
 	return defaultIdleTimeout
 }
 
-// Stream is one replication connection to one master.
-//
-// It is not safe for concurrent readers. Ack may be called from another
-// goroutine.
+// Stream is one replication connection to one master. Not safe for concurrent
+// readers, though Ack may be called from another goroutine.
 type Stream struct {
 	opts StreamOptions
 
 	conn   net.Conn
 	reader *bufio.Reader
 
-	// writing guards sending to the master, because acknowledgements are sent
-	// from the applying side while this side is reading.
+	// writing guards sending to the master, because acknowledgements go out from
+	// the applying side while this side reads.
 	writing sync.Mutex
 
 	// offset is how far the stream has been read.
@@ -157,25 +152,24 @@ func (s *Stream) authenticate() error {
 		return fmt.Errorf("authenticate with the source: %w", err)
 	}
 	if !strings.HasPrefix(reply, "+OK") {
-		// Wrong credentials will never start working, so this is not worth
-		// retrying against.
+		// Wrong credentials will never start working, so this is not worth retrying
+		// against.
 		return domain.Unrecoverable("the source refused the credentials: %s", reply)
 	}
 	return nil
 }
 
-// Sync performs the replication handshake and reports what the master agreed to.
-//
-// On a full resync the caller must consume the data set with SkipRDB before
-// reading commands; the stream is not positioned until it has.
+// Sync performs the handshake and reports what the master agreed to. On a full
+// resync the caller must consume the data set with SkipRDB first; the stream is
+// not positioned until it has.
 func (s *Stream) Sync(from Point) (Handshake, error) {
 	if _, err := s.call([]byte("REPLCONF"), []byte("listening-port"),
 		[]byte(strconv.Itoa(s.opts.ListeningPort))); err != nil {
 		return Handshake{}, fmt.Errorf("announce the listening port: %w", err)
 	}
-	// eof asks for the data set without a length prefix, which is how a master
-	// streams it straight from the fork instead of writing a file first. psync2
-	// is what allows a partial resync to survive the source failing over.
+	// eof asks for the data set without a length prefix, so the master streams it
+	// from the fork instead of writing a file. psync2 is what lets a partial
+	// resync survive a source failover.
 	if _, err := s.call([]byte("REPLCONF"), []byte("capa"), []byte("eof"),
 		[]byte("capa"), []byte("psync2")); err != nil {
 		return Handshake{}, fmt.Errorf("announce capabilities: %w", err)
@@ -183,19 +177,18 @@ func (s *Stream) Sync(from Point) (Handshake, error) {
 
 	id, offset := "?", "-1"
 	if !from.IsZero() {
-		// The protocol asks for the first byte wanted, which is one past what
-		// has been read.
+		// The protocol asks for the first byte wanted, which is one past what has
+		// been read.
 		id, offset = from.ReplID, strconv.FormatInt(from.Offset+1, 10)
 	}
 	reply, err := s.call([]byte("PSYNC"), []byte(id), []byte(offset))
 	if err != nil {
 		return Handshake{}, fmt.Errorf("start replication: %w", err)
 	}
-	// A master waiting for its background save to start sends newlines to keep
-	// the connection alive, and they arrive before the answer to PSYNC rather
-	// than only before the data set. Reading one line and believing it is the
-	// reply is how this fails against a real server while passing against a
-	// scripted one.
+	// A master waiting for its background save sends newlines to keep the
+	// connection alive, and they arrive before the PSYNC reply. Reading one line
+	// and believing it is the reply is how this fails against a real server while
+	// passing against a scripted one.
 	for reply == "" {
 		if reply, err = s.readLine(); err != nil {
 			return Handshake{}, fmt.Errorf("wait for the answer to PSYNC: %w", err)
@@ -216,13 +209,13 @@ func (s *Stream) Sync(from Point) (Handshake, error) {
 		return Handshake{Full: true, ReplID: fields[1], Offset: at}, nil
 
 	case strings.HasPrefix(reply, "+CONTINUE"):
-		// The stream picks up exactly where the position said, so the count of
-		// bytes read stays as it was.
+		// The stream picks up exactly where the position said, so the count of bytes
+		// read stays as it was.
 		s.offset = from.Offset
 		replID := from.ReplID
 		if fields := strings.Fields(reply); len(fields) >= 2 {
-			// psync2: the master may hand over a new identifier for the same
-			// history, which the position has to record from now on.
+			// psync2: the master may hand over a new identifier for the same history,
+			// which the position records from now on.
 			replID = fields[1]
 		}
 		return Handshake{ReplID: replID, Offset: from.Offset}, nil
@@ -231,8 +224,8 @@ func (s *Stream) Sync(from Point) (Handshake, error) {
 		return Handshake{}, fmt.Errorf("the source is not ready to replicate yet: %s", reply)
 
 	case strings.HasPrefix(reply, "-ERR") && strings.Contains(reply, "not allowed"):
-		// Managed Redis disables the replication commands outright. No amount of
-		// retrying changes that, and the fallback is a different reader.
+		// Managed Redis disables the replication commands outright; retrying changes
+		// nothing and the fallback is a different reader.
 		return Handshake{}, domain.Unrecoverable(
 			"the source does not allow PSYNC (%s). A managed instance blocks the "+
 				"replication commands; use the scanning reader or the provider's own "+
@@ -241,8 +234,8 @@ func (s *Stream) Sync(from Point) (Handshake, error) {
 	return Handshake{}, fmt.Errorf("the source answered PSYNC with %q", reply)
 }
 
-// SkipRDB consumes the data set a full resync sends, discarding it. Nothing
-// here parses it.
+// SkipRDB consumes and discards the data set a full resync sends. Nothing here
+// parses it.
 func (s *Stream) SkipRDB(ctx context.Context) (int64, error) {
 	for {
 		line, err := s.readLine()
@@ -271,12 +264,10 @@ func (s *Stream) SkipRDB(ctx context.Context) (int64, error) {
 			return read, err
 		}
 
-		// The master will not start sending commands until the replica
-		// acknowledges. A data set streamed without a length gives the master no
-		// way to know when the replica finished loading it, so it holds the
-		// command stream back until the first REPLCONF ACK arrives. Without this
-		// the connection stays open, the master's offset climbs, and nothing is
-		// ever delivered — which looks exactly like a quiet source.
+		// The master holds the command stream back until the first REPLCONF ACK: a
+		// data set streamed without a length gives it no way to know the replica
+		// finished loading. Without this the offset climbs and nothing is delivered,
+		// which looks exactly like a quiet source.
 		if err := s.Ack(s.offset); err != nil {
 			return read, fmt.Errorf("acknowledge the data set: %w", err)
 		}
@@ -338,10 +329,9 @@ func (s *Stream) skipDelimited(ctx context.Context, marker []byte) (int64, error
 	}
 }
 
-// Next reads one command from the stream.
-//
-// The bytes are kept exactly as they arrived: the offset is a count of them, and
-// so is everything the source will accept in an acknowledgement.
+// Next reads one command, keeping the bytes exactly as they arrived: the offset
+// is a count of them, and so is anything the source will accept in an
+// acknowledgement.
 func (s *Stream) Next(ctx context.Context) (*Command, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -354,10 +344,9 @@ func (s *Stream) Next(ctx context.Context) (*Command, error) {
 			return nil, err
 		}
 		if b == '\n' || b == '\r' {
-			// A keepalive, sent while the master was forking. It is written
-			// straight to the connection rather than through the replication
-			// backlog, so the master does not count it either — counting it here
-			// would drift this side's offset ahead of the master's for good.
+			// A keepalive sent while the master was forking, written straight to the
+			// connection rather than through the backlog. The master does not count it,
+			// so counting it here would drift this side's offset ahead for good.
 			if _, err := s.reader.Discard(1); err != nil {
 				return nil, s.describe(err)
 			}
@@ -380,10 +369,9 @@ func (s *Stream) Next(ctx context.Context) (*Command, error) {
 		return nil, fmt.Errorf("a command in the stream announced %q arguments", line[1:])
 	}
 
-	// Where each argument sits inside the raw bytes. The arguments are handed
-	// out as slices of the copy taken below, never of the scratch buffer: that
-	// gets reused for the next command, and an argument pointing into it would
-	// change under the caller's feet.
+	// Where each argument sits in the raw bytes. Arguments are slices of the copy
+	// taken below, never of the scratch buffer, which is reused for the next
+	// command.
 	type span struct{ at, length int }
 	spans := make([]span, 0, count)
 
@@ -420,9 +408,8 @@ func (s *Stream) Next(ctx context.Context) (*Command, error) {
 
 func (s *Stream) Offset() int64 { return s.offset }
 
-// Ack reports an offset back to the master. A real replica sends this every
-// second, and the master uses it for WAIT, for min-replicas-to-write and for
-// choosing which replica to promote.
+// Ack reports an offset back to the master, which uses it for WAIT, min-
+// replicas-to-write and choosing which replica to promote.
 func (s *Stream) Ack(offset int64) error {
 	s.writing.Lock()
 	defer s.writing.Unlock()
