@@ -14,8 +14,7 @@ import (
 )
 
 // deadMongo returns a client that resolves collection handles without dialling
-// and fails every operation quickly. The counter builds its filter before it
-// runs the count, so the filter can be inspected without a server.
+// and fails every operation quickly.
 func deadMongo(t *testing.T) *mongo.Client {
 	t.Helper()
 
@@ -31,8 +30,7 @@ func deadMongo(t *testing.T) *mongo.Client {
 }
 
 // countedFilter runs a count against an unreachable server and returns the
-// query the counter logged on its way there. That log line is the only seam the
-// filter builder offers.
+// query the counter logged on its way there.
 func countedFilter(t *testing.T, qc *QueryCounter, out *bytes.Buffer,
 	collection string, query *domain.CountQuery) string {
 	t.Helper()
@@ -113,9 +111,7 @@ func TestAConditionForAnotherTableIsIgnored(t *testing.T) {
 }
 
 // TestTheEqualityOperatorMatchesEitherRepresentation covers a value that looks
-// like a number. It used to be converted and the string dropped, and MongoDB
-// does not match a numeric filter against a text field — so an order id stored
-// as text counted zero rows, which reads as a replica that has lost everything.
+// like a number.
 func TestTheEqualityOperatorMatchesEitherRepresentation(t *testing.T) {
 	qc, out := loggingCounter(t)
 
@@ -145,8 +141,7 @@ func TestTheEqualityOperatorMatchesEitherRepresentation(t *testing.T) {
 	}
 }
 
-// TestANumericStringIdIsStillMatched is the case that mattered: an id column
-// stored as text. The value was sent as a number and MongoDB matched nothing.
+// TestANumericStringIdIsStillMatched is the case that mattered.
 func TestANumericStringIdIsStillMatched(t *testing.T) {
 	qc, out := loggingCounter(t)
 

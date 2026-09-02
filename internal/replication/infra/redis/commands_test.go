@@ -16,8 +16,7 @@ func cmd(parts ...string) *Command {
 	return &Command{Args: args}
 }
 
-// table is the command specification a server would have given us: SET and DEL
-// take their key first, EVAL works its keys out at runtime.
+// table is the command specification a server would have given us.
 func table() *commandTable {
 	return &commandTable{
 		keyAt:   map[string]int{"set": 1, "del": 1, "hset": 1, "eval": 0, "get": 1},
@@ -75,8 +74,7 @@ func TestTheCommandsThatCarryNoDataAreRecognised(t *testing.T) {
 }
 
 // TestAWriteReportsTheKeyThatNamesItsSlot is what decides which slot's marker
-// moves. Getting the key wrong puts the position in the wrong slot, and the
-// resume after a restart then skips or repeats a different key's writes.
+// moves.
 func TestAWriteReportsTheKeyThatNamesItsSlot(t *testing.T) {
 	class, key, err := table().classify(context.Background(), nil, cmd("SET", "user:1", "v"))
 	if err != nil {

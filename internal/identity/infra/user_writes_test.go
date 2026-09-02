@@ -103,9 +103,7 @@ func TestUpdateUserAccessAndStatusOnAnUnknownUser(t *testing.T) {
 	}
 }
 
-// TestNullColumnsGetTheirFallbacks records the substitutions the read applies:
-// an absent avatar, userId or email becomes the empty string and an absent
-// status becomes "active".
+// TestNullColumnsGetTheirFallbacks records the substitutions the read applies.
 func TestNullColumnsGetTheirFallbacks(t *testing.T) {
 	db := useTempDB(t)
 	if _, err := db.Exec(

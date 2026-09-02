@@ -9,8 +9,7 @@ import (
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
 )
 
-// Almost every stream failure is worth retrying: the network drops, the source
-// restarts, the connection comes back.
+// Almost every stream failure is worth retrying: the network drops.
 func TestAPurgedBinlogIsNotSomethingToRetry(t *testing.T) {
 	r := &Reader{Labels: metrics.Labels{"task": t.Name()}}
 	defer metrics.Default.Forget(r.Labels)
@@ -36,9 +35,7 @@ func TestAPurgedBinlogIsNotSomethingToRetry(t *testing.T) {
 	}
 }
 
-// TestAnOrdinaryStreamFailureStaysRetryable. A dropped connection is the
-// ordinary case, and turning it into "take a fresh copy" would re-copy a live
-// payment database every time the network hiccuped.
+// TestAnOrdinaryStreamFailureStaysRetryable.
 func TestAnOrdinaryStreamFailureStaysRetryable(t *testing.T) {
 	r := &Reader{Labels: metrics.Labels{"task": t.Name()}}
 	defer metrics.Default.Forget(r.Labels)
@@ -124,8 +121,7 @@ func TestASourceWithGTIDsIsNotWarnedAbout(t *testing.T) {
 }
 
 // TestOnlyASettingNameIsInterpolated is the guard between a configuration value
-// and a query. The name goes into SHOW GLOBAL VARIABLES, where it cannot be
-// parameterised, so anything that is not a bare identifier has to be refused.
+// and a query.
 func TestOnlyASettingNameIsInterpolated(t *testing.T) {
 	for _, name := range []string{"gtid_mode", "binlog_format", "log_bin"} {
 		if !settingName(name) {

@@ -55,9 +55,7 @@ func TestDistinctRecordsShareOneRun(t *testing.T) {
 	}
 }
 
-// TestTheSameRecordTwiceIsSplit covers the ordering that matters. An insert
-// followed by a delete leaves nothing behind; the same two applied the other way
-// round leave the row there.
+// TestTheSameRecordTwiceIsSplit covers the ordering that matters.
 func TestTheSameRecordTwiceIsSplit(t *testing.T) {
 	first := event("orders", "1", "p1")
 	second := event("orders", "1", "p2")
@@ -88,8 +86,7 @@ func TestTheSameKeyInDifferentNamespacesDoesNotClash(t *testing.T) {
 }
 
 // TestADDLIsABarrier covers the statement that changes the shape of a table
-// rather than one row in it. Nothing may cross it in either direction: a row
-// using a new column cannot land before the column exists.
+// rather than one row in it.
 func TestADDLIsABarrier(t *testing.T) {
 	runs := orderedRuns([]*domain.Event{
 		event("orders", "1", "p1"),
@@ -102,8 +99,7 @@ func TestADDLIsABarrier(t *testing.T) {
 	}
 }
 
-// TestABatchIsOnlyFullAtATransactionBoundary is the rule stated on its own,
-// away from the runner's timing.
+// TestABatchIsOnlyFullAtATransactionBoundary is the rule stated on its own.
 func TestABatchIsOnlyFullAtATransactionBoundary(t *testing.T) {
 	limits := Limits{MaxEvents: 2}
 	var b batch

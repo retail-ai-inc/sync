@@ -61,8 +61,7 @@ func rowCount(t *testing.T, db *sql.DB) int {
 }
 
 // TestABatchAndItsPositionCommitTogether is the guarantee the applier exists
-// for. A MySQL replica writes its position in the transaction that applies the
-// rows, so the two cannot disagree after a crash; this does the same.
+// for.
 func TestABatchAndItsPositionCommitTogether(t *testing.T) {
 	db := applierTarget(t)
 	applier, store := newApplier(t, db)
@@ -89,8 +88,7 @@ func TestABatchAndItsPositionCommitTogether(t *testing.T) {
 }
 
 // TestAFailedBatchLeavesNothingBehind covers the atomicity the design depends
-// on. Half a batch on the target is a state the source was never in — and after
-// a failover there is no source left to reconcile it against.
+// on.
 func TestAFailedBatchLeavesNothingBehind(t *testing.T) {
 	db := applierTarget(t)
 	applier, store := newApplier(t, db)
@@ -141,8 +139,7 @@ func TestAFailedPositionWriteRollsBackTheData(t *testing.T) {
 }
 
 // TestTheFailureRollsBackEarlierRunsToo covers a batch split into several runs
-// because it touches the same record twice. Committing the runs one at a time
-// would leave the target holding the ones that succeeded.
+// because it touches the same record twice.
 func TestTheFailureRollsBackEarlierRunsToo(t *testing.T) {
 	db := applierTarget(t)
 	applier, _ := newApplier(t, db)
@@ -162,8 +159,7 @@ func TestTheFailureRollsBackEarlierRunsToo(t *testing.T) {
 }
 
 // TestWithoutACheckpointStoreTheRunnerIsToldToRecordIt covers a target that
-// cannot take part in the transaction. The weaker guarantee has to be reported
-// honestly rather than assumed.
+// cannot take part in the transaction.
 func TestWithoutACheckpointStoreTheRunnerIsToldToRecordIt(t *testing.T) {
 	db := applierTarget(t)
 	applier, _ := newApplier(t, db)

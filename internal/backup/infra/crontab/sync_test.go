@@ -12,8 +12,7 @@ import (
 )
 
 // stubCrontab puts a fake crontab command on PATH that records its invocations
-// and, for `crontab -l`, prints whatever existing lines the test supplied. The
-// real crontab of whoever runs the suite is never touched.
+// and, for `crontab -l`, prints whatever existing lines the test supplied.
 func stubCrontab(t *testing.T, existing string, exitCode int) (binDir, logPath string) {
 	t.Helper()
 
@@ -46,8 +45,7 @@ func itoa(n int) string {
 }
 
 // useTempJobDB returns a handle on a throwaway SQLite file carrying the
-// backup_tasks table. The CronManager is handed the handle directly, so
-// SYNC_DB_PATH is irrelevant here.
+// backup_tasks table.
 func useTempJobDB(t *testing.T) *sql.DB {
 	t.Helper()
 
@@ -264,7 +262,6 @@ func TestNoCrontabBinaryIsReported(t *testing.T) {
 
 // TestACorruptTaskIsSkippedNotReported records that a backup task whose
 // configuration will not parse is left out of the crontab with one error line.
-// The job silently stops running, and the sync that dropped it reports success.
 func TestACorruptTaskIsSkippedNotReported(t *testing.T) {
 	db := useTempJobDB(t)
 	insertJob(t, db, 1, `{"name":`)

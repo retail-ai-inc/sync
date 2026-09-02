@@ -97,8 +97,7 @@ func startSyncer(t *testing.T, cfg config.SyncConfig) (stop func()) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 
-	// NewSyncer, not NewMySQLSyncer: the first is what cmd/sync starts, the
-	// second is the path the shared pipeline replaced.
+	// NewSyncer, not NewMySQLSyncer: the first is what cmd/sync starts.
 	syncer := NewSyncer(cfg, logger)
 	if syncer == nil {
 		t.Fatal("NewSyncer returned nil")
@@ -186,9 +185,7 @@ func TestIncrementalSyncAppliesInsertUpdateDelete(t *testing.T) {
 	})
 }
 
-// TestDDLIsPropagated exercises F-044. A column added at the source is applied
-// to the target before the rows that use it arrive, so a schema change no
-// longer stops replication for the affected table.
+// TestDDLIsPropagated exercises F-044.
 func TestDDLIsPropagated(t *testing.T) {
 	table := harness.UniqueName("ddl")
 	src, tgt := open(t, harness.MySQLSource, sourceDB), open(t, harness.MySQLTarget, targetDB)
@@ -314,8 +311,7 @@ func TestSecurityPolicyIsAppliedToMySQL(t *testing.T) {
 	t.Logf("MySQL masked the value to %q, while MongoDB leaves it in the clear", email)
 }
 
-// TestWritesDuringInitialSyncAreNotLost exercises F-040, the MySQL counterpart
-// of the MongoDB snapshot gap.
+// TestWritesDuringInitialSyncAreNotLost exercises F-040.
 func TestWritesDuringInitialSyncAreNotLost(t *testing.T) {
 	table := harness.UniqueName("snapshotgap")
 	src, tgt := open(t, harness.MySQLSource, sourceDB), open(t, harness.MySQLTarget, targetDB)
@@ -363,8 +359,7 @@ func TestWritesDuringInitialSyncAreNotLost(t *testing.T) {
 		return nil
 	})
 
-	// The seeded rows arrive through the copy; the markers arrive afterwards,
-	// through the stream replaying from the coordinates the copy pinned.
+	// The seeded rows arrive through the copy; the markers arrive afterwards.
 	harness.Eventually(t, 60*time.Second, func() error {
 		if arrived := countRows(t, tgt, table, "name = 'marker'"); arrived != markers {
 			return fmt.Errorf("%d of %d rows written during the initial copy have "+
@@ -375,9 +370,8 @@ func TestWritesDuringInitialSyncAreNotLost(t *testing.T) {
 	})
 }
 
-// TestResumeFromStoredBinlogPosition checks that a restarted syncer replays what
-// it missed. The position file lives under MySQLPositionPath, so the second run
-// must reuse the same path.
+// TestResumeFromStoredBinlogPosition checks that a restarted syncer replays
+// what it missed.
 func TestResumeFromStoredBinlogPosition(t *testing.T) {
 	table := harness.UniqueName("resume")
 	src, tgt := open(t, harness.MySQLSource, sourceDB), open(t, harness.MySQLTarget, targetDB)
@@ -526,9 +520,7 @@ func TestTransactionBoundariesAreObserved(t *testing.T) {
 		t.Errorf("the target settled on a sum of %d, want %d", finalSum, total)
 	}
 
-	// Zero observations is the pass. The poller can only miss a violation, never
-	// invent one, so this is a best-effort check in the direction that matters:
-	// anything it does catch is a state the source never held.
+	// Zero observations is the pass.
 	if len(observed) > 0 {
 		t.Errorf("the target exposed %d intermediate sums such as %v, none of which "+
 			"ever existed at the source: the row events of one transaction are not "+
@@ -636,9 +628,7 @@ func TestATableTheTaskDoesNotListIsReported(t *testing.T) {
 	logger.SetLevel(logrus.WarnLevel)
 
 	cfg := syncTask(t, listed)
-	// Through NewSyncer, which is what the supervisor starts. This test used to
-	// start the old syncer instead, and so went on passing for as long as the
-	// warning it covers was reachable from nowhere the supervisor goes.
+	// Through NewSyncer, which is what the supervisor starts.
 	stop := harness.RunSyncer(t, NewSyncer(cfg, logger).Start)
 	t.Cleanup(stop)
 

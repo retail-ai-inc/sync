@@ -30,9 +30,8 @@ func TestGoogleLoginRefusesAnEmptyCode(t *testing.T) {
 	}
 }
 
-// TestAFailedGoogleLoginAffectsNobodyElse records what a failure means now
-// that the token is the whole identity: it produces no token and touches
-// nothing.
+// TestAFailedGoogleLoginAffectsNobodyElse records what a failure means now that
+// the token is the whole identity: it produces no token and touches nothing.
 func TestAFailedGoogleLoginAffectsNobodyElse(t *testing.T) {
 	db := useTempDB(t)
 	insertUser(t, db, "alice", "secret", "Alice", "admin")
@@ -125,6 +124,4 @@ func TestAnEmptyGoogleIdentityStillReachesTheStore(t *testing.T) {
 	}
 }
 
-// The exchange itself is covered in internal/identity/infra, against a stand-in
-// server. The two Google URLs used to be unexported constants, so there was no
-// seam at all and testing the exchange meant reaching the real Google.
+// The exchange itself is covered in internal/identity/infra.

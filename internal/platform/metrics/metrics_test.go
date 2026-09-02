@@ -98,8 +98,7 @@ func TestTheLabelOrderIsStable(t *testing.T) {
 }
 
 // TestALabelValueIsEscaped covers the characters that would otherwise end the
-// label early and produce an exposition a scraper rejects. A table name is
-// operator-supplied, so this is reachable.
+// label early and produce an exposition a scraper rejects.
 func TestALabelValueIsEscaped(t *testing.T) {
 	r := New()
 

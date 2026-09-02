@@ -10,7 +10,6 @@ import (
 
 // unopenableDB points SYNC_DB_PATH at a path whose parent is a regular file, so
 // the directory creation inside OpenSQLiteDB fails immediately with ENOTDIR.
-// Every store call has to answer for that, and each tags it with the same stage.
 func unopenableDB(t *testing.T) {
 	t.Helper()
 
@@ -65,8 +64,6 @@ func TestSetEnableTagsAnUnopenableDatabase(t *testing.T) {
 }
 
 // TestListJobsReportsAScanFailure covers the branch a badly typed column takes.
-// The enable column is declared INTEGER, but SQLite stores whatever it is given,
-// so a row holding text fails the scan rather than the query.
 func TestListJobsReportsAScanFailure(t *testing.T) {
 	db := useTempJobDB(t)
 	if _, err := db.Exec(

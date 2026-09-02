@@ -14,9 +14,7 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
-// Fixtures shared by this package's handler tests. They are duplicated per
-// package rather than shared through an importable helper package, because a
-// non-test package holding test code compiles into every build.
+// Fixtures shared by this package's handler tests.
 
 // isolateCrontab empties PATH so the `crontab` command cannot be found.
 func isolateCrontab(t *testing.T) {

@@ -20,8 +20,7 @@ func TestNewQueryCounterSuppliesADefaultLogger(t *testing.T) {
 	}
 }
 
-// The existing formatFilterCondition table does not reach $gt, or the
-// non-time branches of $gte and $lte. These pin them.
+// The existing formatFilterCondition table does not reach $gt.
 func TestFormatFilterConditionRemainingOperators(t *testing.T) {
 	qc := NewQueryCounter(nil)
 

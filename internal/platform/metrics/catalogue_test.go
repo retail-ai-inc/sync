@@ -56,9 +56,7 @@ func TestEventsAreCountedByOperation(t *testing.T) {
 	}
 }
 
-// TestCountingAnEventDoesNotTouchTheCallersLabels guards the hot path. The
-// label map is held for the task's life and shared with every other metric it
-// records; adding an op to it in place would put an op label on the lag gauge.
+// TestCountingAnEventDoesNotTouchTheCallersLabels guards the hot path.
 func TestCountingAnEventDoesNotTouchTheCallersLabels(t *testing.T) {
 	labels := Labels{"task": "shared", "engine": "redis"}
 	c := NewEventCounters(labels)
@@ -87,10 +85,8 @@ func TestAnUnpreparedOperationIsStillCounted(t *testing.T) {
 	}
 }
 
-// TestTransactionsAndEventsAreCountedSeparately is the pair that catches a whole
-// source transaction going missing. This codebase shipped with exactly that
-// defect: a checkpoint moved past a transaction whose rows were never read, and
-// nothing said so.
+// TestTransactionsAndEventsAreCountedSeparately is the pair that catches a
+// whole source transaction going missing.
 func TestTransactionsAndEventsAreCountedSeparately(t *testing.T) {
 	labels := Labels{"task": "tx", "engine": "mysql"}
 
@@ -106,9 +102,7 @@ func TestTransactionsAndEventsAreCountedSeparately(t *testing.T) {
 	}
 }
 
-// TestARolledBackBatchIsCounted keeps the refused work visible. A batch that
-// rolls back leaves the target without every transaction it held, and the
-// applied counter cannot say so — it only ever counts what succeeded.
+// TestARolledBackBatchIsCounted keeps the refused work visible.
 func TestARolledBackBatchIsCounted(t *testing.T) {
 	labels := Labels{"task": "rollback", "engine": "mysql"}
 
@@ -140,8 +134,7 @@ func TestConnectedIsNotTheSameAsUp(t *testing.T) {
 }
 
 // TestASnapshotReportsRunningThenCompleted walks the states Debezium's snapshot
-// context exposes. The point of the three flags is that "never ran", "running"
-// and "gave up" are different, and a single boolean cannot say which.
+// context exposes.
 func TestASnapshotReportsRunningThenCompleted(t *testing.T) {
 	labels := Labels{"task": "snap", "engine": "mongodb"}
 
@@ -224,8 +217,7 @@ func TestSchemaChangesAreCountedApartFromRefusals(t *testing.T) {
 }
 
 // TestTheSourceInfoSeriesCarriesTheSlowMovingPartsOfThePosition guards the
-// cardinality decision. The file name is safe as a label because it changes
-// every few hours; a GTID set would make a series per transaction.
+// cardinality decision.
 func TestTheSourceInfoSeriesCarriesTheSlowMovingPartsOfThePosition(t *testing.T) {
 	labels := Labels{"task": "pos", "engine": "mysql"}
 
@@ -245,8 +237,7 @@ func TestTheSourceInfoSeriesCarriesTheSlowMovingPartsOfThePosition(t *testing.T)
 }
 
 // TestTheQueueReportsDepthAndBytes: a queue can be shallow in events and huge
-// in bytes, and the two lead to different answers. One large document filling
-// the buffer is not the same problem as a hundred thousand small ones.
+// in bytes, and the two lead to different answers.
 func TestTheQueueReportsDepthAndBytes(t *testing.T) {
 	labels := Labels{"task": "queue", "engine": "mongodb"}
 

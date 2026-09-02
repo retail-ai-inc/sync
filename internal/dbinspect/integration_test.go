@@ -510,9 +510,7 @@ func TestAnEmptyMongoCollectionReturnsAnArrayNotNull(t *testing.T) {
 	}
 }
 
-// A collection that does not exist behaves exactly like an empty one: 200 with
-// no fields. As with MySQL (T-115) a typo is indistinguishable from an empty
-// collection.
+// A collection that does not exist behaves exactly like an empty one.
 func TestAMissingMongoCollectionLooksEmpty(t *testing.T) {
 	rec, resp := postSchema(t, mongoSchemaBody(t, "collection_that_does_not_exist"))
 

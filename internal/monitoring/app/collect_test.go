@@ -69,8 +69,7 @@ func TestStartRowCountMonitoringTakesNoMeasurementBeforeTheFirstTick(t *testing.
 
 	StartRowCountMonitoring(ctx, cfg, quietLogger(), time.Hour)
 
-	// With an hour-long interval nothing can have run yet. Cancelling has to be
-	// enough to stop both goroutines.
+	// With an hour-long interval nothing can have run yet.
 	cancel()
 	time.Sleep(50 * time.Millisecond)
 }
@@ -108,9 +107,7 @@ func TestDisabledTasksAreNotMeasured(t *testing.T) {
 }
 
 // TestTheDailySummarySaysWhatItLeftOut covers a summary that was only ever
-// implemented for MongoDB. It printed "Daily summary completed" whatever had
-// happened, so a MySQL task with a dateRange condition was missing from a
-// summary that reported itself complete.
+// implemented for MongoDB.
 func TestTheDailySummarySaysWhatItLeftOut(t *testing.T) {
 	log, buf := capturingLogger()
 	cfg := &config.Config{SyncConfigs: []config.SyncConfig{

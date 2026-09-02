@@ -326,8 +326,7 @@ func TestAnUnreadableStoreIsNotSilentlyAbsent(t *testing.T) {
 	}
 }
 
-// TestAReadableStoreWithNothingIsNotAnError is the other side: an empty target
-// really does mean there is no checkpoint.
+// TestAReadableStoreWithNothingIsNotAnError is the other side.
 func TestAReadableStoreWithNothingIsNotAnError(t *testing.T) {
 	l := &Layered{Stores: []Store{newStub(), newStub()}}
 

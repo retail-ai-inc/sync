@@ -32,9 +32,7 @@ func changeDoc(db, coll, op string, key bson.D) bson.D {
 	}
 }
 
-// Two changes to one document may never be reordered against each other, and
-// on a sharded collection two documents can share an _id while differing in
-// the shard key.
+// Two changes to one document may never be reordered against each other.
 func TestTheOrderingKeyCarriesTheShardKey(t *testing.T) {
 	raw := rawEvent(t, changeDoc("shop", "orders", "update", bson.D{
 		{Key: "_id", Value: "abc"},
@@ -94,8 +92,7 @@ func TestEventsOfOneTransactionShareAnIdentity(t *testing.T) {
 	}
 }
 
-// TestADifferentTransactionNumberIsADifferentTransaction is the other half: the
-// boundary has to actually move.
+// TestADifferentTransactionNumberIsADifferentTransaction is the other half.
 func TestADifferentTransactionNumberIsADifferentTransaction(t *testing.T) {
 	session := bson.D{{Key: "id", Value: "s1"}}
 	first := changeDoc("shop", "orders", "insert", bson.D{{Key: "_id", Value: "a"}})
@@ -321,8 +318,7 @@ func TestAnIdleStreamSealsTheOpenTransaction(t *testing.T) {
 	}
 }
 
-// TestAStandaloneChangeClosesAnOpenTransaction covers the mixed stream: an
-// ordinary write after a transaction proves the transaction ended.
+// TestAStandaloneChangeClosesAnOpenTransaction covers the mixed stream.
 func TestAStandaloneChangeClosesAnOpenTransaction(t *testing.T) {
 	r := bufferingReader(t)
 	if err := r.take(txEvent(t, "orders", "o1", "s1", 1)); err != nil {

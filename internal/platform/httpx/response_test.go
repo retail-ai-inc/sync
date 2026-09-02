@@ -89,8 +89,7 @@ func TestErrorJSONStatusCarriesTheGivenStatus(t *testing.T) {
 }
 
 // TestErrorJSONWithoutAnError covers a caller reporting a failure with nothing
-// to attach. The error used to be dereferenced unconditionally, which took down
-// the request goroutine.
+// to attach.
 func TestErrorJSONWithoutAnError(t *testing.T) {
 	rec := httptest.NewRecorder()
 
@@ -144,8 +143,7 @@ func TestConvertTimeToJST(t *testing.T) {
 	}
 }
 
-// ConvertTimeToJST treats a naive SQL timestamp as UTC. Any caller that stores
-// local time in that column gets a second, silent nine-hour shift.
+// ConvertTimeToJST treats a naive SQL timestamp as UTC.
 func TestConvertTimeToJSTAssumesTheInputIsUTC(t *testing.T) {
 	const alreadyJST = "2026-08-21 09:30:00"
 

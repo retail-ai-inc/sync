@@ -47,9 +47,7 @@ func insertUser(t *testing.T, db *sql.DB, username, password, name, access strin
 	}
 }
 
-// isolateCrontab empties PATH so the crontab command cannot be found, keeping
-// any handler that shells out from rewriting the crontab of whoever runs the
-// suite.
+// isolateCrontab empties PATH so the crontab command cannot be found.
 func isolateCrontab(t *testing.T) {
 	t.Helper()
 	t.Setenv("PATH", t.TempDir())

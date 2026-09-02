@@ -148,8 +148,6 @@ func TestNoRecordedPositionIsZero(t *testing.T) {
 }
 
 // TestAPlainTextPositionFileIsStillRead keeps an existing deployment resuming.
-// Older builds wrote the LSN as bare text rather than a document, and refusing
-// it would re-copy every table on upgrade.
 func TestAPlainTextPositionFileIsStillRead(t *testing.T) {
 	s, path := fileBacked(t, "postgres://u:p@tokyo:5432/shop")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -320,10 +318,7 @@ func TestExtractSequenceName(t *testing.T) {
 	}
 }
 
-// TestThePositionIsRecordedOnTheTarget is the reason the store is layered. The
-// file alone was the problem: the syncer runs beside the source, so the outage
-// this setup exists to survive takes the record of what has been applied with
-// it, and a replacement started in the other region has nothing to resume from.
+// TestThePositionIsRecordedOnTheTarget is the reason the store is layered.
 func TestThePositionIsRecordedOnTheTarget(t *testing.T) {
 	target := targetDB(t, "")
 	s := newSyncer(t, config.SyncConfig{

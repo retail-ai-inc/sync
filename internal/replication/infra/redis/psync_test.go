@@ -294,8 +294,7 @@ func TestWrongCredentialsStopRatherThanRetry(t *testing.T) {
 }
 
 // TestALengthPrefixedDataSetIsConsumedWithoutBeingParsed covers the ordinary
-// full resync. The bytes have to leave the wire because the command stream is
-// behind them, and nothing here understands the format on purpose.
+// full resync.
 func TestALengthPrefixedDataSetIsConsumedWithoutBeingParsed(t *testing.T) {
 	body := strings.Repeat("R", 4096)
 	after := append([]byte(fmt.Sprintf("$%d\r\n%s", len(body), body)), resp("SET", "k", "v")...)
@@ -384,8 +383,7 @@ func TestNewlinesWhileTheMasterForksAreSkipped(t *testing.T) {
 }
 
 // TestTheOffsetIsTheSumOfTheBytesReceived is the arithmetic everything else
-// depends on. The master counts the bytes it wrote into its backlog; this side
-// has to arrive at the same number or every position is wrong.
+// depends on.
 func TestTheOffsetIsTheSumOfTheBytesReceived(t *testing.T) {
 	first := resp("SET", "a", "1")
 	second := resp("INCR", "counter")
@@ -419,9 +417,7 @@ func TestTheOffsetIsTheSumOfTheBytesReceived(t *testing.T) {
 	}
 }
 
-// TestArgumentsSurviveTheNextCommand covers a bug this parser is easy to
-// write: handing out arguments that point into the scratch buffer the next
-// command overwrites.
+// TestArgumentsSurviveTheNextCommand covers a bug this parser is easy to write.
 func TestArgumentsSurviveTheNextCommand(t *testing.T) {
 	stream, first, second := twoCommandStream(t,
 		resp("SET", "first-key", "first-value"),
@@ -473,8 +469,7 @@ func TestAnEmptyArgumentIsCarried(t *testing.T) {
 	}
 }
 
-// TestABinaryArgumentIsCarriedUnchanged covers RESTORE, whose payload is
-// arbitrary bytes including CRLF.
+// TestABinaryArgumentIsCarriedUnchanged covers RESTORE.
 func TestABinaryArgumentIsCarriedUnchanged(t *testing.T) {
 	payload := string([]byte{0, 1, '\r', '\n', 0xFF, '$', '*', 0x7F})
 	_, first, _ := twoCommandStream(t, resp("RESTORE", "k", "0", payload), resp("PING"))
@@ -554,8 +549,7 @@ func TestClosingTheContextEndsTheRead(t *testing.T) {
 }
 
 // TestGarbageInTheStreamIsRefusedRatherThanGuessedAt covers a desynchronised
-// connection. Guessing where the next command starts would apply nonsense; the
-// task stops and reconnects instead.
+// connection.
 func TestGarbageInTheStreamIsRefusedRatherThanGuessedAt(t *testing.T) {
 	master := startFakeMaster(t, []string{
 		"+OK\r\n", "+OK\r\n", "+FULLRESYNC abc 0\r\n",

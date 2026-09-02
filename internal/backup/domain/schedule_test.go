@@ -8,9 +8,6 @@ import (
 )
 
 // TestNextBackupTimeReadsTheCronExpression covers a figure shown to operators.
-// It used to ignore the expression and answer "twenty-four hours from now"
-// whatever it said, so a job running every five minutes and one running monthly
-// displayed the same time and neither was true.
 func TestNextBackupTimeReadsTheCronExpression(t *testing.T) {
 	now := time.Now().UTC()
 

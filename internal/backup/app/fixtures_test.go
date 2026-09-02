@@ -14,9 +14,7 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-// isolateCrontab empties PATH so the crontab command cannot be found. Every
-// write use case calls SyncCrontab after answering, which shells out; without
-// this the tests would rewrite the crontab of whoever runs the suite.
+// isolateCrontab empties PATH so the crontab command cannot be found.
 func isolateCrontab(t *testing.T) {
 	t.Helper()
 	t.Setenv("PATH", t.TempDir())

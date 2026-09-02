@@ -32,8 +32,7 @@ func TestTheDispatchKnowsEveryEngine(t *testing.T) {
 }
 
 // TestAnUnknownSyncTypeIsDropped records that an unrecognised engine is logged
-// and the task simply does not run. There is no failed state anywhere: the task
-// shows as enabled in the API and nothing replicates.
+// and the task simply does not run.
 func TestAnUnknownSyncTypeIsDropped(t *testing.T) {
 	for _, engine := range []string{"cassandra", ""} {
 		sc := baseTask()
@@ -96,9 +95,7 @@ func runWith(t *testing.T, build func(config.SyncConfig, *config.Config, *logrus
 	return s
 }
 
-// TestOnlyTheChangedTaskIsRestarted is the point of the whole supervisor. A
-// change to one task used to cancel the context every syncer shared, so an edit
-// to a reporting task stopped the payment tasks too.
+// TestOnlyTheChangedTaskIsRestarted is the point of the whole supervisor.
 func TestOnlyTheChangedTaskIsRestarted(t *testing.T) {
 	started := make(chan int, 8)
 	s := runWith(t, stubTask(started))
@@ -231,8 +228,7 @@ func drain(t *testing.T, started <-chan int, n int) {
 	}
 }
 
-// exitingTask returns a syncer that stops by itself with the given error, and
-// counts how many times it was started.
+// exitingTask returns a syncer that stops by itself with the given error.
 func exitingTask(starts chan<- int, err error) func(config.SyncConfig, *config.Config, *logrus.Logger) func(context.Context) error {
 	return func(sc config.SyncConfig, _ *config.Config, _ *logrus.Logger) func(context.Context) error {
 		return func(context.Context) error {
@@ -364,9 +360,7 @@ func TestTheBackoffIsCapped(t *testing.T) {
 	}
 }
 
-// TestAnUnrecoverableStopIsNotRetried is the other half of the classification. A
-// purged binlog or a rolled-over oplog fails identically on every attempt, and
-// looping on it buries the one thing somebody needs to be told.
+// TestAnUnrecoverableStopIsNotRetried is the other half of the classification.
 func TestAnUnrecoverableStopIsNotRetried(t *testing.T) {
 	starts := make(chan int, 8)
 	s := runWith(t, exitingTask(starts, domain.Unrecoverable("the binlog is gone")))

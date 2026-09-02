@@ -87,8 +87,7 @@ func asFault(err error, target **Fault) bool {
 
 func contains(haystack, needle string) bool { return strings.Contains(haystack, needle) }
 
-// itoa renders a row id the way the endpoints hand it to the store: as the
-// string that arrived in the URL.
+// itoa renders a row id the way the endpoints hand it to the store.
 func itoa(id int64) string { return strconv.FormatInt(id, 10) }
 
 func errNoRows() error { return sql.ErrNoRows }

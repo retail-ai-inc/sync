@@ -17,9 +17,7 @@ func insertEvent(values ...interface{}) *canal.RowsEvent {
 	}
 }
 
-// TestNothingLandsBeforeTheTransactionEnds pins the buffering. Row events are
-// held until the XID that closes the source transaction, so a reader on the
-// target never sees half of one.
+// TestNothingLandsBeforeTheTransactionEnds pins the buffering.
 func TestNothingLandsBeforeTheTransactionEnds(t *testing.T) {
 	db := sqliteTarget(t, ordersSchema)
 	h := newHandler(t, db, mapTable("orders", "orders"))
@@ -183,7 +181,6 @@ func TestAnEmptyTransactionIsANoOp(t *testing.T) {
 }
 
 // TestTheTargetConnectionCanBeReplaced pins the accessor the health check uses.
-// It exists so the swap takes the same lock the statement buffer does.
 func TestTheTargetConnectionCanBeReplaced(t *testing.T) {
 	db := sqliteTarget(t, ordersSchema)
 	h := newHandler(t, nil, mapTable("orders", "orders"))

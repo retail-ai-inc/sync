@@ -36,8 +36,7 @@ func TestTheEngineConstructorsCarryTheirConfiguration(t *testing.T) {
 }
 
 // TestThreeOfFourConstructorsNeverFail records that only the MongoDB
-// constructor talks to the database. The other three build a struct and return
-// it, so an unreachable source is not discovered until Start runs.
+// constructor talks to the database.
 func TestThreeOfFourConstructorsNeverFail(t *testing.T) {
 	unreachable := config.SyncConfig{
 		ID:               1,

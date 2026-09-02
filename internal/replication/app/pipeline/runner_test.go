@@ -246,8 +246,6 @@ func TestTheBatchIsCutOnceTheTransactionEnds(t *testing.T) {
 }
 
 // TestARunawayTransactionIsRefusedRatherThanBuffered covers the safety valve.
-// A batch cannot be cut inside a transaction, so an unbounded one would be held
-// until the process died — in the middle of applying a payment batch.
 func TestARunawayTransactionIsRefusedRatherThanBuffered(t *testing.T) {
 	var events []*domain.Event
 	for i := 0; i < 20; i++ {
@@ -278,8 +276,7 @@ func TestThePositionIsNotRecordedWhenTheApplyFails(t *testing.T) {
 	}
 }
 
-// TestAnApplierThatCommitsThePositionIsNotAskedTwice covers the MySQL path,
-// where the position is written in the same transaction as the data.
+// TestAnApplierThatCommitsThePositionIsNotAskedTwice covers the MySQL path.
 func TestAnApplierThatCommitsThePositionIsNotAskedTwice(t *testing.T) {
 	reader := &fakeReader{events: []*domain.Event{event("orders", "1", "p1")}}
 	applier := &fakeApplier{commits: true}
@@ -313,8 +310,7 @@ func TestAnApplierThatCannotCommitThePositionHasItRecordedForIt(t *testing.T) {
 }
 
 // TestAHeartbeatIsNotWrittenToTheTarget covers the event the syncer makes up
-// itself. Applying it would replicate the syncer's own bookkeeping into the
-// payment data.
+// itself.
 func TestAHeartbeatIsNotWrittenToTheTarget(t *testing.T) {
 	reader := &fakeReader{events: []*domain.Event{
 		event("", "", "p1", heartbeat),
@@ -414,8 +410,7 @@ func gauge(t *testing.T, name string, labels metrics.Labels) float64 {
 }
 
 // TestTheSnapshotPinsBeforeItCopies is the ordering that decides whether the
-// writes made during the copy belong to anybody. Reading the position
-// afterwards loses every one of them.
+// writes made during the copy belong to anybody.
 func TestTheSnapshotPinsBeforeItCopies(t *testing.T) {
 	snap := &fakeSnapshotter{pinned: domain.Position{Payload: "pinned"}}
 	store := newStore()
@@ -563,9 +558,7 @@ func TestTheHeadroomIsTheWindowLessTheLag(t *testing.T) {
 	}
 }
 
-// A task an hour past its window and one a week past it need different
-// answers: the first is a re-copy, the second is a re-copy plus a conversation
-// about how nobody noticed for a week.
+// A task an hour past its window and one a week past it need different answers.
 func TestTheHeadroomGoesNegativeOnceTheWindowIsPast(t *testing.T) {
 	labels := metrics.Labels{"task": "headroom-negative"}
 	defer metrics.Default.Forget(labels)
@@ -588,8 +581,7 @@ func TestTheHeadroomGoesNegativeOnceTheWindowIsPast(t *testing.T) {
 	}
 }
 
-// A guessed window would read exactly like a measured one, and it is read at
-// the moment somebody is deciding whether they still have time.
+// A guessed window would read exactly like a measured one.
 func TestASourceThatCannotSayPublishesNothing(t *testing.T) {
 	labels := metrics.Labels{"task": "headroom-unknown"}
 	defer metrics.Default.Forget(labels)
@@ -930,8 +922,7 @@ func TestAPoisonedEventBlocksTheTaskRatherThanBeingSteppedOver(t *testing.T) {
 	}
 }
 
-// A failure is not proof the write did not happen: a timeout can arrive after
-// the transaction landed.
+// A failure is not proof the write did not happen.
 func TestARetryAsksTheTargetWhatItHoldsFirst(t *testing.T) {
 	store := &refreshingStore{fakeStore: newStore()}
 	applied := make(chan struct{}, 1)
@@ -1119,8 +1110,7 @@ func TestSourceTransactionsAreCounted(t *testing.T) {
 }
 
 // TestABatchThatRollsBackCountsItsTransactionsAsRolledBack keeps refused work
-// visible. The applied counter only ever counts what succeeded, so without this
-// a batch that failed leaves no trace on any graph.
+// visible.
 func TestABatchThatRollsBackCountsItsTransactionsAsRolledBack(t *testing.T) {
 	reader := &fakeReader{events: []*domain.Event{
 		{NS: domain.Namespace{DB: "shop", Object: "orders"}, Op: domain.OpInsert, Payload: "a", EndsTransaction: true,
@@ -1142,8 +1132,7 @@ func TestABatchThatRollsBackCountsItsTransactionsAsRolledBack(t *testing.T) {
 }
 
 // TestTheQueueReportsTheBytesItHolds: a queue can be shallow in events and huge
-// in bytes. One large document filling the buffer and a hundred thousand small
-// ones need different answers, and an event count alone cannot tell them apart.
+// in bytes.
 func TestTheQueueReportsTheBytesItHolds(t *testing.T) {
 	labels := metrics.Labels{"task": t.Name()}
 	defer metrics.Default.Forget(labels)
@@ -1170,8 +1159,7 @@ func TestADuplicateKeyOnMongoDBIsPermanent(t *testing.T) {
 	}
 }
 
-// TestAnOrdinaryMongoDBFailureStaysRetryable. The other half of the line: a
-// target that is merely unreachable has to be waited out, not stopped for.
+// TestAnOrdinaryMongoDBFailureStaysRetryable.
 func TestAnOrdinaryMongoDBFailureStaysRetryable(t *testing.T) {
 	for _, text := range []string{
 		"server selection error: context deadline exceeded",
@@ -1221,8 +1209,7 @@ func TestTheLastBatchIsWrittenAfterTheRunIsAskedToStop(t *testing.T) {
 	for i := 0; i < trials; i++ {
 		applier := &driverApplier{}
 		r := newRunner(t, &fakeReader{}, applier, newStore())
-		// Neither the timer nor the size limit may be what writes this batch:
-		// the stop has to be.
+		// Neither the timer nor the size limit may be what writes this batch.
 		r.Opts.FlushInterval = time.Hour
 		r.Opts.Limits = Limits{MaxEvents: 1000}
 

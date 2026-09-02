@@ -31,9 +31,7 @@ func TestAReplayedSchemaChangeIsNotAFailure(t *testing.T) {
 	}
 }
 
-// TestARealSchemaFailureIsStillAFailure. The other half of the line: an error
-// that is not "already done" has to stop the task, because the target's shape
-// then differs from the source's and the rows that follow land wrong.
+// TestARealSchemaFailureIsStillAFailure.
 func TestARealSchemaFailureIsStillAFailure(t *testing.T) {
 	for _, c := range []struct {
 		code int
@@ -80,9 +78,7 @@ func TestAWrappedServerErrorIsStillRecognised(t *testing.T) {
 	}
 }
 
-// TestAMalformedURIIsNotRetried. Waiting does not make a connection string
-// parse, and retrying one for ever leaves a task that looks alive and replicates
-// nothing.
+// TestAMalformedURIIsNotRetried.
 func TestAMalformedURIIsNotRetried(t *testing.T) {
 	inner := errors.New("error parsing uri: scheme must be mongodb")
 	err := permanentURI{inner}

@@ -6,8 +6,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
-// The progress of a chunked copy is one thing: the _id of the last document
-// read.
+// The progress of a chunked copy is one thing.
 func TestAnIdSurvivesBeingWrittenDownAndReadBack(t *testing.T) {
 	oid := bson.NewObjectID()
 	for _, c := range []struct {
@@ -67,8 +66,7 @@ func TestNoIdYetEncodesToNothing(t *testing.T) {
 	}
 }
 
-// TestAnUnreadableStoredKeyIsRefused. Guessing where to resume from would
-// silently copy the wrong range; stopping says so.
+// TestAnUnreadableStoredKeyIsRefused.
 func TestAnUnreadableStoredKeyIsRefused(t *testing.T) {
 	if _, err := decodeID("{not json"); err == nil {
 		t.Fatal("a corrupted key was accepted")

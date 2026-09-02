@@ -17,8 +17,7 @@ func stubBin(t *testing.T, dir, name, body string, exitCode int) {
 	t.Helper()
 
 	// The outer PATH is restricted to the stub directory so exec.CommandContext
-	// cannot reach a real mysqldump, zip or gsutil. The stub therefore needs its
-	// own PATH to find coreutils.
+	// cannot reach a real mysqldump, zip or gsutil.
 	script := fmt.Sprintf(`#!/bin/sh
 PATH=/usr/bin:/bin:/usr/local/bin
 printf '%%s\n' "$@" >> %q
@@ -214,8 +213,7 @@ func TestExecuteExternalMySQLDumpAppliesAWhereClause(t *testing.T) {
 	cfg := mysqlBackupConfig("sql", "", "gs://b")
 	cfg.Query = map[string]map[string]interface{}{
 		"orders": {"created_at": map[string]interface{}{
-			// The converter only understands this shape; the offsets must be
-			// float64, as they are after a JSON round trip.
+			// The converter only understands this shape; the offsets must be float64.
 			"type": "daily", "startOffset": float64(-1), "endOffset": float64(0),
 		}},
 	}
@@ -801,8 +799,7 @@ func TestABackupWithNoBucketSkipsTheUpload(t *testing.T) {
 	})
 }
 
-// TestTheUploadedObjectKeepsItsName pins the name a backup takes in the
-// bucket.
+// TestTheUploadedObjectKeepsItsName pins the name a backup takes in the bucket.
 func TestTheUploadedObjectKeepsItsName(t *testing.T) {
 	binDir := stubPATH(t)
 	stubBin(t, binDir, "mysqldump", "echo '-- dump'", 0)

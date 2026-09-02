@@ -112,8 +112,6 @@ func TestConvertTimeRangeQuery(t *testing.T) {
 }
 
 // The two engines' time ranges were separate copies of the same arithmetic.
-// They share one implementation now, and this is what would catch them drifting
-// apart again.
 func TestMongoAndMySQLTimeRangesAgree(t *testing.T) {
 	query := map[string]interface{}{"created_at": dailyQuery(float64(-3), float64(-1))}
 

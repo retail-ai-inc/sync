@@ -56,9 +56,7 @@ func TestNoBufferDirectoryIsRefusedAtStartup(t *testing.T) {
 	}
 }
 
-// TestAShardIdentifierIsSafeAsADirectoryName. A cluster shard is named by its
-// slot range, and a stray separator would put the buffer somewhere else
-// entirely — including outside the configured root.
+// TestAShardIdentifierIsSafeAsADirectoryName.
 func TestAShardIdentifierIsSafeAsADirectoryName(t *testing.T) {
 	for _, c := range []struct{ in, want string }{
 		{"0-16383", "0-16383"},
@@ -78,8 +76,7 @@ func TestAShardIdentifierIsSafeAsADirectoryName(t *testing.T) {
 }
 
 // TestAVersionComparisonOrdersReleasesNumerically is what decides whether a
-// source is new enough for the features this relay needs. String comparison
-// would put 7.0.10 before 7.0.9.
+// source is new enough for the features this relay needs.
 func TestAVersionComparisonOrdersReleasesNumerically(t *testing.T) {
 	for _, c := range []struct {
 		a, b string
@@ -98,9 +95,7 @@ func TestAVersionComparisonOrdersReleasesNumerically(t *testing.T) {
 	}
 }
 
-// TestAVersionThatDoesNotParseIsNotTreatedAsOld. Reporting an unreadable
-// version as older would refuse a source that is fine; the safe answer is to
-// let the feature checks that follow decide.
+// TestAVersionThatDoesNotParseIsNotTreatedAsOld.
 func TestAVersionThatDoesNotParseIsNotTreatedAsOld(t *testing.T) {
 	for _, c := range []struct{ a, b string }{
 		{"unstable", "7.0.0"},

@@ -108,8 +108,7 @@ func TestAMappingWithNoTargetKeepsTheSourceName(t *testing.T) {
 	}
 }
 
-// TestAnUnmappedCollectionKeepsItsOwnName covers discovery, where every
-// collection is replicated under the name it already has.
+// TestAnUnmappedCollectionKeepsItsOwnName covers discovery.
 func TestAnUnmappedCollectionKeepsItsOwnName(t *testing.T) {
 	a := &Applier{}
 	if got := a.targetFor("invoices"); got != "invoices" {
@@ -176,9 +175,7 @@ func TestAnUnknownWriteShapeIsRefused(t *testing.T) {
 	}
 }
 
-// TestAnOldTargetIsRecognisedOnce covers the fallback. A server before 8.0 has
-// no bulkWrite command, and that is a reason to write per collection rather than
-// a reason to stop.
+// TestAnOldTargetIsRecognisedOnce covers the fallback.
 func TestAnOldTargetIsRecognisedOnce(t *testing.T) {
 	if lacksClientBulkWrite(nil) {
 		t.Error("no error was read as a missing command")
@@ -222,8 +219,7 @@ func TestTheEscapeHatchSaysWhatItCosts(t *testing.T) {
 	}
 }
 
-// TestTheEscapeHatchIsOffUnlessItIsAskedFor guards the default. It is read from
-// the environment, so a typo must not be taken as consent.
+// TestTheEscapeHatchIsOffUnlessItIsAskedFor guards the default.
 func TestTheEscapeHatchIsOffUnlessItIsAskedFor(t *testing.T) {
 	for _, value := range []string{"", "0", "no", "false", "off", "yes please", " "} {
 		t.Setenv("SYNC_MONGO_NO_TRANSACTION", value)

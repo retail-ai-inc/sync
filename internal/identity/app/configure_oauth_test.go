@@ -295,11 +295,8 @@ func TestAdminAuthorisationReadsTheAccessLevelNotTheUsername(t *testing.T) {
 	}
 }
 
-// TestOnlyTheSignInFieldsAreServed covers an endpoint any unauthenticated caller
-// can reach. It used to answer with the whole stored document, client secret
-// included; the secret is masked now, and the rest is an allow-list — so a field
-// added to the document later does not start being served to the world because
-// nobody remembered to add it to a deny-list.
+// TestOnlyTheSignInFieldsAreServed covers an endpoint any unauthenticated
+// caller can reach.
 func TestOnlyTheSignInFieldsAreServed(t *testing.T) {
 	useTempDB(t)
 

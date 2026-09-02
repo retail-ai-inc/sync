@@ -51,8 +51,7 @@ func connect(t *testing.T, endpoint string) *mongo.Client {
 	return client
 }
 
-// syncTask builds the configuration for one collection, mirroring what the
-// loader produces from a task's config_json.
+// syncTask builds the configuration for one collection.
 func syncTask(t *testing.T, collection string, tables ...config.TableMapping) config.SyncConfig {
 	t.Helper()
 

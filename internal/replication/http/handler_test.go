@@ -115,8 +115,7 @@ func TestSyncListHandlerMasksConnectionPasswords(t *testing.T) {
 			t.Errorf("the response still carries %q: %s", secret, body)
 		}
 	}
-	// The rest of the connection stays, because the UI shows where a task
-	// points.
+	// The rest of the connection stays, because the UI shows where a task points.
 	for _, kept := range []string{"tokyo", "osaka", "repl", "3306"} {
 		if !strings.Contains(body, kept) {
 			t.Errorf("the response no longer names %q: %s", kept, body)

@@ -70,9 +70,8 @@ func TestABareDateIsStillADate(t *testing.T) {
 	}
 }
 
-// TestTheDatePartIsReplacedAndTheRestIsNot puts both behaviours in one realistic
-// pattern: the date suffix resolves and the words around it survive. This used
-// to come out as "order_su08ary_202608.json".
+// TestTheDatePartIsReplacedAndTheRestIsNot puts both behaviours in one
+// realistic pattern: the date suffix resolves and the words around it survive.
 func TestTheDatePartIsReplacedAndTheRestIsNot(t *testing.T) {
 	const pattern = "order_summary_YYYYMM.json"
 

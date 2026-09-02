@@ -124,8 +124,7 @@ func TestTheConfigurationIsRereadEveryTenSeconds(t *testing.T) {
 		runSyncTasks(ctx, quietLogger(), cfg)
 	}()
 
-	// A task appears in the database. The reload interval is ten seconds, which
-	// is longer than this test waits, so nothing should have happened yet.
+	// A task appears in the database.
 	if _, err := db.Exec(
 		`INSERT INTO sync_tasks (enable, config_json) VALUES (1, '{"type":"cassandra"}')`); err != nil {
 		t.Fatalf("insert task: %v", err)

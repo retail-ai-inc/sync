@@ -71,8 +71,7 @@ func TestFormatFileSize(t *testing.T) {
 }
 
 // A negative size is smaller than the unit, so it is reported in bytes rather
-// than rejected. No caller can produce one today (os.FileInfo.Size never
-// returns negative), so this pins the behaviour rather than reporting a bug.
+// than rejected.
 func TestFormatFileSizeOnANegativeSize(t *testing.T) {
 	if got := formatFileSize(-1); got != "-1 B" {
 		t.Errorf("formatFileSize(-1) = %q, want %q", got, "-1 B")
@@ -145,8 +144,7 @@ func TestIsConfigured(t *testing.T) {
 	}{
 		{"both set", "https://hooks.example/x", "#ops", true},
 		{"no webhook", "", "#ops", false},
-		// A webhook carries its own default channel, so one is enough. This used
-		// to require a channel and a shell script as well.
+		// A webhook carries its own default channel, so one is enough.
 		{"no channel", "https://hooks.example/x", "", true},
 		{"neither", "", "", false},
 	}

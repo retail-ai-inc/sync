@@ -9,8 +9,7 @@ import (
 )
 
 // pointAt redirects the Google endpoints at a stand-in server for the duration
-// of a test. The URLs used to be unexported constants, so the only way to
-// exercise this at all was to call Google.
+// of a test.
 func pointAt(t *testing.T, token, userInfo string) {
 	t.Helper()
 
@@ -48,8 +47,7 @@ func TestARefusedCodeIsNotAnIdentity(t *testing.T) {
 	}
 }
 
-// TestARejectedTokenIsNotAnIdentity is the second half: the user-info call
-// answering 401 has to be a failure too.
+// TestARejectedTokenIsNotAnIdentity is the second half.
 func TestARejectedTokenIsNotAnIdentity(t *testing.T) {
 	rejected := serve(t, http.StatusUnauthorized, `{"error":"invalid_credentials"}`)
 	pointAt(t, rejected, rejected)

@@ -25,10 +25,7 @@ func baseTask() config.SyncConfig {
 	}
 }
 
-// TestOneTasksFingerprintIsItsOwn is what makes a restart surgical. The reload
-// used to compare the whole task slice and, on any difference, cancel the one
-// context every syncer shared — so editing one task's table list stopped
-// replication for every other task while they redid their initial checks.
+// TestOneTasksFingerprintIsItsOwn is what makes a restart surgical.
 func TestOneTasksFingerprintIsItsOwn(t *testing.T) {
 	first, second := baseTask(), baseTask()
 	second.ID = 2

@@ -113,8 +113,7 @@ func TestAValueRoundTrips(t *testing.T) {
 	}
 }
 
-// TestTwoSealsOfTheSameValueDiffer pins that the nonce is fresh each time. Equal
-// ciphertexts would tell a reader of the file which two tasks share a password.
+// TestTwoSealsOfTheSameValueDiffer pins that the nonce is fresh each time.
 func TestTwoSealsOfTheSameValueDiffer(t *testing.T) {
 	k := keeper(t)
 

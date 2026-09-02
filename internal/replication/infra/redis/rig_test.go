@@ -68,8 +68,7 @@ func emptyBoth(t *testing.T, source, target goredis.UniversalClient) {
 	}
 }
 
-// widenBacklogs gives the source room to hold history across a disconnect, and
-// leaves the fork delay alone.
+// widenBacklogs gives the source room to hold history across a disconnect.
 func widenBacklogs(t *testing.T, source goredis.UniversalClient) {
 	t.Helper()
 	ctx := context.Background()
@@ -89,8 +88,7 @@ func widenBacklogs(t *testing.T, source goredis.UniversalClient) {
 	}
 }
 
-// rig is one assembly of the pipeline — one runner per source shard — built and
-// thrown away per crash.
+// rig is one assembly of the pipeline — one runner per source shard.
 type rig struct {
 	runners  []*pipeline.Runner
 	links    []*link

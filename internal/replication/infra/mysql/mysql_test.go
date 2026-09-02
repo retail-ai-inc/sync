@@ -13,15 +13,13 @@ import (
 )
 
 // newSyncer builds a syncer that writes SQLite, which is what the hermetic
-// suite has to drive it against. Production leaves the dialect unset and gets
-// MySQL; upsertStatement is covered in both flavours by its own table test.
+// suite has to drive it against.
 func newSyncer(t *testing.T) *MySQLSyncer {
 	t.Helper()
 
 	logger := logrus.New()
 	logger.SetLevel(logrus.PanicLevel)
-	// Type is set because the endpoint and database-name helpers dispatch on
-	// it; a syncer in this package is always a MySQL one.
+	// Type is set because the endpoint and database-name helpers dispatch on it.
 	return &MySQLSyncer{
 		cfg:     config.SyncConfig{Type: "mysql"},
 		logger:  logger,
@@ -78,10 +76,8 @@ func TestParseUserPassword(t *testing.T) {
 	}
 }
 
-// TestParseUserPasswordSurvivesSpecialCharacters covers the characters that used
-// to truncate the credentials. Both are legal inside a password and both appear
-// in passwords Cloud SQL generates; the DSN is assembled from whatever an
-// operator typed into the UI, so nothing rejects them earlier either.
+// TestParseUserPasswordSurvivesSpecialCharacters covers the characters that
+// used to truncate the credentials.
 func TestParseUserPasswordSurvivesSpecialCharacters(t *testing.T) {
 	s := newSyncer(t)
 
@@ -118,8 +114,6 @@ func TestTheAddressSurvivesSpecialCharacters(t *testing.T) {
 }
 
 // TestAnEmptyDSNIsNotTheDriverDefault records the guard in front of the parser.
-// The driver reads an empty DSN as its own defaults, which would have canal
-// dial 127.0.0.1:3306 rather than report that nothing was configured.
 func TestAnEmptyDSNIsNotTheDriverDefault(t *testing.T) {
 	if got := newSyncer(t).parseAddr(""); got != "" {
 		t.Errorf("parseAddr(\"\") = %q, want the empty string", got)
@@ -202,8 +196,6 @@ func TestLoadBinlogPosition(t *testing.T) {
 
 	t.Run("a missing directory is not an error", func(t *testing.T) {
 		// Reading no longer creates the directory it was going to read from.
-		// The saver creates it when it writes, which is the only moment it
-		// needs to exist.
 		path := filepath.Join(dir, "nested", "deep", "binlog.pos")
 		if got := s.loadBinlogPosition(path); got != nil {
 			t.Errorf("loadBinlogPosition = %v for a path that does not exist", *got)

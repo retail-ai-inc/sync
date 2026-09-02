@@ -170,9 +170,7 @@ func TestPasswordsAreNotStoredInCleartext(t *testing.T) {
 }
 
 // TestAPasswordStoredInTheClearIsReplacedOnUse covers the rows that already
-// exist. They go on working, and the first successful login rewrites them as a
-// hash — so the cleartext leaves the file without a migration step or a password
-// reset.
+// exist.
 func TestAPasswordStoredInTheClearIsReplacedOnUse(t *testing.T) {
 	db := useTempDB(t)
 	insertUser(t, db, "alice", "legacy-password", "Alice", "admin")
@@ -202,9 +200,7 @@ func TestAPasswordStoredInTheClearIsReplacedOnUse(t *testing.T) {
 	}
 }
 
-// TestUpdateUserPasswordOnAnUnknownUserSaysSo covers a mistyped username. The
-// UPDATE affected no rows and reported no error, so the caller believed the
-// password had been changed.
+// TestUpdateUserPasswordOnAnUnknownUserSaysSo covers a mistyped username.
 func TestUpdateUserPasswordOnAnUnknownUserSaysSo(t *testing.T) {
 	useTempDB(t)
 
@@ -243,9 +239,7 @@ func TestGetAllUsers(t *testing.T) {
 		t.Fatalf("GetAllUsers returned %d users, want 2", len(users))
 	}
 
-	// Unlike GetUserData, this one keeps the password in the map. Callers are
-	// responsible for stripping it; GetUsersHandler builds a whitelist response
-	// and ValidateUserToken only reads username and access.
+	// Unlike GetUserData, this one keeps the password in the map.
 	if _, present := users[0]["password"]; !present {
 		t.Error("GetAllUsers no longer returns the password; callers that relied " +
 			"on stripping it can be simplified")

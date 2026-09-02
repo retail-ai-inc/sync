@@ -43,9 +43,7 @@ var (
 	stgTargetDB = stgEnv("SYNC_STG_TARGET_DB", "sync_stg_target")
 )
 
-// stgDSN builds the connection string the syncer itself would use. Note what is
-// absent: directConnection. The driver is being asked to discover the cluster,
-// which is the point.
+// stgDSN builds the connection string the syncer itself would use.
 func stgDSN(t *testing.T, database string) string {
 	t.Helper()
 
@@ -220,9 +218,7 @@ func TestTheClusterIsFoundWithoutPinningANode(t *testing.T) {
 	t.Logf("cluster: mongos, %d shards", len(list))
 }
 
-// TestAShardedCollectionIsCopiedAndFollowed is the whole path in one: a
-// snapshot of a collection spread over three shards, then the changes made
-// after it, read from a merged change stream through mongos.
+// TestAShardedCollectionIsCopiedAndFollowed is the whole path in one.
 func TestAShardedCollectionIsCopiedAndFollowed(t *testing.T) {
 	name, source, target := stgCollection(t, "payments_copy")
 	ctx := context.Background()
@@ -563,9 +559,8 @@ func maskPassword(uri string) string {
 }
 
 // A sharded source replicated into an unsharded target is not the same
-// collection: every document lands on whichever shard is primary for the
-// target database, so the copy has one shard's capacity where the source had
-// three.
+// collection: every document lands on whichever shard is primary for the target
+// database, so the copy has one shard's capacity where the source had three.
 func TestTheTargetIsShardedLikeTheSource(t *testing.T) {
 	name, source, target := stgCollection(t, "payments_sharded")
 	ctx := context.Background()
@@ -644,8 +639,7 @@ func TestAChunkMigrationIsNotReplicated(t *testing.T) {
 		return nil
 	})
 
-	// The copy is done and the stream is following. Everything from here on is
-	// the migration's doing.
+	// The copy is done and the stream is following.
 	appliedBefore := counter(t, metrics.BatchEventsSum, labels)
 
 	client := stgConnect(t, stgSourceDB)
@@ -688,8 +682,7 @@ func TestAChunkMigrationIsNotReplicated(t *testing.T) {
 
 type movedChunk struct{ from, to string }
 
-// moveOneChunk moves one chunk of a collection to another shard, splitting the
-// collection first when it is still in one piece.
+// moveOneChunk moves one chunk of a collection to another shard.
 func moveOneChunk(ctx context.Context, client *mongo.Client, ns string) (movedChunk, error) {
 	admin := client.Database("admin")
 	config := client.Database("config")

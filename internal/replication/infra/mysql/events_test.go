@@ -37,13 +37,10 @@ func sqliteTarget(t *testing.T, schemaSQL string) *sql.DB {
 	return db
 }
 
-// targetDSN names the database the handler will address. Only the part after
-// the slash is read.
+// targetDSN names the database the handler will address.
 const targetDSN = "u:p@tcp(127.0.0.1:3306)/main"
 
 // sourceSchema is the database on the source that the fixtures replicate from.
-// The table and query fixtures name it too, so a statement built by them counts
-// as one this task reads.
 const sourceSchema = "shop"
 
 func newHandler(t *testing.T, db *sql.DB, mappings []config.DatabaseMapping) *MyEventHandler {
@@ -61,8 +58,7 @@ func newHandler(t *testing.T, db *sql.DB, mappings []config.DatabaseMapping) *My
 	}
 }
 
-// sourceTable describes the replicated table as the binlog reader would, with
-// the first column as the primary key.
+// sourceTable describes the replicated table as the binlog reader would.
 func sourceTable(name string, columns ...string) *schema.Table {
 	cols := make([]schema.TableColumn, len(columns))
 	for i, c := range columns {
@@ -396,9 +392,8 @@ func TestTheDeleteMatchesOnTheKeyAlone(t *testing.T) {
 	}
 }
 
-// TestAnUnknownActionStopsReplication covers an action this does not understand.
-// It used to be a warning, so an action the library grew later was dropped with
-// a log line nobody reads and the two sides diverged from then on.
+// TestAnUnknownActionStopsReplication covers an action this does not
+// understand.
 func TestAnUnknownActionStopsReplication(t *testing.T) {
 	db := sqliteTarget(t, ordersSchema)
 	h := newHandler(t, db, mapTable("orders", "orders"))
@@ -424,9 +419,7 @@ func keylessTable() *schema.Table {
 }
 
 // TestAnUpdateWithNoPrimaryKeyStopsReplication covers a table whose rows cannot
-// be addressed on the target. This used to be dropped with one warning: inserts
-// arrived and updates did not, so the target accumulated rows the source had
-// since changed, and the row counts agreed the whole time.
+// be addressed on the target.
 func TestAnUpdateWithNoPrimaryKeyStopsReplication(t *testing.T) {
 	db := sqliteTarget(t, ordersSchema)
 	if _, err := db.Exec(`INSERT INTO orders VALUES ('1','Ada','x')`); err != nil {
@@ -485,8 +478,7 @@ func TestTheKeylessRefusalNamesTheTable(t *testing.T) {
 	}
 }
 
-// TestAllowKeylessRestoresTheBestEffortCopy covers the deliberate opt-out. An
-// operator who accepts a half-replicated table gets one, having said so.
+// TestAllowKeylessRestoresTheBestEffortCopy covers the deliberate opt-out.
 func TestAllowKeylessRestoresTheBestEffortCopy(t *testing.T) {
 	db := sqliteTarget(t, ordersSchema)
 	if _, err := db.Exec(`INSERT INTO orders VALUES ('1','Ada','x')`); err != nil {
@@ -642,9 +634,7 @@ func TestTheFirstFailureOfABatchIsReported(t *testing.T) {
 	}
 }
 
-// TestTheErrorFlagIsStickyAcrossEvents pins the other half. The flag guards the
-// position saver, so a later success must not clear it: the offset that follows
-// the failure is still an offset the target never caught up to.
+// TestTheErrorFlagIsStickyAcrossEvents pins the other half.
 func TestTheErrorFlagIsStickyAcrossEvents(t *testing.T) {
 	db := sqliteTarget(t, ordersSchema)
 	h := newHandler(t, db, mapTable("orders", "orders"))
@@ -902,9 +892,7 @@ func TestBatchInsertReportsAFailingStatement(t *testing.T) {
 }
 
 // TestBatchInsertLeavesTheCallersRowsAlone covers a shared slice being written
-// to. The initial-sync path used to mask the caller's own rows in place while
-// the binlog path built a copy — so whatever looked at those rows afterwards, a
-// retry or a count or a log line, saw asterisks instead of what the source held.
+// to.
 func TestBatchInsertLeavesTheCallersRowsAlone(t *testing.T) {
 	db := sqliteTarget(t, ordersSchema)
 	s := newSyncer(t)

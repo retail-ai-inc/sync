@@ -49,8 +49,7 @@ func TestAnOrdinaryFailureIsRetried(t *testing.T) {
 	}
 }
 
-// TestAWrappedUnrecoverableStopIsStillOne covers the path it actually takes: the
-// engine wraps it again on the way up to the supervisor.
+// TestAWrappedUnrecoverableStopIsStillOne covers the path it actually takes.
 func TestAWrappedUnrecoverableStopIsStillOne(t *testing.T) {
 	err := fmt.Errorf("start the mysql task: %w", Unrecoverable("the position is gone"))
 

@@ -323,10 +323,7 @@ func TestAStreamThatStoppedIsStillRecorded(t *testing.T) {
 }
 
 // TestTheFiguresComeFromTheReplicationCounters covers where the statistics are
-// built from. They used to come from a registry — RegisterChangeStream and six
-// functions that updated it — which nothing in the tree ever called, so the map
-// was permanently empty: the collector asked a task for its streams, got
-// nothing, wrote nothing, and logged that it had stored them.
+// built from.
 func TestTheFiguresComeFromTheReplicationCounters(t *testing.T) {
 	conn := useMonitoringDB(t)
 

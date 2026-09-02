@@ -60,8 +60,7 @@ func TestSomethingThatIsNotADocumentReadsAsNothing(t *testing.T) {
 	}
 }
 
-// TestAnUnreadableRawDocumentReadsAsNothing. Corrupted bytes must not become an
-// empty update that silently clears nothing and reports success.
+// TestAnUnreadableRawDocumentReadsAsNothing.
 func TestAnUnreadableRawDocumentReadsAsNothing(t *testing.T) {
 	if got := documentOf(bson.Raw([]byte{1, 2, 3})); got != nil {
 		t.Errorf("unreadable bytes read as %v, want nil", got)

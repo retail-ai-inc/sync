@@ -58,8 +58,7 @@ func TestCreateTaskAppliesTheDefaults(t *testing.T) {
 }
 
 // TestTheEchoedRequestIsTheNormalisedOne records that the caller is handed the
-// request after the defaults were applied, not the one it sent. The endpoint
-// therefore echoes the stored task rather than the submitted body.
+// request after the defaults were applied, not the one it sent.
 func TestTheEchoedRequestIsTheNormalisedOne(t *testing.T) {
 	useTempTaskDB(t)
 
@@ -237,8 +236,7 @@ func TestStartingATaskDoesNotStartASyncer(t *testing.T) {
 	}
 	after := readConfig(t, db, id)
 
-	// The only difference is the status. Nothing about the running process is
-	// recorded, because nothing about it changed.
+	// The only difference is the status.
 	if before == after {
 		t.Fatal("StartTask changed nothing at all")
 	}

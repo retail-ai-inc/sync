@@ -42,8 +42,7 @@ func captureBackgroundLog() (*logrus.Logger, *syncBuffer) {
 	return logger, out
 }
 
-// awaitLog waits for a line to appear, since the sender writes it after the
-// test has already returned from the call.
+// awaitLog waits for a line to appear.
 func awaitLog(t *testing.T, out *syncBuffer, want string) {
 	t.Helper()
 
@@ -59,9 +58,7 @@ func awaitLog(t *testing.T, out *syncBuffer, want string) {
 	}
 }
 
-// webhook stands in for Slack. It answers 200 and hands each posted body to the
-// test through a channel, because the notification is sent from a goroutine the
-// caller does not wait for.
+// webhook stands in for Slack.
 func webhook(t *testing.T) (url string, posted <-chan map[string]interface{}) {
 	t.Helper()
 
@@ -111,8 +108,7 @@ func colour(t *testing.T, payload map[string]interface{}) string {
 	return value
 }
 
-// TestADifferenceIsReportedToSlack covers the path that exists for one reason:
-// telling somebody the copy that will be switched to is missing rows.
+// TestADifferenceIsReportedToSlack covers the path that exists for one reason.
 func TestADifferenceIsReportedToSlack(t *testing.T) {
 	logger, out := captureBackgroundLog()
 	url, posted := webhook(t)
@@ -143,9 +139,8 @@ func TestADifferenceIsReportedToSlack(t *testing.T) {
 	awaitLog(t, out, "notification sent")
 }
 
-// TestAnAgreementIsReportedAsGood records that the daily comparison reports both
-// outcomes. Silence for a match and silence for a broken notifier would look the
-// same, which is the thing this whole path is here to avoid.
+// TestAnAgreementIsReportedAsGood records that the daily comparison reports
+// both outcomes.
 func TestAnAgreementIsReportedAsGood(t *testing.T) {
 	logger, _ := captureBackgroundLog()
 	url, posted := webhook(t)
@@ -166,9 +161,8 @@ func TestAnAgreementIsReportedAsGood(t *testing.T) {
 	}
 }
 
-// TestAWebhookThatRefusesIsReported records that a notifier which cannot deliver
-// says so. An alert nobody receives and no line in the log is indistinguishable
-// from no alert being needed.
+// TestAWebhookThatRefusesIsReported records that a notifier which cannot
+// deliver says so.
 func TestAWebhookThatRefusesIsReported(t *testing.T) {
 	logger, out := captureBackgroundLog()
 

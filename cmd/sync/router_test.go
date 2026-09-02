@@ -29,9 +29,8 @@ func TestTheProbesAnswerWithoutACredential(t *testing.T) {
 	}
 }
 
-// TestTheMetricsAreServedWithoutACredential records the deliberate decision that
-// the exposition takes no token, which is what every scraper expects. Keeping
-// the port off the public network is the requirement that replaces it.
+// TestTheMetricsAreServedWithoutACredential records the deliberate decision
+// that the exposition takes no token, which is what every scraper expects.
 func TestTheMetricsAreServedWithoutACredential(t *testing.T) {
 	rec := serve(t, http.MethodGet, "/metrics")
 	if rec.Code != http.StatusOK {

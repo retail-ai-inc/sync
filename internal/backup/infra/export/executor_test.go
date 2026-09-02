@@ -184,11 +184,7 @@ func TestIsTableRelevantForTimeRange(t *testing.T) {
 	}
 }
 
-// TestATouchingIntervalDoesNotOverlap covers an off-by-one at the boundary. Both
-// intervals are half-open — a monthly table ends on the first of the next month
-// — but the overlap test used Before and After rather than their strict
-// complements, so an interval ending exactly where the window starts counted as
-// overlapping and a one-month backup exported three months of tables.
+// TestATouchingIntervalDoesNotOverlap covers an off-by-one at the boundary.
 func TestATouchingIntervalDoesNotOverlap(t *testing.T) {
 	august := &TimeRange{
 		Start: time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC),
@@ -298,9 +294,7 @@ func TestExtractTimeRange(t *testing.T) {
 		}
 	})
 
-	// The -1..0 default is yesterday and only yesterday. It used to add a day to
-	// the end bound, so it also took in today — whose rows are still being
-	// written — while the row filters resolved the same offsets to one day.
+	// The -1..0 default is yesterday and only yesterday.
 	t.Run("the default is yesterday alone", func(t *testing.T) {
 		query := map[string]interface{}{"created_at": map[string]interface{}{"type": "daily"}}
 

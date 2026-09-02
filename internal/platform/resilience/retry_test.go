@@ -87,9 +87,7 @@ func TestTheLastAttemptIsNotFollowedByASleep(t *testing.T) {
 	}
 }
 
-// TestCancellingStopsTheWaiting covers shutdown. A syncer waiting on a source
-// that is down used to go on sleeping for the best part of a minute, while the
-// supervisor gives a task ten seconds to stop before it gives up on it.
+// TestCancellingStopsTheWaiting covers shutdown.
 func TestCancellingStopsTheWaiting(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	calls := 0

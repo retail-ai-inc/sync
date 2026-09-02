@@ -14,8 +14,7 @@ import (
 	goredis "github.com/redis/go-redis/v9"
 )
 
-// Set SYNC_REDIS_SOURCE to a cluster-enabled instance owning every slot; a
-// single node with CLUSTER ADDSLOTSRANGE 0 16383 is enough.
+// Set SYNC_REDIS_SOURCE to a cluster-enabled instance owning every slot.
 func oneSource(t *testing.T) (string, *goredis.Client) {
 	t.Helper()
 	addr := addrsFrom(t, "SYNC_REDIS_SOURCE")[0]
@@ -149,8 +148,7 @@ func TestTheOffsetAgreesWithARealMaster(t *testing.T) {
 
 	want := masterOffsetOf(t, client)
 
-	// Read until the stream reaches the master's offset. PINGs and the commands
-	// this test issued both count.
+	// Read until the stream reaches the master's offset.
 	deadline := time.Now().Add(20 * time.Second)
 	var sawRewrittenSPop, sawAbsoluteExpiry bool
 	for stream.Offset() < want && time.Now().Before(deadline) {

@@ -204,8 +204,7 @@ func TestLoadSyncTasks(t *testing.T) {
 	if as.MaxRetries != 7 {
 		t.Errorf("MaxRetries = %d, want 7", as.MaxRetries)
 	}
-	// Durations are absent here on purpose: supplying them as strings breaks
-	// the whole task, see TestLoadSyncTasksStringDurationVoidsWholeTask.
+	// Durations are absent here on purpose.
 	if as.BaseRetryDelay != 0 || as.MaxRetryDelay != 0 {
 		t.Errorf("retry delays = %v / %v, want zero", as.BaseRetryDelay, as.MaxRetryDelay)
 	}

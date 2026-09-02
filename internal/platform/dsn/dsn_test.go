@@ -92,8 +92,7 @@ func TestTheSRVSchemeIsUnderstood(t *testing.T) {
 }
 
 // TestTheEndpointCarriesNoCredentials pins what the direction lock writes onto
-// the replicated databases and what error messages name. Either could be read
-// by somebody who should not learn the password.
+// the replicated databases and what error messages name.
 func TestTheEndpointCarriesNoCredentials(t *testing.T) {
 	tests := []struct {
 		dbType string

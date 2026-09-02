@@ -75,8 +75,7 @@ func TestConfigFromCarriesEveryField(t *testing.T) {
 
 	got := ConfigFrom(req)
 
-	// The engine is the one field whose name differs: the request calls it
-	// sourceType, the stored document calls it type.
+	// The engine is the one field whose name differs.
 	if got.Type != req.SourceType {
 		t.Errorf("Type = %q, want %q", got.Type, req.SourceType)
 	}
@@ -113,9 +112,7 @@ func TestConfigFromIsAReplacementNotAMerge(t *testing.T) {
 	}
 }
 
-// TestTheStoredDocumentKeepsItsFieldNames pins the JSON the column holds. The
-// front end reads these names, so a rename here is a breaking change that no
-// compiler catches.
+// TestTheStoredDocumentKeepsItsFieldNames pins the JSON the column holds.
 func TestTheStoredDocumentKeepsItsFieldNames(t *testing.T) {
 	b, err := json.Marshal(ConfigFrom(Request{SourceType: "mongodb", TaskName: "n", Status: "Stopped"}))
 	if err != nil {
@@ -229,8 +226,7 @@ func TestSyncTaskStatus(t *testing.T) {
 }
 
 // TestTheConfiguredStatusCanContradictTheEnableColumn records that the two
-// places a task's state lives are never reconciled. A row with enable=0 whose
-// document says Running is reported as Running, and nothing is replicating.
+// places a task's state lives are never reconciled.
 func TestTheConfiguredStatusCanContradictTheEnableColumn(t *testing.T) {
 	task := NewSyncTask(1, 0, "", "", "")
 

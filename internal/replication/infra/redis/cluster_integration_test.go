@@ -263,9 +263,8 @@ func TestReplayingAnAppliedRangeChangesNothing(t *testing.T) {
 		if err != nil {
 			t.Fatalf("decode the position of shard %s: %v", shard, err)
 		}
-		// Back to the start of what is still on disk, which is as far as a lost
-		// floor could ever put it. Any further and the buffer would refuse, which
-		// is a different behaviour with its own test.
+		// Back to the start of what is still on disk, which is as far as a lost floor
+		// could ever put it.
 		oldest := rig.links[i].buffer.Oldest()
 		if oldest >= position.Offset {
 			t.Fatalf("shard %s holds nothing before offset %d, so there is nothing "+

@@ -14,9 +14,7 @@ import (
 	"github.com/retail-ai-inc/sync/test/harness"
 )
 
-// A batch used to be split into groups that could be applied independently,
-// and independence was decided by the _id: two changes to one document kept
-// their order, everything else could move.
+// A batch used to be split into groups that could be applied independently.
 func TestAUniqueValueHandedFromOneDocumentToAnother(t *testing.T) {
 	src, tgt := connect(t, harness.MongoSource), connect(t, harness.MongoTarget)
 
@@ -34,8 +32,6 @@ func TestAUniqueValueHandedFromOneDocumentToAnother(t *testing.T) {
 	})
 
 	// The unique index is what makes the two documents dependent on each other.
-	// It goes on both sides: the source to make the handover meaningful, the
-	// target to make an out-of-order apply fail rather than quietly pass.
 	unique := mongo.IndexModel{
 		Keys:    bson.D{{Key: "email", Value: 1}},
 		Options: options.Index().SetUnique(true),
@@ -60,8 +56,7 @@ func TestAUniqueValueHandedFromOneDocumentToAnother(t *testing.T) {
 	})
 
 	// One transaction, so the three changes land in one batch: a batch is only
-	// ever cut on a transaction boundary. The first write is there to make the
-	// _id repeat, which is what the split keys on.
+	// ever cut on a transaction boundary.
 	session, err := src.StartSession()
 	if err != nil {
 		t.Fatalf("start a session: %v", err)

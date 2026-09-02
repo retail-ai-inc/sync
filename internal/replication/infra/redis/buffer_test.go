@@ -67,8 +67,7 @@ func TestOffsetsAreTheSumOfTheFramesWritten(t *testing.T) {
 	}
 }
 
-// TestACursorResumesFromAnOffset covers the ordinary restart: the position
-// recorded on the target names a stream offset, and reading has to begin there.
+// TestACursorResumesFromAnOffset covers the ordinary restart.
 func TestACursorResumesFromAnOffset(t *testing.T) {
 	buffer := newBuffer(t, BufferOptions{})
 	if err := buffer.Reset(0); err != nil {
@@ -195,8 +194,7 @@ func TestAPartialFrameIsDiscardedOnRecovery(t *testing.T) {
 	}
 }
 
-// TestACorruptFrameIsNotServed covers bit rot rather than a clean kill: the
-// checksum is what tells the two apart.
+// TestACorruptFrameIsNotServed covers bit rot rather than a clean kill.
 func TestACorruptFrameIsNotServed(t *testing.T) {
 	dir := t.TempDir()
 	buffer := newBuffer(t, BufferOptions{Dir: dir})
@@ -262,8 +260,7 @@ func TestTheStreamContinuesAcrossSegments(t *testing.T) {
 	}
 }
 
-// TestOldSegmentsAreDiscardedOverTheLimit covers the bound on disk use. The
-// buffer is a window, not an archive.
+// TestOldSegmentsAreDiscardedOverTheLimit covers the bound on disk use.
 func TestOldSegmentsAreDiscardedOverTheLimit(t *testing.T) {
 	buffer := newBuffer(t, BufferOptions{SegmentBytes: 8, MaxBytes: 24})
 	if err := buffer.Reset(0); err != nil {
@@ -397,8 +394,7 @@ func TestAWaitingCursorGivesUpWhenTheBufferCloses(t *testing.T) {
 }
 
 // TestResetAbandonsTheOldHistory covers a full resync, which starts a new
-// replication id at a new offset. Reading across that seam would splice two
-// unrelated histories together.
+// replication id at a new offset.
 func TestResetAbandonsTheOldHistory(t *testing.T) {
 	dir := t.TempDir()
 	buffer := newBuffer(t, BufferOptions{Dir: dir})
@@ -433,8 +429,7 @@ func TestResetAbandonsTheOldHistory(t *testing.T) {
 }
 
 // TestAppendingBeforeResetIsRefused keeps a buffer with no starting offset from
-// inventing one. The offset only means something relative to the source's
-// stream, so it has to come from the handshake.
+// inventing one.
 func TestAppendingBeforeResetIsRefused(t *testing.T) {
 	buffer := newBuffer(t, BufferOptions{})
 	if err := buffer.Append([]byte("no starting point")); err == nil {

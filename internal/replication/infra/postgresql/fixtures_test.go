@@ -11,9 +11,7 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// newSyncer builds a syncer with no connections. Only the pure helpers and the
-// statement builders can be exercised on it; anything that touches the source
-// connection needs a live PostgreSQL.
+// newSyncer builds a syncer with no connections.
 func newSyncer(t *testing.T, cfg config.SyncConfig) *PostgreSQLSyncer {
 	t.Helper()
 
@@ -56,8 +54,7 @@ func relation(id uint32, namespace, name string, columns ...string) *pglogrepl.R
 	return rel
 }
 
-// tuple builds a tuple where every value is a text column. A nil entry becomes
-// a NULL column instead.
+// tuple builds a tuple where every value is a text column.
 func tuple(values ...*string) *pglogrepl.TupleData {
 	cols := make([]*pglogrepl.TupleDataColumn, len(values))
 	for i, v := range values {

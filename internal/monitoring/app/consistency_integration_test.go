@@ -72,10 +72,7 @@ func differencesFound(t *testing.T, task config.SyncConfig) float64 {
 	return 0
 }
 
-// TestAnIntegerKeyedTableCompares is the case a stubbed comparison cannot check:
-// the server orders an integer primary key numerically, and any comparison that
-// depends on both sides ordering keys the same way as Go does reports every row
-// past the 9/10 boundary as both missing and extra. The rows here cross it.
+// TestAnIntegerKeyedTableCompares is the case a stubbed comparison cannot check.
 func TestAnIntegerKeyedTableCompares(t *testing.T) {
 	const table = "verify_orders"
 	source, target := verifyTables(t, table,
@@ -178,9 +175,7 @@ func TestACompositePrimaryKeyCompares(t *testing.T) {
 	}
 }
 
-// TestARepairMakesTheTargetMatch closes the loop against a real server: finding
-// out a payment row is missing and then having to put it back by hand is most of
-// the work.
+// TestARepairMakesTheTargetMatch closes the loop against a real server.
 func TestARepairMakesTheTargetMatch(t *testing.T) {
 	const table = "verify_repair"
 	source, target := verifyTables(t, table,
@@ -344,9 +339,8 @@ func TestEachKindOfMongoDivergenceIsReported(t *testing.T) {
 	}
 }
 
-// TestAMongoRepairMakesTheTargetMatch covers the repair, which only runs when it
-// has been turned on. It is what makes the comparison worth running before a
-// switchover rather than only worth reading afterwards.
+// TestAMongoRepairMakesTheTargetMatch covers the repair, which only runs when
+// it has been turned on.
 func TestAMongoRepairMakesTheTargetMatch(t *testing.T) {
 	t.Setenv("SYNC_VERIFY_REPAIR", "true")
 

@@ -103,8 +103,7 @@ func TestAuthCurrentUserHandlerReportsAStoreFailure(t *testing.T) {
 	insertUser(t, db, "alice", "secret", "Alice", domain.AccessAdmin)
 	token := domain.GenerateUserToken("alice", domain.AccessAdmin)
 
-	// The token validates against the table, then the profile read is made to
-	// fail by dropping the table underneath it.
+	// The token validates against the table.
 	if _, err := db.Exec(`ALTER TABLE users RENAME TO users_gone`); err != nil {
 		t.Fatalf("rename table: %v", err)
 	}
@@ -122,8 +121,7 @@ func TestAuthCurrentUserHandlerReportsAStoreFailure(t *testing.T) {
 }
 
 // TestAuthLogoutHandlerAnswersSuccess pins what logging out means now: the
-// client discards its token and the server has nothing to clear. It used to
-// clear the one session the whole process shared.
+// client discards its token and the server has nothing to clear.
 func TestAuthLogoutHandlerAnswersSuccess(t *testing.T) {
 	rec := postJSON(AuthLogoutHandler, http.MethodPost, "/logout", "")
 
@@ -187,8 +185,7 @@ func TestUpdatePasswordHandlerRejectsAWrongOldPassword(t *testing.T) {
 }
 
 // TestUpdatePasswordHandlerReportsALookupFailure covers the store failing after
-// the caller has been identified. With no users table the token cannot be
-// verified either, so the answer is the 401 shape.
+// the caller has been identified.
 func TestUpdatePasswordHandlerReportsALookupFailure(t *testing.T) {
 	emptyIdentityDB(t)
 
@@ -328,10 +325,7 @@ func TestGetUsersHandlerReturnsThePage(t *testing.T) {
 }
 
 // TestGetUsersHandlerRefusesAPageThatIsNotOne covers a parameter that is not a
-// page. It used to be replaced with the default without a word, so a caller
-// asking for page "abc" was served page 1 and had no way to tell — and the
-// endpoint's own parsing was also the only thing keeping the arithmetic away
-// from a negative index, which panicked.
+// page.
 func TestGetUsersHandlerRefusesAPageThatIsNotOne(t *testing.T) {
 	db := useTempDB(t)
 	insertUser(t, db, "a", "secret", "User", domain.AccessGuest)
@@ -744,8 +738,7 @@ func TestEveryGoogleFailureAnswersHTTP200WithTheGuestShape(t *testing.T) {
 }
 
 // TestTheAdminPasswordEndpointFollowsTheToken covers an endpoint that used to
-// change the literal "admin" row whoever asked. A second administrator could not
-// use it at all, and once that row was removed it could never succeed again.
+// change the literal "admin" row whoever asked.
 func TestTheAdminPasswordEndpointFollowsTheToken(t *testing.T) {
 	db := useTempDB(t)
 	insertUser(t, db, "admin", "secret", "Admin", domain.AccessAdmin)
@@ -770,8 +763,7 @@ func TestTheAdminPasswordEndpointFollowsTheToken(t *testing.T) {
 	}
 }
 
-// TestTheAdminPasswordEndpointNeedsAnAdmin is the other half: it is still an
-// administrative endpoint.
+// TestTheAdminPasswordEndpointNeedsAnAdmin is the other half.
 func TestTheAdminPasswordEndpointNeedsAnAdmin(t *testing.T) {
 	db := useTempDB(t)
 	insertUser(t, db, "guest", "secret", "Guest", domain.AccessGuest)

@@ -15,8 +15,7 @@ import (
 )
 
 // statusConn hands back a pinned connection to a SQLite database, which is what
-// readBinlogStatus takes. The statement is a parameter, so a SELECT that names
-// its columns the way SHOW MASTER STATUS does exercises the same mapping.
+// readBinlogStatus takes.
 func statusConn(t *testing.T) *sql.Conn {
 	t.Helper()
 
@@ -53,8 +52,7 @@ func TestTheBinlogStatusIsReadByColumnName(t *testing.T) {
 	}
 }
 
-// TestTheColumnOrderDoesNotMatter is why the mapping is by name: the column
-// list of SHOW MASTER STATUS has changed across server versions.
+// TestTheColumnOrderDoesNotMatter is why the mapping is by name.
 func TestTheColumnOrderDoesNotMatter(t *testing.T) {
 	conn := statusConn(t)
 
@@ -72,8 +70,7 @@ func TestTheColumnOrderDoesNotMatter(t *testing.T) {
 }
 
 // TestAServerWithNoBinaryLogIsReported covers the configuration replication
-// cannot work on at all. It has to be an error rather than a zero position,
-// which would read as "start from the beginning of a file that does not exist".
+// cannot work on at all.
 func TestAServerWithNoBinaryLogIsReported(t *testing.T) {
 	conn := statusConn(t)
 
@@ -315,9 +312,8 @@ func TestAServerWithNoRowImageSettingIsAccepted(t *testing.T) {
 	}
 }
 
-// TestMariaDBIsNotAsked records that the check is skipped for MariaDB, which has
-// no binlog_row_image setting and logs whole rows unconditionally. The nil canal
-// proves it: reaching the query would panic.
+// TestMariaDBIsNotAsked records that the check is skipped for MariaDB, which
+// has no binlog_row_image setting and logs whole rows unconditionally.
 func TestMariaDBIsNotAsked(t *testing.T) {
 	s := newSyncer(t)
 	s.cfg.Type = "mariadb"

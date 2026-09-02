@@ -56,8 +56,7 @@ func TestTheProbeRejectsAMalformedBody(t *testing.T) {
 }
 
 // TestAnUnreachableMySQLIsReportedAsAPingFailure records that the probe answers
-// a refused connection with a 500 carrying the driver's message. Port 1 is used
-// because nothing listens there.
+// a refused connection with a 500 carrying the driver's message.
 func TestAnUnreachableMySQLIsReportedAsAPingFailure(t *testing.T) {
 	code, body := probe(t,
 		`{"dbType":"mysql","host":"127.0.0.1","port":"1","user":"u","password":"p","database":"d"}`)
@@ -105,9 +104,7 @@ func TestAnUnreachablePostgreSQLIsReported(t *testing.T) {
 	}
 }
 
-// TestAnUnreachableMongoDBIsReported takes ten seconds on purpose: the MongoDB
-// branch builds its own context with a hardcoded ten-second timeout from
-// context.Background(), ignoring the request context entirely.
+// TestAnUnreachableMongoDBIsReported takes ten seconds on purpose.
 func TestAnUnreachableMongoDBIsReported(t *testing.T) {
 	code, body := probe(t,
 		`{"dbType":"mongodb","host":"127.0.0.1","port":"1","user":"","password":"","database":"d"}`)
@@ -135,9 +132,7 @@ func TestAnUnreachableRedisIsReported(t *testing.T) {
 // probe: Redis has no tables, so the branch answers success with an empty list
 // rather than, say, the keyspace or the database count.
 func TestTheRedisBranchNeverReportsTables(t *testing.T) {
-	// The success path needs a live Redis, which this suite does not have. What
-	// can be pinned without one is that the branch has no query at all: the only
-	// way it can produce a table list is the empty literal.
+	// The success path needs a live Redis, which this suite does not have.
 	_, body := probe(t,
 		`{"dbType":"redis","host":"127.0.0.1","port":"1","user":"","password":"","database":"0"}`)
 

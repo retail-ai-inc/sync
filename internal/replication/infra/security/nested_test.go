@@ -127,8 +127,7 @@ func TestAFieldThatIsNotThereIsNotInvented(t *testing.T) {
 	}
 }
 
-// TestARuleInsideANamedDocumentIsApplied covers the other entry point: the
-// syncer passes a field's own name as the prefix when it hands over a subtree.
+// TestARuleInsideANamedDocumentIsApplied covers the other entry point.
 func TestARuleInsideANamedDocumentIsApplied(t *testing.T) {
 	cfg := enabled(FieldSecurityConfig{Field: "profile.contact.phone", SecurityType: "masked"})
 

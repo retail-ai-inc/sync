@@ -28,8 +28,7 @@ func TestTLSVerifiesTheServerItConnectedTo(t *testing.T) {
 	}
 }
 
-// TestAHostWithNoPortKeepsItsName. A DSN may carry a bare host, and taking
-// everything before the last colon would leave nothing to verify against.
+// TestAHostWithNoPortKeepsItsName.
 func TestAHostWithNoPortKeepsItsName(t *testing.T) {
 	got := tlsFor(&mysqldriver.Config{TLSConfig: "true", Addr: "mysql.internal"})
 	if got == nil {
@@ -40,9 +39,7 @@ func TestAHostWithNoPortKeepsItsName(t *testing.T) {
 	}
 }
 
-// TestSkipVerifyIsHonouredButStillEncrypts. Asking not to verify is a decision
-// somebody made — a self-signed certificate on a private link — and it must not
-// quietly become a plaintext connection.
+// TestSkipVerifyIsHonouredButStillEncrypts.
 func TestSkipVerifyIsHonouredButStillEncrypts(t *testing.T) {
 	got := tlsFor(&mysqldriver.Config{TLSConfig: "skip-verify", Addr: "10.60.0.5:3306"})
 	if got == nil {

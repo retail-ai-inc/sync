@@ -83,9 +83,7 @@ func TestProcessValueMasked(t *testing.T) {
 		// Strings are replaced with one asterisk per byte, so the length leaks.
 		{"string", "john@example.com", strings.Repeat("*", len("john@example.com"))},
 		{"empty string", "", ""},
-		// A value that is not text keeps its type. It used to become the literal
-		// string "****" whatever it was, which for a numeric or boolean column on
-		// the target is either an error or a truncation.
+		// A value that is not text keeps its type.
 		{"int", 12345, 0},
 		{"int64", int64(12345), int64(0)},
 		{"float", 1.5, float64(0)},
@@ -367,8 +365,7 @@ func TestTheKeyComesFromTheEnvironment(t *testing.T) {
 }
 
 // TestWithNoKeyNothingIsEncrypted covers the case that used to be answered with
-// the published key. There is nowhere to get one, so encrypting is refused
-// rather than performed with a key everyone has.
+// the published key.
 func TestWithNoKeyNothingIsEncrypted(t *testing.T) {
 	t.Setenv("SYNC_FIELD_KEY", "")
 	t.Setenv("SYNC_CONFIG_KEY", "")

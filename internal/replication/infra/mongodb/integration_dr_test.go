@@ -38,8 +38,7 @@ func TestSameDocumentUpdatesConverge(t *testing.T) {
 		return nil
 	})
 
-	// Enough updates to fill several buffer batches; the writer flushes at 100
-	// events or every two seconds.
+	// Enough updates to fill several buffer batches.
 	const updates = 300
 	for i := 1; i <= updates; i++ {
 		if _, err := srcColl.UpdateOne(ctx, bson.M{"_id": id}, bson.M{"$set": bson.M{"v": i}}); err != nil {
@@ -110,9 +109,7 @@ func TestWritesDuringInitialSyncAreNotLost(t *testing.T) {
 		return nil
 	})
 
-	// The seeded documents arrive through the copy; the markers arrive
-	// afterwards, through the stream replaying from the cluster time the copy
-	// pinned.
+	// The seeded documents arrive through the copy; the markers arrive afterwards.
 	harness.Eventually(t, 60*time.Second, func() error {
 		arrived := countIn(t, tgt, targetDB, collection, bson.M{"marker": bson.M{"$exists": true}})
 		if arrived != int64(markers) {
@@ -125,8 +122,7 @@ func TestWritesDuringInitialSyncAreNotLost(t *testing.T) {
 }
 
 // TestResumeAfterRestart checks that a stopped syncer picks up where it left
-// off. The resume token is written under MongoDBResumeTokenPath, so the second
-// run must reuse the same directory.
+// off.
 func TestResumeAfterRestart(t *testing.T) {
 	collection := harness.UniqueName("resume")
 	src, tgt := connect(t, harness.MongoSource), connect(t, harness.MongoTarget)
@@ -181,8 +177,7 @@ func TestResumeAfterRestart(t *testing.T) {
 	})
 }
 
-// TestIgnoreDeleteOpsLeavesDeletedDocuments pins F-033: with the option on, a
-// document removed at the source stays on the target for good.
+// TestIgnoreDeleteOpsLeavesDeletedDocuments pins F-033: with the option on.
 func TestIgnoreDeleteOpsLeavesDeletedDocuments(t *testing.T) {
 	collection := harness.UniqueName("ignoredelete")
 	src, tgt := connect(t, harness.MongoSource), connect(t, harness.MongoTarget)
@@ -241,8 +236,7 @@ func TestInsertThenDeleteInSameBatch(t *testing.T) {
 		return nil
 	})
 
-	// Create and immediately remove many documents. Each pair lands inside one
-	// buffer flush, so both operations reach the same bulk write.
+	// Create and immediately remove many documents.
 	const pairs = 150
 	for i := 0; i < pairs; i++ {
 		res, err := srcColl.InsertOne(ctx, bson.M{"pair": i})
@@ -271,8 +265,7 @@ func TestInsertThenDeleteInSameBatch(t *testing.T) {
 }
 
 // TestDeleteThenReinsertSameID is the mirror image: a document removed and
-// immediately recreated with the same identifier must exist on the target. An
-// unordered batch that runs the upsert before the delete leaves it missing.
+// immediately recreated with the same identifier must exist on the target.
 func TestDeleteThenReinsertSameID(t *testing.T) {
 	collection := harness.UniqueName("recreate")
 	src, tgt := connect(t, harness.MongoSource), connect(t, harness.MongoTarget)
@@ -304,8 +297,7 @@ func TestDeleteThenReinsertSameID(t *testing.T) {
 	}
 
 	// The source finishes its cycles in well under a second, so the target has
-	// either caught up or diverged long before this window elapses. Ten seconds
-	// is generous for convergence and cheap when the defect is present.
+	// either caught up or diverged long before this window elapses.
 	harness.Eventually(t, 10*time.Second, func() error {
 		doc, err := findOne(t, tgt, targetDB, collection, bson.M{"_id": id})
 		if err != nil {

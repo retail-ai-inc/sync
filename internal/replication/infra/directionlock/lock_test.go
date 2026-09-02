@@ -146,8 +146,7 @@ func TestASourceThatIsSomebodyElsesTargetIsRefused(t *testing.T) {
 	}
 }
 
-// TestTwoTasksWritingOneTargetAreRefused covers the ordinary misconfiguration:
-// two tasks pointed at the same target from different sources.
+// TestTwoTasksWritingOneTargetAreRefused covers the ordinary misconfiguration.
 func TestTwoTasksWritingOneTargetAreRefused(t *testing.T) {
 	source := newStore("tokyo:3306/shop")
 	target := newStore("osaka:3306/shop", claim(2, RoleTarget, "kobe:3306/shop", time.Minute))
@@ -166,8 +165,7 @@ func ownClaim(role Role, peer string, age time.Duration) Claim {
 	return c
 }
 
-// TestTheSameTaskReacquiresItsOwnClaim is what an ordinary restart does: the
-// same process, by name, finding the claim it left behind.
+// TestTheSameTaskReacquiresItsOwnClaim is what an ordinary restart does.
 func TestTheSameTaskReacquiresItsOwnClaim(t *testing.T) {
 	source := newStore("tokyo:3306/shop", ownClaim(RoleSource, "osaka:3306/shop", time.Minute))
 	target := newStore("osaka:3306/shop", ownClaim(RoleTarget, "tokyo:3306/shop", time.Minute))
@@ -465,8 +463,7 @@ func TestHoldClaimsAndReleases(t *testing.T) {
 }
 
 // TestHoldReleasesOnlyOnce records that the returned function can be called
-// twice without a second release. Every engine defers it and some call it on
-// their own error paths as well.
+// twice without a second release.
 func TestHoldReleasesOnlyOnce(t *testing.T) {
 	source, target := newStore("tokyo:27017"), newStore("osaka:27017")
 	guard := guardFor(source, target)
@@ -506,9 +503,7 @@ func TestHoldRefusesAReversedPair(t *testing.T) {
 	}
 }
 
-// A claim nobody could remove blocks the reverse direction until it goes
-// stale, and an operator following a failover runbook needs to know that is
-// why they are being refused.
+// A claim nobody could remove blocks the reverse direction until it goes stale.
 func TestHoldReportsAFailedRelease(t *testing.T) {
 	source, target := newStore("tokyo:27017"), newStore("osaka:27017")
 	guard := guardFor(source, target)
@@ -620,9 +615,7 @@ func TestAProcessThatStoppedRefreshingIsNotInTheWay(t *testing.T) {
 	}
 }
 
-// TestADirectionConflictIsNotRetryable keeps the two kinds apart. A reversed
-// direction needs somebody to decide which side is authoritative; two processes
-// need one of them to exit.
+// TestADirectionConflictIsNotRetryable keeps the two kinds apart.
 func TestADirectionConflictIsNotRetryable(t *testing.T) {
 	source, target := newStore("tokyo"), newStore("osaka")
 

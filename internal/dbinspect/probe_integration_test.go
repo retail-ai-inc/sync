@@ -120,11 +120,7 @@ func TestTheProbeListsPostgreSQLTables(t *testing.T) {
 	}
 }
 
-// TestTheProbeListsMongoCollections covers the MongoDB branch. It builds its URI
-// through the shared builder, which is what stops the probe from reporting a
-// connection the task will not be able to make — and which is why it discovers
-// the replica set rather than pinning one node, so this addresses the set whose
-// member advertises an address the host can reach.
+// TestTheProbeListsMongoCollections covers the MongoDB branch.
 func TestTheProbeListsMongoCollections(t *testing.T) {
 	host, port := harness.SplitHostPort(t, harness.MongoDiscoverable)
 

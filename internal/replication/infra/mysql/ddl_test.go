@@ -165,8 +165,7 @@ func TestAnUnqualifiedDDLFromAnotherDatabaseIsSkipped(t *testing.T) {
 }
 
 // TestAnUnqualifiedDDLFromTheReplicatedDatabaseIsApplied is the other side of
-// it. Nearly every statement in a binlog is unqualified, so a filter that
-// refused them would stop schema changes reaching the target altogether.
+// it.
 func TestAnUnqualifiedDDLFromTheReplicatedDatabaseIsApplied(t *testing.T) {
 	h := newHandler(t, nil, mapTable("orders", "orders"))
 
@@ -181,8 +180,7 @@ func TestAnUnqualifiedDDLFromTheReplicatedDatabaseIsApplied(t *testing.T) {
 }
 
 // TestDiscoveryDoesNotReachIntoAnotherDatabase covers the task that lists no
-// tables. It replicates every table it sees — every table of one database, not
-// of the server.
+// tables.
 func TestDiscoveryDoesNotReachIntoAnotherDatabase(t *testing.T) {
 	h := newHandler(t, nil, nil)
 	h.discovering = true
@@ -365,9 +363,7 @@ func TestOnDDLWithNoEventIsANoOp(t *testing.T) {
 	}
 }
 
-// TestOnDDLAppliesTheOpenTransactionFirst pins the ordering: rows written
-// before the schema change belong to the old definition and have to land under
-// it.
+// TestOnDDLAppliesTheOpenTransactionFirst pins the ordering.
 func TestOnDDLAppliesTheOpenTransactionFirst(t *testing.T) {
 	db := sqliteTarget(t, ordersSchema)
 	h := newHandler(t, db, mapTable("orders", "orders"))
@@ -428,8 +424,7 @@ func TestADiscoveredTableIsReplicatedUnderItsOwnName(t *testing.T) {
 	}
 }
 
-// TestADiscoveredTablesSchemaChangeIsPropagated is the other half: a table
-// nobody listed still needs its columns kept in step.
+// TestADiscoveredTablesSchemaChangeIsPropagated is the other half.
 func TestADiscoveredTablesSchemaChangeIsPropagated(t *testing.T) {
 	db := sqliteTarget(t, ordersSchema)
 	h := newHandler(t, db, nil)

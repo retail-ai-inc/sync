@@ -22,16 +22,14 @@ func useTempConfigDB(t *testing.T) *sql.DB {
 	t.Setenv("SYNC_DB_PATH", path)
 
 	// Through the real opener, so the fixture carries the schema the program
-	// creates rather than a copy of it that can drift. That also settles the
-	// schema for this file, so a table a test drops afterwards stays dropped.
+	// creates rather than a copy of it that can drift.
 	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
 		t.Fatalf("open temp sqlite: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
 
-	// The opener seeds a settings row. The tests here supply their own, or
-	// depend on there being none, so start from an empty table.
+	// The opener seeds a settings row.
 	if _, err := db.Exec(`DELETE FROM config_global`); err != nil {
 		t.Fatalf("clear config_global: %v", err)
 	}
@@ -103,8 +101,7 @@ func TestAnEmptyConfigGlobalTableIsReported(t *testing.T) {
 }
 
 func TestAnUnopenableDatabaseIsReported(t *testing.T) {
-	// A directory where the file should be: openable by name, unusable as a
-	// database.
+	// A directory where the file should be: openable by name.
 	dir := filepath.Join(t.TempDir(), "sync.db")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
@@ -137,8 +134,7 @@ func TestAMissingSyncTasksTableIsReported(t *testing.T) {
 // released for the next caller. Two calls in a row have to work.
 func TestNewConfigDoesNotHoldTheDatabaseOpen(t *testing.T) {
 	db := useTempConfigDB(t)
-	// A settings row is mandatory: without one the load reports an error. See
-	// TestAnEmptyConfigGlobalTableIsReported.
+	// A settings row is mandatory: without one the load reports an error.
 	if _, err := db.Exec(
 		`INSERT INTO config_global (id, enable_table_row_count_monitoring, log_level, monitor_interval)
 		 VALUES (1, 0, 'info', 60)`); err != nil {

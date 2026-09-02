@@ -55,8 +55,7 @@ func TestReadOAuthCredentialsReportsTheFirstMissingField(t *testing.T) {
 }
 
 // TestOnlyTheFirstMissingFieldIsReported records that a configuration with
-// nothing set at all is reported as missing the client id alone. An operator
-// filling the form in has to submit three times to learn about three fields.
+// nothing set at all is reported as missing the client id alone.
 func TestOnlyTheFirstMissingFieldIsReported(t *testing.T) {
 	_, missing := ReadOAuthCredentials(map[string]interface{}{})
 
@@ -67,8 +66,7 @@ func TestOnlyTheFirstMissingFieldIsReported(t *testing.T) {
 }
 
 // TestANonStringFieldIsReportedAsMissingRatherThanInvalid records that a
-// configuration whose clientId is a number is described as absent. The operator
-// is told to set a value that is already there.
+// configuration whose clientId is a number is described as absent.
 func TestANonStringFieldIsReportedAsMissingRatherThanInvalid(t *testing.T) {
 	_, missing := ReadOAuthCredentials(map[string]interface{}{
 		FieldClientID:     12345,

@@ -147,8 +147,7 @@ func percentiles(t *testing.T, latencies []time.Duration) {
 		latencies[len(latencies)-1].Round(time.Millisecond))
 }
 
-// TestTheLatencyUnderSteadyWrites is the recovery-point measurement: with the
-// source being written to continuously, how far behind is the replica?
+// TestTheLatencyUnderSteadyWrites is the recovery-point measurement.
 func TestTheLatencyUnderSteadyWrites(t *testing.T) {
 	src := perfOpen(t, harness.MySQLSource, perfSourceDB)
 	tgt := perfOpen(t, harness.MySQLTarget, perfTargetDB)
@@ -275,8 +274,7 @@ func TestTheLatencyUnderSteadyWrites(t *testing.T) {
 }
 
 // TestTheApplyThroughput hands the syncer more than it can absorb at once and
-// times the catch-up. It is the number that says whether a burst — a batch job,
-// a backfill, a retry storm — is absorbed in seconds or in hours.
+// times the catch-up.
 func TestTheApplyThroughput(t *testing.T) {
 	src := perfOpen(t, harness.MySQLSource, perfSourceDB)
 	tgt := perfOpen(t, harness.MySQLTarget, perfTargetDB)

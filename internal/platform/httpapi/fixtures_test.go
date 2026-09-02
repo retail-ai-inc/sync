@@ -30,8 +30,7 @@ func scratchDir(t *testing.T) string {
 	return dir
 }
 
-// Fixtures shared by this package's handler tests. The schema itself comes from
-// the opener rather than from a copy kept here: see internal/platform/sqlite.
+// Fixtures shared by this package's handler tests.
 
 // useTempTaskDB points the package at a throwaway SQLite file carrying the
 // sync_tasks and backup_tasks schema, so the list and mutate handlers can be

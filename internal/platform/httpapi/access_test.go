@@ -36,8 +36,7 @@ func call(t *testing.T, method, path, body, token string) *httptest.ResponseReco
 func withUsers(t *testing.T) (adminToken, guestToken string) {
 	t.Helper()
 
-	// The production work factor costs most of a second per login, and signing in
-	// is the first thing most of these tests do.
+	// The production work factor costs most of a second per login.
 	t.Setenv("SYNC_PASSWORD_ITERATIONS", "1")
 
 	db := useTempDB(t)
@@ -192,8 +191,7 @@ func TestSigningInNeedsNoCredential(t *testing.T) {
 	}
 }
 
-// TestAnExpiredTokenIsRefused closes the loop with the token's own expiry: the
-// middleware is where it takes effect.
+// TestAnExpiredTokenIsRefused closes the loop with the token's own expiry.
 func TestAnExpiredTokenIsRefused(t *testing.T) {
 	withUsers(t)
 

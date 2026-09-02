@@ -90,8 +90,7 @@ func TestEveryTagHashesToItsOwnSlot(t *testing.T) {
 }
 
 // TestTheSlotTagTableIsStable is the most important test in this file, and the
-// least obvious. These tags name the keys that hold how far each slot has been
-// applied.
+// least obvious.
 func TestTheSlotTagTableIsStable(t *testing.T) {
 	const want = "6b728ddecb7be57061f8d2dbdbfe6db2d82aaabcccdc8ed4eb5e8f0231c325a0"
 
@@ -110,8 +109,7 @@ func TestTheSlotTagTableIsStable(t *testing.T) {
 	}
 }
 
-// TestTheTagsAreShort keeps the markers from bloating the target: one key per
-// slot means 16384 of them.
+// TestTheTagsAreShort keeps the markers from bloating the target.
 func TestTheTagsAreShort(t *testing.T) {
 	for slot, tag := range SlotTags() {
 		if len(tag) > 8 {

@@ -134,9 +134,7 @@ func TestRouterReturns405ForTheWrongMethod(t *testing.T) {
 	}
 }
 
-// NewRouter registers no middleware at all: there is no authentication,
-// authorisation, rate limiting, request logging, panic recovery or body-size
-// limit in front of any handler.
+// NewRouter registers no middleware at all: there is no authentication.
 func TestEveryRouteIsCoveredByTheAccessRules(t *testing.T) {
 	r, ok := NewRouter().(chi.Routes)
 	if !ok {
@@ -172,9 +170,8 @@ func TestEveryRouteIsCoveredByTheAccessRules(t *testing.T) {
 	}
 }
 
-// Without chi's Recoverer, a panic in any handler propagates into
-// net/http, which aborts the connection. The client sees a dropped request
-// rather than a 500, and no other request on that connection completes.
+// Without chi's Recoverer, a panic in any handler propagates into net/http,
+// which aborts the connection.
 func TestAPanickingHandlerIsNotRecovered(t *testing.T) {
 	r := chi.NewRouter()
 	r.Get("/boom", func(http.ResponseWriter, *http.Request) { panic("handler bug") })

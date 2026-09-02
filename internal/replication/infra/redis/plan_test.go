@@ -81,8 +81,7 @@ func TestEachSlotBecomesItsOwnTransaction(t *testing.T) {
 }
 
 // TestARepairedKeyIsOnlyCopiedOnce keeps a batch from reading and writing the
-// same value several times. A repair is "copy this key whole", so doing it
-// twice in one batch costs a round trip and changes nothing.
+// same value several times.
 func TestARepairedKeyIsOnlyCopiedOnce(t *testing.T) {
 	a := &Applier{}
 	jobs, err := a.plan([]*domain.Event{
@@ -118,8 +117,7 @@ func TestARepairWithNoOffsetIsAlwaysDone(t *testing.T) {
 	}
 }
 
-// TestABatchCarryingSomethingElseIsRefused. Silently ignoring a payload this
-// applier cannot write would leave a hole in the target that nothing reports.
+// TestABatchCarryingSomethingElseIsRefused.
 func TestABatchCarryingSomethingElseIsRefused(t *testing.T) {
 	a := &Applier{}
 	_, err := a.plan([]*domain.Event{{Payload: "a string"}}, markersWith(nil))
@@ -142,9 +140,7 @@ func TestTheBatchEndIsTheFurthestOffsetItReached(t *testing.T) {
 	}
 }
 
-// TestFlatteningRunsKeepsTheStreamsOrder. The Redis path applies in stream
-// order; a flatten that reordered would apply a delete before the write it was
-// meant to undo.
+// TestFlatteningRunsKeepsTheStreamsOrder.
 func TestFlatteningRunsKeepsTheStreamsOrder(t *testing.T) {
 	first := commandAt(1, 10, "SET", "a", "1")
 	second := commandAt(2, 20, "SET", "b", "2")

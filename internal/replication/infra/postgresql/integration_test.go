@@ -219,8 +219,7 @@ func TestReplicationResumesFromTheStoredPosition(t *testing.T) {
 	})
 	stop()
 
-	// Written while nothing is replicating. The slot holds the WAL, so this is
-	// what the restarted syncer has to pick up.
+	// Written while nothing is replicating.
 	mustExec(t, src, fmt.Sprintf("INSERT INTO %s (id, name) VALUES (2, 'while stopped')", table))
 
 	startSyncer(t, cfg)
@@ -238,8 +237,7 @@ func TestReplicationResumesFromTheStoredPosition(t *testing.T) {
 }
 
 // TestATaskWithNoSlotStopsForGood records that a task missing its replication
-// slot or plugin is reported as unrecoverable rather than retried forever. There
-// is nothing to read changes from and no amount of waiting produces one.
+// slot or plugin is reported as unrecoverable rather than retried forever.
 func TestATaskWithNoSlotStopsForGood(t *testing.T) {
 	table, publication, slot := names(t, "pg_noslot")
 	src, tgt := open(t, harness.PostgresSource, sourceDatabase), open(t, harness.PostgresTarget, targetDatabase)

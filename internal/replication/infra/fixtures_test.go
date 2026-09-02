@@ -90,9 +90,7 @@ func readConfig(t *testing.T, db *sql.DB, id int64) string {
 	return cfg
 }
 
-// readTimestamp reads a DATETIME column back as the string the store wrote. The
-// go-sqlite3 driver converts a DATETIME to time.Time, so scanning straight into
-// a string yields RFC 3339 rather than the value that went in.
+// readTimestamp reads a DATETIME column back as the string the store wrote.
 func readTimestamp(t *testing.T, db *sql.DB, column string, id int64) string {
 	t.Helper()
 

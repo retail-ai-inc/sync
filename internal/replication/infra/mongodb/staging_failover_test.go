@@ -52,9 +52,7 @@ func TestAShardFailoverLosesNothing(t *testing.T) {
 		return nil
 	})
 
-	// Write throughout, tolerating the failures an election causes. Only the
-	// writes the server acknowledged are ones the replica owes us; the rest the
-	// application would have retried or reported.
+	// Write throughout, tolerating the failures an election causes.
 	var (
 		mu       sync.Mutex
 		accepted []int

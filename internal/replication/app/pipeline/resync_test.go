@@ -253,9 +253,7 @@ func TestTheReCopyNeverMovesTheStreamsPosition(t *testing.T) {
 	applier := &fakeApplier{}
 	store := newStore()
 
-	// A heartbeat is what tells the re-copy where the stream has got to. Its
-	// timestamp is the source's own clock, and it means "everything up to here
-	// has been delivered".
+	// A heartbeat is what tells the re-copy where the stream has got to.
 	stream := &fakeReader{events: []*domain.Event{
 		{Heartbeat: true, EndsTransaction: true, SourceTime: time.Now()},
 	}}

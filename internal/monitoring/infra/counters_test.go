@@ -93,11 +93,7 @@ func TestTheMySQLCounterStopsAtTheTarget(t *testing.T) {
 }
 
 // TestThePostgreSQLCounterOpensItsOwnDriver covers a dependency this package
-// used to take on trust. It calls sql.Open("postgres", ...) without importing a
-// driver: in the production binary the replication syncer happens to import one,
-// so the counter worked — but nothing here guaranteed it, and dropping that
-// import elsewhere would have broken monitoring at runtime with "unknown
-// driver".
+// used to take on trust.
 func TestThePostgreSQLCounterOpensItsOwnDriver(t *testing.T) {
 	logger, out := captureLog()
 
@@ -133,10 +129,7 @@ func TestTheRedisCounterReportsAnUnparseableDSN(t *testing.T) {
 }
 
 // TestTheRedisCounterAcceptsAClusterDSN records that a DSN naming more than one
-// host is read as a cluster rather than refused. It used to go through go-
-// redis's ParseURL, which takes a single host: the Tokyo and Osaka clusters both
-// have several, so the comparison never ran at all — one parse error per
-// interval in the log and no row written.
+// host is read as a cluster rather than refused.
 func TestTheRedisCounterAcceptsAClusterDSN(t *testing.T) {
 	logger, out := captureLog()
 
@@ -267,8 +260,7 @@ func TestAnUnconfiguredSlackIsSilent(t *testing.T) {
 }
 
 // seedGlobalConfig points the process at a throwaway database carrying the one
-// row config.NewConfig insists on. Without it the lookup calls log.Fatalf and
-// takes the test binary with it.
+// row config.NewConfig insists on.
 func seedGlobalConfig(t *testing.T, webhook, channel string) {
 	t.Helper()
 

@@ -62,8 +62,7 @@ func rowCount(t *testing.T, db *sql.DB) int {
 	return n
 }
 
-// TestOldRowsAreRemovedAndRecentOnesKept is the whole point: the log grows by a
-// row per table per interval, on the volume the replication state lives on.
+// TestOldRowsAreRemovedAndRecentOnesKept is the whole point.
 func TestOldRowsAreRemovedAndRecentOnesKept(t *testing.T) {
 	db := retentionDB(t)
 	for _, age := range []int{0, 1, 29, 31, 100, 400} {

@@ -25,9 +25,8 @@ func TestAFailoverIsReportedAsAMovedMaster(t *testing.T) {
 	}
 }
 
-// Slots moving between shards is what deletes keys from one master and
-// restores them on another, down two connections with no ordering between
-// them.
+// Slots moving between shards is what deletes keys from one master and restores
+// them on another, down two connections with no ordering between them.
 func TestAReshardIsReportedAsNewAndDepartedShards(t *testing.T) {
 	before := map[string]string{"0-8191": "a:6379", "8192-16383": "b:6379"}
 	after := map[string]string{

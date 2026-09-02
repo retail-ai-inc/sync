@@ -9,9 +9,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo"
 )
 
-// TestUnauthorizedTellsRefusalFromFailure keeps the two apart. A refusal will
-// come back identically for ever, so the nudger stops for it; a cluster that
-// could not answer is asked again on the next tick.
+// TestUnauthorizedTellsRefusalFromFailure keeps the two apart.
 func TestUnauthorizedTellsRefusalFromFailure(t *testing.T) {
 	for _, tc := range []struct {
 		name string

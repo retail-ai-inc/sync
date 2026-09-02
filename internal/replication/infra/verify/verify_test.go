@@ -187,8 +187,7 @@ func TestARowTheTargetNeverGotIsReported(t *testing.T) {
 	}
 }
 
-// TestARowOnlyTheTargetHasIsReported catches a lost delete, and somebody writing
-// to the replica by hand.
+// TestARowOnlyTheTargetHasIsReported catches a lost delete.
 func TestARowOnlyTheTargetHasIsReported(t *testing.T) {
 	source := ordersEnd(t, "source", [2]string{"1", "100"})
 	target := ordersEnd(t, "target", [2]string{"1", "100"}, [2]string{"2", "200"})
@@ -336,8 +335,7 @@ func TestAnUnreadableTargetIsReported(t *testing.T) {
 }
 
 // TestACompositeKeyIsCompared is why the key is encoded rather than taken as a
-// column value. A payment ledger's tables are commonly keyed by a pair, and
-// refusing them left exactly the tables that matter most unverifiable.
+// column value.
 func TestACompositeKeyIsCompared(t *testing.T) {
 	source := ledgerEnd(t, "source",
 		[3]string{"acct-1", "1", "100"}, [3]string{"acct-1", "2", "200"},
@@ -526,8 +524,7 @@ func TestValuesAndCellsAgree(t *testing.T) {
 	}
 }
 
-// upsertFor renders the statement the repairer writes with. SQLite spells it
-// this way; the syncer supplies its own for MySQL.
+// upsertFor renders the statement the repairer writes with.
 func upsertFor(schema, table string, columns []string) string {
 	placeholders := make([]string, len(columns))
 	quoted := make([]string, len(columns))
@@ -557,8 +554,7 @@ func amountOf(t *testing.T, end *SQLEnd, id string) (string, bool) {
 	return amount.String, true
 }
 
-// TestRepairCopiesAMissingRow closes the loop: finding out a row is missing and
-// having to put it back by hand is most of the work.
+// TestRepairCopiesAMissingRow closes the loop.
 func TestRepairCopiesAMissingRow(t *testing.T) {
 	source := ordersEnd(t, "source", [2]string{"1", "100"}, [2]string{"2", "200"})
 	target := ordersEnd(t, "target", [2]string{"1", "100"})
@@ -638,8 +634,6 @@ func TestARepairFailureIsReportedWithWhatItGotThrough(t *testing.T) {
 }
 
 // TestEveryDifferenceIsRepairedNotJustTheSampled is the other repair fix.
-// Repairing from the reported sample only ever fixed the first hundred, so a
-// table a thousand rows apart needed ten passes to converge.
 func TestEveryDifferenceIsRepairedNotJustTheSampled(t *testing.T) {
 	const differences = DefaultReportLimit + 50
 	pairs := make([][2]string, 0, differences)
@@ -808,8 +802,7 @@ func TestNestedFieldsAreOrderedToo(t *testing.T) {
 	}
 }
 
-// TestAReorderedArrayIsADifference is the other side of that: an array's order
-// is part of its value, unlike a document's field order.
+// TestAReorderedArrayIsADifference is the other side of that.
 func TestAReorderedArrayIsADifference(t *testing.T) {
 	if canonical(bson.A{1, 2}) == canonical(bson.A{2, 1}) {
 		t.Error("two arrays with the same items in a different order render identically")
@@ -887,9 +880,7 @@ func TestAnUnreadableIdKeyIsReported(t *testing.T) {
 	}
 }
 
-// TestAKeyIsDescribedForAPerson covers what an operator actually sees. The
-// encoded forms exist to round-trip, and an alert naming a row as
-// "0e000000105f696400070000" is most of the way to no alert at all.
+// TestAKeyIsDescribedForAPerson covers what an operator actually sees.
 func TestAKeyIsDescribedForAPerson(t *testing.T) {
 	if got := DescribeKey(keyOf("42")); got != "42" {
 		t.Errorf("DescribeKey of a single key = %q", got)

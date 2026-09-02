@@ -60,8 +60,7 @@ func TestATaskWithinTheThresholdIsNotReported(t *testing.T) {
 }
 
 // TestATaskTooFarBehindIsReported is the number a disaster-recovery setup is
-// judged on: how much would be lost if the source went away right now. Nothing
-// watched it before.
+// judged on: how much would be lost if the source went away right now.
 func TestATaskTooFarBehindIsReported(t *testing.T) {
 	lagFor(t, "lag-behind", defaultLagAlertSeconds+60)
 	n := &recordingNotifier{configured: true}
@@ -167,8 +166,7 @@ func TestStartLagAlertingStopsWithItsContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	StartLagAlerting(ctx, nil, quiet())
 	cancel()
-	// Nothing to assert beyond it not panicking or blocking: the goroutine
-	// returns on the cancelled context.
+	// Nothing to assert beyond it not panicking or blocking.
 }
 
 // deadLettersFor records dead-lettered operations for a task and removes them
@@ -225,9 +223,7 @@ func TestATaskWithNoDeadLettersIsNotReported(t *testing.T) {
 	}
 }
 
-// TestTheSameDeadLetterIsNotReportedRepeatedly records the cooldown. The counter
-// stays raised until the retry succeeds, so without one every tick would send
-// the same alert.
+// TestTheSameDeadLetterIsNotReportedRepeatedly records the cooldown.
 func TestTheSameDeadLetterIsNotReportedRepeatedly(t *testing.T) {
 	deadLettersFor(t, "dl-3", 2)
 	n := &recordingNotifier{configured: true}
@@ -251,8 +247,7 @@ func TestTheSameDeadLetterIsNotReportedRepeatedly(t *testing.T) {
 }
 
 // TestADeadLetterIsLoggedEvenWithNoSlack records that the alert reaches the log
-// whether or not a webhook is configured. A deployment with no Slack must still
-// leave a trace of a replica that is missing rows.
+// whether or not a webhook is configured.
 func TestADeadLetterIsLoggedEvenWithNoSlack(t *testing.T) {
 	deadLettersFor(t, "dl-4", 7)
 

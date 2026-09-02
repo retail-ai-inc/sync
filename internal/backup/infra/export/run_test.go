@@ -14,8 +14,7 @@ import (
 )
 
 // taskDB opens an empty SQLite database carrying the one table the executor
-// reads. The executor is written against MySQL but only ever issues portable
-// SQL here, so SQLite stands in for the control database.
+// reads.
 func taskDB(t *testing.T) *sql.DB {
 	t.Helper()
 
@@ -342,8 +341,7 @@ func TestATimeRangeDropsIrrelevantShards(t *testing.T) {
 		t.Fatalf("ExpandAndGroupTables: %v", err)
 	}
 	// Both shards are from 2020 and the range covers the last forty days, so
-	// neither is selected. It used to fall back to the first table, archiving a
-	// shard from outside the window and calling that a successful backup.
+	// neither is selected.
 	if tables := groups["orders"]; len(tables) != 0 {
 		t.Errorf("orders group = %v, want nothing", tables)
 	}

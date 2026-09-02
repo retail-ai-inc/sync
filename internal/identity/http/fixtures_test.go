@@ -33,8 +33,7 @@ func useTempDB(t *testing.T) *sql.DB {
 	t.Setenv("SYNC_DB_PATH", path)
 
 	// Through the real opener, so the fixture carries the schema the program
-	// creates rather than a copy of it that can drift. That also settles the
-	// schema for this file, so a table a test renames away stays away.
+	// creates rather than a copy of it that can drift.
 	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
 		t.Fatalf("open temp sqlite: %v", err)

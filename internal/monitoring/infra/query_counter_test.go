@@ -85,8 +85,7 @@ func TestFormatFilterCondition(t *testing.T) {
 }
 
 // TestFormatFilterConditionDropsEmptyOperatorMaps records that an empty bson.M
-// yields an empty string, which buildReadableQueryString then skips. The
-// rendered query therefore claims a filter that the real count did not use.
+// yields an empty string, which buildReadableQueryString then skips.
 func TestFormatFilterConditionDropsEmptyOperatorMaps(t *testing.T) {
 	qc := newCounter(t)
 

@@ -43,8 +43,7 @@ func TestGenerateCrontabEntriesOnNoTasks(t *testing.T) {
 }
 
 // A task whose config_json does not parse is logged and skipped, so it simply
-// never appears in the crontab. The backup stops running with no entry, no
-// alert, and nothing in the API to indicate the schedule was dropped.
+// never appears in the crontab.
 func TestAnUnparseableTaskIsSilentlyLeftOutOfTheCrontab(t *testing.T) {
 	tasks := []BackupTask{
 		{ID: 1, ConfigJSON: `{not json`},

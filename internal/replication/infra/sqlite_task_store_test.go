@@ -206,8 +206,7 @@ func TestUpdateTaskReplacesTheConfigurationAndTheEnableColumn(t *testing.T) {
 }
 
 // TestTheTwoStoresDisagreeAboutTheEnableColumn records that the replication
-// update writes the enable column while the backup update does not. The same
-// gesture in the UI therefore has different effects on the two kinds of task.
+// update writes the enable column while the backup update does not.
 func TestTheTwoStoresDisagreeAboutTheEnableColumn(t *testing.T) {
 	db := useTempTaskDB(t)
 	id := insertTask(t, db, 0, `{"status":"Stopped"}`)
@@ -342,8 +341,7 @@ func TestSetEnableReplacesACorruptDocument(t *testing.T) {
 }
 
 // A stored config_json of literal "null" is valid JSON, so the unmarshal
-// succeeded and left the map nil. The guard only tested the error, so the next
-// assignment panicked with "assignment to entry in nil map".
+// succeeded and left the map nil.
 func TestANullDocumentDoesNotPanic(t *testing.T) {
 	db := useTempTaskDB(t)
 	id := insertTask(t, db, 0, `null`)
@@ -365,9 +363,6 @@ func TestSetEnableOnAnUnknownID(t *testing.T) {
 }
 
 // TestSetEnableTagsWhatWentWrong covers the one message an operator gets back.
-// This call returned the driver's error untagged while every other call in the
-// package carries the stage, so "the table is missing", "the row is missing" and
-// "the database is locked" all came out as "start fail".
 func TestSetEnableTagsWhatWentWrong(t *testing.T) {
 	emptyTaskDB(t)
 
@@ -514,9 +509,8 @@ func TestANegativeDeltaIsClampedToZero(t *testing.T) {
 	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
 	day := now.Format("2006-01-02")
 
-	// A later measurement with fewer rows cannot happen: the delta is
-	// MAX - MIN, so it is never negative from this query. Feed the clamp
-	// directly to record what it does with one.
+	// A later measurement with fewer rows cannot happen: the delta is MAX - MIN,
+	// so it is never negative from this query.
 	insertMonitoringRow(t, db, 1, day+" 01:00:00", "orders", 100, 100)
 
 	stats, err := TodayTableStats("1", now)
@@ -556,9 +550,7 @@ func TestTodayTableStatsReportsAMissingTable(t *testing.T) {
 }
 
 // TestARowThatWillNotScanIsReported covers a monitoring row whose counts are
-// text. It used to be logged and dropped, so the table simply did not appear in
-// the answer — and a table with no traffic and a table whose rows cannot be read
-// look the same from outside.
+// text.
 func TestARowThatWillNotScanIsReported(t *testing.T) {
 	db := useTempTaskDB(t)
 	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
@@ -608,8 +600,7 @@ func TestEveryStoreCallReportsAnUnopenableDatabase(t *testing.T) {
 }
 
 // TestEveryCallNamesTheSameFailureTheSameWay covers two messages for one
-// condition. The update path answered "db fail" where every other call answered
-// "open db fail", and SetEnable answered with nothing at all.
+// condition.
 func TestEveryCallNamesTheSameFailureTheSameWay(t *testing.T) {
 	unopenableDB(t)
 
@@ -666,9 +657,7 @@ func taskWithCredentials() domain.Config {
 	})
 }
 
-// Masking them on the way out of the API does nothing about the file: anybody
-// who can read it — a backup, a volume snapshot, one `cat` inside the pod —
-// has the credentials for both regions' payment databases.
+// Masking them on the way out of the API does nothing about the file.
 func TestTheStoredPasswordsAreNotReadable(t *testing.T) {
 	db := useTempTaskDB(t)
 	withSealedCredentials(t)
@@ -692,8 +681,7 @@ func TestTheStoredPasswordsAreNotReadable(t *testing.T) {
 	}
 }
 
-// TestTheCredentialsComeBackOnTheWayOut closes the loop: what the syncer reads
-// has to be what was written.
+// TestTheCredentialsComeBackOnTheWayOut closes the loop.
 func TestTheCredentialsComeBackOnTheWayOut(t *testing.T) {
 	useTempTaskDB(t)
 	withSealedCredentials(t)
@@ -766,9 +754,7 @@ func TestWithNoKeyTheStoreBehavesAsItAlwaysDid(t *testing.T) {
 	}
 }
 
-// withKey points the credential keeper at a fixed test key for one test. The
-// package-level keeper is built from the environment at init, so a test that
-// wants encryption has to install one rather than set the variable.
+// withKey points the credential keeper at a fixed test key for one test.
 func withKey(t *testing.T) {
 	t.Helper()
 
@@ -813,8 +799,7 @@ func TestAStoredPasswordIsNotReadableInTheFile(t *testing.T) {
 	if contains(stored, "s3cret") {
 		t.Errorf("the password is in the file in the clear: %s", stored)
 	}
-	// The host is deliberately left readable: it is not a secret, and an
-	// operator reading the file needs to be able to tell the tasks apart.
+	// The host is deliberately left readable: it is not a secret.
 	if !contains(stored, "tokyo") {
 		t.Errorf("the stored document lost the host: %s", stored)
 	}

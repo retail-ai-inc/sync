@@ -284,9 +284,7 @@ func TestChangePasswordReportsALookupFailure(t *testing.T) {
 	}
 }
 
-// TestUpdatingAnUnknownUsersPasswordSaysSo covers a mistyped username. The write
-// did not check that it had changed a row, so the only thing between a caller
-// and a silent no-op was the old-password check above it.
+// TestUpdatingAnUnknownUsersPasswordSaysSo covers a mistyped username.
 func TestUpdatingAnUnknownUsersPasswordSaysSo(t *testing.T) {
 	useTempDB(t)
 

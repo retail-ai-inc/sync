@@ -58,8 +58,7 @@ func TestADroppedIndexTravels(t *testing.T) {
 	}
 }
 
-// TestACollModTravels covers the other additive change: a validator or a TTL
-// changed at the source has to reach the target or the two behave differently.
+// TestACollModTravels covers the other additive change.
 func TestACollModTravels(t *testing.T) {
 	raw := schemaEvent(t, "modify", bson.D{
 		{Key: "expireAfterSeconds", Value: 3600},
@@ -202,8 +201,7 @@ func TestAPositionThatIsNeitherIsRefused(t *testing.T) {
 	}
 }
 
-// Asked to decode a document into an interface, the driver's v1 gave a bson.M
-// here and its v2 gives a bson.D.
+// Asked to decode a document into an interface.
 func TestAnIndexKeyIsReadWhateverShapeItArrivesIn(t *testing.T) {
 	shapes := map[string]interface{}{
 		"bson.D": bson.D{{Key: "customer", Value: int32(1)}},

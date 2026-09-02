@@ -14,9 +14,7 @@ import (
 	"github.com/retail-ai-inc/sync/test/harness"
 )
 
-// The pipeline can split a batch into runs that may be applied independently,
-// and it decides independence by the primary key: two changes to one row keep
-// their order, everything else may move.
+// The pipeline can split a batch into runs that may be applied independently.
 func TestAUniqueValueHandedFromOneRowToAnother(t *testing.T) {
 	src, tgt := open(t, harness.MySQLSource, sourceDB), open(t, harness.MySQLTarget, targetDB)
 

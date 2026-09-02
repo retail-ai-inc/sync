@@ -252,8 +252,7 @@ func TestAnInsertInsideATransactionIsApplied(t *testing.T) {
 	}
 }
 
-// A stream that starts mid-transaction — the server resuming from a slot after
-// a restart — loses the changes that arrive before the next BEGIN.
+// A stream that starts mid-transaction.
 func TestAnInsertOutsideATransactionIsDropped(t *testing.T) {
 	db := targetDB(t, ordersSchema)
 	st := stateWith(db)

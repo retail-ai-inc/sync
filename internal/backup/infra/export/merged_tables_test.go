@@ -9,8 +9,7 @@ import (
 	"time"
 )
 
-// yesterdayStamp is the date the exporters put in a file name: a backup taken
-// after midnight covers the day that just ended.
+// yesterdayStamp is the date the exporters put in a file name.
 func yesterdayStamp() string {
 	return time.Now().AddDate(0, 0, -1).Format("2006-01-02")
 }
@@ -28,8 +27,7 @@ func mongoMergedConfig(gcsPath string) ExecutorBackupConfig {
 // naming scheme is every job, on the first of the month.
 func TestTheMergedMongoExportJoinsEveryCollection(t *testing.T) {
 	binDir := stubPATH(t)
-	// mongoexport writes JSONL to the file named by --out. The stub finds that
-	// argument and writes one document naming the collection it was asked for.
+	// mongoexport writes JSONL to the file named by --out.
 	stubBin(t, binDir, "mongoexport", `
 out=""; coll=""
 while [ $# -gt 0 ]; do

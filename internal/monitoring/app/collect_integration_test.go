@@ -142,8 +142,7 @@ func TestCountAndLogMySQLRecordsBothSides(t *testing.T) {
 		_, _ = tgt.Exec("DROP TABLE " + table)
 	})
 
-	// Three rows at the source, two at the target: a divergence the monitor
-	// is supposed to make visible.
+	// Three rows at the source, two at the target.
 	if _, err := src.Exec(fmt.Sprintf("INSERT INTO %s (id) VALUES (1),(2),(3)", table)); err != nil {
 		t.Fatalf("seed source: %v", err)
 	}
@@ -423,8 +422,7 @@ func TestCountAndLogTablesIgnoresUnknownTypes(t *testing.T) {
 }
 
 // T-094: countAndLogTables lower-cases the type before dispatching, unlike
-// startSyncTasks in cmd/sync, which matches case-sensitively. The same
-// configuration value therefore reaches the monitor but not the syncer.
+// startSyncTasks in cmd/sync, which matches case-sensitively.
 func TestTheMonitorAcceptsCasingTheSyncerRejects(t *testing.T) {
 	conn := useMonitoringDB(t)
 
@@ -721,10 +719,7 @@ func TestAnUnreachablePostgreSQLSourceIsReported(t *testing.T) {
 }
 
 // TestTheServerSideChangeStreamProbeRuns covers the branch that asks MongoDB
-// itself what change streams are open. It only runs once the task's own metrics
-// say it has streams, so the counters are seeded first — which is also what the
-// statistics table is now built from, after a year of it holding nothing but
-// zeroes.
+// itself what change streams are open.
 func TestTheServerSideChangeStreamProbeRuns(t *testing.T) {
 	conn := useMonitoringDB(t)
 
@@ -839,8 +834,7 @@ func TestLogYesterdayMongoDBVolumeCountsTheDayThatEnded(t *testing.T) {
 				SourceTable: collection,
 				TargetTable: collection,
 				CountQuery: map[string]interface{}{
-					// The table is part of the condition: a count query can carry
-					// conditions for several collections and each names its own.
+					// The table is part of the condition.
 					"conditions": []map[string]interface{}{
 						{"field": "created_at", "operator": "dateRange",
 							"table": collection, "value": "daily"},

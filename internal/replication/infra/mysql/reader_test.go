@@ -404,8 +404,7 @@ func TestAPositionInsideATransactionIsNotHandedOver(t *testing.T) {
 	}
 }
 
-// TestTheCapturedTableCountIsPublished is Debezium's CapturedTables. It catches
-// the change nothing else reports: a mapping edit that quietly drops a table.
+// TestTheCapturedTableCountIsPublished is Debezium's CapturedTables.
 func TestTheCapturedTableCountIsPublished(t *testing.T) {
 	r := readerFor([]config.DatabaseMapping{
 		{Tables: []config.TableMapping{
@@ -422,8 +421,7 @@ func TestTheCapturedTableCountIsPublished(t *testing.T) {
 	}
 }
 
-// The offset moves with every transaction and is published as a number; the
-// file name moves every few hours and is published as a label.
+// The offset moves with every transaction and is published as a number.
 func TestTheSourceInfoIsPublishedOnlyWhenTheLogFileChanges(t *testing.T) {
 	r := &Reader{
 		source: "10.0.0.1:3306/bench", flavor: "mysql",

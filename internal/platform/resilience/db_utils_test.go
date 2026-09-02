@@ -67,8 +67,7 @@ func TestAFailureWaitingCannotFixIsNotRetried(t *testing.T) {
 
 // These are what the drivers say while a replica set elects a new primary or a
 // managed instance restarts for maintenance — the moments this tool exists to
-// survive. None of them matched the old substring list, so each was given up on
-// at the first attempt.
+// survive.
 func TestTheFailuresOfAFailoverAreRetried(t *testing.T) {
 	transient := []error{
 		errors.New("server selection error: context deadline exceeded"),
@@ -90,9 +89,7 @@ func TestTheFailuresOfAFailoverAreRetried(t *testing.T) {
 	}
 }
 
-// A cancelled context is this process deciding to stop. Retrying through it is
-// how a task asked to shut down kept trying to reach a database it was told to
-// let go of.
+// A cancelled context is this process deciding to stop.
 func TestACancelledContextIsNotAConnectionFailure(t *testing.T) {
 	if IsConnectionError(context.Canceled) {
 		t.Error("IsConnectionError(context.Canceled) = true, want false")

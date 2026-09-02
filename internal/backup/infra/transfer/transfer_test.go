@@ -14,8 +14,7 @@ func stubBin(t *testing.T, dir, name, body string, exitCode int) {
 	t.Helper()
 
 	// The outer PATH is restricted to the stub directory so exec.CommandContext
-	// cannot reach a real mysqldump, zip or gsutil. The stub therefore needs its
-	// own PATH to find coreutils.
+	// cannot reach a real mysqldump, zip or gsutil.
 	script := fmt.Sprintf(`#!/bin/sh
 PATH=/usr/bin:/bin:/usr/local/bin
 printf '%%s\n' "$@" >> %q
@@ -115,8 +114,7 @@ func TestExecuteExternalZipRejectsAMissingArchive(t *testing.T) {
 	}
 }
 
-// archive writes a local file for an upload to carry, and returns its path and
-// size.
+// archive writes a local file for an upload to carry.
 func archive(t *testing.T, name string) (string, int) {
 	t.Helper()
 

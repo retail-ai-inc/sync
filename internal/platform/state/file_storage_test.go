@@ -51,8 +51,7 @@ func TestFileStateStoreLoadMissingKey(t *testing.T) {
 }
 
 // TestSaveCreatesItsDirectory covers a store pointed at a path that does not
-// exist yet. Save used to fail every write, and because the syncers log and
-// carry on the symptom appeared much later, as a checkpoint that never advanced.
+// exist yet.
 func TestSaveCreatesItsDirectory(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "not-created-yet")
 	store := NewFileStateStore(dir)

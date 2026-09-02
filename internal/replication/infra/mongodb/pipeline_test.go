@@ -11,8 +11,7 @@ import (
 )
 
 // deadClient returns a client that resolves handles without dialling and fails
-// every operation quickly. The driver connects lazily, so this needs no server;
-// the short timeouts keep the failure paths fast.
+// every operation quickly.
 func deadClient(t *testing.T) *mongo.Client {
 	t.Helper()
 
@@ -33,9 +32,7 @@ func deadClient(t *testing.T) *mongo.Client {
 func briefCtx(t *testing.T) context.Context {
 	t.Helper()
 
-	// Long enough to read a buffer file on a loaded machine — the parser stops
-	// when its context is done — and short enough to cut the retry backoff at
-	// the first sleep.
+	// Long enough to read a buffer file on a loaded machine.
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	t.Cleanup(cancel)
 	return ctx

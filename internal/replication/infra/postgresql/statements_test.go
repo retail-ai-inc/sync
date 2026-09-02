@@ -114,8 +114,7 @@ func TestAnUnchangedToastedValueIsLeftAlone(t *testing.T) {
 }
 
 // TestABinaryColumnIsReportedNotDropped covers the other format the plugin can
-// send. A binary value used to be written as NULL, which loses the column
-// without saying anything.
+// send.
 func TestABinaryColumnIsReportedNotDropped(t *testing.T) {
 	db := targetDB(t, ordersSchema)
 	st := stateWith(db, relation(1, "main", "orders", "id", "customer", "email"))
@@ -342,9 +341,8 @@ func TestHandleUpdateSkipsAnEmptyNewTuple(t *testing.T) {
 	}
 }
 
-// TestAnUpdateThatCannotBeBuiltWritesNothing is the guard against an unqualified
-// UPDATE, which would rewrite every row of the table. A relation with no columns
-// cannot describe the row, so the statement is refused rather than issued.
+// TestAnUpdateThatCannotBeBuiltWritesNothing is the guard against an
+// unqualified UPDATE, which would rewrite every row of the table.
 func TestAnUpdateThatCannotBeBuiltWritesNothing(t *testing.T) {
 	db := targetDB(t, ordersSchema)
 	if _, err := db.Exec(`INSERT INTO orders VALUES ('1','Ada','x')`); err != nil {

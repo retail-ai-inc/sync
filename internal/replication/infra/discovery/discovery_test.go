@@ -10,9 +10,7 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-// informationSchema stands in for MySQL's. The query is the same; SQLite has no
-// information_schema of its own, so the table is created with the two columns
-// the query reads.
+// informationSchema stands in for MySQL's.
 func informationSchema(t *testing.T, rows ...[3]string) *sql.DB {
 	t.Helper()
 

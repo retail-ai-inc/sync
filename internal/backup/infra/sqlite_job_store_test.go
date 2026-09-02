@@ -342,9 +342,6 @@ func TestSetEnableReplacesACorruptDocument(t *testing.T) {
 }
 
 // TestANullDocumentDoesNotPanic covers a stored config_json of literal "null".
-// A stored config_json of literal "null" is valid JSON, so the unmarshal
-// succeeded and left the map nil. The guard only tested the error, so the next
-// assignment panicked with "assignment to entry in nil map".
 func TestANullDocumentDoesNotPanic(t *testing.T) {
 	db := useTempJobDB(t)
 	id := insertJob(t, db, 1, `null`)
@@ -366,9 +363,6 @@ func TestSetEnableOnAnUnknownID(t *testing.T) {
 }
 
 // TestSetEnableTagsWhatWentWrong covers the one message an operator gets back.
-// This call did not tag its failures with a stage, unlike every other write in
-// the store, so the endpoint answered "pause fail" for a missing table, a
-// missing row and a locked database alike.
 func TestSetEnableTagsWhatWentWrong(t *testing.T) {
 	emptyJobDB(t)
 
@@ -450,8 +444,7 @@ func TestStampLastBackup(t *testing.T) {
 }
 
 // TestStampLastBackupOnAnUnknownIDIsNotASuccess covers stamping a job that is
-// not there. The UPDATE matched no row and the count was never read, so the run
-// endpoint answered "started successfully" for a job it had not touched.
+// not there.
 func TestStampLastBackupOnAnUnknownIDIsNotASuccess(t *testing.T) {
 	useTempJobDB(t)
 

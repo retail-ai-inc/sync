@@ -8,8 +8,7 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-// The fallback used to be derived from runtime.Caller — the path of the source
-// file on the machine that compiled the binary.
+// The fallback used to be derived from runtime.Caller.
 func TestAnUnsetPathDoesNotReachOutsideTheWorkingDirectory(t *testing.T) {
 	if filepath.IsAbs(DefaultPath) {
 		t.Errorf("DefaultPath = %q, want a path relative to the working directory", DefaultPath)
