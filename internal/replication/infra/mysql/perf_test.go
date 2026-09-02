@@ -123,9 +123,10 @@ func perfSyncer(t *testing.T, table string) config.SyncConfig {
 
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
-	syncer := NewMySQLSyncer(cfg, logger)
+	// The pipeline's syncer, so a measurement describes the code that runs.
+	syncer := NewSyncer(cfg, logger)
 	if syncer == nil {
-		t.Fatal("NewMySQLSyncer returned nil")
+		t.Fatal("NewSyncer returned nil")
 	}
 	t.Cleanup(harness.RunSyncer(t, syncer.Start))
 	return cfg

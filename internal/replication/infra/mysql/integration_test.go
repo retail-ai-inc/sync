@@ -97,9 +97,14 @@ func startSyncer(t *testing.T, cfg config.SyncConfig) (stop func()) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 
-	syncer := NewMySQLSyncer(cfg, logger)
+	// NewSyncer, not NewMySQLSyncer: the first is what cmd/sync starts, the
+	// second is the path the shared pipeline replaced. Every test in this file
+	// went through the second one, which is how three separate startup checks
+	// came to be reachable from nowhere the supervisor goes while their tests
+	// went on passing.
+	syncer := NewSyncer(cfg, logger)
 	if syncer == nil {
-		t.Fatal("NewMySQLSyncer returned nil")
+		t.Fatal("NewSyncer returned nil")
 	}
 	stop = harness.RunSyncer(t, syncer.Start)
 	t.Cleanup(stop)
