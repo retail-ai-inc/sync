@@ -711,7 +711,7 @@ func TestAChunkMigrationIsNotReplicated(t *testing.T) {
 
 	// The copy is done and the stream is following. Everything from here on is
 	// the migration's doing.
-	appliedBefore := counter(t, metrics.BatchEvents, labels)
+	appliedBefore := counter(t, metrics.BatchEventsSum, labels)
 
 	client := stgConnect(t, stgSourceDB)
 	moved, err := moveOneChunk(ctx, client, stgSourceDB+"."+name)
@@ -723,7 +723,7 @@ func TestAChunkMigrationIsNotReplicated(t *testing.T) {
 	// Long enough for the events to have arrived if they were going to.
 	time.Sleep(20 * time.Second)
 
-	if applied := counter(t, metrics.BatchEvents, labels); applied != appliedBefore {
+	if applied := counter(t, metrics.BatchEventsSum, labels); applied != appliedBefore {
 		t.Errorf("the applier was given %v changes by a chunk migration, want none. "+
 			"Every document in the chunk is being deleted and re-inserted on the "+
 			"target for no reason, and is absent from it in between",
@@ -745,7 +745,7 @@ func TestAChunkMigrationIsNotReplicated(t *testing.T) {
 		}
 		return nil
 	})
-	if applied := counter(t, metrics.BatchEvents, labels); applied != appliedBefore+1 {
+	if applied := counter(t, metrics.BatchEventsSum, labels); applied != appliedBefore+1 {
 		t.Errorf("the applier was given %v changes for one document written after the "+
 			"migration", applied-appliedBefore)
 	}
