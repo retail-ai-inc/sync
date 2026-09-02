@@ -81,6 +81,7 @@ func (e *BackupExecutor) executeExternalMongoExportWithOptions(ctx context.Conte
 		"--quiet",
 	}
 
+	queryDescription := "none, so the whole collection"
 	if queryConditions, exists := config.Query[collection]; exists && len(queryConditions) > 0 {
 		cleanedQuery := cleanQueryStringValues(queryConditions)
 
@@ -97,6 +98,7 @@ func (e *BackupExecutor) executeExternalMongoExportWithOptions(ctx context.Conte
 			return fmt.Errorf("render the filter for %s: %w", collection, err)
 		}
 		args = append(args, "--query", string(queryJSON))
+		queryDescription = string(queryJSON)
 		logrus.Infof("[BackupExecutor] Applied query for collection %s: %s", collection, string(queryJSON))
 	} else {
 		// If no query conditions, export all data
@@ -132,6 +134,7 @@ func (e *BackupExecutor) executeExternalMongoExportWithOptions(ctx context.Conte
 		}
 	} else {
 		logrus.Infof("[BackupExecutor] ✅ Mongoexport completed: %d records, %.2f MB", recordCount, fileSize)
+		reportIfEmpty("MongoDB", collection, int64(recordCount), queryDescription)
 	}
 
 	return nil
@@ -234,6 +237,7 @@ func (e *BackupExecutor) exportMongoDBMergedTables(ctx context.Context, connStr,
 
 		if recordCount, fileSize, countErr := e.countRecordsInFile(mergedJsonPath); countErr == nil {
 			logrus.Infof("[BackupExecutor] 🔍 Merged file contains %d records, %.2f MB", recordCount, fileSize)
+			reportIfEmpty("MongoDB", baseCollectionName, int64(recordCount), "the merged tables' own filters")
 		} else {
 			logrus.Warnf("[BackupExecutor] ⚠️  Failed to count records: %v", countErr)
 		}

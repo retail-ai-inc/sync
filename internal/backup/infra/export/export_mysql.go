@@ -311,10 +311,17 @@ except Exception as e:
 		return fmt.Errorf("python csv conversion failed: %w", err)
 	}
 
-	if stat, err := os.Stat(outputPath); err == nil {
-		logrus.Infof("[BackupExecutor] ✅ MySQL CSV export completed: %.2f MB", float64(stat.Size())/1024/1024)
-	} else {
+	stat, err := os.Stat(outputPath)
+	if err != nil {
 		return fmt.Errorf("mysql CSV output file not created: %w", err)
+	}
+	logrus.Infof("[BackupExecutor] ✅ MySQL CSV export completed: %.2f MB",
+		float64(stat.Size())/1024/1024)
+
+	if rows, err := countCSVDataRows(outputPath); err != nil {
+		logrus.Warnf("[BackupExecutor] Could not count the rows of %s: %v", outputPath, err)
+	} else {
+		reportIfEmpty("MySQL", table, rows, selectQuery)
 	}
 
 	return nil
