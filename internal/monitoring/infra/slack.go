@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"time"
 
-	// "github.com/sirupsen/logrus"
 	"context"
 
 	"github.com/retail-ai-inc/sync/internal/platform/config"
@@ -20,7 +19,6 @@ func SendTableComparisonSlackNotification(ctx context.Context, sc config.SyncCon
 		return
 	}
 
-	// Get global config to access Slack settings
 	cfg, err := config.NewConfig()
 	if err != nil {
 		log.Warnf("[Monitor] Could not read the Slack settings, so no notification "+
@@ -40,7 +38,6 @@ func SendTableComparisonSlackNotification(ctx context.Context, sc config.SyncCon
 		return
 	}
 
-	// Calculate difference and determine status
 	difference := srcCount - tgtCount
 	status := "✅"
 	alertType := slack.SlackAlertGood
@@ -50,12 +47,10 @@ func SendTableComparisonSlackNotification(ctx context.Context, sc config.SyncCon
 		alertType = slack.SlackAlertWarning
 	}
 
-	// Format message
 	yesterday := yesterdayStart.Format("2006-01-02")
 	message := fmt.Sprintf("%s Daily Data Comparison\n\nTask ID: %d\nDate: %s (JST)\nType: MONGODB\n\n%s %s.%s → %s.%s\nSource: %d\nTarget: %d\nDifference: %d",
 		status, sc.ID, yesterday, status, srcDB, srcTable, tgtDB, tgtTable, srcCount, tgtCount, difference)
 
-	// Send notification asynchronously
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()

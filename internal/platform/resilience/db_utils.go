@@ -108,7 +108,6 @@ func ReopenSQLConnection(ctx context.Context, logger logrus.FieldLogger, connURI
 			return permanentUnless(connErr)
 		}
 
-		// Set connection parameters
 		db.SetMaxOpenConns(25)
 		db.SetMaxIdleConns(5)
 		db.SetConnMaxLifetime(5 * time.Minute)

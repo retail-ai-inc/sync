@@ -100,7 +100,6 @@ func (e *BackupExecutor) maskSensitiveArgs(args []string) string {
 						hostPart := remaining[atIndex:]
 						credPart := remaining[:atIndex]
 
-						// Check if there are credentials
 						if strings.Contains(credPart, ":") {
 							maskedArgs[i+1] = protocolPart + "***:***" + hostPart
 						}

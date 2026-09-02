@@ -82,7 +82,6 @@ func NewMongoDBSyncer(cfg config.SyncConfig, globalConfig *config.Config, logger
 		}
 	}
 
-	// Create buffer directory for persistent storage
 	bufferDir := cfg.MongoDBResumeTokenPath
 	if bufferDir == "" {
 		bufferDir = "./mongodb_buffer"
@@ -94,7 +93,6 @@ func NewMongoDBSyncer(cfg config.SyncConfig, globalConfig *config.Config, logger
 		logger.Warnf("[MongoDB] Failed to create buffer directory %s: %v", bufferDir, err)
 	}
 
-	// Create dead letter directory for failed data
 	deadLetterDir := cfg.MongoDBResumeTokenPath
 	if deadLetterDir == "" {
 		deadLetterDir = "./mongodb_dead_letter"
@@ -107,22 +105,19 @@ func NewMongoDBSyncer(cfg config.SyncConfig, globalConfig *config.Config, logger
 	}
 
 	return &MongoDBSyncer{
-		sourceClient:     sourceClient,
-		targetClient:     targetClient,
-		connectErr:       connectErr,
-		cfg:              cfg,
-		logger:           logger.WithField("sync_task_id", cfg.ID),
-		resumeTokens:     resumeMap,
-		bufferDir:        bufferDir,
-		bufferEnabled:    true, // Enable persistent buffer by default
-		activeProcessors: make(map[string]context.CancelFunc),
-		// Initialize async pipeline components
-		channelCapacity: 200, // A smaller, safer default to prevent OOM.
-		// Initialize smart batch controller configuration
-		targetBatchSizeBytes: 256 * 1024 * 1024, // 256MB - Increased batch size for higher throughput
-		maxFilesPerBatch:     1000,
-		minFilesPerBatch:     5,
-		// Initialize dead letter queue configuration
+		sourceClient:          sourceClient,
+		targetClient:          targetClient,
+		connectErr:            connectErr,
+		cfg:                   cfg,
+		logger:                logger.WithField("sync_task_id", cfg.ID),
+		resumeTokens:          resumeMap,
+		bufferDir:             bufferDir,
+		bufferEnabled:         true, // Enable persistent buffer by default
+		activeProcessors:      make(map[string]context.CancelFunc),
+		channelCapacity:       200,               // A smaller, safer default to prevent OOM.
+		targetBatchSizeBytes:  256 * 1024 * 1024, // 256MB - Increased batch size for higher throughput
+		maxFilesPerBatch:      1000,
+		minFilesPerBatch:      5,
 		deadLetterDir:         deadLetterDir,
 		maxRetryAttempts:      3,
 		retryInterval:         time.Second * 5,

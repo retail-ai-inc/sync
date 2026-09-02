@@ -75,7 +75,6 @@ func decodeFieldKey(raw string) ([]byte, error) {
 // rather than quietly producing readable data.
 func KeyConfigured() bool { return len(fieldKey()) == 32 }
 
-// Define field security configuration
 type FieldSecurityConfig struct {
 	Field        string `json:"field"`
 	SecurityType string `json:"securityType"` // masked or encrypted
@@ -114,7 +113,6 @@ func encryptAES(plaintext []byte) (string, error) {
 	// Encrypt
 	ciphertext := gcm.Seal(nonce, nonce, plaintext, nil)
 
-	// Return encrypted data encoded in base64
 	return base64.StdEncoding.EncodeToString(ciphertext), nil
 }
 

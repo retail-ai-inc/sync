@@ -24,12 +24,10 @@ func (e *BackupExecutor) ExpandAndGroupTables(ctx context.Context, config *Execu
 		return nil, fmt.Errorf("the job selects tables by pattern but has no pattern")
 	}
 
-	// Check if regex mode is enabled
 	if config.TableSelectionMode == "regex" {
 		var actualTables []string
 		var err error
 
-		// Get actual tables based on database type
 		switch config.SourceType {
 		case "mongodb":
 			actualTables, err = e.getMongoDBCollections(ctx, config, config.RegexPattern)
@@ -48,7 +46,6 @@ func (e *BackupExecutor) ExpandAndGroupTables(ctx context.Context, config *Execu
 		// Group tables by common prefix
 		tempGroups := e.groupTablesByPrefix(actualTables)
 
-		// Apply time range filtering to each group
 		for groupName, tables := range tempGroups {
 			filteredTables := e.filterRelevantTables(tables, config.Query, groupName)
 			if len(filteredTables) > 0 {
@@ -67,7 +64,6 @@ func (e *BackupExecutor) ExpandAndGroupTables(ctx context.Context, config *Execu
 		if len(tempGroups) == 1 {
 			for groupName, tables := range tempGroups {
 				if len(tables) > 1 {
-					// Apply time range filtering for merged tables
 					filteredTables := e.filterRelevantTables(tables, config.Query, groupName)
 					if len(filteredTables) > 0 {
 						tableGroups[groupName] = filteredTables
@@ -82,7 +78,6 @@ func (e *BackupExecutor) ExpandAndGroupTables(ctx context.Context, config *Execu
 		} else {
 			// Multiple groups or no grouping possible, treat each table individually
 			for _, table := range config.Database.Tables {
-				// Apply time range filtering for individual tables
 				filteredTables := e.filterRelevantTables([]string{table}, config.Query, table)
 				if len(filteredTables) > 0 {
 					tableGroups[table] = filteredTables
@@ -97,7 +92,6 @@ func (e *BackupExecutor) ExpandAndGroupTables(ctx context.Context, config *Execu
 
 func (e *BackupExecutor) getMongoDBCollections(ctx context.Context, config *ExecutorBackupConfig, pattern string) ([]string, error) {
 
-	// Build connection string
 	connStr := buildMongoDBConnectionString(config.Database.URL, config.Database.Username, config.Database.Password)
 
 	// Connect to MongoDB
@@ -107,7 +101,6 @@ func (e *BackupExecutor) getMongoDBCollections(ctx context.Context, config *Exec
 	}
 	defer client.Disconnect(ctx)
 
-	// Get database
 	database := client.Database(config.Database.Database)
 
 	// List collections matching the pattern
@@ -138,7 +131,6 @@ func (e *BackupExecutor) groupTablesByPrefix(tables []string) map[string][]strin
 	groups := make(map[string][]string)
 
 	for _, table := range tables {
-		// Extract prefix by removing date/month suffixes
 		prefix := e.extractTablePrefix(table)
 		groups[prefix] = append(groups[prefix], table)
 	}
@@ -253,7 +245,6 @@ func (e *BackupExecutor) extractTimeRange(query map[string]interface{}) *TimeRan
 }
 
 func (e *BackupExecutor) isTableRelevantForTimeRange(tableName string, timeRange *TimeRange) bool {
-	// Extract table time pattern
 	tableTime := e.extractTableTimePattern(tableName)
 	if tableTime == nil {
 		// If we can't determine table time, include it to be safe

@@ -13,7 +13,6 @@ import (
 	"github.com/retail-ai-inc/sync/internal/platform/httpx"
 	"github.com/retail-ai-inc/sync/internal/platform/metrics"
 	"github.com/retail-ai-inc/sync/internal/platform/sqlite"
-	// "github.com/sirupsen/logrus"
 )
 
 // convertToJST converts a time string from UTC to JST (UTC+9)
@@ -26,11 +25,9 @@ func convertToJST(timeStr string) string {
 		return timeStr
 	}
 
-	// Convert to JST (UTC+9)
 	jst := time.FixedZone("JST", 9*60*60)
 	jstTime := parsedTime.In(jst)
 
-	// Format the time in the desired format
 	return jstTime.Format("2006-01-02T15:04+09:00")
 }
 
@@ -412,7 +409,6 @@ ORDER BY task_id, collection_name
 			continue
 		}
 
-		// Skip Task ID=0 to filter out legacy data
 		if taskID == 0 {
 			continue
 		}
@@ -444,7 +440,6 @@ ORDER BY task_id, collection_name
 
 		allChangeStreams = append(allChangeStreams, csDetail)
 
-		// Update last updated time (take the latest)
 		if lastUpdated == "" || lastUpdatedTime > lastUpdated {
 			lastUpdated = lastUpdatedTime
 		}
@@ -463,7 +458,6 @@ ORDER BY task_id, collection_name
 		// processingRate = fmt.Sprintf("~%d/min", totalExecuted)
 	}
 
-	// Prepare response
 	response := map[string]interface{}{
 		"success": true,
 		"data": map[string]interface{}{

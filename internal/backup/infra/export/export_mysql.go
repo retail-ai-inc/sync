@@ -21,10 +21,8 @@ func (e *BackupExecutor) executeExternalMySQLBackupSimple(ctx context.Context, c
 
 	e.logMemoryUsage("MYSQL_BACKUP_START")
 
-	// Parse connection URL
 	host, port, username, password := buildMySQLConnectionString(connectionURL, config.Database.Username, config.Database.Password)
 
-	// Clean table name and generate file paths
 	baseTableName := e.extractTablePrefix(table)
 	logrus.Infof("[BackupExecutor] 🔍 Original table name: %s, extracted base name: %s", table, baseTableName)
 
@@ -47,7 +45,6 @@ func (e *BackupExecutor) executeExternalMySQLBackupSimple(ctx context.Context, c
 		}
 	}()
 
-	// Determine format: SQL or CSV
 	format := config.Format
 	if format == "" {
 		format = "sql" // Default to SQL format
@@ -149,7 +146,6 @@ func (e *BackupExecutor) executeExternalMySQLDump(ctx context.Context, host, por
 		"-u", username,
 	)
 
-	// Add mysqldump options
 	args = append(args,
 		"--single-transaction",
 		"--skip-lock-tables",
@@ -158,7 +154,6 @@ func (e *BackupExecutor) executeExternalMySQLDump(ctx context.Context, host, por
 		table,
 	)
 
-	// Add WHERE clause if query conditions exist
 	if queryConditions, exists := config.Query[table]; exists && len(queryConditions) > 0 {
 		whereClause, err := e.convertTimeRangeQueryForMySQL(queryConditions)
 		if err != nil {
@@ -174,7 +169,6 @@ func (e *BackupExecutor) executeExternalMySQLDump(ctx context.Context, host, por
 
 	cmd := exec.CommandContext(ctx, "mysqldump", args...)
 
-	// Create output file
 	outFile, err := os.Create(outputPath)
 	if err != nil {
 		return fmt.Errorf("failed to create output file: %w", err)
@@ -191,7 +185,6 @@ func (e *BackupExecutor) executeExternalMySQLDump(ctx context.Context, host, por
 		return fmt.Errorf("mysqldump failed: %w", err)
 	}
 
-	// Check output file and log size
 	if stat, err := os.Stat(outputPath); err == nil {
 		logrus.Infof("[BackupExecutor] ✅ Mysqldump completed: %.2f MB", float64(stat.Size())/1024/1024)
 	} else {
@@ -205,7 +198,6 @@ func (e *BackupExecutor) executeExternalMySQLDump(ctx context.Context, host, por
 // This method properly handles all special characters (quotes, newlines, tabs, commas, etc.)
 // Works with remote MySQL servers without requiring FILE privilege or secure_file_priv configuration
 func (e *BackupExecutor) executeExternalMySQLCSV(ctx context.Context, host, port, username, password, database, table, outputPath string, config ExecutorBackupConfig) error {
-	// Build SELECT query
 	selectQuery, buildErr := e.buildMySQLSelectQuery(table, config)
 	if buildErr != nil {
 		return buildErr
@@ -278,13 +270,10 @@ except Exception as e:
     sys.exit(1)
 `
 
-	// Create mysql command
 	mysqlCmd := exec.CommandContext(ctx, "mysql", mysqlArgs...)
 
-	// Create python command
 	pythonCmd := exec.CommandContext(ctx, "python3", "-c", pythonScript)
 
-	// Create output file
 	outFile, err := os.Create(outputPath)
 	if err != nil {
 		return fmt.Errorf("failed to create output file: %w", err)
@@ -306,27 +295,22 @@ except Exception as e:
 		e.maskMySQLPassword(append([]string{"mysql"}, mysqlArgs...)), outputPath)
 	logrus.Infof("[BackupExecutor] Using Python csv module for proper CSV formatting with special character handling")
 
-	// Start python command first
 	if err := pythonCmd.Start(); err != nil {
 		return fmt.Errorf("failed to start python command: %w", err)
 	}
 
-	// Start mysql command
 	if err := mysqlCmd.Start(); err != nil {
 		return fmt.Errorf("failed to start mysql command: %w", err)
 	}
 
-	// Wait for mysql command to finish
 	if err := mysqlCmd.Wait(); err != nil {
 		return fmt.Errorf("mysql command failed: %w", err)
 	}
 
-	// Wait for python command to finish
 	if err := pythonCmd.Wait(); err != nil {
 		return fmt.Errorf("python csv conversion failed: %w", err)
 	}
 
-	// Check output file and log size
 	if stat, err := os.Stat(outputPath); err == nil {
 		logrus.Infof("[BackupExecutor] ✅ MySQL CSV export completed: %.2f MB", float64(stat.Size())/1024/1024)
 	} else {
@@ -348,14 +332,11 @@ func (e *BackupExecutor) exportMySQLMergedTables(ctx context.Context, connection
 
 	e.logMemoryUsage("MYSQL_MERGED_START")
 
-	// Parse connection URL
 	host, port, username, password := buildMySQLConnectionString(connectionURL, config.Database.Username, config.Database.Password)
 
-	// Extract base name (remove date suffix)
 	baseTableName := e.extractTablePrefix(tables[0])
 	logrus.Infof("[BackupExecutor] 🔍 Original table name: %s, extracted base name: %s", tables[0], baseTableName)
 
-	// Determine format
 	format := config.Format
 	if format == "" {
 		format = "sql" // Default to SQL format
@@ -385,7 +366,6 @@ func (e *BackupExecutor) exportMySQLMergedTables(ctx context.Context, connection
 	// Step 1: Export each table and merge
 	logrus.Infof("[BackupExecutor] 📤 Step 1: Exporting and merging %d tables", len(tables))
 
-	// Create merged file
 	mergedFile, err := os.Create(mergedFilePath)
 	if err != nil {
 		return fmt.Errorf("failed to create merged file: %w", err)
@@ -395,7 +375,6 @@ func (e *BackupExecutor) exportMySQLMergedTables(ctx context.Context, connection
 	for i, table := range tables {
 		logrus.Infof("[BackupExecutor] 📄 Exporting table %d/%d: %s", i+1, len(tables), table)
 
-		// Create temporary file for each table
 		tempTablePath := fmt.Sprintf("%s/%s%s%s_temp%s", tempDir, table, JSONFilenameSeparator, dateStr, fileExt)
 
 		var exportErr error
@@ -415,7 +394,6 @@ func (e *BackupExecutor) exportMySQLMergedTables(ctx context.Context, connection
 			return fmt.Errorf("failed to export table %s: %w", table, exportErr)
 		}
 
-		// Read temporary file and append to merged file
 		content, err := os.ReadFile(tempTablePath)
 		if err != nil {
 			return fmt.Errorf("failed to read temp file for table %s: %w", table, err)
@@ -427,7 +405,6 @@ func (e *BackupExecutor) exportMySQLMergedTables(ctx context.Context, connection
 			}
 		}
 
-		// Clean up temporary file
 		if err := os.Remove(tempTablePath); err != nil {
 			logrus.Warnf("[BackupExecutor] Failed to remove temp file %s: %v", tempTablePath, err)
 		} else {
@@ -455,7 +432,6 @@ func (e *BackupExecutor) exportMySQLMergedTables(ctx context.Context, connection
 
 	e.logMemoryUsage("MYSQL_MERGED_COMPLETE")
 
-	// Clean up temporary files
 	if err := os.Remove(mergedFilePath); err != nil {
 		logrus.Warnf("[BackupExecutor] Failed to remove merged file %s: %v", mergedFilePath, err)
 	} else {
@@ -480,7 +456,6 @@ func (e *BackupExecutor) getMySQLTables(ctx context.Context, config *ExecutorBac
 	// were always empty, so every one of these connections was anonymous.
 	host, port := parseMySQLConnectionURL(config.Database.URL)
 
-	// Build DSN
 	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s",
 		config.Database.Username, config.Database.Password, host, port, config.Database.Database)
 
@@ -520,7 +495,6 @@ func (e *BackupExecutor) getMySQLTables(ctx context.Context, config *ExecutorBac
 		allTables = append(allTables, tableName)
 	}
 
-	// Filter tables by regex pattern
 	var matchedTables []string
 	re, err := regexp.Compile(pattern)
 	if err != nil {

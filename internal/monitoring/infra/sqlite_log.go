@@ -9,7 +9,6 @@ import (
 
 	"github.com/retail-ai-inc/sync/internal/platform/sqlite"
 
-	// "github.com/sirupsen/logrus"
 	"context"
 
 	"github.com/sirupsen/logrus"

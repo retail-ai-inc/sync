@@ -179,14 +179,12 @@ func (s *PostgreSQLSyncer) Start(ctx context.Context) error {
 		s.logger.Warnf("[PostgreSQL] prepareTargetSchema error: %v", err)
 	}
 
-	// Perform initial sync
 	err = s.doInitialSync(ctx)
 	if err != nil {
 		return fmt.Errorf("make the initial copy: %w", err)
 	}
 	s.logger.Info("[PostgreSQL] Initial full sync done.")
 
-	// Start logical replication
 	err = s.startLogicalReplication(ctx)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -484,7 +482,6 @@ func (s *PostgreSQLSyncer) copyIndexes(ctx context.Context, srcSchema, srcTable,
 		newIdxName := fmt.Sprintf("%s_%s", tgtTable, idxName)
 		newIdxDef = strings.Replace(newIdxDef, idxName, newIdxName, 1)
 
-		// Check if this index already exists
 		if existingIndexes[newIdxName] {
 			s.logger.Debugf("[PostgreSQL] Index %s already exists, skipping", newIdxName)
 			indexesSkipped++

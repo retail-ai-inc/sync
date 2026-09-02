@@ -1,9 +1,6 @@
 package domain
 
 import (
-
-	// "github.com/sirupsen/logrus"
-
 	"strconv"
 )
 

@@ -34,7 +34,6 @@ WHERE username = ?`, username)
 		return nil, err
 	}
 
-	// Create user map with proper NULL handling
 	user := map[string]interface{}{
 		"id":       id,
 		"username": username,
@@ -43,7 +42,6 @@ WHERE username = ?`, username)
 		"access":   access,
 	}
 
-	// Handle potentially NULL fields
 	if avatar.Valid {
 		user["avatar"] = avatar.String
 	} else {
@@ -62,7 +60,6 @@ WHERE username = ?`, username)
 		user["email"] = ""
 	}
 
-	// Process status field
 	if status.Valid {
 		user["status"] = status.String
 	} else {
@@ -108,7 +105,6 @@ func GetUserData(username string) (map[string]interface{}, error) {
 		return nil, err
 	}
 
-	// Remove sensitive information
 	delete(user, "password")
 
 	return user, nil
@@ -149,7 +145,6 @@ func SaveGoogleUser(email, name string) (string, string, error) {
 	}
 	defer db.Close()
 
-	// Check if user already exists
 	var count int
 	err = db.QueryRow("SELECT COUNT(*) FROM users WHERE email = ?", email).Scan(&count)
 	if err != nil {
@@ -173,7 +168,6 @@ func SaveGoogleUser(email, name string) (string, string, error) {
 			return "", "", err
 		}
 
-		// Get access level for existing user
 		err = db.QueryRow("SELECT username, access FROM users WHERE email = ?", email).Scan(&username, &access)
 		if err != nil {
 			return "", "", err
@@ -293,8 +287,6 @@ func scanUsers(rows *sql.Rows) ([]map[string]interface{}, error) {
 
 func nullOrEmpty(s sql.NullString) string { return nullOr(s, "") }
 
-// Initialize user table when starting service
-
 func GetAuthConfig(provider string) (map[string]interface{}, error) {
 	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
@@ -370,20 +362,17 @@ func UpdateAuthConfig(provider string, config map[string]interface{}) error {
 		stored[key] = value
 	}
 
-	// Convert config to JSON
 	configJSON, err := json.Marshal(stored)
 	if err != nil {
 		return err
 	}
 
-	// Check if the configuration already exists
 	var exists bool
 	err = db.QueryRow("SELECT EXISTS(SELECT 1 FROM auth_configs WHERE provider = ?)", provider).Scan(&exists)
 	if err != nil {
 		return err
 	}
 
-	// Execute operations
 	tx, err := db.Begin()
 	if err != nil {
 		return err

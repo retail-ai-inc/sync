@@ -23,10 +23,8 @@ import (
 //   - administrative: everything that changes a replication task, a backup
 //     job, a user or the OAuth configuration
 //
-// Before this split, four handlers checked the Authorization header for
-// themselves and the rest did not, so anyone who could reach the port could
-// list every replication task with its credentials, create and delete tasks,
-// and drive the connection prober at arbitrary hosts.
+// Before this split each handler decided for itself, and most did not, so
+// anyone who could reach the port could read every task's credentials.
 func NewRouter() http.Handler {
 	r := chi.NewRouter()
 

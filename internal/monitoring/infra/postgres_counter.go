@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	// "github.com/sirupsen/logrus"
 	"context"
 
 	_ "github.com/lib/pq" // this package opens PostgreSQL itself

@@ -1,9 +1,8 @@
 package infra
 
 import (
-	"strings"
-	// "github.com/sirupsen/logrus"
 	"context"
+	"strings"
 
 	"sync"
 
@@ -73,16 +72,6 @@ func CountAndLogRedis(ctx context.Context, sc config.SyncConfig, log *logrus.Log
 	// Insert into database monitoring_log with sync_task_id
 	storeMonitoringLog(sc.ID, dbType, srcDBName, "", srcCount, tgtDBName, "", tgtCount, action)
 }
-
-// getRowCount is used by MySQL / MariaDB / PostgreSQL
-// func getRowCount(db *sql.DB, table string) int64 {
-// 	query := fmt.Sprintf("SELECT COUNT(*) FROM %s", table)
-// 	var cnt int64
-// 	if err := db.QueryRow(query).Scan(&cnt); err != nil {
-// 		return -1
-// 	}
-// 	return cnt
-// }
 
 // keyCount reports how many keys an instance holds. DBSize asked of a cluster
 // node answers for that node alone, so comparing one node of the source

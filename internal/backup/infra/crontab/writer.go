@@ -47,7 +47,6 @@ func (cm *CronManager) SyncCrontab(ctx context.Context) error {
 			continue
 		}
 
-		// Parse timestamps
 		if lastUpdateTime.Valid {
 			t, _ := time.Parse("2006-01-02 15:04:05", lastUpdateTime.String)
 			task.LastUpdateTime = t
@@ -67,7 +66,6 @@ func (cm *CronManager) SyncCrontab(ctx context.Context) error {
 	// Generate crontab entries
 	crontabEntries := domain.GenerateCrontabEntries(tasks, cm.apiServer)
 
-	// Update system crontab
 	if err := updateSystemCrontab(crontabEntries); err != nil {
 		logrus.Errorf("[CronManager] Failed to update system crontab: %v", err)
 		return fmt.Errorf("failed to update system crontab: %w", err)
@@ -78,7 +76,6 @@ func (cm *CronManager) SyncCrontab(ctx context.Context) error {
 }
 
 func updateSystemCrontab(newEntries []string) error {
-	// Get current crontab
 	cmd := exec.Command("crontab", "-l")
 	currentCrontab, err := cmd.Output()
 
@@ -89,12 +86,10 @@ func updateSystemCrontab(newEntries []string) error {
 		currentCrontab = []byte("")
 	}
 
-	// Parse current crontab
 	currentEntries := strings.Split(string(currentCrontab), "\n")
 	var filteredEntries []string
 	inBackupSection := false
 
-	// Remove old backup tasks section
 	for _, line := range currentEntries {
 		if strings.Contains(line, "BEGIN SYNC BACKUP TASKS") {
 			inBackupSection = true
@@ -111,11 +106,9 @@ func updateSystemCrontab(newEntries []string) error {
 		}
 	}
 
-	// Merge old crontab with new backup tasks
 	allEntries := append(filteredEntries, "")
 	allEntries = append(allEntries, newEntries...)
 
-	// Write new crontab
 	tempFile, err := os.CreateTemp("", "crontab")
 	if err != nil {
 		return fmt.Errorf("failed to create temp file: %w", err)
@@ -130,7 +123,6 @@ func updateSystemCrontab(newEntries []string) error {
 		return fmt.Errorf("failed to close temp file: %w", err)
 	}
 
-	// Update system crontab
 	cmd = exec.Command("crontab", tempFile.Name())
 	output, err := cmd.CombinedOutput()
 	if err != nil {

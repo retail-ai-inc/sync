@@ -16,7 +16,6 @@ import (
 )
 
 func (e *BackupExecutor) copyFile(src, dst string) error {
-	// Log memory before file copy
 	var memStatsBefore runtime.MemStats
 	runtime.ReadMemStats(&memStatsBefore)
 	logrus.Infof("[BackupExecutor] 📋 Memory BEFORE copyFile: Alloc=%.2fMB, Sys=%.2fMB",
@@ -28,7 +27,6 @@ func (e *BackupExecutor) copyFile(src, dst string) error {
 	}
 	defer sourceFile.Close()
 
-	// Create destination directory if it doesn't exist
 	dstDir := filepath.Dir(dst)
 	if err := os.MkdirAll(dstDir, 0755); err != nil {
 		return err
@@ -62,7 +60,6 @@ func (e *BackupExecutor) copyFile(src, dst string) error {
 		}
 	}
 
-	// Log memory after file copy
 	var memStatsAfter runtime.MemStats
 	runtime.ReadMemStats(&memStatsAfter)
 	logrus.Infof("[BackupExecutor] 📋 Memory AFTER copyFile: Alloc=%.2fMB, Sys=%.2fMB (Delta: +%.2fMB)",
@@ -80,7 +77,6 @@ func processFileNamePattern(pattern, tableName string) string {
 		return fmt.Sprintf("%s_%s", tableName, dateStr)
 	}
 
-	// Remove regex anchors if present
 	cleanPattern := strings.TrimPrefix(pattern, "^")
 	cleanPattern = strings.TrimSuffix(cleanPattern, "$")
 
@@ -155,7 +151,6 @@ func (e *BackupExecutor) writeJSONFile(filePath string, documents []interface{})
 			return fmt.Errorf("failed to marshal JSON document: %w", err)
 		}
 
-		// Write document followed by newline
 		if _, err := file.Write(docBytes); err != nil {
 			return fmt.Errorf("failed to write document to file: %w", err)
 		}

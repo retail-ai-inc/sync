@@ -56,7 +56,6 @@ type Store interface {
 	Claims(ctx context.Context) ([]Claim, error)
 	// Put records one claim, replacing that task's previous one.
 	Put(ctx context.Context, c Claim) error
-	// Remove discards one task's claim.
 	Remove(ctx context.Context, taskID int) error
 	// Endpoint describes the database, for error messages. It must not carry
 	// credentials.

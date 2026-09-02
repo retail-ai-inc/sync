@@ -24,12 +24,10 @@ func Zip(ctx context.Context, workDir, inputFile, outputFile string) error {
 		return fmt.Errorf("zip failed: %w, output: %s", err, string(output))
 	}
 
-	// Check output file
 	if _, err := os.Stat(outputFile); err != nil {
 		return fmt.Errorf("zip output file not created: %w", err)
 	}
 
-	// Log compression results
 	if stat, err := os.Stat(outputFile); err == nil {
 		logrus.Infof("[BackupExecutor] ✅ Zip completed: %.2f MB", float64(stat.Size())/1024/1024)
 	}

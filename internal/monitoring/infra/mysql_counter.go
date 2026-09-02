@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	// "github.com/sirupsen/logrus"
 	"context"
 
 	_ "github.com/go-sql-driver/mysql" // this package opens MySQL itself

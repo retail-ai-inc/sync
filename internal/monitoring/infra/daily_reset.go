@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"time"
 
-	// "github.com/sirupsen/logrus"
-
 	"github.com/sirupsen/logrus"
 )
 
@@ -75,7 +73,6 @@ func resetDailyStatisticsIfNeeded(tx *sql.Tx, syncTaskID int) error {
 		return resetInMemoryAndStored(tx, syncTaskID)
 	}
 
-	// Convert to JST for comparison
 	lastUpdateJST := lastUpdate.UTC().In(jst)
 	lastUpdateDateJST := time.Date(lastUpdateJST.Year(), lastUpdateJST.Month(), lastUpdateJST.Day(), 0, 0, 0, 0, jst)
 

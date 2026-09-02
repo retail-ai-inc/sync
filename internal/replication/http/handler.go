@@ -252,7 +252,6 @@ func SyncTablesHandler(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	// Get JST date for display purposes only
 	jst := time.FixedZone("JST", 9*60*60)
 	jstDate := now.In(jst).Format("2006-01-02")
 

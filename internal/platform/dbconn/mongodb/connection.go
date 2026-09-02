@@ -46,7 +46,6 @@ func ConnectMongoDB(ctx context.Context, host string, port string, user string, 
 
 	logger.Infof("[MongoDB] Connecting to %s:%s database: %s", host, port, database)
 
-	// Build the connection URI
 	uri := fmt.Sprintf("mongodb://%s:%s@%s:%s/%s?authSource=admin", user, password, host, port, database)
 
 	client, err := GetMongoClient(ctx, uri)
@@ -64,7 +63,6 @@ func ConnectMongoDBFromTaskID(ctx context.Context, taskID string, logger *logrus
 		logger = logrus.StandardLogger()
 	}
 
-	// Open the local SQLite database
 	db, err := openLocalDB()
 	if err != nil {
 		logger.Errorf("[MongoDB] Failed to open local DB: %v", err)
@@ -72,7 +70,6 @@ func ConnectMongoDBFromTaskID(ctx context.Context, taskID string, logger *logrus
 	}
 	defer db.Close()
 
-	// Get the configuration for the task
 	var configJSON string
 	err = db.QueryRow("SELECT config_json FROM sync_tasks WHERE id = ?", taskID).Scan(&configJSON)
 	if err != nil {
@@ -80,7 +77,6 @@ func ConnectMongoDBFromTaskID(ctx context.Context, taskID string, logger *logrus
 		return nil, "", fmt.Errorf("failed to get task configuration: %w", err)
 	}
 
-	// Parse the JSON configuration
 	var config struct {
 		Type       string            `json:"type"`
 		SourceConn map[string]string `json:"sourceConn"`

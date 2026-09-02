@@ -39,10 +39,8 @@ func (e *BackupExecutor) logMemoryUsage(phase string) {
 func (e *BackupExecutor) executeExternalMongoExportSimple(ctx context.Context, connStr, database, collection, tempDir string, config ExecutorBackupConfig) error {
 	logrus.Infof("[BackupExecutor] 🚀 Starting COMPLETE external command backup for collection: %s", collection)
 
-	// Log Go process memory (should remain stable)
 	e.logMemoryUsage("EXTERNAL_FULL_START")
 
-	// Clean collection name and generate file paths
 	baseCollectionName := e.extractTablePrefix(collection)
 	logrus.Infof("[BackupExecutor] 🔍 Original collection name: %s, extracted base name: %s", collection, baseCollectionName)
 
@@ -84,9 +82,7 @@ func (e *BackupExecutor) executeExternalMongoExportWithOptions(ctx context.Conte
 		"--quiet",
 	}
 
-	// Add query conditions
 	if queryConditions, exists := config.Query[collection]; exists && len(queryConditions) > 0 {
-		// Clean extra quotes in query conditions
 		cleanedQuery := cleanQueryStringValues(queryConditions)
 
 		// Convert dynamic time queries to specific MongoDB queries. A condition
@@ -108,7 +104,6 @@ func (e *BackupExecutor) executeExternalMongoExportWithOptions(ctx context.Conte
 		logrus.Infof("[BackupExecutor] No query conditions found for collection %s, exporting all data", collection)
 	}
 
-	// Add field selection
 	if fields, exists := config.Database.Fields[collection]; exists && len(fields) > 0 && fields[0] != "all" {
 		fieldsStr := strings.Join(fields, ",")
 		args = append(args, "--fields", fieldsStr)
@@ -125,12 +120,10 @@ func (e *BackupExecutor) executeExternalMongoExportWithOptions(ctx context.Conte
 		return fmt.Errorf("mongoexport failed: %w, output: %s", err, string(output))
 	}
 
-	// Check output file
 	if _, err := os.Stat(outputPath); err != nil {
 		return fmt.Errorf("mongoexport output file not created: %w", err)
 	}
 
-	// Count exported records and file size
 	recordCount, fileSize, err := e.countRecordsInFile(outputPath)
 	if err != nil {
 		logrus.Warnf("[BackupExecutor] Failed to count records in %s: %v", outputPath, err)
@@ -157,10 +150,8 @@ func (e *BackupExecutor) exportMongoDBMergedTables(ctx context.Context, connStr,
 		return fmt.Errorf("no tables to back up")
 	}
 
-	// Log Go process memory (should remain stable)
 	e.logMemoryUsage("MERGED_TABLES_START")
 
-	// Extract base name (remove date suffix)
 	baseCollectionName := e.extractTablePrefix(tables[0])
 	logrus.Infof("[BackupExecutor] 🔍 Original table name: %s, extracted base name: %s", tables[0], baseCollectionName)
 
@@ -176,7 +167,6 @@ func (e *BackupExecutor) exportMongoDBMergedTables(ctx context.Context, connStr,
 	// Step 1: Export each table separately and merge
 	logrus.Infof("[BackupExecutor] 📤 Step 1: Exporting and merging %d tables", len(tables))
 
-	// Create merged file
 	mergedFile, err := os.Create(mergedJsonPath)
 	if err != nil {
 		return fmt.Errorf("failed to create merged file: %w", err)
@@ -188,7 +178,6 @@ func (e *BackupExecutor) exportMongoDBMergedTables(ctx context.Context, connStr,
 	for i, table := range tables {
 		logrus.Infof("[BackupExecutor] 📄 Exporting table %d/%d: %s", i+1, len(tables), table)
 
-		// Create temporary file for each table
 		tempTablePath := fmt.Sprintf("%s/%s%s%s_temp.json", tempDir, table, JSONFilenameSeparator, dateStr) // _temp suffix for temporary files
 
 		// Use mongoexport to export single table, apply query conditions and field selection
@@ -196,7 +185,6 @@ func (e *BackupExecutor) exportMongoDBMergedTables(ctx context.Context, connStr,
 			return fmt.Errorf("failed to export table %s: %w", table, err)
 		}
 
-		// Read temporary file and merge to main file
 		tempFile, err := os.Open(tempTablePath)
 		if err != nil {
 			return fmt.Errorf("failed to open temp file for table %s: %w", table, err)
@@ -230,7 +218,6 @@ func (e *BackupExecutor) exportMongoDBMergedTables(ctx context.Context, connStr,
 		}
 
 		tempFile.Close()
-		// Clean up temporary files
 		if err := os.Remove(tempTablePath); err != nil {
 			logrus.Warnf("[BackupExecutor] Failed to remove temp file %s: %v", tempTablePath, err)
 		} else {
@@ -246,7 +233,6 @@ func (e *BackupExecutor) exportMongoDBMergedTables(ctx context.Context, connStr,
 	if stat, err := os.Stat(mergedJsonPath); err == nil {
 		logrus.Infof("[BackupExecutor] ✅ Merge completed: %.2f MB", float64(stat.Size())/1024/1024)
 
-		// Count records but don't output specific content
 		if recordCount, fileSize, countErr := e.countRecordsInFile(mergedJsonPath); countErr == nil {
 			logrus.Infof("[BackupExecutor] 🔍 Merged file contains %d records, %.2f MB", recordCount, fileSize)
 		} else {

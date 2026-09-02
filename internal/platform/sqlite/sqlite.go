@@ -34,7 +34,6 @@ func OpenSQLiteDB() (*sql.DB, error) {
 	_, statErr := os.Stat(dbPath)
 	fresh := os.IsNotExist(statErr)
 
-	// Ensure parent directory exists
 	dir := filepath.Dir(dbPath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create database directory: %v", err)
@@ -61,7 +60,6 @@ func OpenSQLiteDB() (*sql.DB, error) {
 			continue
 		}
 
-		// Set connection parameters
 		db.SetMaxOpenConns(1)                   // SQLite works best with a single connection
 		db.SetConnMaxLifetime(time.Second * 30) // Longer connection lifetime
 		db.SetMaxIdleConns(1)                   // Keep one idle connection

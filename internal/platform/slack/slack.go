@@ -113,14 +113,12 @@ func (s *SlackNotifier) SendNotification(ctx context.Context, message string, op
 		return s.postToWebhook(ctx, message, opts)
 	}
 
-	// Set default options if not provided
 	if opts == nil {
 		opts = &SlackNotificationOptions{
 			AlertType: SlackAlertGood,
 		}
 	}
 
-	// Build command arguments
 	args := []string{
 		"-w", s.webhookURL,
 		"-c", s.channel,
@@ -128,12 +126,10 @@ func (s *SlackNotifier) SendNotification(ctx context.Context, message string, op
 		"-m", message,
 	}
 
-	// Add alert type if specified
 	if opts.AlertType != "" {
 		args = append(args, "-a", string(opts.AlertType))
 	}
 
-	// Add optional parameters
 	if opts.BranchName != "" {
 		args = append(args, "-b", opts.BranchName)
 	}
@@ -144,14 +140,12 @@ func (s *SlackNotifier) SendNotification(ctx context.Context, message string, op
 		args = append(args, "-U", opts.CommitURL)
 	}
 
-	// Create the command with proper argument handling
 	cmdArgs := append([]string{s.scriptPath}, args...)
 	fullCommand := strings.Join(cmdArgs, " ")
 
 	s.logger.Infof("[Slack] Sending notification: %s", message)
 	s.logger.Debugf("[Slack] Executing command: %s", fullCommand)
 
-	// Execute with timeout context
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 

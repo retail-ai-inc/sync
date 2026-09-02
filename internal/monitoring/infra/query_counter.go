@@ -7,7 +7,6 @@ import (
 
 	"github.com/retail-ai-inc/sync/internal/monitoring/domain"
 
-	// "github.com/sirupsen/logrus"
 	"context"
 	"strconv"
 
@@ -60,7 +59,6 @@ func (qc *QueryCounter) CountMongoDBDocuments(ctx context.Context, client *mongo
 		return count, nil
 	}
 
-	// Build query filter
 	filter := bson.M{}
 	relevantConditions := 0
 	// dropped names the conditions this could not express. A count taken with
@@ -69,7 +67,6 @@ func (qc *QueryCounter) CountMongoDBDocuments(ctx context.Context, client *mongo
 	// number that was asked for.
 	var dropped []string
 
-	// Get Japan timezone
 	jst, err := time.LoadLocation("Asia/Tokyo")
 	if err != nil {
 		qc.logger.Warnf("[QueryCounter] Failed to load JST timezone: %v, falling back to local time", err)
@@ -77,7 +74,6 @@ func (qc *QueryCounter) CountMongoDBDocuments(ctx context.Context, client *mongo
 	}
 
 	for _, condition := range query.Conditions {
-		// Check if the condition is for this table
 		if condition.Table != collection {
 			continue
 		}
@@ -207,7 +203,6 @@ func (qc *QueryCounter) buildReadableQueryString(collection string, filter bson.
 func (qc *QueryCounter) formatFilterCondition(field string, value interface{}) string {
 	switch v := value.(type) {
 	case bson.M:
-		// Handle operators like $gt, $gte, $lt, $lte
 		var parts []string
 		for op, opValue := range v {
 			switch op {

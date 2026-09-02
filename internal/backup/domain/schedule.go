@@ -26,7 +26,6 @@ type BackupConfig struct {
 func GenerateCrontabEntries(tasks []BackupTask, apiServer string) []string {
 	var entries []string
 
-	// Add comment marking the beginning
 	entries = append(entries, "# BEGIN SYNC BACKUP TASKS - DO NOT EDIT THIS SECTION")
 
 	for _, task := range tasks {
@@ -57,12 +56,10 @@ func GenerateCrontabEntries(tasks []BackupTask, apiServer string) []string {
 		entry := fmt.Sprintf("%s /usr/bin/curl -s -X POST %s/backup/execute/%d > /dev/null 2>&1",
 			config.Schedule, apiServer, task.ID)
 
-		// Add comment for identification
 		comment := fmt.Sprintf("# Backup task: %s (ID: %d)", config.Name, task.ID)
 		entries = append(entries, comment, entry, "")
 	}
 
-	// Add comment marking the end
 	entries = append(entries, "# END SYNC BACKUP TASKS")
 
 	return entries

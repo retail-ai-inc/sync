@@ -245,7 +245,6 @@ func BackupExecuteHandler(w http.ResponseWriter, r *http.Request) {
 
 	taskID := app.SubmitRun(id)
 
-	// Return immediate response with task ID
 	httpx.WriteJSON(w, map[string]interface{}{
 		"success": true,
 		"taskId":  taskID,

@@ -379,7 +379,6 @@ ORDER BY id ASC
 												sc.Mappings[i].Tables[j].CountQuery = countQuery
 											}
 
-											// Parse advancedSettings
 											if advancedSettings, ok := table["advancedSettings"].(map[string]interface{}); ok {
 												if syncIndexes, ok := advancedSettings["syncIndexes"].(bool); ok {
 													sc.Mappings[i].Tables[j].AdvancedSettings.SyncIndexes = syncIndexes
@@ -393,7 +392,6 @@ ORDER BY id ASC
 												if gcsAddress, ok := advancedSettings["gcsAddress"].(string); ok {
 													sc.Mappings[i].Tables[j].AdvancedSettings.GcsAddress = gcsAddress
 												}
-												// Parse retry settings
 												if maxRetries, ok := advancedSettings["maxRetries"].(float64); ok {
 													sc.Mappings[i].Tables[j].AdvancedSettings.MaxRetries = int(maxRetries)
 												}

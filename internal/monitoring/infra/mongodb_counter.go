@@ -7,7 +7,6 @@ import (
 
 	"github.com/retail-ai-inc/sync/internal/monitoring/domain"
 
-	// "github.com/sirupsen/logrus"
 	"context"
 	"encoding/json"
 
@@ -36,7 +35,6 @@ func CountAndLogMongoDB(ctx context.Context, sc config.SyncConfig, log *logrus.L
 			var tgtCount int64
 			var err error
 
-			// Parse count query if exists
 			var countQuery *domain.CountQuery
 			if tblMap.CountQuery != nil && len(tblMap.CountQuery) > 0 {
 				if conditions, ok := tblMap.CountQuery["conditions"]; ok {
@@ -59,7 +57,6 @@ func CountAndLogMongoDB(ctx context.Context, sc config.SyncConfig, log *logrus.L
 			// count and a measurement of minus one row were the same row.
 			srcOK, tgtOK := true, true
 
-			// Count source collection
 			srcCount, err = queryCounter.CountMongoDBDocuments(ctx, srcClient, srcDBName, tblMap.SourceTable, countQuery)
 			if err != nil {
 				log.WithError(err).WithFields(logrus.Fields{
@@ -71,7 +68,6 @@ func CountAndLogMongoDB(ctx context.Context, sc config.SyncConfig, log *logrus.L
 				srcCount, srcOK = -1, false
 			}
 
-			// Count target collection
 			tgtCount, err = queryCounter.CountMongoDBDocuments(ctx, tgtClient, tgtDBName, tblMap.TargetTable, countQuery)
 			if err != nil {
 				log.WithError(err).WithFields(logrus.Fields{
@@ -122,7 +118,6 @@ func CountAndLogMongoDB(ctx context.Context, sc config.SyncConfig, log *logrus.L
 		csDetails = append(csDetails, details)
 	}
 
-	// Calculate pending total for logging
 	pendingTotal := receivedTotal - executedTotal
 
 	// Always store ChangeStream statistics to database (even if no active streams)
@@ -257,7 +252,6 @@ func LogYesterdayMongoDBVolume(ctx context.Context, sc config.SyncConfig, log *l
 
 	for _, mapping := range sc.Mappings {
 		for _, tblMap := range mapping.Tables {
-			// Parse original count query conditions
 			var originalConditions []domain.CountCondition
 			var hasDateRangeCondition bool
 			var dateRangeField string
@@ -279,7 +273,6 @@ func LogYesterdayMongoDBVolume(ctx context.Context, sc config.SyncConfig, log *l
 				}
 			}
 
-			// Skip tables without dateRange conditions
 			if !hasDateRangeCondition {
 				continue
 			}
@@ -321,7 +314,6 @@ func LogYesterdayMongoDBVolume(ctx context.Context, sc config.SyncConfig, log *l
 
 			queryCounter := NewQueryCounterWithYesterdaySupport(log, yesterdayStart, yesterdayEnd)
 
-			// Count source collection for yesterday
 			srcCount, err := queryCounter.CountMongoDBDocuments(ctx, srcClient, srcDBName, tblMap.SourceTable, yesterdayQuery)
 			if err != nil {
 				log.WithError(err).WithFields(logrus.Fields{
@@ -335,7 +327,6 @@ func LogYesterdayMongoDBVolume(ctx context.Context, sc config.SyncConfig, log *l
 				srcCount = -1
 			}
 
-			// Count target collection for yesterday
 			tgtCount, err := queryCounter.CountMongoDBDocuments(ctx, tgtClient, tgtDBName, tblMap.TargetTable, yesterdayQuery)
 			if err != nil {
 				log.WithError(err).WithFields(logrus.Fields{
@@ -349,7 +340,6 @@ func LogYesterdayMongoDBVolume(ctx context.Context, sc config.SyncConfig, log *l
 				tgtCount = -1
 			}
 
-			// Calculate synced count
 			syncedCount := tgtCount
 			if srcCount >= 0 && tgtCount >= 0 {
 				// For daily sync, synced count is typically the target count

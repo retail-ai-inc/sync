@@ -8,7 +8,6 @@ import (
 
 	"github.com/retail-ai-inc/sync/internal/monitoring/infra"
 
-	// "github.com/sirupsen/logrus"
 	"context"
 
 	"github.com/retail-ai-inc/sync/internal/platform/config"
@@ -18,14 +17,12 @@ import (
 func StartRowCountMonitoring(ctx context.Context, cfg *config.Config, log *logrus.Logger, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 
-	// Start daily summary at 00:05 JST
 	watch(func() {
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			default:
-				// Calculate time until next 00:05 JST
 				jst, err := time.LoadLocation("Asia/Tokyo")
 				if err != nil {
 					log.Warnf("[Monitor] Failed to load JST timezone: %v, falling back to local time", err)
@@ -44,7 +41,6 @@ func StartRowCountMonitoring(ctx context.Context, cfg *config.Config, log *logru
 				log.Infof("[Monitor] Daily summary scheduled to run at: %s (in %v)",
 					nextRunTime.Format("2006-01-02 15:04:05 JST"), durationUntilRun)
 
-				// Wait until the scheduled time
 				select {
 				case <-ctx.Done():
 					return
@@ -102,14 +98,12 @@ func countAndLogTables(ctx context.Context, sc config.SyncConfig, log *logrus.Lo
 func logYesterdayDataVolume(ctx context.Context, cfg *config.Config, log *logrus.Logger) {
 	log.Infof("[Monitor] Starting daily summary for yesterday's data volume...")
 
-	// Get Japan timezone
 	jst, err := time.LoadLocation("Asia/Tokyo")
 	if err != nil {
 		log.Warnf("[Monitor] Failed to load JST timezone: %v, falling back to local time", err)
 		jst = time.Local
 	}
 
-	// Calculate yesterday's date range in JST
 	now := time.Now().In(jst)
 	yesterday := now.AddDate(0, 0, -1)
 	yesterdayStart := time.Date(yesterday.Year(), yesterday.Month(), yesterday.Day(), 0, 0, 0, 0, jst)

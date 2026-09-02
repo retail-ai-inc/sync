@@ -93,13 +93,11 @@ func cleanQueryStringValues(queryObj map[string]interface{}) map[string]interfac
 }
 
 func (e *BackupExecutor) buildMySQLSelectQuery(table string, config ExecutorBackupConfig) (string, error) {
-	// Build field list
 	fields := "*"
 	if fieldList, exists := config.Database.Fields[table]; exists && len(fieldList) > 0 && fieldList[0] != "all" {
 		fields = strings.Join(fieldList, ", ")
 	}
 
-	// Build WHERE clause
 	whereClause := ""
 	if queryConditions, exists := config.Query[table]; exists && len(queryConditions) > 0 {
 		var err error

@@ -71,6 +71,5 @@ func ConvertTimeToJST(input string) string {
 		return t.In(jst).Format(layout)
 	}
 
-	// Return original if we can't parse
 	return input
 }

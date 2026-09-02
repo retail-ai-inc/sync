@@ -55,7 +55,6 @@ func (e *BackupExecutor) Execute(ctx context.Context, taskID int) error {
 		return fmt.Errorf("failed to get backup task: %w", err)
 	}
 
-	// Parse configuration
 	var config ExecutorBackupConfig
 
 	if err := json.Unmarshal([]byte(task.ConfigJSON), &config); err != nil {
@@ -84,11 +83,9 @@ func (e *BackupExecutor) Execute(ctx context.Context, taskID int) error {
 	// directory could not be created.
 	var failures []error
 
-	// Process each table group separately
 	for groupName, tables := range tableGroups {
 		logrus.Debugf("[BackupExecutor] Processing table group: %s (%d tables)", groupName, len(tables))
 
-		// Create temporary directory for this table group
 		tempDir, err := os.MkdirTemp("", fmt.Sprintf("backup_%d_%s_", taskID, groupName))
 		if err != nil {
 			failures = append(failures, fmt.Errorf("%s: create a temporary directory: %w", groupName, err))
@@ -135,7 +132,6 @@ func (e *BackupExecutor) Execute(ctx context.Context, taskID int) error {
 		// 🎉 External command mode has completed the full backup workflow (export + compression + upload)
 		logrus.Infof("[BackupExecutor] ✅ External command backup completed successfully for table group: %s", groupName)
 
-		// Clean up temporary directory
 		if err := os.RemoveAll(tempDir); err != nil {
 			logrus.Warnf("[BackupExecutor] Failed to remove temp directory %s: %v", tempDir, err)
 		} else {

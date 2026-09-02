@@ -494,7 +494,6 @@ func TestAnEmptyMongoCollectionReturnsAnArrayNotNull(t *testing.T) {
 	collection := harness.UniqueName("mempty")
 	client := openSchemaMongo(t)
 	coll := client.Database(schemaSourceDB).Collection(collection)
-	// Create the collection without documents.
 	if err := client.Database(schemaSourceDB).CreateCollection(t.Context(), collection); err != nil {
 		t.Fatalf("create collection: %v", err)
 	}

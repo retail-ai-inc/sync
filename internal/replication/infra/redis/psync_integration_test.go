@@ -25,7 +25,6 @@ func oneSource(t *testing.T) (string, *goredis.Client) {
 		t.Fatalf("ping %s: %v", addr, err)
 	}
 
-	// Start from an empty source.
 	emptyOne(t, client)
 	return addr, client
 }

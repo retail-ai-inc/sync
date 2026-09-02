@@ -340,7 +340,6 @@ func TestWritesDuringInitialSyncAreNotLost(t *testing.T) {
 
 	startSyncer(t, syncTask(t, table))
 
-	// Write markers while the copy is still running.
 	markers := 0
 	deadline := time.Now().Add(6 * time.Second)
 	for time.Now().Before(deadline) {

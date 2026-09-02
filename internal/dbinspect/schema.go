@@ -87,7 +87,6 @@ func GetTableSchemaHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Sort fields before returning results
 	sortFieldsByName(&schema)
 
 	response := map[string]interface{}{
@@ -126,7 +125,6 @@ func getMongoDBSchema(c context.Context, req SchemaRequest) (SchemaResponse, err
 			req.Connection.Host, req.Connection.Port, req.Connection.Database)
 	}
 
-	// Set connection timeout
 	ctx, cancel := context.WithTimeout(c, 30*time.Second)
 	defer cancel()
 
@@ -147,7 +145,6 @@ func getMongoDBSchema(c context.Context, req SchemaRequest) (SchemaResponse, err
 		}
 	}()
 
-	// Validate connection
 	if err := client.Ping(ctx, nil); err != nil {
 		return SchemaResponse{}, fmt.Errorf("mongoDB connection test failed: %w", err)
 	}
@@ -186,7 +183,6 @@ func getMongoDBSchema(c context.Context, req SchemaRequest) (SchemaResponse, err
 		extractNestedFields(doc, "", fieldMap)
 	}
 
-	// Build field response
 	var fields []Field
 	for field, fieldType := range fieldMap {
 		if fieldType == "" {
@@ -268,13 +264,11 @@ func getMongoFieldType(value interface{}) string {
 }
 
 func getMySQLSchema(c context.Context, req SchemaRequest) (SchemaResponse, error) {
-	// Check username and password
 	if req.Connection.User == "" {
 		// If user doesn't provide username, use default or return error
 		return SchemaResponse{}, fmt.Errorf("MySQL connection requires a username")
 	}
 
-	// Build DSN
 	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?timeout=10s&parseTime=true&multiStatements=true&charset=utf8mb4",
 		req.Connection.User, req.Connection.Password,
 		req.Connection.Host, req.Connection.Port,
@@ -287,16 +281,13 @@ func getMySQLSchema(c context.Context, req SchemaRequest) (SchemaResponse, error
 	}
 	defer db.Close()
 
-	// Set database connection parameters
 	db.SetConnMaxLifetime(time.Minute * 3)
 	db.SetMaxOpenConns(10)
 	db.SetMaxIdleConns(10)
 
-	// Set timeout
 	ctx, cancel := context.WithTimeout(c, 10*time.Second)
 	defer cancel()
 
-	// Validate connection
 	if err := db.PingContext(ctx); err != nil {
 		return SchemaResponse{}, fmt.Errorf("mySQL connection test failed: %w", err)
 	}
@@ -346,7 +337,6 @@ func getMySQLSchema(c context.Context, req SchemaRequest) (SchemaResponse, error
 }
 
 func getPostgreSQLSchema(c context.Context, req SchemaRequest) (SchemaResponse, error) {
-	// Build connection string
 	connStr := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
 		req.Connection.Host, req.Connection.Port,
 		req.Connection.User, req.Connection.Password,
@@ -359,11 +349,9 @@ func getPostgreSQLSchema(c context.Context, req SchemaRequest) (SchemaResponse, 
 	}
 	defer db.Close()
 
-	// Set timeout
 	ctx, cancel := context.WithTimeout(c, 10*time.Second)
 	defer cancel()
 
-	// Validate connection
 	if err := db.PingContext(ctx); err != nil {
 		return SchemaResponse{}, fmt.Errorf("postgreSQL connection test failed: %w", err)
 	}

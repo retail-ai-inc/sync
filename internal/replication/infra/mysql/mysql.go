@@ -185,7 +185,6 @@ func (s *MySQLSyncer) Start(ctx context.Context) error {
 	}
 	c.SetEventHandler(h)
 
-	// Add connection health check
 	connCheckTicker := time.NewTicker(5 * time.Minute)
 	defer connCheckTicker.Stop()
 
@@ -591,7 +590,6 @@ func (s *MySQLSyncer) createTargetTableAndIndexes(
 		}
 	}
 
-	// Check if table already exists
 	exists, err := s.targetTableExists(ctx, targetDB, tgtDBName, tgtTableName)
 	if err != nil {
 		s.logger.Warnf("[MySQL] Error checking if table exists: %v", err)

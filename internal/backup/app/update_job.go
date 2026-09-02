@@ -66,7 +66,6 @@ func SyncCrontab(ctx context.Context, caller string) {
 		logrus.Errorf("[CronManager] Failed to open database: %v", err)
 		return
 	}
-	// Ensure API path correctly includes /api prefix
 	apiServer := "http://localhost:8080/api" // Should be obtained from configuration
 	if err := crontab.NewCronManager(db, apiServer).SyncCrontab(ctx); err != nil {
 		logrus.Warnf("[%s] Failed to sync crontab: %v", caller, err)
