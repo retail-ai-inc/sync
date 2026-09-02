@@ -2,33 +2,24 @@ package mysql
 
 import (
 	"context"
-	"crypto/tls"
 	"database/sql"
 	"fmt"
-	"net"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/go-mysql-org/go-mysql/canal"
 	"github.com/go-mysql-org/go-mysql/mysql"
-	"github.com/go-mysql-org/go-mysql/replication"
 	"github.com/go-mysql-org/go-mysql/schema"
 	"github.com/retail-ai-inc/sync/internal/platform/config"
 	"github.com/retail-ai-inc/sync/internal/platform/dsn"
 	"github.com/retail-ai-inc/sync/internal/platform/metrics"
-	"github.com/retail-ai-inc/sync/internal/platform/resilience"
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
-	"github.com/retail-ai-inc/sync/internal/replication/infra/checkpoint"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/directionlock"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/discovery"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/security"
 	"github.com/sirupsen/logrus"
-
-	mysqldriver "github.com/go-sql-driver/mysql"
 )
 
 type MySQLSyncer struct {
@@ -43,235 +34,6 @@ func (s *MySQLSyncer) flavour() dialect {
 		return dialectMySQL
 	}
 	return s.dialect
-}
-
-func NewMySQLSyncer(cfg config.SyncConfig, logger *logrus.Logger) *MySQLSyncer {
-	return &MySQLSyncer{
-		cfg:    cfg,
-		logger: logger.WithField("sync_task_id", cfg.ID),
-	}
-}
-
-// Start replicates until the context is cancelled, or until it cannot carry on.
-//
-// The returned error is what the supervisor decides on: nil or a transient
-// failure means try again, an ErrUnrecoverable means stop and tell somebody.
-func (s *MySQLSyncer) Start(ctx context.Context) error {
-	if err := security.CheckKeyForMappings(s.cfg.Mappings); err != nil {
-		return domain.Unrecoverable("%v", err)
-	}
-
-	s.logger.Info("[MySQL] Starting synchronization...")
-
-	cfg := canal.NewDefaultConfig()
-	if strings.ToLower(s.cfg.Type) == "mariadb" {
-		cfg.Flavor = "mariadb"
-	} else {
-		cfg.Flavor = "mysql"
-	}
-	cfg.Addr = s.parseAddr(s.cfg.SourceConnection)
-	cfg.User, cfg.Password = s.parseUserPassword(s.cfg.SourceConnection)
-	cfg.TLSConfig = s.sourceTLS()
-	cfg.Dump.ExecutionPath = s.cfg.DumpExecutionPath
-
-	sourceDBName := dsn.GetDatabaseName(s.cfg.Type, s.cfg.SourceConnection)
-	discovering := !s.hasConfiguredTables()
-
-	var includeTables []string
-	if discovering {
-		// Nothing was listed, so replicate the whole database — including the
-		// tables that appear after this point. A table created at the source
-		// used simply not to be replicated, with no warning anywhere, which
-		// looks exactly like everything working.
-		s.logger.Infof("[MySQL] No tables configured; replicating every table in %s, "+
-			"including ones created later", sourceDBName)
-		includeTables = []string{fmt.Sprintf("%s\\..*", sourceDBName)}
-	} else {
-		for _, mapping := range s.cfg.Mappings {
-			for _, table := range mapping.Tables {
-				includeTables = append(includeTables, fmt.Sprintf("%s\\.%s", sourceDBName, table.SourceTable))
-			}
-		}
-	}
-	cfg.IncludeTableRegex = includeTables
-
-	var c *canal.Canal
-	err := resilience.Retry(ctx, 5, 2*time.Second, 2.0, func() error {
-		var e error
-		c, e = canal.NewCanal(cfg)
-		return e
-	})
-	if err != nil {
-		return fmt.Errorf("connect to the source: %w", err)
-	}
-
-	if err := s.checkRowImage(c); err != nil {
-		return domain.Unrecoverable("%v", err)
-	}
-
-	var targetDB *sql.DB
-	err = resilience.Retry(ctx, 5, 2*time.Second, 2.0, func() error {
-		var connErr error
-		targetDB, connErr = sql.Open("mysql", s.cfg.TargetConnection)
-		if connErr != nil {
-			return connErr
-		}
-		return targetDB.PingContext(ctx)
-	})
-	if err != nil {
-		return fmt.Errorf("connect to the target: %w", err)
-	}
-
-	// Nothing is read or written until the direction is agreed. A target that
-	// has been promoted, or a source that is itself somebody's target, means
-	// the pair has been reversed under us and carrying on would overwrite the
-	// newer side with the older one.
-	releaseGuard, guardErr := s.claimDirection(ctx, targetDB)
-	if guardErr != nil {
-		// A reversed direction is not something a retry resolves: somebody has
-		// to decide which side is authoritative.
-		if directionlock.IsBlocking(guardErr) {
-			return domain.Unrecoverable("%v", guardErr)
-		}
-		// Anything else is transient and the task is restarted for it: another
-		// process still finishing its shutdown, or an endpoint that is briefly
-		// unreachable — the guard reads its claims from the databases, so an
-		// outage on either side fails it while the outage lasts.
-		return fmt.Errorf("%w", guardErr)
-	}
-	defer releaseGuard()
-
-	// The stored checkpoint is the authority on whether the copy has been made:
-	// a previous run that reached the stream wrote one. Without it the copy runs
-	// and its starting coordinates are pinned first, so writes made while it is
-	// running are replayed by the stream rather than falling between the two.
-	checkpoints := s.checkpointStore(targetDB)
-	stored, err := s.loadCheckpoint(ctx, checkpoints)
-	if err != nil {
-		// "There is no checkpoint" and "the checkpoint could not be read" lead
-		// to opposite decisions, and acting on the wrong one either re-copies
-		// the whole database or skips whatever was in flight.
-		return fmt.Errorf("read the stored checkpoint, without which this task "+
-			"cannot safely decide where to resume from: %w", err)
-	}
-	if stored == nil {
-		stored = s.snapshot(ctx, targetDB)
-		if stored != nil {
-			if payload, encErr := checkpoint.Encode(*stored); encErr == nil {
-				if saveErr := checkpoints.Save(ctx, "", payload); saveErr != nil {
-					s.logger.Errorf("[MySQL] Failed to store the snapshot checkpoint: %v", saveErr)
-				}
-			}
-		}
-	} else {
-		s.logger.Infof("[MySQL] Resuming from a stored checkpoint: %+v", *stored)
-	}
-
-	h := &MyEventHandler{
-		targetDB:          targetDB,
-		mappings:          s.cfg.Mappings,
-		logger:            s.logger,
-		positionSaverPath: s.cfg.MySQLPositionPath,
-		canal:             c,
-		lastExecError:     0,
-		TargetConnection:  s.cfg.TargetConnection,
-		flavor:            cfg.Flavor,
-		source:            dsn.Endpoint(s.cfg.Type, s.cfg.SourceConnection),
-		labels:            s.metricLabels(),
-		discovering:       discovering,
-		sourceDatabase:    sourceDBName,
-		checkpoints:       checkpoints,
-		checkpointEvery:   checkpointInterval(),
-	}
-	c.SetEventHandler(h)
-
-	connCheckTicker := time.NewTicker(5 * time.Minute)
-	defer connCheckTicker.Stop()
-
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-connCheckTicker.C:
-				if err := resilience.CheckSQLConnection(ctx, targetDB); err != nil {
-					s.logger.Warnf("[MySQL] Target connection check failed: %v", err)
-					if newDB, err := resilience.ReopenSQLConnection(ctx, s.logger, s.cfg.TargetConnection, "mysql"); err == nil {
-						oldDB := targetDB
-						targetDB = newDB
-						h.setTargetDB(newDB)
-
-						if oldDB != nil {
-							_ = oldDB.Close()
-						}
-						s.logger.Info("[MySQL] Successfully reconnected to target database")
-					}
-				}
-			}
-		}
-	}()
-
-	stopped := make(chan error, 1)
-	var readerReturned atomic.Bool
-
-	// Stopping the reader is what makes this function's return mean anything.
-	// Cancelling the context used to return from here and leave canal reading the
-	// binlog and writing to the target for the life of the process: a task
-	// restarted by the supervisor ran a second reader beside the first, and a
-	// task edited to point somewhere else went on writing to where it used to
-	// point.
-	defer func() {
-		c.Close()
-		if !readerReturned.Load() {
-			select {
-			case <-stopped:
-			case <-time.After(10 * time.Second):
-				s.logger.Warn("[MySQL] The binlog reader did not stop within ten " +
-					"seconds of being closed")
-			}
-		}
-		h.recordPendingCheckpoint()
-	}()
-
-	go func() {
-		switch {
-		case stored == nil:
-			stopped <- c.Run()
-		case stored.gtidSet() != nil:
-			// Preferred: the transactions themselves, which stay meaningful
-			// across a failover to a different server.
-			stopped <- c.StartFromGTID(stored.gtidSet())
-		default:
-			stopped <- c.RunFrom(stored.position())
-		}
-	}()
-
-	metrics.SetTaskUp(s.metricLabels(), true)
-	defer metrics.SetTaskUp(s.metricLabels(), false)
-
-	select {
-	case <-ctx.Done():
-		s.logger.Info("[MySQL] Synchronization stopped.")
-		return nil
-
-	case runErr := <-stopped:
-		readerReturned.Store(true)
-		// The stream ended by itself. Whether that is worth retrying is the
-		// whole question: it used to be logged and then waited on for a context
-		// cancellation that might never come, so the task sat there doing
-		// nothing until the process restarted.
-		if runErr == nil {
-			s.logger.Warn("[MySQL] The binlog stream ended without an error.")
-			return nil
-		}
-		if strings.Contains(runErr.Error(), "context canceled") {
-			return nil
-		}
-		if reason, lost := positionNoLongerAvailable(runErr); lost {
-			return domain.Unrecoverable("%s", reason)
-		}
-		return fmt.Errorf("read the binlog: %w", runErr)
-	}
 }
 
 // positionNoLongerAvailable reports whether an error says the source has
@@ -299,55 +61,6 @@ func positionNoLongerAvailable(err error) (string, bool) {
 		}
 	}
 	return "", false
-}
-
-// snapshot copies the source into the target and reports the binlog coordinates
-// the stream must resume from. They are read before a row is copied, inside the
-// transaction the copy reads through: reading them afterwards loses every write
-// made while the copy ran.
-//
-// nil means they could not be pinned, so the caller has no safe place to
-// resume from.
-func (s *MySQLSyncer) snapshot(ctx context.Context, targetDB *sql.DB) *binlogCheckpoint {
-	sourceDB, err := sql.Open("mysql", s.cfg.SourceConnection)
-	if err != nil {
-		s.logger.Errorf("[MySQL] Failed to open source DB: %v", err)
-		return nil
-	}
-	defer sourceDB.Close()
-
-	// One pinned connection: the consistent snapshot and every SELECT that reads
-	// through it have to be the same session.
-	conn, err := sourceDB.Conn(ctx)
-	if err != nil {
-		s.logger.Errorf("[MySQL] Failed to pin a source connection: %v", err)
-		return nil
-	}
-	defer conn.Close()
-
-	if _, err := conn.ExecContext(ctx, "START TRANSACTION WITH CONSISTENT SNAPSHOT"); err != nil {
-		s.logger.Errorf("[MySQL] Failed to open a consistent snapshot: %v", err)
-		return nil
-	}
-	defer func() { _, _ = conn.ExecContext(ctx, "COMMIT") }()
-
-	pinned, err := s.sourceCheckpoint(ctx, conn)
-	if err != nil {
-		s.logger.Errorf("[MySQL] Failed to read the source binlog coordinates: %v. "+
-			"The copy cannot start without them, because every write made while "+
-			"it ran would then belong to neither the copy nor the stream", err)
-		return nil
-	}
-	pinned.Source = dsn.Endpoint(s.cfg.Type, s.cfg.SourceConnection)
-	s.logger.Infof("[MySQL] Snapshot pinned at %+v", *pinned)
-
-	if err := s.doInitialSync(ctx, conn, targetDB); err != nil {
-		s.logger.Errorf("[MySQL] %v", err)
-		// Without coordinates the caller has nothing safe to resume from, which
-		// is exactly the situation an incomplete copy leaves.
-		return nil
-	}
-	return pinned
 }
 
 // sourceCheckpoint reads the source's current binlog coordinates.
@@ -774,122 +487,6 @@ func (c *binlogCheckpoint) gtidSet() mysql.GTIDSet {
 	return set
 }
 
-// checkpointStore is where this task records its offset. It writes to the
-// target database as well as the configured file.
-func (s *MySQLSyncer) checkpointStore(targetDB *sql.DB) checkpoint.Store {
-	stores := []checkpoint.Store{
-		&checkpoint.SQLStore{
-			DB:     targetDB,
-			Schema: dsn.GetDatabaseName(s.cfg.Type, s.cfg.TargetConnection),
-			TaskID: s.cfg.ID,
-		},
-	}
-	if s.cfg.MySQLPositionPath != "" {
-		stores = append(stores, &checkpoint.FileStore{Path: s.cfg.MySQLPositionPath})
-	}
-	return &checkpoint.Layered{
-		Stores:  stores,
-		OnError: func(err error) { s.logger.Warnf("[MySQL] Checkpoint store: %v", err) },
-	}
-}
-
-func (s *MySQLSyncer) loadCheckpoint(ctx context.Context, store checkpoint.Store) (*binlogCheckpoint, error) {
-	payload, err := store.Load(ctx, "")
-	if err != nil {
-		return nil, err
-	}
-
-	var cp binlogCheckpoint
-	found, err := checkpoint.Decode(payload, &cp)
-	if err != nil {
-		return nil, fmt.Errorf("read the stored checkpoint: %w", err)
-	}
-	if !found || cp.Name == "" {
-		return nil, nil
-	}
-
-	// A checkpoint written against another server is worse than none: the offset
-	// would be read against data it does not describe, successfully, and the
-	// task would resume from somewhere arbitrary.
-	if want := dsn.Endpoint(s.cfg.Type, s.cfg.SourceConnection); cp.Source != "" && cp.Source != want {
-		s.logger.Warnf("[MySQL] Ignoring a checkpoint recorded against %s: this task "+
-			"reads %s, and a binlog offset means nothing on another server. The copy "+
-			"will be made again.", cp.Source, want)
-		return nil, nil
-	}
-	return &cp, nil
-}
-
-// loadBinlogPosition reports the file-and-offset pair recorded in a file, for
-// callers that only need that half.
-func (s *MySQLSyncer) loadBinlogPosition(path string) *mysql.Position {
-	cp, err := s.loadCheckpoint(context.Background(), &checkpoint.FileStore{Path: path})
-	if err != nil || cp == nil {
-		return nil
-	}
-	pos := cp.position()
-	return &pos
-}
-
-// parseAddr reports the host and port canal should dial.
-//
-// The driver's own parser is used rather than splitting on punctuation: "@"
-// and ":" are both legal inside a password, and Cloud SQL generates passwords
-// that contain them. Splitting by hand recovered the wrong credentials and the
-// only symptom was an authentication failure that named neither.
-func (s *MySQLSyncer) parseAddr(dsn string) string {
-	// An empty DSN parses into the driver's defaults, which would have canal
-	// quietly dial 127.0.0.1:3306 instead of the configured source.
-	if dsn == "" {
-		s.logger.Error("[MySQL] No source connection configured")
-		return ""
-	}
-	cfg, err := mysqldriver.ParseDSN(dsn)
-	if err != nil {
-		s.logger.Errorf("[MySQL] Invalid DSN => %v", err)
-		return ""
-	}
-	if cfg.Net != "tcp" {
-		s.logger.Errorf("[MySQL] Replication needs a tcp DSN, got net=%q", cfg.Net)
-		return ""
-	}
-	return cfg.Addr
-}
-
-// sourceTLS reports the TLS settings the binlog connection should use.  canal
-// opens its own connection rather than going through database/sql, so the tls
-// parameter in the DSN does not reach it: without this the row events would
-// cross the region in the clear even when every other connection is encrypted.
-// A DSN asking for "preferred" gets no TLS here, because canal has no way to
-// negotiate and fall back — asking for it unconditionally would break a server
-// that has no certificate.
-func (s *MySQLSyncer) sourceTLS() *tls.Config {
-	cfg, err := mysqldriver.ParseDSN(s.cfg.SourceConnection)
-	if err != nil {
-		return nil
-	}
-	switch strings.ToLower(cfg.TLSConfig) {
-	case "true":
-		host, _, splitErr := net.SplitHostPort(cfg.Addr)
-		if splitErr != nil {
-			host = cfg.Addr
-		}
-		return &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12}
-	case "skip-verify":
-		return &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}
-	}
-	return nil
-}
-
-func (s *MySQLSyncer) parseUserPassword(dsn string) (string, string) {
-	cfg, err := mysqldriver.ParseDSN(dsn)
-	if err != nil {
-		s.logger.Errorf("[MySQL] Invalid DSN => %v", err)
-		return "", ""
-	}
-	return cfg.User, cfg.Passwd
-}
-
 func (s *MySQLSyncer) getTableColumns(ctx context.Context, db *sql.Conn, database, table string) ([]string, error) {
 	query := fmt.Sprintf("SHOW COLUMNS FROM %s.%s", database, table)
 	rows, err := db.QueryContext(ctx, query)
@@ -913,39 +510,17 @@ func (s *MySQLSyncer) getTableColumns(ctx context.Context, db *sql.Conn, databas
 	return cols, nil
 }
 
+// MyEventHandler renders binlog row events into target statements. It was
+// canal's event handler as well, which is why it embedded DummyEventHandler;
+// Reader is the handler now, so the embedding is gone — with it in place a call
+// to a callback this type no longer implements resolved to canal's no-op
+// instead of failing to compile.
 type MyEventHandler struct {
-	canal.DummyEventHandler
-	// mu guards targetDB and pending. Row events arrive on canal's goroutine
-	// while the health check may replace the connection from its own.
-	mu           sync.Mutex
-	pending      []statement
-	pendingLimit int
-	targetDB     *sql.DB
+	// mu guards keylessTables, written from canal's goroutine.
+	mu sync.Mutex
 
-	mappings          []config.DatabaseMapping
-	logger            logrus.FieldLogger
-	positionSaverPath string
-	// checkpoints is where the offset is recorded. It writes to the target
-	// database as well as the local file, so a syncer replaced in the other
-	// region can find out where to resume from.
-	checkpoints checkpoint.Store
-	// lastCheckpointAt is when the offset was last recorded, and checkpointEvery
-	// is how often it may be. canal reports a synced position once per source
-	// transaction, and recording every one of them meant a round trip and an
-	// fsync on the target for every transaction replicated: measured against
-	// MySQL 8.1, that held the apply rate to 47 rows a second where the target
-	// itself accepted 177. Recording less often costs nothing but a replay of
-	// the interval after an unclean stop, and replaying is already safe — the
-	// applied statements are idempotent, which is what makes an interrupted
-	// batch recoverable at all.
-	lastCheckpointAt time.Time
-	checkpointEvery  time.Duration
-	// pendingCheckpoint is the most recent position not yet recorded, so a clean
-	// stop can record it and start from where it actually got to.
-	pendingCheckpoint string
-
-	canal         *canal.Canal
-	lastExecError int32
+	mappings []config.DatabaseMapping
+	logger   logrus.FieldLogger
 	// keylessTables names the tables already reported as having no primary key,
 	// so the warning appears once rather than once per row.
 	keylessTables    map[string]bool
@@ -964,22 +539,17 @@ type MyEventHandler struct {
 	// database of its own, and without this there was nothing to compare it
 	// against: see replicatesSchema.
 	sourceDatabase string
-	// sourceEventAt is when the source made the change the buffer is holding.
-	// The applied lag is measured from it, which is the number a
-	// disaster-recovery setup is judged on.
-	sourceEventAt time.Time
 	// dialect is the flavour the target speaks. The zero value is MySQL, so a
 	// handler built without naming one behaves as production does.
 	dialect dialect
-	// sink diverts the statements this handler builds instead of buffering them
-	// for its own flush. The single-stream reader sets it so that one piece of
-	// conversion code serves both the old path and the pipeline.
+	// sink takes the statements this handler renders. It is the only way out:
+	// the handler used to buffer and apply them itself, which is the pipeline's
+	// job now.
 	sink func(*statement) error
 	// allowKeyless lets a table with no primary key be replicated on a
 	// best-effort basis: inserts arrive, updates and deletes do not. It is off
 	// by default because the two sides then drift apart silently, which is not a
-	// thing payment data may do. An operator who knows what they are accepting
-	// turns it on deliberately.
+	// thing payment data may do.
 	allowKeyless bool
 }
 
@@ -1014,9 +584,6 @@ func (h *MyEventHandler) OnRow(e *canal.RowsEvent) error {
 
 	if e.Header != nil && e.Header.Timestamp > 0 {
 		at := time.Unix(int64(e.Header.Timestamp), 0)
-		h.mu.Lock()
-		h.sourceEventAt = at
-		h.mu.Unlock()
 		metrics.SetReadLag(h.labels, time.Since(at).Seconds())
 	}
 
@@ -1242,87 +809,18 @@ func (h *MyEventHandler) warnAboutMissingKey(db, table string) {
 
 // enqueue adds a statement to the open transaction, flushing early when the
 // buffer has grown past what is safe to hold.
+// enqueue hands a rendered statement to whoever asked for it. The sink is the
+// only path: this used to buffer and apply the statements itself, which is what
+// the pipeline's applier does now.
 func (h *MyEventHandler) enqueue(stmt *statement) error {
 	if stmt == nil {
 		return nil
 	}
-	if h.sink != nil {
-		return h.sink(stmt)
+	if h.sink == nil {
+		return fmt.Errorf("no sink is set, so the statement for %s would be dropped",
+			h.sourceDatabase)
 	}
-
-	h.mu.Lock()
-	h.pending = append(h.pending, *stmt)
-	overflow := len(h.pending) >= h.maxPending()
-	h.mu.Unlock()
-
-	if !overflow {
-		return nil
-	}
-	h.logger.Warnf("[MySQL] Source transaction exceeds %d statements; applying it "+
-		"in more than one target transaction", h.maxPending())
-	return h.flush()
-}
-
-// maxPending reports the buffer cap. The zero value means the package default;
-// the field exists so a test can reach the cap without building ten thousand
-// statements.
-func (h *MyEventHandler) maxPending() int {
-	if h.pendingLimit > 0 {
-		return h.pendingLimit
-	}
-	return maxPendingStatements
-}
-
-// flush applies the buffered statements as one transaction on the target.
-//
-// Either every statement of a source transaction lands or none of it does. A
-// reader on the target can otherwise observe a state that never existed at the
-// source, which for a payment ledger means a debit without its matching credit.
-func (h *MyEventHandler) flush() error {
-	h.mu.Lock()
-	pending := h.pending
-	h.pending = nil
-	db := h.targetDB
-	eventAt := h.sourceEventAt
-	h.mu.Unlock()
-
-	if len(pending) == 0 {
-		return nil
-	}
-	if db == nil {
-		return fmt.Errorf("apply %d statements: no target connection", len(pending))
-	}
-
-	err := resilience.RetryDBOperation(context.Background(), h.logger,
-		fmt.Sprintf("apply %d statements", len(pending)),
-		func() error {
-			tx, err := db.Begin()
-			if err != nil {
-				return err
-			}
-			for _, stmt := range pending {
-				if _, err := tx.Exec(stmt.query, stmt.args...); err != nil {
-					_ = tx.Rollback()
-					return fmt.Errorf("%s: %w", stmt.query, err)
-				}
-			}
-			return tx.Commit()
-		})
-
-	if err != nil {
-		h.logger.Errorf("[MySQL] Failed to apply a source transaction of %d "+
-			"statements: %v", len(pending), err)
-		atomic.StoreInt32(&h.lastExecError, 1)
-		metrics.Failed(h.labels, len(pending))
-		return fmt.Errorf("apply source transaction: %w", err)
-	}
-
-	metrics.Applied(h.labels, len(pending))
-	if !eventAt.IsZero() {
-		metrics.SetLag(h.labels, time.Since(eventAt).Seconds())
-	}
-	h.logger.Debugf("[MySQL] Applied a source transaction of %d statements", len(pending))
-	return nil
+	return h.sink(stmt)
 }
 
 // defaultCheckpointInterval is how often the binlog position is recorded.
@@ -1331,117 +829,6 @@ func (h *MyEventHandler) flush() error {
 // replicated, which is most of the cost of replicating a payment ledger where
 // every payment is its own transaction.
 const defaultCheckpointInterval = 200 * time.Millisecond
-
-// checkpointInterval reports the interval, which SYNC_MYSQL_CHECKPOINT_INTERVAL
-// overrides with any duration Go can parse. Zero records every position, which
-// is the old behaviour and is available for anyone who wants it.
-func checkpointInterval() time.Duration {
-	raw := strings.TrimSpace(os.Getenv("SYNC_MYSQL_CHECKPOINT_INTERVAL"))
-	if raw == "" {
-		return defaultCheckpointInterval
-	}
-	parsed, err := time.ParseDuration(raw)
-	if err != nil || parsed < 0 {
-		return defaultCheckpointInterval
-	}
-	return parsed
-}
-
-// OnXID marks the end of a source transaction, which is where the buffered
-// statements are applied.
-func (h *MyEventHandler) OnXID(*replication.EventHeader, mysql.Position) error {
-	return h.flush()
-}
-
-// setTargetDB swaps the connection the handler writes through. The health check
-// reconnects from its own goroutine, so the field needs the same lock the
-// statement buffer uses.
-func (h *MyEventHandler) setTargetDB(db *sql.DB) {
-	h.mu.Lock()
-	h.targetDB = db
-	h.mu.Unlock()
-}
-
-func (h *MyEventHandler) OnPosSynced(header *replication.EventHeader, pos mysql.Position, set mysql.GTIDSet, force bool) error {
-	// A source that never sends XID events — a non-transactional engine, or a
-	// stream that stops mid-transaction — would otherwise leave rows buffered
-	// indefinitely. This is the periodic checkpoint, so drain here too. The
-	// failure is already recorded on the handler, and the guard below keeps the
-	// offset where it is.
-	_ = h.flush()
-
-	if h.checkpoints == nil {
-		return nil
-	}
-
-	// The offset is only meaningful if everything before it reached the target.
-	// Once a statement has failed the flag stays raised for the life of the
-	// handler, so the stored position never moves past the loss and a restart
-	// replays from the last offset that was fully applied.
-	if atomic.LoadInt32(&h.lastExecError) != 0 {
-		h.logger.Warnf("[MySQL] Not writing position %v: an earlier statement "+
-			"failed to apply, so replication must resume from the stored offset", pos)
-		return nil
-	}
-
-	h.logger.Debugf("[MySQL] Syncing position: %v, force: %v", pos, force)
-
-	cp := binlogCheckpoint{Name: pos.Name, Pos: pos.Pos, Source: h.source}
-	if set != nil {
-		cp.GTID = set.String()
-		cp.Flavor = h.flavor
-	}
-
-	payload, err := checkpoint.Encode(cp)
-	if err != nil {
-		h.logger.Errorf("[MySQL] Failed to marshal position: %v", err)
-		return err
-	}
-
-	// force means canal is at a boundary it wants recorded — a rotate, or a
-	// stop — and those are rare enough to honour immediately.
-	if !force && h.checkpointEvery > 0 && time.Since(h.lastCheckpointAt) < h.checkpointEvery {
-		h.pendingCheckpoint = payload
-		return nil
-	}
-	if err := h.recordCheckpoint(payload); err != nil {
-		return err
-	}
-
-	h.logger.Debugf("[MySQL] Recorded binlog position: %v", pos)
-	return nil
-}
-
-func (h *MyEventHandler) recordCheckpoint(payload string) error {
-	if err := h.checkpoints.Save(context.Background(), "", payload); err != nil {
-		h.logger.Errorf("[MySQL] Failed to record the position: %v", err)
-		return err
-	}
-	h.lastCheckpointAt = time.Now()
-	h.pendingCheckpoint = ""
-	return nil
-}
-
-// recordPendingCheckpoint writes the position the throttle was holding back.
-//
-// It runs on a clean stop, so an orderly restart resumes from where replication
-// actually got to rather than replaying the last interval. An unclean stop
-// replays it, which is safe and is the whole reason the interval is affordable.
-func (h *MyEventHandler) recordPendingCheckpoint() {
-	if h.checkpoints == nil || h.pendingCheckpoint == "" {
-		return
-	}
-	if atomic.LoadInt32(&h.lastExecError) != 0 {
-		return
-	}
-	if err := h.recordCheckpoint(h.pendingCheckpoint); err != nil {
-		h.logger.Warnf("[MySQL] Could not record the final position: %v", err)
-	}
-}
-
-func (h *MyEventHandler) String() string {
-	return "MyEventHandler"
-}
 
 // claimDirection records which way this task replicates, on both databases, and
 // keeps the claims refreshed for as long as it runs.
@@ -1527,24 +914,6 @@ func (s *MySQLSyncer) resolveMappings(ctx context.Context, conn *sql.Conn, sourc
 	}
 	s.logger.Infof("[MySQL] Discovered %d tables in %s", len(mapped), sourceDBName)
 	return []config.DatabaseMapping{{Tables: mapped}}
-}
-
-// checkRowImage refuses a source whose binlog does not carry whole rows.
-//
-// canal checks binlog_format for itself, but not binlog_row_image: that check is
-// an exported method it never calls. MariaDB has no such setting and always logs
-// the whole row, so it is only asked of MySQL.
-func (s *MySQLSyncer) checkRowImage(c *canal.Canal) error {
-	if strings.EqualFold(s.cfg.Type, "mariadb") {
-		return nil
-	}
-
-	result, err := c.Execute(`SHOW GLOBAL VARIABLES LIKE 'binlog_row_image'`)
-	if err != nil {
-		return fmt.Errorf("read binlog_row_image: %w", err)
-	}
-	image, _ := result.GetString(0, 1)
-	return requireFullRowImage(image)
 }
 
 // requireFullRowImage reports why a binlog row image cannot be replicated

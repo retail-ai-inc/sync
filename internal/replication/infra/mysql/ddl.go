@@ -1,14 +1,9 @@
 package mysql
 
 import (
-	"context"
 	"fmt"
-	"github.com/retail-ai-inc/sync/internal/platform/metrics"
 	"strings"
-	"sync/atomic"
 
-	"github.com/go-mysql-org/go-mysql/mysql"
-	"github.com/go-mysql-org/go-mysql/replication"
 	"github.com/pingcap/tidb/pkg/parser"
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/format"
@@ -22,7 +17,6 @@ import (
 	_ "github.com/pingcap/tidb/pkg/parser/test_driver"
 
 	"github.com/retail-ai-inc/sync/internal/platform/dsn"
-	"github.com/retail-ai-inc/sync/internal/platform/resilience"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/discovery"
 )
 
@@ -215,82 +209,4 @@ func (h *MyEventHandler) planDDL(defaultSchema, query string) ([]ddlDecision, er
 		decisions = append(decisions, ddlDecision{action: ddlApply, query: sb.String()})
 	}
 	return decisions, nil
-}
-
-// OnDDL propagates a schema change to the target.
-//
-// Without it a column added at the source never reached the target, and every
-// row event that used the new column failed to apply from then on — which,
-// before the offset was made to wait on successful writes, meant the task went
-// on silently discarding rows.
-func (h *MyEventHandler) OnDDL(_ *replication.EventHeader, _ mysql.Position, e *replication.QueryEvent) error {
-	// A schema change closes whatever transaction was open.
-	if err := h.flush(); err != nil {
-		return err
-	}
-	if e == nil {
-		return nil
-	}
-	query := string(e.Query)
-
-	decisions, err := h.planDDL(string(e.Schema), query)
-	if err != nil {
-		// The statement cannot be read, which is also true of the BEGIN and
-		// COMMIT markers that arrive as query events. Carrying on is right for
-		// those; for anything else the schemas may drift, so say so loudly.
-		h.logger.Warnf("[MySQL][DDL] Not propagating a statement that could not be "+
-			"parsed: %v", err)
-		return nil
-	}
-
-	for _, decision := range decisions {
-		switch decision.action {
-		case ddlSkip:
-			metrics.CountSchemaRefused(h.labels, "skipped")
-			h.logger.Debugf("[MySQL][DDL] Skipping %q: %s", query, decision.reason)
-
-		case ddlBlock:
-			// A refusal is a decision, and a decision nobody can see is a
-			// decision nobody can audit. This is the path a TRUNCATE or a DROP
-			// takes, so it is the one that has to be counted.
-			metrics.CountSchemaRefused(h.labels, "blocked")
-			atomic.StoreInt32(&h.lastExecError, 1)
-			return fmt.Errorf("refusing to replicate %q: it %s. Replication has "+
-				"stopped so the change can be made on the target deliberately; "+
-				"clear the stored position to resume", query, decision.reason)
-
-		case ddlApply:
-			metrics.CountSchemaChange(h.labels, 1)
-			metrics.SetSchemaChangeAge(h.labels, 0)
-			h.logger.Infof("[MySQL][DDL] Applying %q", decision.query)
-			if err := h.execDDL(decision.query); err != nil {
-				atomic.StoreInt32(&h.lastExecError, 1)
-				return fmt.Errorf("apply DDL %q: %w", decision.query, err)
-			}
-		}
-	}
-	return nil
-}
-
-func (h *MyEventHandler) execDDL(query string) error {
-	h.mu.Lock()
-	db := h.targetDB
-	h.mu.Unlock()
-
-	if db == nil {
-		return fmt.Errorf("no target connection")
-	}
-	return resilience.RetryDBOperation(context.Background(), h.logger, "DDL",
-		func() error {
-			_, err := db.Exec(query)
-			return err
-		})
-}
-
-// OnTableChanged records that canal has seen a table's definition change. The
-// statement itself arrives separately at OnDDL; this is the boundary, so
-// anything still buffered belongs to the old definition and is applied first.
-func (h *MyEventHandler) OnTableChanged(_ *replication.EventHeader, schema, table string) error {
-	h.logger.Infof("[MySQL][DDL] Source table %s.%s changed", schema, table)
-	return h.flush()
 }

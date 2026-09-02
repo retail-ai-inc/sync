@@ -454,3 +454,58 @@ func TestTheSourceInfoIsPublishedOnlyWhenTheLogFileChanges(t *testing.T) {
 		t.Errorf("lastLogFile = %q, want the rotated file", r.lastLogFile)
 	}
 }
+
+// A file and offset recorded against another server is worse than no position:
+// read successfully, against data it does not describe. The old syncer checked
+// this and the pipeline did not.
+func TestAPositionFromAnotherServerIsRefused(t *testing.T) {
+	stored := &binlogCheckpoint{
+		Name:   "binlog.000012",
+		Pos:    41017161,
+		Source: "10.0.0.1:3306/shop",
+	}
+
+	err := resumableHere(stored, "10.0.0.2:3306/shop")
+	if err == nil {
+		t.Fatal("a file-and-offset position from another server was accepted")
+	}
+	if !domain.IsUnrecoverable(err) {
+		t.Errorf("err = %v, want it unrecoverable: retrying reads the same wrong bytes", err)
+	}
+	for _, want := range []string{"10.0.0.1:3306/shop", "10.0.0.2:3306/shop"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal does not name %q, so nobody can act on it: %v", want, err)
+		}
+	}
+}
+
+// A GTID set names transactions rather than a place in one server's log, so it
+// survives the failover this deployment exists for. Discarding it because the
+// endpoint moved would force a full re-copy every time Osaka took over.
+func TestAGTIDPositionSurvivesTheServerChanging(t *testing.T) {
+	stored := &binlogCheckpoint{
+		Name:   "binlog.000012",
+		Pos:    41017161,
+		GTID:   "e67b8f4b-a2d6-11f1-9406-42010a400002:1-624",
+		Source: "10.0.0.1:3306/shop",
+	}
+
+	if err := resumableHere(stored, "10.0.0.2:3306/shop"); err != nil {
+		t.Errorf("a GTID position was refused after a failover: %v", err)
+	}
+}
+
+// The same source, and no source at all — a checkpoint from a build that did
+// not record one — both resume.
+func TestAPositionFromThisServerResumes(t *testing.T) {
+	here := "10.0.0.1:3306/shop"
+	for _, stored := range []*binlogCheckpoint{
+		{Name: "binlog.000012", Pos: 41017161, Source: here},
+		{Name: "binlog.000012", Pos: 41017161},
+		{},
+	} {
+		if err := resumableHere(stored, here); err != nil {
+			t.Errorf("resumableHere(%+v) = %v", stored, err)
+		}
+	}
+}

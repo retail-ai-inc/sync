@@ -3,20 +3,16 @@ package mysql
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
-	"os"
+	"fmt"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"testing"
 
 	"github.com/go-mysql-org/go-mysql/canal"
-	"github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/schema"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/retail-ai-inc/sync/internal/platform/config"
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
-	"github.com/retail-ai-inc/sync/internal/replication/infra/checkpoint"
 	"github.com/sirupsen/logrus"
 )
 
@@ -49,7 +45,6 @@ func newHandler(t *testing.T, db *sql.DB, mappings []config.DatabaseMapping) *My
 	logger := logrus.New()
 	logger.SetLevel(logrus.PanicLevel)
 	return &MyEventHandler{
-		targetDB:         db,
 		mappings:         mappings,
 		logger:           logger,
 		TargetConnection: targetDSN,
@@ -88,36 +83,47 @@ func securedTable(source, target string, fields ...string) []config.DatabaseMapp
 	}}
 }
 
-// storedCheckpoint reads back what the saver wrote to a file, which is what a
-// test can inspect without a target database.
-func storedCheckpoint(t *testing.T, path string) *binlogCheckpoint {
-	t.Helper()
-
-	cp, err := newSyncer(t).loadCheckpoint(context.Background(), &checkpoint.FileStore{Path: path})
-	if err != nil {
-		t.Fatalf("loadCheckpoint: %v", err)
+// insertEvent is one INSERT against the orders fixture.
+func insertEvent(values ...interface{}) *canal.RowsEvent {
+	return &canal.RowsEvent{
+		Table:  sourceTable("orders", "id", "customer", "email"),
+		Action: canal.InsertAction,
+		Rows:   [][]interface{}{values},
 	}
-	return cp
 }
 
-// fileHandler builds a handler whose checkpoints go to a file, so the position
-// saver can be exercised without a target database.
-func fileHandler(t *testing.T, db *sql.DB, mappings []config.DatabaseMapping, path string) *MyEventHandler {
-	t.Helper()
+// apply renders one row event and writes what it produced in a single
+// transaction, which is what the pipeline's applier does with a batch.
+func apply(db *sql.DB, h *MyEventHandler, e *canal.RowsEvent) error {
+	var pending []statement
+	previous := h.sink
+	h.sink = func(stmt *statement) error {
+		pending = append(pending, *stmt)
+		return nil
+	}
+	defer func() { h.sink = previous }()
 
-	h := newHandler(t, db, mappings)
-	h.checkpoints = &checkpoint.FileStore{Path: path}
-
-	h.positionSaverPath = path
-	h.checkpoints = &checkpoint.FileStore{Path: path}
-	return h
-}
-
-func apply(h *MyEventHandler, e *canal.RowsEvent) error {
 	if err := h.OnRow(e); err != nil {
 		return err
 	}
-	return h.OnXID(nil, mysql.Position{})
+	if len(pending) == 0 {
+		return nil
+	}
+	if db == nil {
+		return fmt.Errorf("apply %d statements: no target connection", len(pending))
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	for _, stmt := range pending {
+		if _, err := tx.Exec(stmt.query, stmt.args...); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("%s: %w", stmt.query, err)
+		}
+	}
+	return tx.Commit()
 }
 
 func rows(t *testing.T, db *sql.DB) []string {
@@ -145,7 +151,7 @@ func TestOnRowAppliesAnInsert(t *testing.T) {
 	db := sqliteTarget(t, ordersSchema)
 	h := newHandler(t, db, mapTable("orders", "orders"))
 
-	err := apply(h, &canal.RowsEvent{
+	err := apply(db, h, &canal.RowsEvent{
 		Table:  sourceTable("orders", "id", "customer", "email"),
 		Action: canal.InsertAction,
 		Rows:   [][]interface{}{{"1", "Ada", "ada@example.com"}},
@@ -162,7 +168,7 @@ func TestOnRowAppliesEveryRowOfABatch(t *testing.T) {
 	db := sqliteTarget(t, ordersSchema)
 	h := newHandler(t, db, mapTable("orders", "orders"))
 
-	if err := apply(h, &canal.RowsEvent{
+	if err := apply(db, h, &canal.RowsEvent{
 		Table:  sourceTable("orders", "id", "customer", "email"),
 		Action: canal.InsertAction,
 		Rows:   [][]interface{}{{"1", "Ada", "x"}, {"2", "Grace", "y"}},
@@ -178,7 +184,7 @@ func TestOnRowRenamesTheTargetTable(t *testing.T) {
 	db := sqliteTarget(t, `CREATE TABLE orders_archive (id TEXT, customer TEXT, email TEXT)`)
 	h := newHandler(t, db, mapTable("orders", "orders_archive"))
 
-	if err := apply(h, &canal.RowsEvent{
+	if err := apply(db, h, &canal.RowsEvent{
 		Table:  sourceTable("orders", "id", "customer", "email"),
 		Action: canal.InsertAction,
 		Rows:   [][]interface{}{{"1", "Ada", "x"}},
@@ -199,7 +205,7 @@ func TestOnRowSkipsAnUnmappedTable(t *testing.T) {
 	db := sqliteTarget(t, ordersSchema)
 	h := newHandler(t, db, mapTable("customers", "customers"))
 
-	if err := apply(h, &canal.RowsEvent{
+	if err := apply(db, h, &canal.RowsEvent{
 		Table:  sourceTable("orders", "id", "customer", "email"),
 		Action: canal.InsertAction,
 		Rows:   [][]interface{}{{"1", "Ada", "x"}},
@@ -224,7 +230,7 @@ func TestAMappingThatNamesItsDatabaseIsHeldToIt(t *testing.T) {
 	other := sourceTable("orders", "id", "customer", "email")
 	other.Schema = "a_completely_different_database"
 
-	if err := apply(h, &canal.RowsEvent{
+	if err := apply(db, h, &canal.RowsEvent{
 		Table: other, Action: canal.InsertAction,
 		Rows: [][]interface{}{{"1", "Ada", "x"}},
 	}); err != nil {
@@ -242,7 +248,7 @@ func TestAMappingWithNoDatabaseMatchesAnyOfThem(t *testing.T) {
 	db := sqliteTarget(t, ordersSchema)
 	h := newHandler(t, db, mapTable("orders", "orders"))
 
-	if err := apply(h, &canal.RowsEvent{
+	if err := apply(db, h, &canal.RowsEvent{
 		Table:  sourceTable("orders", "id", "customer", "email"),
 		Action: canal.InsertAction,
 		Rows:   [][]interface{}{{"1", "Ada", "x"}},
@@ -267,7 +273,7 @@ func TestATableCanBeFannedOutToTwoTargets(t *testing.T) {
 		{Tables: []config.TableMapping{{SourceTable: "orders", TargetTable: "orders_copy"}}},
 	})
 
-	if err := apply(h, &canal.RowsEvent{
+	if err := apply(db, h, &canal.RowsEvent{
 		Table:  sourceTable("orders", "id", "customer", "email"),
 		Action: canal.InsertAction,
 		Rows:   [][]interface{}{{"1", "Ada", "x"}},
@@ -294,7 +300,7 @@ func TestOnRowAppliesAnUpdate(t *testing.T) {
 	}
 	h := newHandler(t, db, mapTable("orders", "orders"))
 
-	if err := apply(h, &canal.RowsEvent{
+	if err := apply(db, h, &canal.RowsEvent{
 		Table:  sourceTable("orders", "id", "customer", "email"),
 		Action: canal.UpdateAction,
 		Rows: [][]interface{}{
@@ -319,7 +325,7 @@ func TestAnUpdateMatchesOnTheOldPrimaryKey(t *testing.T) {
 	}
 	h := newHandler(t, db, mapTable("orders", "orders"))
 
-	if err := apply(h, &canal.RowsEvent{
+	if err := apply(db, h, &canal.RowsEvent{
 		Table:  sourceTable("orders", "id", "customer", "email"),
 		Action: canal.UpdateAction,
 		Rows:   [][]interface{}{{"1", "Ada", "x"}, {"9", "Ada", "x"}},
@@ -338,7 +344,7 @@ func TestAnOddUpdateBatchIsRejected(t *testing.T) {
 	db := sqliteTarget(t, ordersSchema)
 	h := newHandler(t, db, mapTable("orders", "orders"))
 
-	err := apply(h, &canal.RowsEvent{
+	err := apply(db, h, &canal.RowsEvent{
 		Table:  sourceTable("orders", "id", "customer", "email"),
 		Action: canal.UpdateAction,
 		Rows:   [][]interface{}{{"1", "Ada", "x"}},
@@ -358,7 +364,7 @@ func TestOnRowAppliesADelete(t *testing.T) {
 	}
 	h := newHandler(t, db, mapTable("orders", "orders"))
 
-	if err := apply(h, &canal.RowsEvent{
+	if err := apply(db, h, &canal.RowsEvent{
 		Table:  sourceTable("orders", "id", "customer", "email"),
 		Action: canal.DeleteAction,
 		Rows:   [][]interface{}{{"1", "Ada", "x"}},
@@ -380,7 +386,7 @@ func TestTheDeleteMatchesOnTheKeyAlone(t *testing.T) {
 	}
 	h := newHandler(t, db, mapTable("orders", "orders"))
 
-	if err := apply(h, &canal.RowsEvent{
+	if err := apply(db, h, &canal.RowsEvent{
 		Table:  sourceTable("orders", "id", "customer", "email"),
 		Action: canal.DeleteAction,
 		Rows:   [][]interface{}{{"1", "Ada", "x"}},
@@ -398,7 +404,7 @@ func TestAnUnknownActionStopsReplication(t *testing.T) {
 	db := sqliteTarget(t, ordersSchema)
 	h := newHandler(t, db, mapTable("orders", "orders"))
 
-	err := apply(h, &canal.RowsEvent{
+	err := apply(db, h, &canal.RowsEvent{
 		Table:  sourceTable("orders", "id", "customer", "email"),
 		Action: "truncate",
 		Rows:   [][]interface{}{{"1", "Ada", "x"}},
@@ -427,7 +433,7 @@ func TestAnUpdateWithNoPrimaryKeyStopsReplication(t *testing.T) {
 	}
 	h := newHandler(t, db, mapTable("orders", "orders"))
 
-	err := apply(h, &canal.RowsEvent{
+	err := apply(db, h, &canal.RowsEvent{
 		Table: keylessTable(), Action: canal.UpdateAction,
 		Rows: [][]interface{}{{"1", "Ada", "x"}, {"1", "Grace", "y"}},
 	})
@@ -447,7 +453,7 @@ func TestADeleteWithNoPrimaryKeyStopsReplication(t *testing.T) {
 	}
 	h := newHandler(t, db, mapTable("orders", "orders"))
 
-	err := apply(h, &canal.RowsEvent{
+	err := apply(db, h, &canal.RowsEvent{
 		Table: keylessTable(), Action: canal.DeleteAction,
 		Rows: [][]interface{}{{"1", "Ada", "x"}},
 	})
@@ -463,9 +469,10 @@ func TestADeleteWithNoPrimaryKeyStopsReplication(t *testing.T) {
 // TestTheKeylessRefusalNamesTheTable is what makes the stop actionable: an
 // operator woken by it has to know which table to fix.
 func TestTheKeylessRefusalNamesTheTable(t *testing.T) {
-	h := newHandler(t, sqliteTarget(t, ordersSchema), mapTable("orders", "orders"))
+	db := sqliteTarget(t, ordersSchema)
+	h := newHandler(t, db, mapTable("orders", "orders"))
 
-	err := apply(h, &canal.RowsEvent{
+	err := apply(db, h, &canal.RowsEvent{
 		Table: keylessTable(), Action: canal.DeleteAction,
 		Rows: [][]interface{}{{"1", "Ada", "x"}},
 	})
@@ -487,7 +494,7 @@ func TestAllowKeylessRestoresTheBestEffortCopy(t *testing.T) {
 	h := newHandler(t, db, mapTable("orders", "orders"))
 	h.allowKeyless = true
 
-	if err := apply(h, &canal.RowsEvent{
+	if err := apply(db, h, &canal.RowsEvent{
 		Table: keylessTable(), Action: canal.DeleteAction,
 		Rows: [][]interface{}{{"1", "Ada", "x"}},
 	}); err != nil {
@@ -507,7 +514,7 @@ func TestAnInsertWithNoPrimaryKeyStillRuns(t *testing.T) {
 	table := sourceTable("orders", "id", "customer", "email")
 	table.PKColumns = nil
 
-	if err := apply(h, &canal.RowsEvent{
+	if err := apply(db, h, &canal.RowsEvent{
 		Table: table, Action: canal.InsertAction,
 		Rows: [][]interface{}{{"1", "Ada", "x"}},
 	}); err != nil {
@@ -522,7 +529,7 @@ func TestAnInsertMasksASecuredField(t *testing.T) {
 	db := sqliteTarget(t, ordersSchema)
 	h := newHandler(t, db, securedTable("orders", "orders", "email"))
 
-	if err := apply(h, &canal.RowsEvent{
+	if err := apply(db, h, &canal.RowsEvent{
 		Table:  sourceTable("orders", "id", "customer", "email"),
 		Action: canal.InsertAction,
 		Rows:   [][]interface{}{{"1", "Ada", "ada@example.com"}},
@@ -551,7 +558,7 @@ func TestAnUpdateAlsoMasks(t *testing.T) {
 	}
 	h := newHandler(t, db, securedTable("orders", "orders", "email"))
 
-	if err := apply(h, &canal.RowsEvent{
+	if err := apply(db, h, &canal.RowsEvent{
 		Table:  sourceTable("orders", "id", "customer", "email"),
 		Action: canal.UpdateAction,
 		Rows: [][]interface{}{
@@ -576,7 +583,7 @@ func TestTheDeleteKeyIsNotMasked(t *testing.T) {
 	}
 	h := newHandler(t, db, securedTable("orders", "orders", "id"))
 
-	if err := apply(h, &canal.RowsEvent{
+	if err := apply(db, h, &canal.RowsEvent{
 		Table:  sourceTable("orders", "id", "customer", "email"),
 		Action: canal.DeleteAction,
 		Rows:   [][]interface{}{{"1", "Ada", "x"}},
@@ -598,22 +605,18 @@ func failingEvent() *canal.RowsEvent {
 	}
 }
 
-// TestAFailedStatementIsReportedToCanal pins the contract that keeps the
-// offset honest: the failure reaches canal, which stops rather than reading on
-// past a row that never landed.
-func TestAFailedStatementIsReportedToCanal(t *testing.T) {
+// A statement the target refuses has to reach the caller, which stops rather
+// than reading on past a row that never landed.
+func TestAFailedStatementIsReported(t *testing.T) {
 	db := sqliteTarget(t, ordersSchema)
 	h := newHandler(t, db, mapTable("orders", "orders"))
 
-	err := apply(h, failingEvent())
+	err := apply(db, h, failingEvent())
 	if err == nil {
 		t.Fatal("the handler swallowed a statement the target could not apply")
 	}
 	if !strings.Contains(err.Error(), "main.orders") {
 		t.Errorf("error = %v, want the target table named", err)
-	}
-	if atomic.LoadInt32(&h.lastExecError) != 1 {
-		t.Error("the error flag was not raised")
 	}
 }
 
@@ -624,7 +627,7 @@ func TestTheFirstFailureOfABatchIsReported(t *testing.T) {
 	db := sqliteTarget(t, ordersSchema)
 	h := newHandler(t, db, mapTable("orders", "orders"))
 
-	err := apply(h, &canal.RowsEvent{
+	err := apply(db, h, &canal.RowsEvent{
 		Table:  sourceTable("orders", "id", "missing_column"),
 		Action: canal.InsertAction,
 		Rows:   [][]interface{}{{"1", "x"}, {"2", "y"}},
@@ -634,176 +637,7 @@ func TestTheFirstFailureOfABatchIsReported(t *testing.T) {
 	}
 }
 
-// TestTheErrorFlagIsStickyAcrossEvents pins the other half.
-func TestTheErrorFlagIsStickyAcrossEvents(t *testing.T) {
-	db := sqliteTarget(t, ordersSchema)
-	h := newHandler(t, db, mapTable("orders", "orders"))
-
-	if err := apply(h, failingEvent()); err == nil {
-		t.Fatal("the failing event was not reported")
-	}
-
-	if err := apply(h, &canal.RowsEvent{
-		Table:  sourceTable("orders", "id", "customer", "email"),
-		Action: canal.InsertAction,
-		Rows:   [][]interface{}{{"2", "Ada", "y"}},
-	}); err != nil {
-		t.Fatalf("the following event failed too: %v", err)
-	}
-
-	if atomic.LoadInt32(&h.lastExecError) != 1 {
-		t.Error("a later success cleared the error flag, which would let the " +
-			"position advance past the row that was lost")
-	}
-}
-
-// TestThePositionIsNotWrittenAfterAFailure closes the loop between the two: the
-// saver consults the flag and leaves the file untouched, so a restart replays
-// from the last offset that was fully applied.
-func TestThePositionIsNotWrittenAfterAFailure(t *testing.T) {
-	db := sqliteTarget(t, ordersSchema)
-	h := fileHandler(t, db, mapTable("orders", "orders"), filepath.Join(t.TempDir(), "pos.json"))
-
-	if err := h.OnPosSynced(nil, mysql.Position{Name: "binlog.1", Pos: 100}, nil, false); err != nil {
-		t.Fatalf("OnPosSynced before any failure: %v", err)
-	}
-	if err := apply(h, failingEvent()); err == nil {
-		t.Fatal("the failing event was not reported")
-	}
-	if err := h.OnPosSynced(nil, mysql.Position{Name: "binlog.1", Pos: 200}, nil, true); err != nil {
-		t.Fatalf("OnPosSynced after a failure: %v", err)
-	}
-
-	got := newSyncer(t).loadBinlogPosition(h.positionSaverPath)
-	if got == nil {
-		t.Fatal("no position was stored at all")
-	}
-	if got.Pos != 100 {
-		t.Errorf("stored offset %d, want the pre-failure 100: the saver advanced "+
-			"past a row that never reached the target", got.Pos)
-	}
-}
-
-func TestOnPosSyncedWritesThePosition(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "nested", "pos.json")
-	h := fileHandler(t, nil, nil, path)
-
-	pos := mysql.Position{Name: "binlog.000004", Pos: 1234}
-	if err := h.OnPosSynced(nil, pos, nil, false); err != nil {
-		t.Fatalf("OnPosSynced: %v", err)
-	}
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read back: %v", err)
-	}
-	var got mysql.Position
-	if err := json.Unmarshal(data, &got); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if got != pos {
-		t.Errorf("stored %+v, want %+v", got, pos)
-	}
-}
-
-// TestOnPosSyncedWithNoPathIsANoOp records that an unset position path turns
-// the saver off silently, so the task restarts from wherever the server offers.
-func TestOnPosSyncedWithNoPathIsANoOp(t *testing.T) {
-	h := newHandler(t, nil, nil)
-
-	if err := h.OnPosSynced(nil, mysql.Position{Name: "binlog.1", Pos: 1}, nil, false); err != nil {
-		t.Fatalf("OnPosSynced with no path: %v", err)
-	}
-}
-
-func TestOnPosSyncedReportsAnUnwritablePath(t *testing.T) {
-	blocker := filepath.Join(t.TempDir(), "file")
-	if err := os.WriteFile(blocker, nil, 0o644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	h := fileHandler(t, nil, nil, filepath.Join(blocker, "pos.json"))
-
-	if err := h.OnPosSynced(nil, mysql.Position{Name: "binlog.1", Pos: 1}, nil, false); err == nil {
-		t.Fatal("OnPosSynced to an unwritable path returned no error")
-	}
-}
-
 const sampleGTID = "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-5"
-
-// TestTheSavedPositionCarriesTheGTIDSet pins what makes a checkpoint survive a
-// failover.
-func TestTheSavedPositionCarriesTheGTIDSet(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "pos.json")
-	h := fileHandler(t, nil, nil, path)
-	h.flavor = mysql.MySQLFlavor
-
-	gtid, err := mysql.ParseMysqlGTIDSet(sampleGTID)
-	if err != nil {
-		t.Fatalf("ParseMysqlGTIDSet: %v", err)
-	}
-	if err := h.OnPosSynced(nil, mysql.Position{Name: "binlog.1", Pos: 4}, gtid, false); err != nil {
-		t.Fatalf("OnPosSynced: %v", err)
-	}
-
-	cp := storedCheckpoint(t, path)
-	if cp == nil {
-		t.Fatal("loadCheckpoint returned nil for a file the saver wrote")
-	}
-	if cp.GTID != sampleGTID {
-		t.Errorf("stored GTID %q, want %q", cp.GTID, sampleGTID)
-	}
-	if cp.Flavor != mysql.MySQLFlavor {
-		t.Errorf("stored flavor %q, want %q", cp.Flavor, mysql.MySQLFlavor)
-	}
-	if got := cp.gtidSet(); got == nil || got.String() != sampleGTID {
-		t.Errorf("the stored set did not parse back: %v", got)
-	}
-}
-
-// TestACheckpointWithNoGTIDSetFallsBackToTheOffset covers the source that has
-// GTIDs turned off, and files written before they were recorded.
-func TestACheckpointWithNoGTIDSetFallsBackToTheOffset(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "pos.json")
-	h := fileHandler(t, nil, nil, path)
-
-	want := mysql.Position{Name: "binlog.000007", Pos: 990}
-	if err := h.OnPosSynced(nil, want, nil, false); err != nil {
-		t.Fatalf("OnPosSynced: %v", err)
-	}
-
-	cp := storedCheckpoint(t, path)
-	if cp == nil {
-		t.Fatal("loadCheckpoint returned nil")
-	}
-	if cp.gtidSet() != nil {
-		t.Errorf("a set was recorded for a source that sent none: %q", cp.GTID)
-	}
-	if cp.position() != want {
-		t.Errorf("position %+v, want %+v", cp.position(), want)
-	}
-}
-
-// TestAPositionFileFromAnOlderBuildStillLoads pins the file format's
-// compatibility: the two fields keep the capitalised names mysql.Position
-// marshals to, so an existing deployment resumes rather than restarting from
-// the current end of the binlog.
-func TestAPositionFileFromAnOlderBuildStillLoads(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "pos.json")
-	if err := os.WriteFile(path, []byte(`{"Name":"binlog.000003","Pos":154}`), 0o644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-
-	cp := storedCheckpoint(t, path)
-	if cp == nil {
-		t.Fatal("loadCheckpoint returned nil for a file in the old format")
-	}
-	if want := (mysql.Position{Name: "binlog.000003", Pos: 154}); cp.position() != want {
-		t.Errorf("position %+v, want %+v", cp.position(), want)
-	}
-	if cp.gtidSet() != nil {
-		t.Error("a GTID set was invented for a file that has none")
-	}
-}
 
 // TestAnUnreadableGTIDSetFallsBackToTheOffset records that a corrupt set does
 // not stop the task: the offset is still there, and resuming from it is better
@@ -827,31 +661,6 @@ func TestAMissingFlavourReadsAsMySQL(t *testing.T) {
 	}
 	if got.String() != sampleGTID {
 		t.Errorf("gtidSet() = %q, want %q", got, sampleGTID)
-	}
-}
-
-// TestTheSavedPositionRoundTrips closes the loop with the loader, which is what
-// makes a restart resume where the stream stopped.
-func TestTheSavedPositionRoundTrips(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "pos.json")
-	h := fileHandler(t, nil, nil, path)
-	want := mysql.Position{Name: "binlog.000009", Pos: 4711}
-
-	if err := h.OnPosSynced(nil, want, nil, true); err != nil {
-		t.Fatalf("OnPosSynced: %v", err)
-	}
-	got := newSyncer(t).loadBinlogPosition(path)
-	if got == nil {
-		t.Fatal("loadBinlogPosition returned nil for a file the saver wrote")
-	}
-	if *got != want {
-		t.Errorf("loaded %+v, wrote %+v", *got, want)
-	}
-}
-
-func TestTheHandlerNamesItself(t *testing.T) {
-	if got := newHandler(t, nil, nil).String(); got != "MyEventHandler" {
-		t.Errorf("String() = %q", got)
 	}
 }
 

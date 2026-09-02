@@ -2,12 +2,15 @@ package mysql
 
 import (
 	"strings"
-	"sync/atomic"
 	"testing"
 
 	"github.com/go-mysql-org/go-mysql/canal"
 	"github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/replication"
+	"github.com/sirupsen/logrus"
+
+	"github.com/retail-ai-inc/sync/internal/platform/config"
+	"github.com/retail-ai-inc/sync/internal/replication/domain"
 )
 
 // plan runs one statement through the planner and returns the single decision
@@ -283,35 +286,27 @@ func TestAnUnparseableStatementIsReported(t *testing.T) {
 	}
 }
 
-func TestOnDDLAppliesTheChangeToTheTarget(t *testing.T) {
-	db := sqliteTarget(t, ordersSchema)
-	h := newHandler(t, db, mapTable("orders", "orders"))
-
-	if err := h.OnDDL(nil, mysql.Position{}, query("ALTER TABLE orders ADD COLUMN note TEXT")); err != nil {
-		t.Fatalf("OnDDL: %v", err)
-	}
-
-	var count int
-	if err := db.QueryRow(
-		`SELECT COUNT(*) FROM pragma_table_info('orders') WHERE name = 'note'`).Scan(&count); err != nil {
-		t.Fatalf("inspect target: %v", err)
-	}
-	if count != 1 {
-		t.Error("the column was not added to the target")
-	}
-}
-
-// TestARowUsingANewColumnLandsAfterTheDDL is the sequence the source produces
-// and the reason the gap mattered: without the schema change the row that uses
-// the new column could not be applied at all.
+// The sequence the source produces, and the reason the gap mattered: without
+// the schema change the row that uses the new column cannot be applied at all.
+// The reader emits the statement and the applier writes it, so the write is
+// done here in the applier's place.
 func TestARowUsingANewColumnLandsAfterTheDDL(t *testing.T) {
 	db := sqliteTarget(t, `CREATE TABLE orders (id TEXT, customer TEXT)`)
 	h := newHandler(t, db, mapTable("orders", "orders"))
 
-	if err := h.OnDDL(nil, mysql.Position{}, query("ALTER TABLE orders ADD COLUMN email TEXT")); err != nil {
+	r := readerWithMappings(t, mapTable("orders", "orders"))
+	if err := r.OnDDL(nil, mysql.Position{}, query("ALTER TABLE orders ADD COLUMN email TEXT")); err != nil {
 		t.Fatalf("OnDDL: %v", err)
 	}
-	if err := apply(h, &canal.RowsEvent{
+	events := handedOver(r)
+	if len(events) != 1 {
+		t.Fatalf("the reader emitted %d events for the schema change", len(events))
+	}
+	if _, err := db.Exec(events[0].Payload.(statement).query); err != nil {
+		t.Fatalf("apply the schema change to the target: %v", err)
+	}
+
+	if err := apply(db, h, &canal.RowsEvent{
 		Table:  sourceTable("orders", "id", "customer", "email"),
 		Action: canal.InsertAction,
 		Rows:   [][]interface{}{{"1", "Ada", "ada@example.com"}},
@@ -324,90 +319,6 @@ func TestARowUsingANewColumnLandsAfterTheDDL(t *testing.T) {
 	}
 }
 
-func TestOnDDLStopsOnABlockedStatement(t *testing.T) {
-	db := sqliteTarget(t, ordersSchema)
-	h := newHandler(t, db, mapTable("orders", "orders"))
-
-	err := h.OnDDL(nil, mysql.Position{}, query("DROP TABLE orders"))
-	if err == nil {
-		t.Fatal("OnDDL accepted a statement that would drop the replicated table")
-	}
-	if !strings.Contains(err.Error(), "refusing to replicate") {
-		t.Errorf("error = %v", err)
-	}
-	if atomic.LoadInt32(&h.lastExecError) != 1 {
-		t.Error("the error flag was not raised, so the offset could still advance")
-	}
-	if _, qerr := db.Query("SELECT 1 FROM orders"); qerr != nil {
-		t.Errorf("the target table was dropped anyway: %v", qerr)
-	}
-}
-
-// TestOnDDLIgnoresATransactionMarker covers the query events that are not DDL
-// at all. BEGIN arrives on the same channel and must not stop replication.
-func TestOnDDLIgnoresATransactionMarker(t *testing.T) {
-	h := newHandler(t, nil, mapTable("orders", "orders"))
-
-	for _, marker := range []string{"BEGIN", "# a comment", ""} {
-		if err := h.OnDDL(nil, mysql.Position{}, query(marker)); err != nil {
-			t.Errorf("OnDDL(%q): %v", marker, err)
-		}
-	}
-}
-
-func TestOnDDLWithNoEventIsANoOp(t *testing.T) {
-	h := newHandler(t, nil, mapTable("orders", "orders"))
-
-	if err := h.OnDDL(nil, mysql.Position{}, nil); err != nil {
-		t.Errorf("OnDDL(nil): %v", err)
-	}
-}
-
-// TestOnDDLAppliesTheOpenTransactionFirst pins the ordering.
-func TestOnDDLAppliesTheOpenTransactionFirst(t *testing.T) {
-	db := sqliteTarget(t, ordersSchema)
-	h := newHandler(t, db, mapTable("orders", "orders"))
-
-	if err := h.OnRow(insertEvent("1", "Ada", "a@x")); err != nil {
-		t.Fatalf("OnRow: %v", err)
-	}
-	if err := h.OnDDL(nil, mysql.Position{}, query("ALTER TABLE orders ADD COLUMN note TEXT")); err != nil {
-		t.Fatalf("OnDDL: %v", err)
-	}
-
-	if got := rows(t, db); len(got) != 1 {
-		t.Errorf("target holds %v, want the buffered row applied before the DDL", got)
-	}
-}
-
-func TestOnTableChangedAppliesTheOpenTransaction(t *testing.T) {
-	db := sqliteTarget(t, ordersSchema)
-	h := newHandler(t, db, mapTable("orders", "orders"))
-
-	if err := h.OnRow(insertEvent("1", "Ada", "a@x")); err != nil {
-		t.Fatalf("OnRow: %v", err)
-	}
-	if err := h.OnTableChanged(nil, "shop", "orders"); err != nil {
-		t.Fatalf("OnTableChanged: %v", err)
-	}
-
-	if got := rows(t, db); len(got) != 1 {
-		t.Errorf("target holds %v, want the buffered row applied", got)
-	}
-}
-
-func TestADDLWithNoTargetConnectionIsReported(t *testing.T) {
-	h := newHandler(t, nil, mapTable("orders", "orders"))
-
-	err := h.OnDDL(nil, mysql.Position{}, query("ALTER TABLE orders ADD COLUMN note TEXT"))
-	if err == nil {
-		t.Fatal("OnDDL with no connection reported nothing")
-	}
-	if !strings.Contains(err.Error(), "no target connection") {
-		t.Errorf("error = %v", err)
-	}
-}
-
 // Every table it sees is replicated, including one created after the task
 // started — which used simply not to be replicated, with no warning anywhere.
 func TestADiscoveredTableIsReplicatedUnderItsOwnName(t *testing.T) {
@@ -415,7 +326,7 @@ func TestADiscoveredTableIsReplicatedUnderItsOwnName(t *testing.T) {
 	h := newHandler(t, db, nil)
 	h.discovering = true
 
-	if err := apply(h, insertEvent("1", "Ada", "a@x")); err != nil {
+	if err := apply(db, h, insertEvent("1", "Ada", "a@x")); err != nil {
 		t.Fatalf("OnRow: %v", err)
 	}
 
@@ -448,7 +359,7 @@ func TestTheDirectionLockIsNeverReplicated(t *testing.T) {
 	h := newHandler(t, db, nil)
 	h.discovering = true
 
-	err := apply(h, &canal.RowsEvent{
+	err := apply(db, h, &canal.RowsEvent{
 		Table:  sourceTable("_sync_direction_lock", "task_id", "role"),
 		Action: canal.InsertAction,
 		Rows:   [][]interface{}{{"1", "source"}},
@@ -468,11 +379,108 @@ func TestWithoutDiscoveryAnUnlistedTableIsStillSkipped(t *testing.T) {
 	db := sqliteTarget(t, ordersSchema)
 	h := newHandler(t, db, mapTable("customers", "customers"))
 
-	if err := apply(h, insertEvent("1", "Ada", "a@x")); err != nil {
+	if err := apply(db, h, insertEvent("1", "Ada", "a@x")); err != nil {
 		t.Fatalf("OnRow: %v", err)
 	}
 
 	if got := rows(t, db); len(got) != 0 {
 		t.Errorf("target holds %v, want nothing from an unlisted table", got)
+	}
+}
+
+// readerWithMappings builds a Reader whose converter renders statements, which
+// is what the DDL path needs and all it needs.
+func readerWithMappings(t *testing.T, mappings []config.DatabaseMapping) *Reader {
+	t.Helper()
+
+	logger := logrus.New()
+	logger.SetLevel(logrus.PanicLevel)
+
+	r := readerFor(mappings, "u:p@tcp(h:3306)/shop")
+	r.Logger = logger
+	r.conv = r.converter()
+	r.appliedSince = map[string]bool{}
+	// OnDDL hands the event straight over, a schema change being its own batch,
+	// so there has to be somewhere for it to go.
+	r.out = make(chan *domain.Event, 8)
+	r.done = make(chan struct{})
+	return r
+}
+
+// handedOver drains what the reader pushed onto its channel.
+func handedOver(r *Reader) []*domain.Event {
+	var events []*domain.Event
+	for {
+		select {
+		case e := <-r.out:
+			events = append(events, e)
+		default:
+			return events
+		}
+	}
+}
+
+// A schema change reaches the target as an event of its own, carrying the
+// statement rewritten for the target's names. These tests used to drive
+// MyEventHandler.OnDDL, which applied the statement itself; Reader.OnDDL is the
+// path the supervisor takes, and the applier does the writing.
+func TestASchemaChangeBecomesAnEvent(t *testing.T) {
+	r := readerWithMappings(t, mapTable("orders", "orders"))
+
+	if err := r.OnDDL(nil, mysql.Position{}, query("ALTER TABLE orders ADD COLUMN note TEXT")); err != nil {
+		t.Fatalf("OnDDL: %v", err)
+	}
+
+	events := handedOver(r)
+	if len(events) != 1 {
+		t.Fatalf("the reader handed over %d events, want the schema change", len(events))
+	}
+	event := events[0]
+	if event.Op != domain.OpSchema {
+		t.Errorf("op = %v, want a schema change", event.Op)
+	}
+	stmt, ok := event.Payload.(statement)
+	if !ok {
+		t.Fatalf("payload = %T, want a statement", event.Payload)
+	}
+	if !strings.Contains(stmt.query, "note") {
+		t.Errorf("statement = %q, want it to add the column", stmt.query)
+	}
+}
+
+// A statement that would destroy replicated data stops the task rather than
+// being carried, and stopping has to be permanent: retrying would offer the
+// same DROP for as long as anybody let it.
+func TestADestructiveStatementStopsTheTask(t *testing.T) {
+	r := readerWithMappings(t, mapTable("orders", "orders"))
+
+	err := r.OnDDL(nil, mysql.Position{}, query("DROP TABLE orders"))
+	if err == nil {
+		t.Fatal("OnDDL accepted a statement that would drop the replicated table")
+	}
+	if !domain.IsUnrecoverable(err) {
+		t.Errorf("err = %v, want it unrecoverable", err)
+	}
+	if events := handedOver(r); len(events) != 0 {
+		t.Errorf("the reader handed over %d events for a refused statement", len(events))
+	}
+}
+
+// BEGIN and COMMIT arrive as query events and do not parse. Carrying on is
+// right for those, and a nil event is not an event at all.
+func TestATransactionMarkerIsNotASchemaChange(t *testing.T) {
+	r := readerWithMappings(t, mapTable("orders", "orders"))
+
+	for _, marker := range []string{"BEGIN", "COMMIT", "# Dumm"} {
+		if err := r.OnDDL(nil, mysql.Position{}, query(marker)); err != nil {
+			t.Errorf("OnDDL(%q): %v", marker, err)
+		}
+	}
+	if err := r.OnDDL(nil, mysql.Position{}, nil); err != nil {
+		t.Errorf("OnDDL(nil): %v", err)
+	}
+	if events := handedOver(r); len(events) != 0 {
+		t.Errorf("the reader handed over %d events for statements that are not DDL",
+			len(events))
 	}
 }

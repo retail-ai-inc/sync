@@ -2,7 +2,6 @@ package mysql
 
 import (
 	"context"
-	"crypto/tls"
 	"database/sql"
 	"fmt"
 	"os"
@@ -10,7 +9,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/checkpoint"
 )
 
@@ -119,31 +117,6 @@ func TestAMultiLineGTIDSetIsFlattened(t *testing.T) {
 	}
 }
 
-func TestTheCheckpointFileRoundTrips(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "nested", "pos.json")
-	want := binlogCheckpoint{
-		Name: "binlog.000004", Pos: 154,
-		GTID: sampleGTID, Flavor: mysql.MySQLFlavor,
-	}
-
-	payload, err := checkpoint.Encode(want)
-	if err != nil {
-		t.Fatalf("Encode: %v", err)
-	}
-	store := &checkpoint.FileStore{Path: path}
-	if err := store.Save(context.Background(), "", payload); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-
-	got := storedCheckpoint(t, path)
-	if got == nil {
-		t.Fatal("loadCheckpoint returned nil")
-	}
-	if *got != want {
-		t.Errorf("loaded %+v, want %+v", *got, want)
-	}
-}
-
 func TestAnUnwritableCheckpointPathIsReported(t *testing.T) {
 	blocker := filepath.Join(t.TempDir(), "file")
 	if err := os.WriteFile(blocker, nil, 0o644); err != nil {
@@ -153,128 +126,6 @@ func TestAnUnwritableCheckpointPathIsReported(t *testing.T) {
 	store := &checkpoint.FileStore{Path: filepath.Join(blocker, "pos.json")}
 	if err := store.Save(context.Background(), "", "{}"); err == nil {
 		t.Error("writing under a regular file returned no error")
-	}
-}
-
-// TestTheBinlogConnectionFollowsTheDSN covers the connection database/sql never
-// sees: canal dials the source itself, so the DSN's tls parameter has to be
-// translated for it or the row events cross the region in the clear.
-func TestTheBinlogConnectionFollowsTheDSN(t *testing.T) {
-	s := newSyncer(t)
-
-	tests := []struct {
-		name       string
-		dsn        string
-		wantTLS    bool
-		wantServer string
-		wantSkip   bool
-	}{
-		{"required", "u:p@tcp(db.example.net:3306)/shop?tls=true", true, "db.example.net", false},
-		{"skip verify", "u:p@tcp(db.example.net:3306)/shop?tls=skip-verify", true, "", true},
-		{"preferred cannot negotiate here", "u:p@tcp(db:3306)/shop?tls=preferred", false, "", false},
-		{"none", "u:p@tcp(db:3306)/shop", false, "", false},
-		{"unparseable", "not a dsn", false, "", false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			s.cfg.SourceConnection = tt.dsn
-			got := s.sourceTLS()
-
-			if (got != nil) != tt.wantTLS {
-				t.Fatalf("sourceTLS() = %v, want TLS: %v", got, tt.wantTLS)
-			}
-			if got == nil {
-				return
-			}
-			if got.ServerName != tt.wantServer {
-				t.Errorf("ServerName = %q, want %q", got.ServerName, tt.wantServer)
-			}
-			if got.InsecureSkipVerify != tt.wantSkip {
-				t.Errorf("InsecureSkipVerify = %v, want %v", got.InsecureSkipVerify, tt.wantSkip)
-			}
-			if got.MinVersion != tls.VersionTLS12 {
-				t.Errorf("MinVersion = %x, want TLS 1.2", got.MinVersion)
-			}
-		})
-	}
-}
-
-// A file and offset mean nothing on another server: read against a different
-// one they address unrelated bytes, and the read succeeds, so the task resumes
-// from somewhere arbitrary with nothing to show that it happened.
-func TestACheckpointFromAnotherSourceIsIgnored(t *testing.T) {
-	s := newSyncer(t)
-	s.cfg.SourceConnection = "u:p@tcp(osaka:3306)/shop"
-	path := filepath.Join(t.TempDir(), "pos.json")
-
-	payload, err := checkpoint.Encode(binlogCheckpoint{
-		Name: "binlog.000004", Pos: 154, Source: "tokyo:3306/shop",
-	})
-	if err != nil {
-		t.Fatalf("Encode: %v", err)
-	}
-	store := &checkpoint.FileStore{Path: path}
-	if err := store.Save(context.Background(), "", payload); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-
-	got, err := s.loadCheckpoint(context.Background(), store)
-	if err != nil {
-		t.Fatalf("loadCheckpoint: %v", err)
-	}
-	if got != nil {
-		t.Errorf("checkpoint = %+v; an offset from another server was accepted", *got)
-	}
-}
-
-func TestACheckpointFromTheSameSourceIsUsed(t *testing.T) {
-	s := newSyncer(t)
-	s.cfg.SourceConnection = "u:p@tcp(tokyo:3306)/shop"
-	path := filepath.Join(t.TempDir(), "pos.json")
-
-	payload, err := checkpoint.Encode(binlogCheckpoint{
-		Name: "binlog.000004", Pos: 154, Source: "tokyo:3306/shop",
-	})
-	if err != nil {
-		t.Fatalf("Encode: %v", err)
-	}
-	store := &checkpoint.FileStore{Path: path}
-	if err := store.Save(context.Background(), "", payload); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-
-	got, err := s.loadCheckpoint(context.Background(), store)
-	if err != nil {
-		t.Fatalf("loadCheckpoint: %v", err)
-	}
-	if got == nil {
-		t.Fatal("a checkpoint from this task's own source was ignored")
-	}
-	if got.Pos != 154 {
-		t.Errorf("offset = %d", got.Pos)
-	}
-}
-
-// TestACheckpointWithNoSourceIsStillUsed keeps an existing deployment resuming:
-// a checkpoint written before the source was recorded has no way to prove which
-// server it came from, and refusing it would re-copy every table on upgrade.
-func TestACheckpointWithNoSourceIsStillUsed(t *testing.T) {
-	s := newSyncer(t)
-	s.cfg.SourceConnection = "u:p@tcp(tokyo:3306)/shop"
-	path := filepath.Join(t.TempDir(), "pos.json")
-
-	if err := (&checkpoint.FileStore{Path: path}).Save(context.Background(), "",
-		`{"Name":"binlog.000003","Pos":154}`); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-
-	got, err := s.loadCheckpoint(context.Background(), &checkpoint.FileStore{Path: path})
-	if err != nil {
-		t.Fatalf("loadCheckpoint: %v", err)
-	}
-	if got == nil {
-		t.Fatal("a checkpoint from an older build was ignored, which would re-copy every table")
 	}
 }
 
@@ -309,17 +160,6 @@ func TestOnlyFullRowImagesAreAccepted(t *testing.T) {
 func TestAServerWithNoRowImageSettingIsAccepted(t *testing.T) {
 	if err := requireFullRowImage(""); err != nil {
 		t.Errorf("requireFullRowImage(\"\") = %v", err)
-	}
-}
-
-// TestMariaDBIsNotAsked records that the check is skipped for MariaDB, which
-// has no binlog_row_image setting and logs whole rows unconditionally.
-func TestMariaDBIsNotAsked(t *testing.T) {
-	s := newSyncer(t)
-	s.cfg.Type = "mariadb"
-
-	if err := s.checkRowImage(nil); err != nil {
-		t.Errorf("checkRowImage for MariaDB = %v", err)
 	}
 }
 

@@ -122,6 +122,9 @@ func (r *Reader) Open(ctx context.Context, from domain.Position) error {
 	if _, err := checkpoint.Decode(from.Payload, stored); err != nil {
 		return fmt.Errorf("read the stored position: %w", err)
 	}
+	if err := resumableHere(stored, r.source); err != nil {
+		return err
+	}
 
 	// A starting stream begins outside any transaction, whatever the last one was
 	// doing.
@@ -638,4 +641,31 @@ func tlsFor(cfg *mysqldriver.Config) *tls.Config {
 		return &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}
 	}
 	return nil
+}
+
+// resumableHere refuses a stored position that names a server this task is not
+// reading.
+//
+// The old syncer checked this and the shared pipeline did not, so the position
+// carried the endpoint it was written against and nothing ever compared it. A
+// task repointed at a different server then resumed from a file and offset that
+// mean nothing there — read successfully, against data they do not describe.
+//
+// A GTID set is exempt, and that is the whole point of one: it names the
+// transactions rather than a place in one server's log, so it stays valid across
+// the failover this deployment exists for. Discarding a position because the
+// endpoint moved, which is what the old check did, would have forced a full
+// re-copy after every failover.
+func resumableHere(stored *binlogCheckpoint, source string) error {
+	if stored.Name == "" || stored.Source == "" || stored.Source == source {
+		return nil
+	}
+	if stored.GTID != "" {
+		return nil
+	}
+	return domain.Unrecoverable("the stored position is a file and offset recorded "+
+		"against %s, and this task reads %s. A binlog offset names a place on one "+
+		"server and nowhere else, so resuming from it here would read bytes that "+
+		"describe other data. Clear this task's position to copy the source again, "+
+		"or point the task back at %s", stored.Source, source, stored.Source)
 }

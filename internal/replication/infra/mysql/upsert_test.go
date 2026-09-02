@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
-	"sync/atomic"
 	"testing"
 
 	"github.com/go-mysql-org/go-mysql/canal"
@@ -88,18 +87,15 @@ func TestAReplayedInsertDoesNotLoseTheRow(t *testing.T) {
 		Action: canal.InsertAction,
 		Rows:   [][]interface{}{{"1", "Ada", "ada@example.com"}},
 	}
-	if err := apply(h, event); err != nil {
+	if err := apply(db, h, event); err != nil {
 		t.Fatalf("first insert: %v", err)
 	}
-	if err := apply(h, event); err != nil {
+	if err := apply(db, h, event); err != nil {
 		t.Fatalf("replayed insert: %v", err)
 	}
 
 	if got := rows(t, db); len(got) != 1 || got[0] != "1|Ada|ada@example.com" {
 		t.Errorf("target holds %v, want the single row once", got)
-	}
-	if atomic.LoadInt32(&h.lastExecError) != 0 {
-		t.Error("the replayed insert raised the error flag")
 	}
 }
 
@@ -111,13 +107,13 @@ func TestAReplayedInsertCarriesTheNewerRow(t *testing.T) {
 	h := newHandler(t, db, mapTable("orders", "orders"))
 
 	table := sourceTable("orders", "id", "customer", "email")
-	if err := apply(h, &canal.RowsEvent{
+	if err := apply(db, h, &canal.RowsEvent{
 		Table: table, Action: canal.InsertAction,
 		Rows: [][]interface{}{{"1", "Ada", "old@example.com"}},
 	}); err != nil {
 		t.Fatalf("first insert: %v", err)
 	}
-	if err := apply(h, &canal.RowsEvent{
+	if err := apply(db, h, &canal.RowsEvent{
 		Table: table, Action: canal.InsertAction,
 		Rows: [][]interface{}{{"1", "Ada", "new@example.com"}},
 	}); err != nil {
