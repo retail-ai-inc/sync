@@ -30,6 +30,12 @@ type Options struct {
 	// QueueCapacity bounds how far the reader may run ahead. Reaching it stops the
 	// reader, so the backlog sits in the source log where it is durable.
 	QueueCapacity int
+	// SnapshotQueueCapacity bounds it while the initial copy runs, when nothing
+	// drains the queue yet. Reaching this one is not durable the way reaching
+	// QueueCapacity is: the reader stops, and the pinned point then ages out of
+	// the source's log while the copy still has hours left, which costs the whole
+	// copy.
+	SnapshotQueueCapacity int
 	// ReportInterval is how often the health gauges refresh while nothing happens,
 	// so a stalled task shows a rising age rather than a frozen one.
 	ReportInterval time.Duration
@@ -49,9 +55,13 @@ type Options struct {
 }
 
 const (
-	defaultFlushInterval  = 500 * time.Millisecond
-	defaultQueueCapacity  = 2000
-	defaultReportInterval = time.Second
+	defaultFlushInterval = 500 * time.Millisecond
+	defaultQueueCapacity = 2000
+	// Slots are a pointer each, so a deep queue costs almost nothing until the
+	// changes actually arrive; what it buys is a copy that survives a source
+	// still being written to.
+	defaultSnapshotQueueCapacity = 200000
+	defaultReportInterval        = time.Second
 	// Well inside Kubernetes' default thirty-second termination grace period.
 	defaultShutdownGrace = 5 * time.Second
 )
@@ -68,6 +78,13 @@ func (o Options) queueCapacity() int {
 		return o.QueueCapacity
 	}
 	return defaultQueueCapacity
+}
+
+func (o Options) snapshotQueueCapacity() int {
+	if o.SnapshotQueueCapacity > 0 {
+		return o.SnapshotQueueCapacity
+	}
+	return defaultSnapshotQueueCapacity
 }
 
 func (o Options) reportInterval() time.Duration {
@@ -115,6 +132,9 @@ type Runner struct {
 	// each chunk until this passes it, which is what orders the two.
 	lastReadAt time.Time
 	queueUsed  int
+	// queueCap is the capacity the queue was made with, which differs between the
+	// initial copy and the stream that follows it.
+	queueCap int
 
 	// window is the source's retention and windowAt when it was asked for: a
 	// server setting, so it is read occasionally rather than every second.
@@ -166,11 +186,20 @@ func (r *Runner) tag(format string) string {
 // Run replicates until the context is cancelled or the stream cannot continue.
 // nil or a transient error means try again; Unrecoverable means stop.
 func (r *Runner) Run(ctx context.Context) error {
-	start, err := r.startingPoint(ctx)
+	start, owed, err := r.startingPoint(ctx)
 	if err != nil {
 		return err
 	}
 
+	// The stream opens before a record is copied, and the reader below drains it
+	// from the moment it does. Copying first and opening afterwards is what this
+	// replaces: the copy's own writes push the source's log past the pinned
+	// point, so a source whose smallest shard holds an hour of log loses that
+	// point long before a copy of any size finishes -- and it is only found out
+	// at the end, with the position already recorded, which leaves the task
+	// unable to resume and unable to copy again. Opening first costs nothing,
+	// since the pinned point is where the stream starts either way, and it keeps
+	// the cursor ahead of the truncation for as long as the copy runs.
 	if err := r.Reader.Open(ctx, start); err != nil {
 		return fmt.Errorf("open the source stream: %w", err)
 	}
@@ -182,7 +211,11 @@ func (r *Runner) Run(ctx context.Context) error {
 	r.lastAppliedAt = now
 	r.mu.Unlock()
 
-	queue := make(chan *domain.Event, r.Opts.queueCapacity())
+	r.queueCap = r.Opts.queueCapacity()
+	if owed {
+		r.queueCap = r.Opts.snapshotQueueCapacity()
+	}
+	queue := make(chan *domain.Event, r.queueCap)
 	readCtx, stopReading := context.WithCancel(ctx)
 	defer stopReading()
 
@@ -200,6 +233,17 @@ func (r *Runner) Run(ctx context.Context) error {
 
 	stopReporting := r.report(readCtx)
 	defer stopReporting()
+
+	// Nothing drains the queue yet, so the changes made while the copy runs
+	// collect in it and are applied in stream order once the copy is done. That
+	// converges even though the copy reads each record at whatever state it had
+	// when the copy reached it: every change that took a record to that state is
+	// itself in the queue, and the last one applied is the newest.
+	if owed {
+		if err := r.copy(ctx, start, queue); err != nil {
+			return err
+		}
+	}
 
 	resyncErr := r.startResyncs(readCtx, queue, &producers)
 
@@ -279,51 +323,92 @@ func (r *Runner) startResyncs(ctx context.Context, queue chan<- *domain.Event, p
 	return failed
 }
 
-func (r *Runner) startingPoint(ctx context.Context) (domain.Position, error) {
+// startingPoint reports where the stream starts and whether the target still
+// owes an initial copy. It pins but does not copy: the copy runs once the
+// stream is open, which is the whole point of the split.
+func (r *Runner) startingPoint(ctx context.Context) (domain.Position, bool, error) {
 	payload, err := r.Checkpoints.Load(ctx, r.CheckpointKey)
 	if err != nil {
-		return domain.Position{}, fmt.Errorf("read the stored position: %w", err)
+		return domain.Position{}, false, fmt.Errorf("read the stored position: %w", err)
 	}
 	if payload != "" {
 		r.log().Infof(r.tag("Resuming from the stored position"))
-		return domain.Position{Payload: payload}, nil
+		return domain.Position{Payload: payload}, false, nil
 	}
 
 	if r.Snapshotter == nil {
-		return domain.Position{}, nil
+		return domain.Position{}, false, nil
 	}
-
-	// snapshotDone separates "finished" from "gave up": a copy that errored must
-	// not be recorded as completed.
-	snapshotDone := false
-
-	// Pinned before a row is copied, stored once the copy finished. Pinning after
-	// loses every write made during it; storing early resumes from a point never
-	// reached.
-	started := r.now()
-	metrics.SnapshotStarted(r.Opts.Labels, 0)
-	defer func() {
-		if !snapshotDone {
-			metrics.SnapshotFinished(r.Opts.Labels, false, r.now().Sub(started).Seconds())
-		}
-	}()
 
 	pinned, err := r.Snapshotter.Pin(ctx)
 	if err != nil {
-		return domain.Position{}, fmt.Errorf("pin the snapshot's starting point: %w", err)
+		return domain.Position{}, false, fmt.Errorf("pin the snapshot's starting point: %w", err)
 	}
-	r.log().Infof(r.tag("Snapshot pinned; copying"))
+	return pinned, true, nil
+}
 
-	if err := r.Snapshotter.Copy(ctx); err != nil {
-		return domain.Position{}, fmt.Errorf("copy the source: %w", err)
+// copy fills the target while the stream is open and being read.
+//
+// The position is recorded only once the copy has finished: a copy that gave up
+// halfway must not leave behind a position that claims a complete base, because
+// the stream would then carry on from it and the gap would stay for good.
+func (r *Runner) copy(ctx context.Context, pinned domain.Position, queue chan *domain.Event) error {
+	started := r.now()
+	metrics.SnapshotStarted(r.Opts.Labels, 0)
+	r.log().Infof(r.tag("Snapshot pinned; copying with the stream already open"))
+
+	failed := func(err error) error {
+		metrics.SnapshotFinished(r.Opts.Labels, false, r.now().Sub(started).Seconds())
+		return err
 	}
+
+	stopWatching := r.watchQueuePressure(ctx, queue)
+	err := r.Snapshotter.Copy(ctx)
+	stopWatching()
+	if err != nil {
+		return failed(fmt.Errorf("copy the source: %w", err))
+	}
+
 	if err := r.Checkpoints.Save(ctx, r.CheckpointKey, pinned.Payload); err != nil {
-		return domain.Position{}, fmt.Errorf("record the snapshot's starting point: %w", err)
+		return failed(fmt.Errorf("record the snapshot's starting point: %w", err))
 	}
-	snapshotDone = true
 	metrics.SnapshotFinished(r.Opts.Labels, true, r.now().Sub(started).Seconds())
-	r.log().Infof(r.tag("Copy finished; streaming from the pinned point"))
-	return pinned, nil
+	r.log().Infof(r.tag("Copy finished; applying the changes made while it ran"))
+	return nil
+}
+
+// watchQueuePressure reports a queue running out of room while the copy holds
+// the applier. A full queue stops the reader, and a stopped reader is the one
+// thing opening the stream early was meant to prevent: the source's log carries
+// on past the pinned point with nothing consuming it.
+func (r *Runner) watchQueuePressure(ctx context.Context, queue chan *domain.Event) func() {
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(r.Opts.reportInterval())
+		defer ticker.Stop()
+		warned := false
+		for {
+			select {
+			case <-done:
+				return
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				held, room := len(queue), cap(queue)
+				if warned || room == 0 || held*10 < room*8 {
+					continue
+				}
+				warned = true
+				r.log().Warnf(r.tag("The changes made during the copy hold %d of the "+
+					"queue's %d places. If it fills, the stream stops being read and the "+
+					"pinned point can age out of the source's log, which costs the whole "+
+					"copy: raise SnapshotQueueCapacity, or copy when the source is quieter"),
+					held, room)
+			}
+		}
+	}()
+	var once sync.Once
+	return func() { once.Do(func() { close(done) }) }
 }
 
 func (r *Runner) read(ctx context.Context, queue chan<- *domain.Event) error {
@@ -711,7 +796,7 @@ func (r *Runner) report(ctx context.Context) (stop func()) {
 				if !heard.IsZero() {
 					metrics.SetLastEventAge(r.Opts.Labels, now.Sub(heard).Seconds())
 				}
-				metrics.SetQueue(r.Opts.Labels, used, r.Opts.queueCapacity())
+				metrics.SetQueue(r.Opts.Labels, used, r.queueCap)
 				metrics.SetQueueBytes(r.Opts.Labels, held)
 			}
 		}

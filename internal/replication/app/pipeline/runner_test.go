@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -22,10 +23,16 @@ type fakeReader struct {
 	opened  domain.Position
 	openErr error
 	closed  bool
+	// onOpen, when non-nil, is called as the stream opens, so a test can assert
+	// when that happened relative to the copy.
+	onOpen func()
 }
 
 func (f *fakeReader) Open(_ context.Context, from domain.Position) error {
 	f.opened = from
+	if f.onOpen != nil {
+		f.onOpen()
+	}
 	return f.openErr
 }
 
@@ -120,6 +127,9 @@ type fakeSnapshotter struct {
 	pinned  domain.Position
 	pinErr  error
 	copyErr error
+	// onCopy, when non-nil, is called while the copy is running, which is when a
+	// test can see what the rest of the pipeline is doing underneath it.
+	onCopy func()
 }
 
 func (f *fakeSnapshotter) Pin(context.Context) (domain.Position, error) {
@@ -129,6 +139,9 @@ func (f *fakeSnapshotter) Pin(context.Context) (domain.Position, error) {
 
 func (f *fakeSnapshotter) Copy(context.Context) error {
 	f.calls = append(f.calls, "copy")
+	if f.onCopy != nil {
+		f.onCopy()
+	}
 	return f.copyErr
 }
 
@@ -429,6 +442,62 @@ func TestTheSnapshotPinsBeforeItCopies(t *testing.T) {
 	}
 }
 
+// TestTheStreamOpensBeforeTheCopyStarts is what keeps a long copy alive. The
+// copy's own writes push the source's log past the pinned point -- on a sharded
+// source they push the smallest shard's log past it in minutes -- so a stream
+// opened after the copy can find the point already gone. By then the copy has
+// run for hours and the position is recorded, which leaves the task able
+// neither to resume nor to copy again.
+func TestTheStreamOpensBeforeTheCopyStarts(t *testing.T) {
+	snap := &fakeSnapshotter{pinned: domain.Position{Payload: "pinned"}}
+	reader := &fakeReader{}
+	reader.onOpen = func() { snap.calls = append(snap.calls, "open") }
+	store := newStore()
+	r := newRunner(t, reader, &fakeApplier{}, store)
+	r.Snapshotter = snap
+
+	if err := runFor(t, r, 60*time.Millisecond); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	want := []string{"pin", "open", "copy"}
+	if !reflect.DeepEqual(snap.calls, want) {
+		t.Errorf("the run did %v, want %v", snap.calls, want)
+	}
+	if reader.opened.Payload != "pinned" {
+		t.Errorf("opened the stream at %q, want the pinned point", reader.opened.Payload)
+	}
+}
+
+// TestTheCopyHoldsTheChangesMadeWhileItRuns is the other half of opening early.
+// The stream is read during the copy, so those changes must wait for the copy to
+// lay the base down under them: applying one first would write a record the copy
+// then overwrites with the state it had before the change.
+func TestTheCopyHoldsTheChangesMadeWhileItRuns(t *testing.T) {
+	applier := &fakeApplier{}
+	snap := &fakeSnapshotter{pinned: domain.Position{Payload: "pinned"}}
+	during := -1
+	snap.onCopy = func() { during = len(applier.applied()) }
+
+	reader := &fakeReader{events: []*domain.Event{
+		event("orders", "1", "p1"),
+		event("orders", "2", "p2"),
+	}}
+	r := newRunner(t, reader, applier, newStore())
+	r.Snapshotter = snap
+
+	if err := runFor(t, r, 200*time.Millisecond); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if during != 0 {
+		t.Errorf("%d batches reached the target while the copy ran, want none", during)
+	}
+	if got := len(applier.applied()); got == 0 {
+		t.Error("no batch reached the target after the copy, want the held changes")
+	}
+}
+
 // TestAnInterruptedCopyRecordsNoPosition means the copy is redone rather than
 // resumed from a point it never reached.
 func TestAnInterruptedCopyRecordsNoPosition(t *testing.T) {
@@ -495,16 +564,33 @@ func TestAQuietSourceDoesNotLookLikeALag(t *testing.T) {
 	}
 }
 
+// windowedReader is read from the test while the reporting goroutine calls it,
+// so every field goes through the mutex.
 type windowedReader struct {
 	*fakeReader
+	mu     sync.Mutex
 	window time.Duration
 	err    error
 	calls  int
 }
 
 func (w *windowedReader) Window(context.Context) (time.Duration, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	w.calls++
 	return w.window, w.err
+}
+
+func (w *windowedReader) answer(window time.Duration, err error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.window, w.err = window, err
+}
+
+func (w *windowedReader) asked() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.calls
 }
 
 func headroomOf(t *testing.T, labels metrics.Labels) (float64, bool) {
@@ -601,9 +687,9 @@ func TestASourceThatCannotSayPublishesNothing(t *testing.T) {
 	if _, ok := headroomOf(t, labels); ok {
 		t.Error("a headroom was published for a source that could not say what its window is")
 	}
-	if source.calls != 1 {
+	if asked := source.asked(); asked != 1 {
 		t.Errorf("the source was asked %d times, want once — a source that cannot answer "+
-			"should not be asked, or logged about, on every tick", source.calls)
+			"should not be asked, or logged about, on every tick", asked)
 	}
 }
 
@@ -646,8 +732,8 @@ func TestTheWindowIsNotReReadEveryTick(t *testing.T) {
 	runReporting(t, r, now.Add(-time.Minute))
 	time.Sleep(50 * time.Millisecond)
 
-	if source.calls != 1 {
-		t.Errorf("the source was asked %d times over many ticks, want once", source.calls)
+	if asked := source.asked(); asked != 1 {
+		t.Errorf("the source was asked %d times over many ticks, want once", asked)
 	}
 }
 
@@ -748,9 +834,9 @@ func TestASourceThatCannotSayYetIsAskedAgain(t *testing.T) {
 	time.Sleep(80 * time.Millisecond)
 	stop()
 
-	if source.calls < 2 {
+	if asked := source.asked(); asked < 2 {
 		t.Errorf("the source was asked %d time(s); a source that says 'not yet' has "+
-			"to be asked again, or the metric never appears", source.calls)
+			"to be asked again, or the metric never appears", asked)
 	}
 	if _, ok := headroomOf(t, labels); ok {
 		t.Error("a headroom was published before the source could say what its window is")
@@ -779,8 +865,7 @@ func TestASourceThatSaysNotYetAndThenAnswersIsPublished(t *testing.T) {
 	time.Sleep(30 * time.Millisecond)
 
 	// The second measurement arrives.
-	source.err = nil
-	source.window = 2 * time.Hour
+	source.answer(2*time.Hour, nil)
 
 	deadline := time.Now().Add(2 * time.Second)
 	var published bool
