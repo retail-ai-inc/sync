@@ -98,7 +98,20 @@ func (s *Snapshotter) Copy(ctx context.Context) error {
 			return err
 		}
 
-		if table.AdvancedSettings.SyncIndexes {
+		if err := s.Syncer.doInitialSync(ctx,
+			source.Collection(table.SourceTable),
+			target.Collection(targetName),
+			s.sourceDB, s.targetDB); err != nil {
+			failures = append(failures,
+				fmt.Sprintf("%s.%s: %v", s.sourceDB, table.SourceTable, err))
+		} else if table.AdvancedSettings.SyncIndexes {
+			// After the documents rather than before them. An index that exists
+			// during the load is maintained one document at a time, against every
+			// index the collection has; built afterwards it is a single bulk pass.
+			// Nothing reads the target until the copy finishes, so the collection
+			// loses nothing by being unindexed while it fills -- and the copy
+			// finishing sooner is also what keeps the changes buffered behind it
+			// from piling up.
 			if err := s.Syncer.copyIndexes(ctx,
 				source.Collection(table.SourceTable),
 				target.Collection(targetName)); err != nil {
@@ -108,14 +121,6 @@ func (s *Snapshotter) Copy(ctx context.Context) error {
 				s.Logger.Warnf("[MongoDB] Could not copy the indexes of %s.%s: %v",
 					s.sourceDB, table.SourceTable, err)
 			}
-		}
-
-		if err := s.Syncer.doInitialSync(ctx,
-			source.Collection(table.SourceTable),
-			target.Collection(targetName),
-			s.sourceDB, s.targetDB); err != nil {
-			failures = append(failures,
-				fmt.Sprintf("%s.%s: %v", s.sourceDB, table.SourceTable, err))
 		}
 		remaining--
 		metrics.SnapshotProgress(s.Labels, 0, remaining, time.Since(started).Seconds())
@@ -151,7 +156,17 @@ func (s *Snapshotter) collections(ctx context.Context, source *mongo.Database) (
 
 	discovered := make([]config.TableMapping, 0, len(names))
 	for _, name := range names {
-		discovered = append(discovered, config.TableMapping{SourceTable: name, TargetTable: name})
+		discovered = append(discovered, config.TableMapping{
+			SourceTable: name,
+			TargetTable: name,
+			// A task that names its collections carries this per collection, and
+			// nothing here overrides it. One that names none is copying a database
+			// whole, which is a standby to fail over to -- and a standby that
+			// answers every query with a collection scan is an outage of its own.
+			// There is no per-collection setting to read in that case, so the
+			// default has to be the one that leaves the copy usable.
+			AdvancedSettings: config.AdvancedSettings{SyncIndexes: true},
+		})
 	}
 	s.Logger.Infof("[MongoDB] The task names no collections, so all %d in %s are "+
 		"being copied", len(discovered), s.sourceDB)
