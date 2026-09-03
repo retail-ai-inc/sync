@@ -134,7 +134,15 @@ func connectMongo(ctx context.Context, uri string) (*mongo.Client, error) {
 
 	err := resilience.Retry(ctx, 5, 2*time.Second, 2.0, func() error {
 		var connErr error
-		client, connErr = mongo.Connect(options.Client().ApplyURI(uri))
+		// Compression is negotiated, so a server that does not offer it simply
+		// goes uncompressed. It earns its place on the copy: every document
+		// crosses the wire twice, and for the Tokyo-to-Osaka case that wire is
+		// charged for. A URI that names its own compressors keeps them.
+		opts := options.Client().ApplyURI(uri)
+		if len(opts.Compressors) == 0 {
+			opts.SetCompressors([]string{"zstd", "snappy"})
+		}
+		client, connErr = mongo.Connect(opts)
 		if isURIError(connErr) {
 			return permanentURI{connErr}
 		}

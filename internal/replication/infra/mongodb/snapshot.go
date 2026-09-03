@@ -66,13 +66,22 @@ func (s *MongoDBSyncer) doInitialSync(ctx context.Context, sourceColl, targetCol
 		return fmt.Errorf("read how %s.%s is partitioned: %w", sourceDB, sourceColl.Name(), err)
 	}
 
-	cursor, err := sourceColl.Find(ctx, bson.M{})
+	// A target that is still empty can be filled with plain inserts, which is
+	// the difference between one round trip per batch and a keyed write per
+	// document. It is asked once, here: nothing else writes to the target while
+	// the copy runs, because the change stream only opens once it has finished.
+	fresh, err := collectionIsEmpty(ctx, targetColl)
+	if err != nil {
+		return fmt.Errorf("check whether %s.%s is empty: %w", targetDB, targetColl.Name(), err)
+	}
+
+	cursor, err := sourceColl.Find(ctx, bson.M{}, options.Find().SetBatchSize(int32(snapshotBatch)))
 	if err != nil {
 		return fmt.Errorf("source find fail => %v", err)
 	}
 	defer cursor.Close(ctx)
 
-	batchSize := 100
+	batchSize := snapshotBatch
 	var batch []bson.M
 	inserted := 0
 
@@ -83,7 +92,7 @@ func (s *MongoDBSyncer) doInitialSync(ctx context.Context, sourceColl, targetCol
 		}
 		batch = append(batch, s.maskDocument(sourceColl.Name(), doc))
 		if len(batch) >= batchSize {
-			written, err := s.copyBatch(ctx, targetColl, batch, targetDB, address)
+			written, err := s.copyBatch(ctx, targetColl, batch, targetDB, address, &fresh)
 			if err != nil {
 				return err
 			}
@@ -96,7 +105,7 @@ func (s *MongoDBSyncer) doInitialSync(ctx context.Context, sourceColl, targetCol
 	}
 
 	if len(batch) > 0 {
-		written, err := s.copyBatch(ctx, targetColl, batch, targetDB, address)
+		written, err := s.copyBatch(ctx, targetColl, batch, targetDB, address, &fresh)
 		if err != nil {
 			return err
 		}
@@ -108,11 +117,65 @@ func (s *MongoDBSyncer) doInitialSync(ctx context.Context, sourceColl, targetCol
 	return nil
 }
 
-// copyBatch writes one batch of the snapshot. The writes are upserts rather
-// than inserts because a copy that is interrupted and resumed re-reads
-// documents it already wrote, and because the change stream that resumes from
-// the pinned cluster time replays the writes made while the copy was running.
-func (s *MongoDBSyncer) copyBatch(ctx context.Context, targetColl *mongo.Collection, batch []bson.M, targetDB string, address documentAddress) (int, error) {
+// snapshotBatch is how many documents move per round trip. It was 100, which
+// held the copy at about 1,200 documents a second on a sharded staging target
+// -- roughly twelve round trips a second, so the batch was the limit rather
+// than either database.
+const snapshotBatch = 1000
+
+// collectionIsEmpty reports whether anything is in the collection yet. The
+// count stops at the first document: the question is "is there anything", and
+// counting a large collection to answer it would cost more than it saves.
+func collectionIsEmpty(ctx context.Context, coll *mongo.Collection) (bool, error) {
+	found, err := coll.CountDocuments(ctx, bson.M{}, options.Count().SetLimit(1))
+	if err != nil {
+		return false, err
+	}
+	return found == 0, nil
+}
+
+// insertBatch fills an empty collection with plain inserts. An upsert has to
+// find each document before it writes it, and on a sharded target that is a
+// keyed lookup per document; inserting sends the batch once.
+func (s *MongoDBSyncer) insertBatch(ctx context.Context, targetColl *mongo.Collection, batch []bson.M, targetDB string) error {
+	docs := make([]interface{}, 0, len(batch))
+	for _, doc := range batch {
+		docs = append(docs, doc)
+	}
+	return resilience.RetryMongoOperation(ctx, s.logger,
+		fmt.Sprintf("insert %d documents into %s.%s", len(docs), targetDB, targetColl.Name()),
+		func() error {
+			_, err := targetColl.InsertMany(ctx, docs, options.InsertMany().SetOrdered(false))
+			return err
+		})
+}
+
+// copyBatch writes one batch of the snapshot.
+//
+// An empty target is filled with inserts; anything else is written by key,
+// because a copy that is interrupted and resumed re-reads documents it already
+// wrote, and because the change stream that resumes from the pinned cluster
+// time replays the writes made while the copy was running.
+//
+// fresh is the caller's flag and is cleared here: once inserting has failed
+// once -- a document already there, a shard key the target will not take -- the
+// rest of the collection goes by key. Falling back is always safe, since the
+// keyed write is idempotent and re-covers whatever the failed insert managed to
+// put in, and it is what produces the useful error when the cause was not a
+// duplicate.
+func (s *MongoDBSyncer) copyBatch(ctx context.Context, targetColl *mongo.Collection, batch []bson.M, targetDB string, address documentAddress, fresh *bool) (int, error) {
+	if *fresh {
+		err := s.insertBatch(ctx, targetColl, batch, targetDB)
+		if err == nil {
+			return len(batch), nil
+		}
+		*fresh = false
+		s.logger.Warnf("[MongoDB] Inserting into %s.%s did not work (%v), so the "+
+			"rest of this collection is copied by key, which is slower but takes "+
+			"a target that already holds some of it",
+			targetDB, targetColl.Name(), err)
+	}
+
 	models := make([]mongo.WriteModel, 0, len(batch))
 	for _, doc := range batch {
 		filter, err := address.filter(doc)
