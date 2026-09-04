@@ -216,6 +216,7 @@ func (s *MongoDBSyncer) copyIndexes(ctx context.Context, sourceColl, targetColl 
 
 	indexesCreated := 0
 	indexesSkipped := 0
+	var failed []string
 
 	for _, idx := range indexDocs {
 		if name, ok := idx["name"].(string); ok && name == "_id_" {
@@ -241,6 +242,31 @@ func (s *MongoDBSyncer) copyIndexes(ctx context.Context, sourceColl, targetColl 
 
 		indexOptions := options.Index()
 
+		// A text index does not come back the way it was made. The server reports
+		// its key as {_fts: "text", _ftsx: 1} and puts the indexed fields in
+		// "weights", and creating an index from that key is refused -- "text index
+		// option 'weights' must specify fields or the wildcard". The fields are
+		// read back out of the weights instead. Without this the copy silently
+		// carried every index but the text ones, which are the ones a search
+		// depends on.
+		if textIndexKey(keyDoc) {
+			rebuilt, weights, okText := textIndexFrom(idx["weights"])
+			if !okText {
+				s.logger.Warnf("[MongoDB] Cannot read the weights of text index %q, so "+
+					"it is not being copied: %v", name, idx["weights"])
+				failed = append(failed, name)
+				continue
+			}
+			keyDoc = rebuilt
+			indexOptions.SetWeights(weights)
+			if v, okStr := idx["default_language"].(string); okStr {
+				indexOptions.SetDefaultLanguage(v)
+			}
+			if v, okStr := idx["language_override"].(string); okStr {
+				indexOptions.SetLanguageOverride(v)
+			}
+		}
+
 		if uniqueVal, hasUnique := idx["unique"]; hasUnique {
 			if uv, isBool := uniqueVal.(bool); isBool && uv {
 				indexOptions.SetUnique(true)
@@ -265,16 +291,52 @@ func (s *MongoDBSyncer) copyIndexes(ctx context.Context, sourceColl, targetColl 
 				indexesSkipped++
 			} else {
 				s.logger.Warnf("[MongoDB] Create index %s fail: %v", name, errC)
+				failed = append(failed, name)
 			}
 		} else {
 			indexesCreated++
 		}
 	}
 
-	s.logger.Infof("[MongoDB] Index creation summary for %s: created=%d, skipped=%d",
-		targetColl.Name(), indexesCreated, indexesSkipped)
+	s.logger.Infof("[MongoDB] Index creation summary for %s: created=%d, skipped=%d, failed=%d",
+		targetColl.Name(), indexesCreated, indexesSkipped, len(failed))
 
+	// An index that could not be created is reported to the caller rather than
+	// left in the log. The caller warns and carries on -- missing an index is
+	// slow, missing data is wrong -- but a summary that counts only successes is
+	// how a standby ends up short of the indexes its queries need with nothing
+	// anywhere saying so.
+	if len(failed) > 0 {
+		return fmt.Errorf("%d of the source's indexes on %s could not be created: %s",
+			len(failed), targetColl.Name(), strings.Join(failed, ", "))
+	}
 	return nil
+}
+
+// textIndexKey reports whether a key is the shape the server hands back for a
+// text index rather than the shape one is created from.
+func textIndexKey(key bson.D) bool {
+	for _, e := range key {
+		if e.Key == "_fts" || e.Key == "_ftsx" {
+			return true
+		}
+	}
+	return false
+}
+
+// textIndexFrom rebuilds a text index's key and weights from the weights
+// document, which is where the server keeps the fields the index actually
+// covers.
+func textIndexFrom(raw interface{}) (key bson.D, weights bson.D, ok bool) {
+	weights, ok = indexKeyOf(raw)
+	if !ok {
+		return nil, nil, false
+	}
+	key = make(bson.D, 0, len(weights))
+	for _, e := range weights {
+		key = append(key, bson.E{Key: e.Key, Value: "text"})
+	}
+	return key, weights, true
 }
 
 // indexKeyOf reads an index's key specification, whatever shape the driver
