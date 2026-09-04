@@ -3,6 +3,7 @@ package mongodb
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 
@@ -168,7 +169,7 @@ func TestAPinnedClusterTimeIsRecognisedAsOne(t *testing.T) {
 
 func TestAResumeTokenIsRecognisedAsOne(t *testing.T) {
 	raw := rawEvent(t, bson.D{{Key: "_data", Value: "8264ABCDEF"}})
-	payload, err := encodeToken(raw)
+	payload, err := encodeTokenAt(raw, time.Time{})
 	if err != nil {
 		t.Fatalf("encodeToken: %v", err)
 	}

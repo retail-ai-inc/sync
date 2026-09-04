@@ -273,3 +273,47 @@ func SyncTablesHandler(w http.ResponseWriter, r *http.Request) {
 		},
 	})
 }
+
+// GET /api/sync/{id}/position
+//
+// Has the target applied what the source had? The endpoint a switch-over asks,
+// and the one that was missing: replication lag answers it only while the task
+// is running, and a task that has stopped is when it is asked.
+func SyncPositionHandler(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+
+	progress, err := app.TaskProgress(r.Context(), id)
+	if err != nil {
+		fail(w, "read the task's position", err)
+		return
+	}
+
+	shards := make([]map[string]interface{}, 0, len(progress.Shards))
+	for _, shard := range progress.Shards {
+		entry := map[string]interface{}{
+			"shard":      shard.Shard,
+			"source":     shard.Source,
+			"applied":    shard.Applied,
+			"caughtUp":   shard.CaughtUp,
+			"comparable": shard.Comparable,
+		}
+		// Only where the engine's position is a byte offset. Elsewhere the
+		// distance is not a number, and reporting 0 would read as "caught up".
+		if shard.BehindBytes >= 0 {
+			entry["behindBytes"] = shard.BehindBytes
+		}
+		if shard.Note != "" {
+			entry["note"] = shard.Note
+		}
+		shards = append(shards, entry)
+	}
+
+	httpx.WriteJSON(w, map[string]interface{}{
+		"success": true,
+		"data": map[string]interface{}{
+			"engine":   progress.Engine,
+			"caughtUp": progress.CaughtUp(),
+			"shards":   shards,
+		},
+	})
+}

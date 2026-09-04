@@ -54,6 +54,7 @@ var readRoutes = []struct{ method, path string }{
 	{http.MethodGet, "/sync/1/metrics"},
 	{http.MethodGet, "/sync/1/logs"},
 	{http.MethodGet, "/sync/1/tables"},
+	{http.MethodGet, "/sync/1/position"},
 	{http.MethodGet, "/changestreams/status"},
 	{http.MethodGet, "/backup"},
 	{http.MethodGet, "/backup/status/1"},

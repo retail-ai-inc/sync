@@ -211,10 +211,6 @@ func (r *Reader) fill(ctx context.Context) error {
 		if token == nil {
 			continue
 		}
-		payload, err := encodeToken(token)
-		if err != nil {
-			return err
-		}
 		// The heartbeat carries the source's clock, not just a token: it means
 		// everything up to here was delivered, which is how a re-copy knows the
 		// stream passed the point its chunk was read at.
@@ -222,6 +218,10 @@ func (r *Reader) fill(ctx context.Context) error {
 		if clockErr != nil {
 			r.Logger.Warnf("[MongoDB] Could not read the source's cluster time for a "+
 				"heartbeat: %v", clockErr)
+		}
+		payload, err := encodeTokenAt(token, at)
+		if err != nil {
+			return err
 		}
 		r.ready = append(r.ready, &domain.Event{
 			Heartbeat:       true,
@@ -296,12 +296,12 @@ func (r *Reader) take(raw bson.Raw) error {
 		return nil
 	}
 
-	token, err := encodeToken(raw.Lookup("_id").Document())
+	at, _ := eventClusterTime(raw)
+	token, err := encodeTokenAt(raw.Lookup("_id").Document(), at)
 	if err != nil {
 		return err
 	}
 
-	at, _ := eventClusterTime(raw)
 	if !at.IsZero() {
 		r.lastAt = at
 		metrics.SetReadLag(r.Labels, time.Since(at).Seconds())
@@ -383,11 +383,11 @@ func (r *Reader) takeSchemaChange(raw bson.Raw, ns domain.Namespace) error {
 				"so the change can be made on the target deliberately", ns, reason)
 	}
 
-	token, err := encodeToken(raw.Lookup("_id").Document())
+	at, _ := eventClusterTime(raw)
+	token, err := encodeTokenAt(raw.Lookup("_id").Document(), at)
 	if err != nil {
 		return err
 	}
-	at, _ := eventClusterTime(raw)
 
 	// A schema change is its own boundary and gets its own batch: MongoDB's
 	// catalogue is not transactional, so it cannot share one with rows.
@@ -575,6 +575,15 @@ type streamPosition struct {
 	// delivery.
 	Cluster   uint32 `json:"cluster,omitempty"`
 	Increment uint32 `json:"increment,omitempty"`
+	// At is the cluster time of the event the token belongs to, in seconds.
+	//
+	// It is recorded beside the token and never used to resume: a resume token
+	// is exact and a timestamp is not, so resuming from the timestamp would
+	// re-deliver every event that shared its second. It is here to be read --
+	// a token is opaque, so with only a token stored there is no way to answer
+	// "has the target applied what the source had at this moment", which is the
+	// question a switch-over asks.
+	At int64 `json:"at,omitempty"`
 }
 
 func (p streamPosition) token() (bson.Raw, error) {
@@ -585,7 +594,10 @@ func (p streamPosition) token() (bson.Raw, error) {
 	return token, nil
 }
 
-func encodeToken(token bson.Raw) (string, error) {
+// encodeTokenAt stores a resume token together with the cluster time of the
+// event it came from, so the stored position can be read as well as resumed
+// from.
+func encodeTokenAt(token bson.Raw, at time.Time) (string, error) {
 	if token == nil {
 		return "", nil
 	}
@@ -593,7 +605,11 @@ func encodeToken(token bson.Raw) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("encode the resume token: %w", err)
 	}
-	return checkpoint.Encode(streamPosition{Token: string(encoded)})
+	position := streamPosition{Token: string(encoded)}
+	if !at.IsZero() {
+		position.At = at.Unix()
+	}
+	return checkpoint.Encode(position)
 }
 
 func encodeClusterTime(at bson.Timestamp) (string, error) {
