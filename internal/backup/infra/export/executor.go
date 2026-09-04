@@ -117,6 +117,10 @@ func (e *BackupExecutor) Execute(ctx context.Context, taskID int) error {
 				logrus.Infof("[BackupExecutor] 🚀 Starting external MySQL backup for %d merged tables: %v", len(tables), tables)
 				exportErr = e.exportMySQLMergedTables(ctx, config.Database.URL, config.Database.Database, tables, tempDir, config)
 			}
+		case "sqlite", "sqlite3":
+			// The control database is one file, not a set of tables, so the table
+			// grouping above does not apply to it. Its path arrives as the database.
+			exportErr = e.executeSQLiteBackup(ctx, config.Database.Database, tempDir, config)
 		default:
 			exportErr = fmt.Errorf("unsupported database type: %s", config.SourceType)
 		}
