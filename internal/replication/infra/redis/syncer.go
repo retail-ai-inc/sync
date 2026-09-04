@@ -129,7 +129,7 @@ func (s *Syncer) Start(ctx context.Context) error {
 		group.Go(func() error {
 			// errgroup does not recover a panic, so a shard's panic would end the
 			// process rather than the shard.
-			return domain.Guard(func() error {
+			return resilience.Guard(func() error {
 				return s.runShard(groupCtx, shard, source, target, commands, trigger, guard)
 			})
 		})

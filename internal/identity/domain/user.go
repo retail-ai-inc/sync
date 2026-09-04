@@ -3,8 +3,6 @@ package domain
 import (
 	"crypto/rand"
 	"encoding/base64"
-
-	_ "github.com/mattn/go-sqlite3" // SQLite driver
 )
 
 // GenerateRandomPassword generates a password for a new Google user. It used

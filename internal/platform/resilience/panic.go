@@ -1,11 +1,11 @@
-package domain
+package resilience
 
 import (
 	"fmt"
 	"runtime/debug"
 )
 
-// A panic on one task's goroutine used to end the process, and with it the other
+// A panic on one goroutine used to end the process, and with it the other
 // tasks: four replication links stopped because one of them dereferenced
 // something. Every goroutine a task owns turns its panic into an error instead,
 // which the supervisor treats as the task stopping -- and the pipeline resumes

@@ -3,8 +3,6 @@ package domain
 import (
 	"testing"
 	"time"
-
-	_ "github.com/mattn/go-sqlite3"
 )
 
 // TestNextBackupTimeReadsTheCronExpression covers a figure shown to operators.
@@ -18,10 +16,13 @@ func TestNextBackupTimeReadsTheCronExpression(t *testing.T) {
 		"0 0 1 * *":   32 * 24 * time.Hour,
 	} {
 		t.Run(expr, func(t *testing.T) {
-			got := NextBackupTime(expr)
-			parsed, err := time.Parse("2006-01-02 15:04:05", got)
+			got, err := NextBackupTime(expr)
 			if err != nil {
-				t.Fatalf("NextBackupTime(%q) = %q: %v", expr, got, err)
+				t.Fatalf("NextBackupTime(%q): %v", expr, err)
+			}
+			parsed, perr := time.Parse("2006-01-02 15:04:05", got)
+			if perr != nil {
+				t.Fatalf("NextBackupTime(%q) = %q: %v", expr, got, perr)
 			}
 			if !parsed.After(now) {
 				t.Errorf("NextBackupTime(%q) = %q, which is not in the future", expr, got)
@@ -38,8 +39,12 @@ func TestNextBackupTimeReadsTheCronExpression(t *testing.T) {
 // than carrying a confident wrong answer.
 func TestNextBackupTimeOfSomethingThatIsNotASchedule(t *testing.T) {
 	for _, expr := range []string{"", "not a cron", "0 3 * *", "0 99 * * *"} {
-		if got := NextBackupTime(expr); got != "" {
+		got, err := NextBackupTime(expr)
+		if got != "" {
 			t.Errorf("NextBackupTime(%q) = %q, want nothing", expr, got)
+		}
+		if err == nil {
+			t.Errorf("NextBackupTime(%q) reported no reason for the empty answer", expr)
 		}
 	}
 }

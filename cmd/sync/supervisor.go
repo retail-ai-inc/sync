@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/retail-ai-inc/sync/internal/platform/resilience"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/mongodb"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/mysql"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/redis"
@@ -218,7 +219,7 @@ func (s *supervisor) start(parentCtx context.Context, sc config.SyncConfig) {
 		// It becomes this task's error, which reconsider restarts with backoff --
 		// and the pipeline resumes from its stored position, so the restart begins
 		// from a point the target agrees with.
-		task.err = domain.Guard(func() error { return syncer(ctx) })
+		task.err = resilience.Guard(func() error { return syncer(ctx) })
 	}()
 	metrics.SetTaskBlocked(taskLabels(sc), false)
 	s.log.Infof("Task %d (%s) started", sc.ID, sc.Type)

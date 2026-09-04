@@ -10,8 +10,6 @@ import (
 	"os"
 	"strings"
 	"time"
-
-	_ "github.com/mattn/go-sqlite3" // SQLite driver
 )
 
 // TokenTTL is how long a freshly minted token stays usable. The previous

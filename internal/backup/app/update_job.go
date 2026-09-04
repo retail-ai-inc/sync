@@ -4,7 +4,21 @@ import (
 	"github.com/retail-ai-inc/sync/internal/backup/domain"
 	"github.com/retail-ai-inc/sync/internal/backup/infra"
 	"github.com/retail-ai-inc/sync/internal/platform/httpx"
+	"github.com/sirupsen/logrus"
 )
+
+// nextRunTime is the stored "next run" column. A schedule that cannot be read
+// leaves the column empty rather than stopping the save: the job is still
+// worth storing, and an empty column is how the UI shows that its schedule
+// names no run time.
+func nextRunTime(schedule string) string {
+	next, err := domain.NextBackupTime(schedule)
+	if err != nil {
+		logrus.Warnf("[Backup] no next run time to show: %v", err)
+		return ""
+	}
+	return next
+}
 
 // CreateJob stores a new job. New jobs are always enabled.
 func CreateJob(req domain.Request) (id int64, name, status string, err error) {
@@ -14,7 +28,7 @@ func CreateJob(req domain.Request) (id int64, name, status string, err error) {
 	status = domain.StatusEnabled
 	enable := 1
 
-	newID, err := infra.InsertJob(enable, httpx.TimeNowStr(), domain.NextBackupTime(req.Schedule),
+	newID, err := infra.InsertJob(enable, httpx.TimeNowStr(), nextRunTime(req.Schedule),
 		domain.ConfigFrom(req, status))
 	if err != nil {
 		return 0, "", "", err
@@ -46,7 +60,7 @@ func UpdateJob(id string, req domain.Request) error {
 		req.Name = domain.DeriveUpdateName(oldConfig, id)
 	}
 
-	return infra.UpdateJob(id, httpx.TimeNowStr(), domain.NextBackupTime(req.Schedule),
+	return infra.UpdateJob(id, httpx.TimeNowStr(), nextRunTime(req.Schedule),
 		domain.ConfigFrom(req, status))
 }
 

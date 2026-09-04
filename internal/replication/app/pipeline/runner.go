@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/retail-ai-inc/sync/internal/platform/resilience"
 	"regexp"
 	"strings"
 	"sync"
@@ -246,7 +247,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	producers.Add(1)
 	go func() {
 		defer producers.Done()
-		readErr <- domain.Guard(func() error { return r.read(readCtx, queue) })
+		readErr <- resilience.Guard(func() error { return r.read(readCtx, queue) })
 	}()
 
 	stopReporting := r.report(readCtx)
@@ -316,7 +317,7 @@ func (r *Runner) startResyncs(ctx context.Context, queue chan<- *domain.Event, p
 			defer producers.Done()
 			defer func() {
 				if recovered := recover(); recovered != nil {
-					failed <- domain.Recovered(recovered)
+					failed <- resilience.Recovered(recovered)
 				}
 			}()
 			r.log().Infof(r.tag("Re-copying %s alongside the stream"), resync.NS)
@@ -412,7 +413,7 @@ func (r *Runner) watchQueuePressure(ctx context.Context, queue chan *domain.Even
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				r.log().Errorf(r.tag("The queue-pressure watch stopped: %v"),
-					domain.Recovered(recovered))
+					resilience.Recovered(recovered))
 			}
 		}()
 		ticker := time.NewTicker(r.Opts.reportInterval())
@@ -815,7 +816,7 @@ func (r *Runner) report(ctx context.Context) (stop func()) {
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				r.log().Errorf(r.tag("The health reporter stopped, so its gauges are "+
-					"now stale: %v"), domain.Recovered(recovered))
+					"now stale: %v"), resilience.Recovered(recovered))
 			}
 		}()
 		defer ticker.Stop()

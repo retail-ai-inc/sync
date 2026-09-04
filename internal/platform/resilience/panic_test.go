@@ -1,4 +1,4 @@
-package domain
+package resilience
 
 import (
 	"errors"
