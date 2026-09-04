@@ -224,12 +224,19 @@ func (s *Stream) Sync(from Point) (Handshake, error) {
 		return Handshake{}, fmt.Errorf("the source is not ready to replicate yet: %s", reply)
 
 	case strings.HasPrefix(reply, "-ERR") && strings.Contains(reply, "not allowed"):
-		// Managed Redis disables the replication commands outright; retrying changes
-		// nothing and the fallback is a different reader.
+		// A managed Redis that disables the replication commands cannot be
+		// replicated by this tool at all, and retrying changes nothing.
+		//
+		// The message used to send the reader to "the scanning reader", which
+		// does not exist: there is no fallback here, and telling somebody to
+		// reach for one costs them the time it takes to find that out. Not every
+		// managed Redis blocks PSYNC -- Memorystore does not -- so this is about
+		// the ones that do.
 		return Handshake{}, domain.Unrecoverable(
-			"the source does not allow PSYNC (%s). A managed instance blocks the "+
-				"replication commands; use the scanning reader or the provider's own "+
-				"cross-region replication instead", reply)
+			"the source does not allow PSYNC (%s), so this tool cannot replicate "+
+				"from it: reading the stream is the only way it has. Use the "+
+				"provider's own cross-region replication, or a source that permits "+
+				"replication", reply)
 	}
 	return Handshake{}, fmt.Errorf("the source answered PSYNC with %q", reply)
 }

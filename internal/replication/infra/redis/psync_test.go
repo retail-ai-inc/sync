@@ -258,8 +258,13 @@ func TestAManagedInstanceRefusingPSYNCStopsRatherThanRetries(t *testing.T) {
 	if !domain.IsUnrecoverable(err) {
 		t.Fatalf("Sync returned %v, want an unrecoverable error", err)
 	}
-	if !strings.Contains(err.Error(), "scanning reader") {
-		t.Errorf("error = %v, want it to name the fallback", err)
+	// It used to name "the scanning reader" as the way out. There is no such
+	// reader, so the message sent whoever read it looking for one.
+	if strings.Contains(err.Error(), "scanning reader") {
+		t.Errorf("error = %v, want it not to offer a reader that does not exist", err)
+	}
+	if !strings.Contains(err.Error(), "cross-region replication") {
+		t.Errorf("error = %v, want it to name something that does exist", err)
 	}
 }
 
