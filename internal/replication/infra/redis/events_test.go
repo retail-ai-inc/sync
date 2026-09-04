@@ -2,6 +2,7 @@ package redis
 
 import (
 	"context"
+	"github.com/retail-ai-inc/sync/internal/replication/infra/directionlock"
 	"strconv"
 	"testing"
 
@@ -87,5 +88,45 @@ func TestEachWriteCarriesTheDatabaseItBelongsTo(t *testing.T) {
 	}
 	if r.streamDB != 1 {
 		t.Errorf("stream database = %d, want 1", r.streamDB)
+	}
+}
+
+// The direction lock says which side of a pair is the source. Replicating it
+// tells the target it is one, and it is rewritten on every heartbeat, so the
+// stream carries it over and over. It used to be missed because the copy
+// walked only one database and the lock was in another.
+func TestThisToolsOwnKeysAreNotReplicated(t *testing.T) {
+	r := readerOverBuffer(t)
+	r.Commands = table()
+	for _, frame := range [][]byte{
+		resp("SELECT", "0"),
+		resp("HSET", directionlock.RedisKey, "42", "claim"),
+		resp("SET", OffsetKey(7, 42), "12345"),
+		resp("SET", "real-data", "v"),
+	} {
+		if err := r.Link.buffer.Append(frame); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+	}
+
+	cursor, err := r.Link.cursor(0)
+	if err != nil {
+		t.Fatalf("cursor: %v", err)
+	}
+	r.cursor = cursor
+
+	ctx := context.Background()
+	for i := 0; i < 4; i++ {
+		if err := r.take(ctx); err != nil {
+			t.Fatalf("take %d: %v", i, err)
+		}
+	}
+
+	var keys []string
+	for _, e := range append(append([]*domain.Event{}, r.ready...), r.pending...) {
+		keys = append(keys, e.Key)
+	}
+	if len(keys) != 1 || keys[0] != "real-data" {
+		t.Errorf("carried %v, want only the key that is data", keys)
 	}
 }

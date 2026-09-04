@@ -203,15 +203,17 @@ type RedisStore struct {
 
 func (s *RedisStore) Endpoint() string { return s.Address }
 
-// redisKey is the hash the claims live in. The name is deliberately not one a
-// keyspace replication task would copy across, since copying a claim would tell
-// the target it is a source.
-const redisKey = "_sync:direction_lock"
+// RedisKey is the hash the claims live in. A keyspace replication task has to
+// skip it in both directions -- the first copy and the stream -- because
+// copying a claim tells the target it is a source. It is exported so that the
+// skip names this rather than a string of its own: the two drifting apart is
+// how the claim gets copied.
+const RedisKey = "_sync:direction_lock"
 
 func (s *RedisStore) Claims(ctx context.Context) ([]Claim, error) {
-	fields, err := s.Client.HGetAll(ctx, redisKey).Result()
+	fields, err := s.Client.HGetAll(ctx, RedisKey).Result()
 	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", redisKey, err)
+		return nil, fmt.Errorf("read %s: %w", RedisKey, err)
 	}
 
 	var claims []Claim
@@ -232,15 +234,15 @@ func (s *RedisStore) Put(ctx context.Context, c Claim) error {
 	if err != nil {
 		return err
 	}
-	if err := s.Client.HSet(ctx, redisKey, strconv.Itoa(c.TaskID), string(encoded)).Err(); err != nil {
-		return fmt.Errorf("write %s: %w", redisKey, err)
+	if err := s.Client.HSet(ctx, RedisKey, strconv.Itoa(c.TaskID), string(encoded)).Err(); err != nil {
+		return fmt.Errorf("write %s: %w", RedisKey, err)
 	}
 	return nil
 }
 
 func (s *RedisStore) Remove(ctx context.Context, taskID int) error {
-	if err := s.Client.HDel(ctx, redisKey, strconv.Itoa(taskID)).Err(); err != nil {
-		return fmt.Errorf("write %s: %w", redisKey, err)
+	if err := s.Client.HDel(ctx, RedisKey, strconv.Itoa(taskID)).Err(); err != nil {
+		return fmt.Errorf("write %s: %w", RedisKey, err)
 	}
 	return nil
 }

@@ -218,6 +218,13 @@ func (r *Reader) take(ctx context.Context) error {
 		return nil
 	}
 
+	// This tool's own keys are not data. The direction lock in particular is
+	// rewritten on every heartbeat, so replicating it would tell the target it
+	// is a source over and over.
+	if internalKey(string(key)) {
+		return nil
+	}
+
 	slot := SlotOf(key)
 	var event *domain.Event
 	if r.position.inValuePhase(end) {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	intRedis "github.com/retail-ai-inc/sync/internal/platform/dbconn/redis"
+	"github.com/retail-ai-inc/sync/internal/replication/infra/directionlock"
 	"net/url"
 	"sort"
 	"strconv"
@@ -138,10 +139,7 @@ func (s *Snapshotter) copyDatabase(ctx context.Context, from, source,
 		}
 		wanted := make([][]byte, 0, len(keys))
 		for _, key := range keys {
-			if IsOffsetKey(key) || isMetaKey(key) {
-				// This task's own bookkeeping, if the source has ever been a
-				// target. Copying it would overwrite the progress of the task
-				// writing here.
+			if internalKey(key) {
 				continue
 			}
 			wanted = append(wanted, []byte(key))
@@ -255,6 +253,18 @@ func scanOne(ctx context.Context, client goredis.UniversalClient, batch int,
 		}
 		cursor = next
 	}
+}
+
+// internalKey reports whether a key is this tool's own rather than the data it
+// is replicating. Copying one writes one side's replication state onto the
+// other: a marker overwrites the progress of the task writing here, and the
+// direction lock tells the target it is a source.
+//
+// The first copy used to walk only the database its connection was on, which
+// hid the direction lock in a database nobody scanned. Walking all of them is
+// what made the skip necessary rather than incidental.
+func internalKey(key string) bool {
+	return IsOffsetKey(key) || isMetaKey(key) || key == directionlock.RedisKey
 }
 
 func isMetaKey(key string) bool {
