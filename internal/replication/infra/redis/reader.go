@@ -38,11 +38,6 @@ type Reader struct {
 	// Configured is the retention window the task was told, for a source that
 	// cannot be asked. Zero means measure it.
 	Configured time.Duration
-	// SourceDB is the database this task replicates. A standalone server
-	// interleaves every database into one replication stream, separated by
-	// SELECT, so a task that copies one of them has to drop the rest: they
-	// would otherwise be applied to the target as though they were its own.
-	SourceDB int
 
 	Logger logrus.FieldLogger
 	Labels metrics.Labels
