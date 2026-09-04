@@ -1,6 +1,10 @@
 package mongodb
 
 import (
+	"github.com/retail-ai-inc/sync/internal/platform/config"
+	"github.com/sirupsen/logrus"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -44,5 +48,24 @@ func TestAnOrdinaryIndexIsLeftAlone(t *testing.T) {
 	key, _ := indexKeyOf(bson.M{"sku": int32(1), "shop": int32(-1)})
 	if textIndexKey(key) {
 		t.Errorf("key %v was taken for a text index", key)
+	}
+}
+
+// TestNoDirectoriesAreMadeForNothing: the syncer used to create a buffer and a
+// dead-letter directory on every start, alongside ten fields that were set from
+// them and read by nothing. The deployment notes told operators to size a volume
+// for a buffer that never held anything.
+func TestNoDirectoriesAreMadeForNothing(t *testing.T) {
+	root := t.TempDir()
+	cfg := config.SyncConfig{ID: 1, Type: "mongodb", MongoDBResumeTokenPath: root}
+
+	log := logrus.New()
+	log.SetLevel(logrus.PanicLevel)
+	_ = NewMongoDBSyncer(cfg, nil, log)
+
+	for _, unwanted := range []string{"buffer", "dead_letter"} {
+		if _, err := os.Stat(filepath.Join(root, unwanted)); err == nil {
+			t.Errorf("%s was created; nothing reads it", unwanted)
+		}
 	}
 }

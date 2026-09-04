@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -27,23 +26,9 @@ type MongoDBSyncer struct {
 	logger        logrus.FieldLogger
 	resumeTokens  map[string]bson.Raw
 	resumeTokensM sync.RWMutex
-	// New fields for persistent buffer
-	bufferDir     string
-	bufferEnabled bool
 	// Fields for goroutine lifecycle management
 	activeProcessors map[string]context.CancelFunc
 	processorMutex   sync.RWMutex
-	// New fields for async pipeline
-	channelCapacity int
-	// Smart batch controller configuration
-	targetBatchSizeBytes int64
-	maxFilesPerBatch     int
-	minFilesPerBatch     int
-	// Dead letter queue configuration
-	deadLetterDir         string
-	maxRetryAttempts      int
-	retryInterval         time.Duration
-	enableDeadLetterQueue bool
 	// Global configuration for accessing Slack settings
 	globalConfig *config.Config
 	// checkpoints is where the resume tokens and start times are recorded.
@@ -82,47 +67,15 @@ func NewMongoDBSyncer(cfg config.SyncConfig, globalConfig *config.Config, logger
 		}
 	}
 
-	bufferDir := cfg.MongoDBResumeTokenPath
-	if bufferDir == "" {
-		bufferDir = "./mongodb_buffer"
-	} else {
-		bufferDir = filepath.Join(bufferDir, "buffer")
-	}
-
-	if err := os.MkdirAll(bufferDir, os.ModePerm); err != nil {
-		logger.Warnf("[MongoDB] Failed to create buffer directory %s: %v", bufferDir, err)
-	}
-
-	deadLetterDir := cfg.MongoDBResumeTokenPath
-	if deadLetterDir == "" {
-		deadLetterDir = "./mongodb_dead_letter"
-	} else {
-		deadLetterDir = filepath.Join(deadLetterDir, "dead_letter")
-	}
-
-	if err := os.MkdirAll(deadLetterDir, os.ModePerm); err != nil {
-		logger.Warnf("[MongoDB] Failed to create dead letter directory %s: %v", deadLetterDir, err)
-	}
-
 	return &MongoDBSyncer{
-		sourceClient:          sourceClient,
-		targetClient:          targetClient,
-		connectErr:            connectErr,
-		cfg:                   cfg,
-		logger:                logger.WithField("sync_task_id", cfg.ID),
-		resumeTokens:          resumeMap,
-		bufferDir:             bufferDir,
-		bufferEnabled:         true, // Enable persistent buffer by default
-		activeProcessors:      make(map[string]context.CancelFunc),
-		channelCapacity:       200,               // A smaller, safer default to prevent OOM.
-		targetBatchSizeBytes:  256 * 1024 * 1024, // 256MB - Increased batch size for higher throughput
-		maxFilesPerBatch:      1000,
-		minFilesPerBatch:      5,
-		deadLetterDir:         deadLetterDir,
-		maxRetryAttempts:      3,
-		retryInterval:         time.Second * 5,
-		enableDeadLetterQueue: true,
-		globalConfig:          globalConfig,
+		sourceClient:     sourceClient,
+		targetClient:     targetClient,
+		connectErr:       connectErr,
+		cfg:              cfg,
+		logger:           logger.WithField("sync_task_id", cfg.ID),
+		resumeTokens:     resumeMap,
+		activeProcessors: make(map[string]context.CancelFunc),
+		globalConfig:     globalConfig,
 	}
 }
 
