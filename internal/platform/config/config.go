@@ -436,3 +436,27 @@ ORDER BY id ASC
 	}
 	return results, nil
 }
+
+// LoadSyncTask reads one task's configuration.
+//
+// It exists for the caller that has to read a task before deleting it: the
+// clean-up needs the target's connection, and after the row is gone there is
+// nowhere to read it from.
+func LoadSyncTask(id int) (SyncConfig, error) {
+	db, err := sqlite.OpenSQLiteDB()
+	if err != nil {
+		return SyncConfig{}, fmt.Errorf("open the control database: %w", err)
+	}
+	defer db.Close()
+
+	tasks, err := loadSyncTasks(db)
+	if err != nil {
+		return SyncConfig{}, err
+	}
+	for _, task := range tasks {
+		if task.ID == id {
+			return task, nil
+		}
+	}
+	return SyncConfig{}, fmt.Errorf("no task %d", id)
+}

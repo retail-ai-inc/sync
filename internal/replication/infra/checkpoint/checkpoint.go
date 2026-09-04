@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -353,6 +354,41 @@ func (s *FileStore) Save(_ context.Context, key, payload string) error {
 	}
 	if err := os.WriteFile(s.path(key), []byte(payload), 0o644); err != nil {
 		return fmt.Errorf("write %s: %w", s.path(key), err)
+	}
+	return nil
+}
+
+// Purge removes this task's rows.
+//
+// A deleted task used to leave its position behind for ever: the row in
+// sync_tasks went and the row here did not, so a target accumulated the
+// positions of every task that had ever pointed at it -- and a new task reusing
+// an id would resume from a stranger's offset rather than copying.
+func (s *SQLStore) Purge(ctx context.Context) error {
+	if err := s.ensure(ctx); err != nil {
+		// Nothing to purge if the table was never made.
+		return nil
+	}
+	_, err := s.DB.ExecContext(ctx,
+		fmt.Sprintf("DELETE FROM %s WHERE task_id = %s", s.qualified(), s.arg(1)), s.TaskID)
+	if err != nil {
+		return fmt.Errorf("remove the positions of task %d from %s: %w",
+			s.TaskID, s.qualified(), err)
+	}
+	return nil
+}
+
+// Purge removes this task's documents, for the same reason the SQL store's does.
+func (s *MongoStore) Purge(ctx context.Context) error {
+	prefix := strconv.Itoa(s.TaskID) + ":"
+	_, err := s.Database.Collection(tableName).DeleteMany(ctx, bson.M{
+		// The id is "<task>:<key>", and a prefix match is what selects one task's
+		// documents without knowing which keys it wrote.
+		"_id": bson.M{"$regex": "^" + regexp.QuoteMeta(prefix)},
+	})
+	if err != nil {
+		return fmt.Errorf("remove the positions of task %d from %s: %w",
+			s.TaskID, tableName, err)
 	}
 	return nil
 }

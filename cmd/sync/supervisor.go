@@ -3,6 +3,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"github.com/retail-ai-inc/sync/internal/replication/infra/mongodb"
+	"github.com/retail-ai-inc/sync/internal/replication/infra/mysql"
+	"github.com/retail-ai-inc/sync/internal/replication/infra/redis"
 	"strconv"
 	"strings"
 	"time"
@@ -342,3 +346,27 @@ func runSyncTasks(parentCtx context.Context, log *logrus.Logger, cfg *config.Con
 		}
 	}
 }
+
+// purgeCheckpointsFor removes what a deleted task left on its target.
+//
+// The dispatch lives here because this is where the engines are already known.
+// The app package that deletes a task neither knows them nor should learn them,
+// so it calls this through a hook set at start-up.
+func purgeCheckpointsFor(sc config.SyncConfig) error {
+	ctx, cancel := context.WithTimeout(context.Background(), purgeTimeout)
+	defer cancel()
+
+	switch strings.ToLower(strings.TrimSpace(sc.Type)) {
+	case "mongodb":
+		return mongodb.PurgeCheckpoints(ctx, sc)
+	case "mysql", "mariadb":
+		return mysql.PurgeCheckpoints(ctx, sc)
+	case "redis":
+		return redis.PurgeCheckpoints(ctx, sc)
+	}
+	// PostgreSQL shares the SQL store, but nothing wires a purge for it yet, and
+	// saying so beats reporting a clean-up that did not happen.
+	return fmt.Errorf("no clean-up is implemented for %q", sc.Type)
+}
+
+const purgeTimeout = 30 * time.Second

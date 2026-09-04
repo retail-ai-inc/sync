@@ -2,6 +2,7 @@ package redis
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"path/filepath"
@@ -524,4 +525,33 @@ func (s *Syncer) labels() metrics.Labels {
 		"task":   strconv.Itoa(s.cfg.ID),
 		"engine": "redis",
 	}
+}
+
+// PurgeCheckpoints removes what a task left on its target, for a task that is
+// being deleted. Every shard's position goes, which needs the shard names -- so
+// the source is asked for them, and a source that cannot be reached leaves the
+// per-shard markers behind rather than blocking the delete.
+func PurgeCheckpoints(ctx context.Context, cfg config.SyncConfig) error {
+	target, err := intRedis.GetRedisClient(cfg.TargetConnection)
+	if err != nil {
+		return fmt.Errorf("connect to the target: %w", err)
+	}
+	defer target.Close()
+
+	shards := []shard{{id: "0"}}
+	if source, srcErr := intRedis.GetRedisClient(cfg.SourceConnection); srcErr == nil {
+		defer source.Close()
+		if found, listErr := shardsOf(ctx, source, dsn.HostPort("redis", cfg.SourceConnection)); listErr == nil {
+			shards = found
+		}
+	}
+
+	var failures []error
+	for _, sh := range shards {
+		positions := &Checkpoints{Target: target, TaskID: cfg.ID, Shard: sh.id}
+		if err := positions.Purge(ctx); err != nil {
+			failures = append(failures, err)
+		}
+	}
+	return errors.Join(failures...)
 }

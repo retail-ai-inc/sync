@@ -1,9 +1,13 @@
 package app
 
 import (
+	"fmt"
+	"github.com/retail-ai-inc/sync/internal/platform/config"
 	"github.com/retail-ai-inc/sync/internal/platform/httpx"
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
 	"github.com/retail-ai-inc/sync/internal/replication/infra"
+	"log"
+	"strconv"
 )
 
 // CreateTask stores a new task and reports the request as normalised, so the
@@ -40,7 +44,43 @@ func UpdateTask(id string, req domain.Request) (stored domain.Request, err error
 	return req, infra.UpdateTask(id, enable, httpx.TimeNowStr(), domain.ConfigFrom(req))
 }
 
-func DeleteTask(id string) error { return infra.DeleteTask(id) }
+// PurgeCheckpoints removes what a deleted task left on its target. It is set
+// at start-up, where the engines are already known: this package does not
+// dispatch on engine and should not start.
+//
+// Nil means nothing is removed, which is what the tests and any caller that
+// has not wired it get.
+var PurgeCheckpoints func(cfg config.SyncConfig) error
+
+// DeleteTask removes a task and then what it left behind.
+//
+// The row goes first. A position removed before the row would, if the delete
+// then failed, leave a live task with no position and so a full re-copy on its
+// next start -- worse than the orphan rows this is here to clean up. Failing to
+// clean up is reported and not fatal for the same reason: a target that cannot
+// be reached must not make a task undeletable.
+func DeleteTask(id string) error {
+	// Read before deleting: the clean-up needs the target's connection, and
+	// after the row is gone there is nowhere to read it from.
+	var stored config.SyncConfig
+	readErr := fmt.Errorf("no task id")
+	if n, convErr := strconv.Atoi(id); convErr == nil {
+		stored, readErr = config.LoadSyncTask(n)
+	}
+
+	if err := infra.DeleteTask(id); err != nil {
+		return err
+	}
+
+	if PurgeCheckpoints == nil || readErr != nil {
+		return nil
+	}
+	if err := PurgeCheckpoints(stored); err != nil {
+		log.Printf("[WARN] task %s is deleted, but its positions are still on the "+
+			"target and a new task given the same id would resume from them: %v", id, err)
+	}
+	return nil
+}
 
 // StoredEndpointPassword reports the password a saved task holds for one of its
 // endpoints, "source" or "target".

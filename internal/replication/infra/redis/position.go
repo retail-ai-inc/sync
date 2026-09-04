@@ -202,3 +202,20 @@ func (c *Checkpoints) markersFor(start int64) []int64 {
 	}
 	return c.markers
 }
+
+// Purge removes this task's position and every slot marker it wrote.
+//
+// A deleted task used to leave them on the target for ever, and a new task
+// given the same id would read a stranger's offsets and skip the stream up to
+// them rather than copying.
+func (c *Checkpoints) Purge(ctx context.Context) error {
+	pipe := c.Target.Pipeline()
+	pipe.Del(ctx, metaKey(c.TaskID, c.Shard))
+	for slot := 0; slot < SlotCount; slot++ {
+		pipe.Del(ctx, OffsetKey(slot, c.TaskID))
+	}
+	if _, err := pipe.Exec(ctx); err != nil && err != goredis.Nil {
+		return fmt.Errorf("remove the positions of task %d: %w", c.TaskID, err)
+	}
+	return nil
+}

@@ -3,6 +3,7 @@ package mongodb
 import (
 	"context"
 	"fmt"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 	"strings"
 	"time"
 
@@ -360,4 +361,20 @@ func (s *Syncer) resyncs(inner *MongoDBSyncer, store *checkpoint.MongoStore, sou
 		s.logger.Infof("[MongoDB] %s is listed for a re-copy alongside the stream", ns)
 	}
 	return out
+}
+
+// PurgeCheckpoints removes what a task left on its target, for a task that is
+// being deleted.
+func PurgeCheckpoints(ctx context.Context, cfg config.SyncConfig) error {
+	client, err := mongo.Connect(options.Client().ApplyURI(cfg.TargetConnection))
+	if err != nil {
+		return fmt.Errorf("connect to the target: %w", err)
+	}
+	defer func() { _ = client.Disconnect(ctx) }()
+
+	store := &checkpoint.MongoStore{
+		Database: client.Database(dsn.GetDatabaseName(cfg.Type, cfg.TargetConnection)),
+		TaskID:   cfg.ID,
+	}
+	return store.Purge(ctx)
 }

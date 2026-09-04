@@ -347,3 +347,21 @@ func (s *Syncer) watchSourceTables(ctx context.Context, sourceDBName string,
 		metrics.SetUnreplicated(labels, float64(len(warned)))
 	})
 }
+
+// PurgeCheckpoints removes what a task left on its target, for a task that is
+// being deleted. Best effort by design: a target that cannot be reached must
+// not make a task undeletable.
+func PurgeCheckpoints(ctx context.Context, cfg config.SyncConfig) error {
+	target, err := sql.Open("mysql", cfg.TargetConnection)
+	if err != nil {
+		return fmt.Errorf("connect to the target: %w", err)
+	}
+	defer target.Close()
+
+	store := &checkpoint.SQLStore{
+		DB:     target,
+		Schema: dsn.GetDatabaseName(cfg.Type, cfg.TargetConnection),
+		TaskID: cfg.ID,
+	}
+	return store.Purge(ctx)
+}

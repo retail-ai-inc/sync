@@ -431,3 +431,51 @@ func TestTheTableIsCreatedOncePerProcess(t *testing.T) {
 			"CREATE TABLE into the source's binary log")
 	}
 }
+
+// A deleted task used to leave its position behind for ever: the row in
+// sync_tasks went and the row here did not, so a target accumulated the
+// positions of every task that had ever pointed at it -- and a new task given
+// a reused id would resume from a stranger's offset rather than copying.
+func TestPurgeRemovesOnlyThisTasksPositions(t *testing.T) {
+	mine := sqlStore(t, 7)
+	theirs := &SQLStore{DB: mine.DB, TaskID: 8}
+
+	ctx := context.Background()
+	for _, s := range []*SQLStore{mine, theirs} {
+		for _, key := range []string{"shard-a", "shard-b"} {
+			if err := s.Save(ctx, key, "position-"+key); err != nil {
+				t.Fatalf("save: %v", err)
+			}
+		}
+	}
+
+	if err := mine.Purge(ctx); err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+
+	for _, key := range []string{"shard-a", "shard-b"} {
+		got, err := mine.Load(ctx, key)
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		if got != "" {
+			t.Errorf("task 7 still has %s = %q after being purged", key, got)
+		}
+		// The neighbour's positions are not this task's to remove.
+		other, err := theirs.Load(ctx, key)
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		if other != "position-"+key {
+			t.Errorf("task 8 lost %s: %q", key, other)
+		}
+	}
+}
+
+// Purging a task that never wrote anything is not an error: a task deleted
+// before it ever ran must still be deletable.
+func TestPurgingATaskThatNeverRanIsFine(t *testing.T) {
+	if err := sqlStore(t, 11).Purge(context.Background()); err != nil {
+		t.Errorf("purge of an unused task = %v, want nil", err)
+	}
+}

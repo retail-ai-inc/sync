@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	replicationapp "github.com/retail-ai-inc/sync/internal/replication/app"
 	"net/http"
 	"os"
 	"os/signal"
@@ -119,6 +120,10 @@ func main() {
 	syncDone := make(chan struct{})
 	go func() {
 		defer close(syncDone)
+		// A deleted task's positions are removed by the engine that wrote them,
+		// and this is where the engines are known.
+		replicationapp.PurgeCheckpoints = purgeCheckpointsFor
+
 		runSyncTasks(ctx, log, cfg)
 	}()
 
