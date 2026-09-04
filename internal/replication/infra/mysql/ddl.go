@@ -29,6 +29,13 @@ const (
 	ddlApply
 	// ddlBlock: the statement would destroy replicated data on the target.
 	ddlBlock
+	// ddlNotSchema: the statement is not a schema change at all. It is dropped
+	// like a skip and, unlike a skip, is not counted as one: the binlog carries
+	// a BEGIN and a COMMIT per transaction as query events, and counting those
+	// as schema changes deliberately not carried through reported tens of them
+	// a second on a busy source. A refusal metric that says that is a metric
+	// nobody can read.
+	ddlNotSchema
 )
 
 type ddlDecision struct {
@@ -39,6 +46,23 @@ type ddlDecision struct {
 	// reason explains a skip or a block, for the log and for the error an
 	// operator will read.
 	reason string
+}
+
+// notASchemaChange reports whether a statement changes no schema at all.
+//
+// The binlog carries these as query events beside the real DDL: a BEGIN and a
+// COMMIT for every transaction, and whatever the session set along the way.
+// They parse, they name no table, and they used to be counted as schema changes
+// this task refused to carry -- twenty-five a second on a shared server, which
+// is what an operator would have read as the two schemas coming apart.
+func notASchemaChange(stmt ast.StmtNode) bool {
+	switch stmt.(type) {
+	case *ast.BeginStmt, *ast.CommitStmt, *ast.RollbackStmt,
+		*ast.SavepointStmt, *ast.ReleaseSavepointStmt,
+		*ast.SetStmt, *ast.SetSessionStatesStmt, *ast.UseStmt:
+		return true
+	}
+	return false
 }
 
 // tableRefs reports every table name a DDL statement names, as pointers into
@@ -155,6 +179,14 @@ func (h *MyEventHandler) planDDL(defaultSchema, query string) ([]ddlDecision, er
 
 	decisions := make([]ddlDecision, 0, len(stmts))
 	for _, stmt := range stmts {
+		if notASchemaChange(stmt) {
+			decisions = append(decisions, ddlDecision{
+				action: ddlNotSchema,
+				reason: "is not a schema change",
+			})
+			continue
+		}
+
 		refs := tableRefs(stmt)
 		if len(refs) == 0 {
 			decisions = append(decisions, ddlDecision{

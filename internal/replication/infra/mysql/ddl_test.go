@@ -484,3 +484,36 @@ func TestATransactionMarkerIsNotASchemaChange(t *testing.T) {
 			len(events))
 	}
 }
+
+// A transaction boundary is not a schema change. The binlog carries a BEGIN and
+// a COMMIT per transaction as query events; counting them as schema changes
+// deliberately not carried through reported twenty-five a second on a shared
+// server, which reads as the two schemas coming apart.
+func TestATransactionBoundaryIsNotARefusedSchemaChange(t *testing.T) {
+	h := &MyEventHandler{}
+
+	for _, q := range []string{"BEGIN", "COMMIT", "ROLLBACK", "SAVEPOINT s1",
+		"RELEASE SAVEPOINT s1", "SET autocommit=1", "USE shop"} {
+		decisions, err := h.planDDL("shop", q)
+		if err != nil {
+			t.Fatalf("planDDL(%q): %v", q, err)
+		}
+		if len(decisions) != 1 {
+			t.Fatalf("%q produced %d decisions", q, len(decisions))
+		}
+		if decisions[0].action != ddlNotSchema {
+			t.Errorf("%q is action %v, want it not counted as a schema refusal",
+				q, decisions[0].action)
+		}
+	}
+
+	// A real statement naming nothing replicated is still a refusal: that is the
+	// gap somebody has to see.
+	decisions, err := h.planDDL("shop", "ALTER TABLE elsewhere ADD COLUMN x INT")
+	if err != nil {
+		t.Fatalf("planDDL: %v", err)
+	}
+	if len(decisions) != 1 || decisions[0].action != ddlSkip {
+		t.Errorf("an unreplicated ALTER is %v, want a counted skip", decisions)
+	}
+}

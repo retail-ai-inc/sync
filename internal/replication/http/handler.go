@@ -72,6 +72,13 @@ func taskPayload(id interface{}, enable bool, status, lastUpdate, lastRun, name 
 		"mongodb_resume_token_path": c.MongodbResumeTokenPath,
 		"redis_position_path":       c.RedisPositionPath,
 		"redis_buffer_dir":          c.RedisBufferDir,
+		"redis_buffer_bytes":        c.RedisBufferBytes,
+		"redis_batch_window":        c.RedisBatchWindow,
+		"redis_reconcile_interval":  c.RedisReconcileInterval,
+		"redis_source_read_rate":    c.RedisSourceReadRate,
+		"retention_window":          c.RetentionWindow,
+		"dump_execution_path":       c.DumpExecutionPath,
+		"resync":                    c.Resync,
 		"securityEnabled":           c.SecurityEnabled,
 	}
 }

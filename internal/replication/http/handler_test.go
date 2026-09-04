@@ -222,25 +222,45 @@ func TestStartingAMissingTaskIsRejected(t *testing.T) {
 	}
 }
 
-// TestARedisTaskKeepsItsBufferDirectory: a Redis task refuses to start without
-// one, and the endpoints used to drop it, which made the engine unusable
-// through the API and the UI both.
-func TestARedisTaskKeepsItsBufferDirectory(t *testing.T) {
+// TestEverySettingTheStoredConfigReadsCanBeSet: each of these is read from the
+// stored configuration and had no way of getting there, so a task could be
+// given one by editing the database and no other way. RetentionWindow is what a
+// sharded MongoDB or a managed Redis needs -- neither can be measured through
+// the router or with CONFIG disabled -- and Resync is the answer every "re-copy
+// this deliberately" error points at.
+func TestEverySettingTheStoredConfigReadsCanBeSet(t *testing.T) {
 	req := domain.Request{
-		TaskName:       "redis",
-		SourceType:     "redis",
-		Status:         "Stopped",
-		RedisBufferDir: "/mnt/state/redis_buffer_42",
+		TaskName:               "redis",
+		SourceType:             "redis",
+		Status:                 "Stopped",
+		RedisBufferDir:         "/mnt/state/redis_buffer_42",
+		RedisBufferBytes:       1 << 30,
+		RedisBatchWindow:       "50ms",
+		RedisReconcileInterval: "10m",
+		RedisSourceReadRate:    5000,
+		RetentionWindow:        "45m",
+		DumpExecutionPath:      "/usr/bin",
+		Resync:                 []string{"shard-0"},
 	}
 
 	stored := domain.ConfigFrom(req)
-	if stored.RedisBufferDir != req.RedisBufferDir {
-		t.Fatalf("stored buffer directory = %q, want %q",
-			stored.RedisBufferDir, req.RedisBufferDir)
-	}
-
 	payload := taskPayload(42, false, stored.Status, "", "", stored.TaskName, stored)
-	if got := payload["redis_buffer_dir"]; got != req.RedisBufferDir {
-		t.Errorf("the payload answers %v, so an edit would save the task without it", got)
+
+	for field, want := range map[string]interface{}{
+		"redis_buffer_dir":         req.RedisBufferDir,
+		"redis_buffer_bytes":       req.RedisBufferBytes,
+		"redis_batch_window":       req.RedisBatchWindow,
+		"redis_reconcile_interval": req.RedisReconcileInterval,
+		"redis_source_read_rate":   req.RedisSourceReadRate,
+		"retention_window":         req.RetentionWindow,
+		"dump_execution_path":      req.DumpExecutionPath,
+	} {
+		if got := payload[field]; got != want {
+			t.Errorf("%s: stored/answered %v, want %v — an edit would save the task "+
+				"without it", field, got, want)
+		}
+	}
+	if got, _ := payload["resync"].([]string); len(got) != 1 || got[0] != "shard-0" {
+		t.Errorf("resync = %v, want the object named for a re-copy", payload["resync"])
 	}
 }

@@ -411,6 +411,9 @@ func (r *Reader) OnDDL(header *replication.EventHeader, pos mysql.Position, e *r
 
 	for _, decision := range decisions {
 		switch decision.action {
+		case ddlNotSchema:
+			// Dropped without being counted; see notASchemaChange.
+			r.Logger.Debugf("[MySQL][DDL] Not a schema change, dropping %q", e.Query)
 		case ddlSkip:
 			metrics.CountSchemaRefused(r.Labels, "skipped")
 			r.Logger.Debugf("[MySQL][DDL] Skipping %q: %s", e.Query, decision.reason)

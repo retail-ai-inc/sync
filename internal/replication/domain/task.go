@@ -24,11 +24,24 @@ type Config struct {
 	MysqlPositionPath      string                   `json:"mysql_position_path"`
 	MongodbResumeTokenPath string                   `json:"mongodb_resume_token_path"`
 	RedisPositionPath      string                   `json:"redis_position_path"`
-	// RedisBufferDir is where a Redis task spools the replication stream. A
-	// task without one refuses to start, so an endpoint that dropped it made
-	// the engine unusable through the API and the UI both.
-	RedisBufferDir  string `json:"redis_buffer_dir,omitempty"`
-	SecurityEnabled bool   `json:"securityEnabled"`
+
+	// The settings below are read from the stored configuration and had no way
+	// of getting there: the create and update endpoints did not carry them, so
+	// a task could be given them by editing the database and no other way. Each
+	// is the documented answer to some condition -- RetentionWindow is what a
+	// sharded MongoDB or a managed Redis needs, because neither can be measured
+	// through the router or with CONFIG disabled, and Resync is the answer every
+	// "re-copy this deliberately" error points at.
+	RedisBufferDir         string   `json:"redis_buffer_dir,omitempty"`
+	RedisBufferBytes       int64    `json:"redis_buffer_bytes,omitempty"`
+	RedisBatchWindow       string   `json:"redis_batch_window,omitempty"`
+	RedisReconcileInterval string   `json:"redis_reconcile_interval,omitempty"`
+	RedisSourceReadRate    int      `json:"redis_source_read_rate,omitempty"`
+	RetentionWindow        string   `json:"retention_window,omitempty"`
+	DumpExecutionPath      string   `json:"dump_execution_path,omitempty"`
+	Resync                 []string `json:"resync,omitempty"`
+
+	SecurityEnabled bool `json:"securityEnabled"`
 }
 
 // Request is the body the create and update endpoints accept. It is Config with
@@ -49,6 +62,13 @@ type Request struct {
 	MongodbResumeTokenPath string                   `json:"mongodb_resume_token_path"`
 	RedisPositionPath      string                   `json:"redis_position_path"`
 	RedisBufferDir         string                   `json:"redis_buffer_dir,omitempty"`
+	RedisBufferBytes       int64                    `json:"redis_buffer_bytes,omitempty"`
+	RedisBatchWindow       string                   `json:"redis_batch_window,omitempty"`
+	RedisReconcileInterval string                   `json:"redis_reconcile_interval,omitempty"`
+	RedisSourceReadRate    int                      `json:"redis_source_read_rate,omitempty"`
+	RetentionWindow        string                   `json:"retention_window,omitempty"`
+	DumpExecutionPath      string                   `json:"dump_execution_path,omitempty"`
+	Resync                 []string                 `json:"resync,omitempty"`
 	SecurityEnabled        bool                     `json:"securityEnabled"`
 }
 
@@ -95,6 +115,13 @@ func ConfigFrom(req Request) Config {
 		MongodbResumeTokenPath: req.MongodbResumeTokenPath,
 		RedisPositionPath:      req.RedisPositionPath,
 		RedisBufferDir:         req.RedisBufferDir,
+		RedisBufferBytes:       req.RedisBufferBytes,
+		RedisBatchWindow:       req.RedisBatchWindow,
+		RedisReconcileInterval: req.RedisReconcileInterval,
+		RedisSourceReadRate:    req.RedisSourceReadRate,
+		RetentionWindow:        req.RetentionWindow,
+		DumpExecutionPath:      req.DumpExecutionPath,
+		Resync:                 req.Resync,
 		SecurityEnabled:        req.SecurityEnabled,
 	}
 }
