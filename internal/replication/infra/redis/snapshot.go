@@ -3,6 +3,11 @@ package redis
 import (
 	"context"
 	"fmt"
+	intRedis "github.com/retail-ai-inc/sync/internal/platform/dbconn/redis"
+	"net/url"
+	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -26,6 +31,12 @@ type Snapshotter struct {
 	Node   goredis.UniversalClient
 	Source goredis.UniversalClient
 	Target goredis.UniversalClient
+
+	// SourceConn and TargetConn are the connection strings, used to open a
+	// client on a database other than the one the task names. A standalone
+	// source holds several, and the copy has to walk all of them.
+	SourceConn string
+	TargetConn string
 
 	Logger logrus.FieldLogger
 	Labels metrics.Labels
@@ -68,16 +79,59 @@ func (s *Snapshotter) Pin(ctx context.Context) (domain.Position, error) {
 }
 
 func (s *Snapshotter) Copy(ctx context.Context) error {
+	from := s.Node
+	if from == nil {
+		from = s.Source
+	}
+
+	// A cluster has one database and its client cannot SELECT, so it is copied
+	// as it always was. A standalone server holds up to sixteen, and a copy that
+	// walks only the one the connection is on leaves the rest out of the standby
+	// with nothing saying so.
+	if _, cluster := from.(*goredis.ClusterClient); cluster || s.SourceConn == "" {
+		return s.copyDatabase(ctx, from, s.Source, s.Target, -1)
+	}
+
+	databases, err := populatedDatabases(ctx, from)
+	if err != nil {
+		return err
+	}
+	if len(databases) == 0 {
+		s.logger().Infof("[Redis] The source holds no keys for shard %s", s.Link.shard)
+		return nil
+	}
+
+	for _, db := range databases {
+		source, err := clientOnDB(s.SourceConn, db)
+		if err != nil {
+			return fmt.Errorf("open the source on database %d: %w", db, err)
+		}
+		target, err := clientOnDB(s.TargetConn, db)
+		if err != nil {
+			source.Close()
+			return fmt.Errorf("open the target on database %d: %w", db, err)
+		}
+		err = s.copyDatabase(ctx, source, source, target, db)
+		source.Close()
+		target.Close()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// copyDatabase copies one database. db is -1 for a source that has only one,
+// which is what keeps the cluster path's logs saying what they always said.
+func (s *Snapshotter) copyDatabase(ctx context.Context, from, source,
+	target goredis.UniversalClient, db int) error {
+
 	var (
 		copied int
 		limit  = newRateLimiter(s.ReadRate)
 		start  = time.Now()
 	)
 
-	from := s.Node
-	if from == nil {
-		from = s.Source
-	}
 	err := scanOne(ctx, from, s.batch(), func(keys []string) error {
 		if err := limit.wait(ctx, len(keys)); err != nil {
 			return err
@@ -96,11 +150,11 @@ func (s *Snapshotter) Copy(ctx context.Context) error {
 			return nil
 		}
 
-		values, err := readValues(ctx, s.Source, wanted)
+		values, err := readValues(ctx, source, wanted)
 		if err != nil {
 			return err
 		}
-		pipe := s.Target.Pipeline()
+		pipe := target.Pipeline()
 		for _, value := range values {
 			value.queue(ctx, pipe)
 		}
@@ -122,9 +176,42 @@ func (s *Snapshotter) Copy(ctx context.Context) error {
 		return fmt.Errorf("copy the source after %d keys: %w", copied, err)
 	}
 
-	s.logger().Infof("[Redis] Copied %d keys for shard %s in %s",
-		copied, s.Link.shard, time.Since(start).Round(time.Millisecond))
+	if db < 0 {
+		s.logger().Infof("[Redis] Copied %d keys for shard %s in %s",
+			copied, s.Link.shard, time.Since(start).Round(time.Millisecond))
+	} else {
+		s.logger().Infof("[Redis] Copied %d keys from database %d for shard %s in %s",
+			copied, db, s.Link.shard, time.Since(start).Round(time.Millisecond))
+	}
 	return nil
+}
+
+// populatedDatabases reports which of a standalone server's databases hold
+// keys, in order. INFO keyspace lists only the ones that do, which is what
+// keeps this from probing sixteen databases to find two.
+func populatedDatabases(ctx context.Context, client goredis.UniversalClient) ([]int, error) {
+	info, err := client.Info(ctx, "keyspace").Result()
+	if err != nil {
+		return nil, fmt.Errorf("ask the source which databases hold keys: %w", err)
+	}
+	var databases []int
+	for _, line := range strings.Split(info, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "db") {
+			continue
+		}
+		colon := strings.Index(line, ":")
+		if colon < 0 {
+			continue
+		}
+		db, err := strconv.Atoi(line[2:colon])
+		if err != nil {
+			continue
+		}
+		databases = append(databases, db)
+	}
+	sort.Ints(databases)
+	return databases, nil
 }
 
 // scanAll walks every key of a source, whether it is one server or a cluster.
@@ -214,4 +301,15 @@ func (r *rateLimiter) wait(ctx context.Context, n int) error {
 		r.last = time.Now()
 		return nil
 	}
+}
+
+// clientOnDB opens a client on one database of a connection, whatever database
+// the connection string names.
+func clientOnDB(connection string, db int) (goredis.UniversalClient, error) {
+	u, err := url.Parse(connection)
+	if err != nil {
+		return nil, fmt.Errorf("read the connection: %w", err)
+	}
+	u.Path = "/" + strconv.Itoa(db)
+	return intRedis.GetRedisClient(u.String())
 }

@@ -223,19 +223,12 @@ func (r *Reader) take(ctx context.Context) error {
 		return nil
 	}
 
-	// A write from another database is not this task's to carry. Applying it
-	// would put another database's key into this target under the same name,
-	// which is indistinguishable from the source having written it here.
-	if r.streamDB != r.SourceDB {
-		return nil
-	}
-
 	slot := SlotOf(key)
 	var event *domain.Event
 	if r.position.inValuePhase(end) {
-		event = repairEvent(&valueRepair{key: key, slot: slot, offset: end}, at, !r.inMulti)
+		event = repairEvent(&valueRepair{key: key, db: r.streamDB, slot: slot, offset: end}, at, !r.inMulti)
 	} else {
-		event = commandEvent(&command{args: args, slot: slot, offset: end}, key, at, !r.inMulti)
+		event = commandEvent(&command{args: args, db: r.streamDB, slot: slot, offset: end}, key, at, !r.inMulti)
 	}
 
 	if r.inMulti {

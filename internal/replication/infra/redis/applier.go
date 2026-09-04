@@ -43,6 +43,14 @@ type Applier struct {
 	// Concurrency bounds how many slot transactions are in flight at once. Zero
 	// means the default.
 	Concurrency int
+	// SourceHomeDB is the database the source client is on, so a read from
+	// another one knows where to put the connection back.
+	SourceHomeDB int
+	// BookkeepingDB is the database the slot markers and the stored position
+	// live in. It is the database the target connection was opened on, and it
+	// is not one of the databases being replicated into -- the markers belong
+	// to this task rather than to any database the source has.
+	BookkeepingDB int
 
 	mu sync.Mutex
 	// skipped counts commands dropped because their slot had already applied
@@ -60,18 +68,25 @@ func (a *Applier) concurrency() int {
 	return defaultConcurrency
 }
 
+// repairKey names a key to re-read, in the database it lives in.
+type repairKey struct {
+	db  int
+	key []byte
+}
+
 type work struct {
 	slot int
 	// commands are the stream commands for this slot, in the order they were
 	// read.
 	commands []*command
 	// repairs are keys whose value is to be re-read from the source and written
-	// whole, used where replaying a command would not be safe.
+	// whole, used where replaying a command would not be safe. Each carries the
+	// database it belongs to: the value has to be read from that one.
 	//
 	// A key appears once however many times the batch changed it: the repair
 	// writes whatever the source holds now, so reading it twice in one batch
 	// would cost a round trip to arrive at the same answer.
-	repairs [][]byte
+	repairs []repairKey
 	seen    map[string]bool
 }
 
@@ -180,7 +195,7 @@ func (a *Applier) plan(events []*domain.Event, markers []int64) ([]work, error) 
 			}
 			if !job.seen[string(payload.key)] {
 				job.seen[string(payload.key)] = true
-				job.repairs = append(job.repairs, payload.key)
+				job.repairs = append(job.repairs, repairKey{db: payload.db, key: payload.key})
 			}
 
 		default:
@@ -255,12 +270,31 @@ func (a *Applier) applySlot(ctx context.Context, job work, batchEnd int64) error
 	}
 
 	tx := a.Target.TxPipeline()
+
+	// The stream interleaves the source's databases, so the transaction moves
+	// between them as its commands do. SELECT inside MULTI is what keeps this
+	// one transaction: splitting it per database would write the slot's marker
+	// more than once, and a marker written by a transaction that committed
+	// while its neighbour failed says applied about work that is not.
+	at := a.BookkeepingDB
+	selectDB := func(db int) {
+		if db != at {
+			tx.Do(ctx, "select", db)
+			at = db
+		}
+	}
 	for _, cmd := range job.commands {
+		selectDB(cmd.db)
 		tx.Do(ctx, cmd.arguments()...)
 	}
 	for _, repair := range repairs {
+		selectDB(repair.db)
 		repair.queue(ctx, tx)
 	}
+
+	// Back to where the bookkeeping lives, both for the marker and so the
+	// connection is returned to the pool on the database its owner expects.
+	selectDB(a.BookkeepingDB)
 	marker := tx.Set(ctx, OffsetKey(job.slot, a.Positions.TaskID),
 		strconv.FormatInt(batchEnd, 10), 0)
 
@@ -297,7 +331,27 @@ func (a *Applier) readRepairs(ctx context.Context, job work) ([]*repairedValue, 
 	if a.Source == nil {
 		return nil, fmt.Errorf("a repair needs the source to read from")
 	}
-	return readValues(ctx, a.Source, job.repairs)
+
+	// One read per database. A repair is the exception rather than the rule, so
+	// the extra round trip costs less than holding a client open per database.
+	byDB := map[int][][]byte{}
+	order := make([]int, 0, 2)
+	for _, repair := range job.repairs {
+		if _, seen := byDB[repair.db]; !seen {
+			order = append(order, repair.db)
+		}
+		byDB[repair.db] = append(byDB[repair.db], repair.key)
+	}
+
+	var values []*repairedValue
+	for _, db := range order {
+		read, err := readValuesIn(ctx, a.Source, a.SourceHomeDB, db, byDB[db])
+		if err != nil {
+			return nil, err
+		}
+		values = append(values, read...)
+	}
+	return values, nil
 }
 
 func flatten(runs [][]*domain.Event) []*domain.Event {

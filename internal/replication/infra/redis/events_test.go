@@ -2,6 +2,7 @@ package redis
 
 import (
 	"context"
+	"strconv"
 	"testing"
 
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
@@ -36,24 +37,22 @@ func TestARemovalIsCountedApartFromAWrite(t *testing.T) {
 }
 
 // A standalone server interleaves every database into one replication stream,
-// separated by SELECT. A task carries one of them, and applying another
-// database's write would put its key into this target under the same name --
-// indistinguishable from the source having written it here.
-func TestAWriteFromAnotherDatabaseIsNotCarried(t *testing.T) {
+// separated by SELECT. The database has to travel with the command: without it
+// every database's writes land in whichever one the target connection happens
+// to be on, and a key from database 2 becomes a key of database 1 under the
+// same name, indistinguishable from the source having written it there.
+func TestEachWriteCarriesTheDatabaseItBelongsTo(t *testing.T) {
 	r := readerOverBuffer(t)
-	r.SourceDB = 1
 	r.Commands = table()
-	if err := r.Link.buffer.Append(resp("SELECT", "2")); err != nil {
-		t.Fatalf("append: %v", err)
-	}
-	if err := r.Link.buffer.Append(resp("SET", "other", "v")); err != nil {
-		t.Fatalf("append: %v", err)
-	}
-	if err := r.Link.buffer.Append(resp("SELECT", "1")); err != nil {
-		t.Fatalf("append: %v", err)
-	}
-	if err := r.Link.buffer.Append(resp("SET", "mine", "v")); err != nil {
-		t.Fatalf("append: %v", err)
+	for _, frame := range [][]byte{
+		resp("SELECT", "2"),
+		resp("SET", "in-two", "v"),
+		resp("SELECT", "1"),
+		resp("SET", "in-one", "v"),
+	} {
+		if err := r.Link.buffer.Append(frame); err != nil {
+			t.Fatalf("append: %v", err)
+		}
 	}
 
 	cursor, err := r.Link.cursor(0)
@@ -69,12 +68,22 @@ func TestAWriteFromAnotherDatabaseIsNotCarried(t *testing.T) {
 		}
 	}
 
-	var keys []string
+	got := map[string]string{}
 	for _, e := range append(append([]*domain.Event{}, r.ready...), r.pending...) {
-		keys = append(keys, e.Key)
+		got[e.Key] = e.NS.DB
+		if cmd, ok := e.Payload.(*command); ok && strconv.Itoa(cmd.db) != e.NS.DB {
+			t.Errorf("%s: command database %d disagrees with the event's %q",
+				e.Key, cmd.db, e.NS.DB)
+		}
 	}
-	if len(keys) != 1 || keys[0] != "mine" {
-		t.Errorf("carried %v, want only the key written in database 1", keys)
+	want := map[string]string{"in-two": "2", "in-one": "1"}
+	if len(got) != len(want) {
+		t.Fatalf("carried %v, want both writes", got)
+	}
+	for key, db := range want {
+		if got[key] != db {
+			t.Errorf("%s is in database %q, want %q", key, got[key], db)
+		}
 	}
 	if r.streamDB != 1 {
 		t.Errorf("stream database = %d, want 1", r.streamDB)

@@ -1,6 +1,7 @@
 package redis
 
 import (
+	"strconv"
 	"strings"
 	"time"
 
@@ -12,6 +13,10 @@ import (
 
 type command struct {
 	args [][]byte
+	// db is the database the command belongs to. A standalone server
+	// interleaves all of them into one stream, so the database has to travel
+	// with the command or the applier cannot know where to put it.
+	db int
 	// slot is which hash slot the command's key belongs to, and so which
 	// transaction it is committed in.
 	slot int
@@ -58,6 +63,9 @@ func (c *command) bytes() int {
 // the smeared window of the first copy, and a key the target has diverged on.
 type valueRepair struct {
 	key []byte
+	// db is the database the key belongs to, for the same reason a command
+	// carries one.
+	db int
 	// slot is the key's hash slot.
 	slot int
 	// offset is the stream offset that asked for the repair, or zero when the
@@ -72,7 +80,7 @@ type valueRepair struct {
 // point between events is a legal place to cut a batch.
 func commandEvent(cmd *command, key []byte, at time.Time, endsBlock bool) *domain.Event {
 	return &domain.Event{
-		NS:              domain.Namespace{DB: "0"},
+		NS:              domain.Namespace{DB: strconv.Itoa(cmd.db)},
 		Op:              cmd.operation(),
 		Key:             string(key),
 		Payload:         cmd,
@@ -85,7 +93,7 @@ func commandEvent(cmd *command, key []byte, at time.Time, endsBlock bool) *domai
 
 func repairEvent(repair *valueRepair, at time.Time, endsBlock bool) *domain.Event {
 	return &domain.Event{
-		NS:              domain.Namespace{DB: "0"},
+		NS:              domain.Namespace{DB: strconv.Itoa(repair.db)},
 		Op:              domain.OpUpdate,
 		Key:             string(repair.key),
 		Payload:         repair,

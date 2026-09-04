@@ -228,10 +228,16 @@ func (s *Syncer) runShard(ctx context.Context, sh shard, source, target goredis.
 	// connection that still takes ordinary commands.
 	connection.node = node
 
-	// Which database of the source this task carries. The replication stream
-	// interleaves every database the server has, so the reader needs to know
-	// which one is this task's.
-	sourceDB, err := databaseIndex(s.cfg.SourceConnection)
+	// The database the target connection is on. The slot markers and the stored
+	// position live there: they are this task's bookkeeping rather than
+	// anything the source has, and keeping them in one database is what lets a
+	// slot commit its data and its marker in a single transaction however many
+	// databases that data came from.
+	bookkeepingDB, err := databaseIndex(s.cfg.TargetConnection)
+	if err != nil {
+		return err
+	}
+	sourceHomeDB, err := databaseIndex(s.cfg.SourceConnection)
 	if err != nil {
 		return err
 	}
@@ -246,27 +252,30 @@ func (s *Syncer) runShard(ctx context.Context, sh shard, source, target goredis.
 			Commands:   commands,
 			Node:       node,
 			Configured: s.cfg.RetentionWindow,
-			SourceDB:   sourceDB,
 			Logger:     s.logger,
 			Labels:     labels,
 		},
 		Applier: &Applier{
-			Target:    target,
-			Source:    source,
-			Link:      connection,
-			Positions: positions,
-			Commands:  commands,
-			Logger:    s.logger,
-			Labels:    labels,
+			Target:        target,
+			Source:        source,
+			Link:          connection,
+			Positions:     positions,
+			Commands:      commands,
+			SourceHomeDB:  sourceHomeDB,
+			BookkeepingDB: bookkeepingDB,
+			Logger:        s.logger,
+			Labels:        labels,
 		},
 		Snapshotter: &Snapshotter{
-			Link:     connection,
-			Node:     node,
-			Source:   source,
-			Target:   target,
-			Logger:   s.logger,
-			Labels:   labels,
-			ReadRate: s.cfg.RedisSourceReadRate,
+			Link:       connection,
+			Node:       node,
+			Source:     source,
+			Target:     target,
+			SourceConn: s.cfg.SourceConnection,
+			TargetConn: s.cfg.TargetConnection,
+			Logger:     s.logger,
+			Labels:     labels,
+			ReadRate:   s.cfg.RedisSourceReadRate,
 		},
 		Checkpoints:   positions,
 		CheckpointKey: sh.id,
