@@ -487,6 +487,20 @@ func (c *binlogCheckpoint) gtidSet() mysql.GTIDSet {
 	return set
 }
 
+// generatedColumn reports whether SHOW COLUMNS says the server computes this
+// column rather than storing what it is given.
+//
+// DEFAULT_GENERATED is not that: it marks a default expression, and the column
+// still takes a value, so the word alone cannot be the test. MariaDB spells the
+// same property VIRTUAL and PERSISTENT.
+func generatedColumn(extra string) bool {
+	rest := strings.ToUpper(strings.TrimSpace(extra))
+	rest = strings.ReplaceAll(rest, "DEFAULT_GENERATED", "")
+	return strings.Contains(rest, "GENERATED") ||
+		strings.Contains(rest, "VIRTUAL") ||
+		strings.Contains(rest, "PERSISTENT")
+}
+
 func (s *MySQLSyncer) getTableColumns(ctx context.Context, db *sql.Conn, database, table string) ([]string, error) {
 	query := fmt.Sprintf("SHOW COLUMNS FROM %s.%s", database, table)
 	rows, err := db.QueryContext(ctx, query)
@@ -501,11 +515,17 @@ func (s *MySQLSyncer) getTableColumns(ctx context.Context, db *sql.Conn, databas
 		if err := rows.Scan(&field, &typeStr, &nullStr, &keyStr, &defaultStr, &extraStr); err != nil {
 			return nil, fmt.Errorf("failed to scan columns info from %s.%s: %v", database, table, err)
 		}
-		if field.Valid {
-			cols = append(cols, field.String)
-		} else {
+		if !field.Valid {
 			return nil, fmt.Errorf("invalid column name for %s.%s", database, table)
 		}
+		// A generated column is computed by the server, which refuses a write that
+		// supplies one. Sending every column the source had made any table holding
+		// one impossible to copy at all: the whole table failed, and with it every
+		// table whose foreign key pointed at it.
+		if generatedColumn(extraStr.String) {
+			continue
+		}
+		cols = append(cols, field.String)
 	}
 	return cols, nil
 }
@@ -713,11 +733,19 @@ func (h *MyEventHandler) buildStatement(
 		return out
 	}
 
+	// The columns a statement may set, by their index in the full row. A
+	// generated column is computed by the server and refuses a write, so it is
+	// left out of the column list and out of the arguments -- while the indexes
+	// stay whole, because the primary key is addressed by position in the full
+	// row and renumbering it here would address the wrong column.
+	writable := writableColumns(table)
+	writableCols := pick(cols, writable)
+
 	switch opType {
 	case "INSERT":
 		return &statement{
-			query: upsertStatement(h.flavour(), tgtDB, tgtTable, cols, 1),
-			args:  process(newRow),
+			query: upsertStatement(h.flavour(), tgtDB, tgtTable, writableCols, 1),
+			args:  pick(process(newRow), writable),
 		}, nil
 
 	case "UPDATE":
@@ -728,12 +756,12 @@ func (h *MyEventHandler) buildStatement(
 			h.warnAboutMissingKey(tgtDB, tgtTable)
 			return nil, nil
 		}
-		setClauses := make([]string, len(cols))
-		for i, colName := range cols {
+		setClauses := make([]string, len(writableCols))
+		for i, colName := range writableCols {
 			setClauses[i] = fmt.Sprintf("%s = ?", colName)
 		}
 		var whereClauses []string
-		args := process(newRow)
+		args := pick(process(newRow), writable)
 		for _, pkIndex := range table.PKColumns {
 			whereClauses = append(whereClauses, fmt.Sprintf("%s = ?", cols[pkIndex]))
 			args = append(args, oldRow[pkIndex])
@@ -767,6 +795,30 @@ func (h *MyEventHandler) buildStatement(
 		}, nil
 	}
 	return nil, nil
+}
+
+// writableColumns lists the columns of a table that a statement may set, by
+// their index in the row the binlog carries.
+func writableColumns(table *schema.Table) []int {
+	keep := make([]int, 0, len(table.Columns))
+	for i, col := range table.Columns {
+		if col.IsVirtual || col.IsStored {
+			continue
+		}
+		keep = append(keep, i)
+	}
+	return keep
+}
+
+// pick projects a column list or a row onto the given indexes.
+func pick[T any](all []T, indexes []int) []T {
+	out := make([]T, 0, len(indexes))
+	for _, i := range indexes {
+		if i < len(all) {
+			out = append(out, all[i])
+		}
+	}
+	return out
 }
 
 // refuseKeyless stops replication for a table whose rows cannot be addressed.

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	mysqldriver "github.com/go-sql-driver/mysql"
 	"github.com/sirupsen/logrus"
 
 	"github.com/retail-ai-inc/sync/internal/platform/config"
@@ -118,10 +119,15 @@ func (s *Syncer) Start(ctx context.Context) error {
 		dsn.Endpoint(s.cfg.Type, s.cfg.SourceConnection),
 		dsn.Endpoint(s.cfg.Type, s.cfg.TargetConnection))
 
+	targetConnection, err := withoutForeignKeyChecks(s.cfg.TargetConnection)
+	if err != nil {
+		return fmt.Errorf("read the target connection: %w", err)
+	}
+
 	var targetDB *sql.DB
-	err := resilience.Retry(ctx, 5, 2*time.Second, 2.0, func() error {
+	err = resilience.Retry(ctx, 5, 2*time.Second, 2.0, func() error {
 		var connErr error
-		targetDB, connErr = sql.Open("mysql", s.cfg.TargetConnection)
+		targetDB, connErr = sql.Open("mysql", targetConnection)
 		if connErr != nil {
 			return connErr
 		}
@@ -265,6 +271,31 @@ func (s *Syncer) resyncs(store *checkpoint.SQLStore) []*pipeline.Resync {
 
 // unlistedScanEvery is how often a task that names its tables is compared
 // against what the source actually holds.
+// withoutForeignKeyChecks turns off foreign key enforcement for every
+// connection the target pool hands out.
+//
+// A copy is not an application: it reproduces what the source holds, in the
+// order the source's own log gives it, and a foreign key checked on the way in
+// rejects both. It rejects a child row copied before its parent, because the
+// copy walks tables by name and not by dependency. And it rejects a row the
+// source itself holds in violation -- a source loaded with the checks off keeps
+// orphans, and a standby that refuses them is not a copy of the source but an
+// opinion about it, missing exactly the rows nobody knew were there.
+//
+// It is set on the connection rather than per statement because database/sql
+// hands out whichever pooled connection is free.
+func withoutForeignKeyChecks(connection string) (string, error) {
+	cfg, err := mysqldriver.ParseDSN(connection)
+	if err != nil {
+		return "", err
+	}
+	if cfg.Params == nil {
+		cfg.Params = map[string]string{}
+	}
+	cfg.Params["foreign_key_checks"] = "0"
+	return cfg.FormatDSN(), nil
+}
+
 const unlistedScanEvery = 5 * time.Minute
 
 // watchSourceTables scans the source on an interval and publishes what it

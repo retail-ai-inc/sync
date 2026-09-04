@@ -53,6 +53,13 @@ func newHandler(t *testing.T, db *sql.DB, mappings []config.DatabaseMapping) *My
 	}
 }
 
+// quietLogger is a logger the assertions do not have to read.
+func quietLogger() *logrus.Logger {
+	l := logrus.New()
+	l.SetLevel(logrus.PanicLevel)
+	return l
+}
+
 // sourceTable describes the replicated table as the binlog reader would.
 func sourceTable(name string, columns ...string) *schema.Table {
 	cols := make([]schema.TableColumn, len(columns))
@@ -718,5 +725,57 @@ func TestBatchInsertLeavesTheCallersRowsAlone(t *testing.T) {
 	}
 	if got := rows(t, db); strings.Contains(got[0], "ada@example.com") {
 		t.Errorf("row = %q, want the address masked on the target", got[0])
+	}
+}
+
+// TestAGeneratedColumnIsLeftOutOfTheStatement: the primary key is addressed by
+// position in the full row, so the generated column has to be dropped from the
+// column list without renumbering the indexes the key is found by. The
+// generated column sits before the key here on purpose -- with it after, a
+// renumbering is indistinguishable from the correct answer.
+func TestAGeneratedColumnIsLeftOutOfTheStatement(t *testing.T) {
+	table := sourceTable("users", "NameHashed", "Id", "Name", "Email")
+	table.Columns[0].IsVirtual = true
+	table.PKColumns = []int{1}
+
+	h := &MyEventHandler{mappings: mapTable("users", "users"), logger: quietLogger()}
+	cols := []string{"NameHashed", "Id", "Name", "Email"}
+	newRow := []interface{}{"deadbeef", 7, "ann", "ann@example.com"}
+	oldRow := []interface{}{"cafe", 7, "old", "old@example.com"}
+
+	insert, err := h.buildStatement("INSERT", "shop_bk", "users", cols, table, newRow, nil)
+	if err != nil {
+		t.Fatalf("build the insert: %v", err)
+	}
+	if strings.Contains(insert.query, "NameHashed") {
+		t.Errorf("insert sets the generated column: %s", insert.query)
+	}
+	if len(insert.args) != 3 {
+		t.Errorf("insert args = %v, want the three writable columns", insert.args)
+	}
+	if insert.args[0] != 7 {
+		t.Errorf("insert args = %v, want the generated column's value dropped with it", insert.args)
+	}
+
+	update, err := h.buildStatement("UPDATE", "shop_bk", "users", cols, table, newRow, oldRow)
+	if err != nil {
+		t.Fatalf("build the update: %v", err)
+	}
+	if strings.Contains(update.query, "NameHashed = ?") {
+		t.Errorf("update sets the generated column: %s", update.query)
+	}
+	if !strings.Contains(update.query, "WHERE Id = ?") {
+		t.Errorf("update addresses the wrong column: %s", update.query)
+	}
+	if got := update.args[len(update.args)-1]; got != 7 {
+		t.Errorf("key argument = %v, want the old row's Id", got)
+	}
+
+	del, err := h.buildStatement("DELETE", "shop_bk", "users", cols, table, newRow, nil)
+	if err != nil {
+		t.Fatalf("build the delete: %v", err)
+	}
+	if !strings.Contains(del.query, "WHERE Id = ?") || del.args[0] != 7 {
+		t.Errorf("delete = %s args %v", del.query, del.args)
 	}
 }

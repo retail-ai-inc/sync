@@ -62,3 +62,43 @@ func TestTheSnapshotSharesTheSeriesThePipelineWritesTo(t *testing.T) {
 		t.Errorf("labels = %v, want %v", got, want)
 	}
 }
+
+// TestAGeneratedColumnIsNotCopied: the server computes these and refuses a
+// write that supplies one, which failed the whole table and every table whose
+// foreign key pointed at it.
+func TestAGeneratedColumnIsNotCopied(t *testing.T) {
+	tests := []struct {
+		extra string
+		want  bool
+	}{
+		{"VIRTUAL GENERATED", true},
+		{"STORED GENERATED", true},
+		{"VIRTUAL", true},
+		{"PERSISTENT", true},
+		{"DEFAULT_GENERATED", false},
+		{"DEFAULT_GENERATED on update CURRENT_TIMESTAMP", false},
+		{"auto_increment", false},
+		{"", false},
+	}
+	for _, tc := range tests {
+		if got := generatedColumn(tc.extra); got != tc.want {
+			t.Errorf("generatedColumn(%q) = %v, want %v", tc.extra, got, tc.want)
+		}
+	}
+}
+
+// TestTheTargetDoesNotCheckForeignKeys: a copy reproduces what the source
+// holds, orphans included, and walks tables by name rather than by dependency.
+func TestTheTargetDoesNotCheckForeignKeys(t *testing.T) {
+	got, err := withoutForeignKeyChecks("root:pw@tcp(osaka:3306)/shop_bk?parseTime=true")
+	if err != nil {
+		t.Fatalf("withoutForeignKeyChecks: %v", err)
+	}
+	if !strings.Contains(got, "foreign_key_checks=0") {
+		t.Errorf("dsn = %q, want the checks turned off", got)
+	}
+	// The rest of the connection has to survive being rewritten.
+	if !strings.Contains(got, "parseTime=true") || !strings.Contains(got, "/shop_bk") {
+		t.Errorf("dsn = %q, want the original settings kept", got)
+	}
+}
