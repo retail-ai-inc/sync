@@ -43,8 +43,19 @@
 testing/kokoro/test-env.sh
 .envrc
 
-# Ignore deploy folder
-deploy/
+# The deploy folder is ignored by default -- it is where environment-specific
+# and generated files land. The manifests below are the exception: they define
+# how this is deployed and monitored, and keeping them out of version control
+# is what left the Prometheus scrape job and the headless Service living only
+# on the clusters. Listed one directory at a time rather than lifting the
+# ignore, so a credential file dropped in deploy/ is still ignored.
+#
+# "deploy/*" rather than "deploy/": git does not descend into an ignored
+# directory, so a negation inside one has no effect.
+deploy/*
+!deploy/README.md
+!deploy/kubernetes/
+!deploy/prometheus/
 
 # Ignore config file
 env.json
