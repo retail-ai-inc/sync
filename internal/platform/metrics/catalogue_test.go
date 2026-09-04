@@ -1,354 +1,454 @@
 package metrics
 
 import (
-	"strings"
 	"testing"
 	"time"
 )
 
-// value reads one series out of the default registry, which is where the
-// catalogue's helpers record.
-func value(t *testing.T, name string, want Labels) (float64, bool) {
-	t.Helper()
+// The catalogue is thin -- each entry names a metric and writes it -- and thin
+// is what makes it worth pinning. A setter that writes the wrong metric name,
+// or a counter helper that lets a zero through and creates a series nobody
+// meant, is invisible in the code and shows up as a panel that is empty or a
+// series that never goes away.
 
-	for _, s := range Default.Snapshot(name) {
-		if s.Labels.Key() == want.Key() {
-			return s.Value, true
+func labelsFor(t *testing.T) Labels {
+	return Labels{"task": t.Name(), "engine": "test"}
+}
+
+func TestTheGaugeSettersWriteTheirOwnMetric(t *testing.T) {
+	labels := labelsFor(t)
+
+	for _, c := range []struct {
+		name   string
+		set    func()
+		want   float64
+		metric string
+	}{
+		{"last event age", func() { SetLastEventAge(labels, 12.5) }, 12.5, LastEventAgeSeconds},
+		{"captured tables", func() { SetCapturedTables(labels, 7) }, 7, CapturedTables},
+		{"schema change age", func() { SetSchemaChangeAge(labels, 900) }, 900, SchemaChangeAgeSeconds},
+		{"dead lettered", func() { SetDeadLettered(labels, 3) }, 3, DeadLettered},
+		{"unreplicated", func() { SetUnreplicated(labels, 4) }, 4, Unreplicated},
+		{"source lag", func() { SetSourceLag(labels, 8192) }, 8192, SourceLagBytes},
+		{"reconcile difference", func() { SetReconcileDifference(labels, 11) }, 11, ReconcileDifference},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Cleanup(func() { Default.Forget(labels) })
+			c.set()
+			if got := sampleValue(t, c.metric, labels); got != c.want {
+				t.Errorf("%s = %v, want %v", c.metric, got, c.want)
+			}
+		})
+	}
+}
+
+// TestSetRetentionWritesBothHalves covers the one setter that writes two
+// metrics. A headroom left unwritten reads as zero, which is the value that
+// means "the window is exactly as long as the lag" -- an alarm state reported
+// for a link that is fine.
+func TestSetRetentionWritesBothHalves(t *testing.T) {
+	labels := labelsFor(t)
+	t.Cleanup(func() { Default.Forget(labels) })
+
+	SetRetention(labels, 25092, 25086)
+
+	if got := sampleValue(t, RetentionWindowSeconds, labels); got != 25092 {
+		t.Errorf("window = %v, want 25092", got)
+	}
+	if got := sampleValue(t, RetentionHeadroomSeconds, labels); got != 25086 {
+		t.Errorf("headroom = %v, want 25086", got)
+	}
+}
+
+// TestTheCounterHelpersIgnoreAZero covers why they test n > 0: a counter set
+// created for a zero is a series that exists forever, reporting nothing, on
+// every task that never filtered or skipped anything.
+func TestTheCounterHelpersIgnoreAZero(t *testing.T) {
+	labels := labelsFor(t)
+	t.Cleanup(func() { Default.Forget(labels) })
+
+	CountFiltered(labels, 0)
+	CountSkipped(labels, 0)
+	CountValueRepairs(labels, 0)
+
+	for _, name := range []string{EventsFilteredTotal, EventsSkippedTotal, ValueRepairsTotal} {
+		if _, ok := seriesFor(Default, name, labels); ok {
+			t.Errorf("%s was created for a count of zero", name)
 		}
 	}
-	return 0, false
 }
 
-func mustValue(t *testing.T, name string, labels Labels) float64 {
+func TestTheCounterHelpersAdvanceOnAPositiveCount(t *testing.T) {
+	labels := labelsFor(t)
+	t.Cleanup(func() { Default.Forget(labels) })
+
+	CountFiltered(labels, 3)
+	CountFiltered(labels, 2)
+	CountSkipped(labels, 1)
+	CountValueRepairs(labels, 4)
+	CountDisconnect(labels)
+	CountDisconnect(labels)
+
+	for name, want := range map[string]float64{
+		EventsFilteredTotal: 5,
+		EventsSkippedTotal:  1,
+		ValueRepairsTotal:   4,
+		DisconnectsTotal:    2,
+	} {
+		if got := sampleValue(t, name, labels); got != want {
+			t.Errorf("%s = %v, want %v", name, got, want)
+		}
+	}
+}
+
+// TestTheTargetReadinessGaugesAreAlwaysWritten covers the point of having them
+// at all: a target that is set up correctly has to report 0, not nothing. An
+// absent series cannot be distinguished from a task that never checked, so an
+// alert on it would fire for every stopped task.
+func TestTheTargetReadinessGaugesAreAlwaysWritten(t *testing.T) {
+	labels := labelsFor(t)
+	t.Cleanup(func() { Default.Forget(labels) })
+
+	SetTargetEvictsKeys(labels, false)
+	SetTargetTooSmall(labels, false)
+	SetTargetMissingModules(labels, 0)
+
+	for _, name := range []string{TargetEvictsKeys, TargetTooSmall, TargetMissingModules} {
+		got, ok := seriesFor(Default, name, labels)
+		if !ok {
+			t.Errorf("%s was not written for a target that is set up correctly", name)
+			continue
+		}
+		if got != 0 {
+			t.Errorf("%s = %v, want 0", name, got)
+		}
+	}
+}
+
+func TestTheTargetReadinessGaugesReportAProblem(t *testing.T) {
+	labels := labelsFor(t)
+	t.Cleanup(func() { Default.Forget(labels) })
+
+	SetTargetEvictsKeys(labels, true)
+	SetTargetTooSmall(labels, true)
+	SetTargetMissingModules(labels, 2)
+
+	for name, want := range map[string]float64{
+		TargetEvictsKeys:     1,
+		TargetTooSmall:       1,
+		TargetMissingModules: 2,
+	} {
+		if got := sampleValue(t, name, labels); got != want {
+			t.Errorf("%s = %v, want %v", name, got, want)
+		}
+	}
+}
+
+func sampleValue(t *testing.T, name string, labels Labels) float64 {
 	t.Helper()
-
-	v, ok := value(t, name, labels)
+	value, ok := seriesFor(Default, name, labels)
 	if !ok {
-		t.Fatalf("%s{%s} was never recorded", name, labels.Key())
+		t.Fatalf("%s{%v} is not reported", name, labels)
 	}
-	return v
+	return value
 }
 
-// TestEventsAreCountedByOperation is the Debezium split that a single applied
-// counter cannot give: three attributes there, one metric with an op label
-// here.
-func TestEventsAreCountedByOperation(t *testing.T) {
-	labels := Labels{"task": "opsplit", "engine": "mysql"}
-	c := NewEventCounters(labels)
+// TestWithLabelDoesNotMutateTheCallersMap covers what the copy is for: a task
+// holds one label set for its whole life and passes it to every setter. A
+// setter that added its own label in place would leave every later metric
+// carrying it, so one schema refusal would put a reason label on the lag.
+func TestWithLabelDoesNotMutateTheCallersMap(t *testing.T) {
+	held := Labels{"task": "39", "engine": "mongodb"}
 
-	c.Count("insert", 3)
-	c.Count("update", 2)
-	c.Count("delete", 1)
-	c.Count("insert", 1)
+	with := withLabel(held, "op", "insert")
 
-	insert := Labels{"task": "opsplit", "engine": "mysql", "op": "insert"}
-	update := Labels{"task": "opsplit", "engine": "mysql", "op": "update"}
-	remove := Labels{"task": "opsplit", "engine": "mysql", "op": "delete"}
-
-	if got := mustValue(t, EventsTotal, insert); got != 4 {
-		t.Errorf("insert count = %v, want 4", got)
+	if len(held) != 2 {
+		t.Errorf("the caller's map grew to %v", held)
 	}
-	if got := mustValue(t, EventsTotal, update); got != 2 {
-		t.Errorf("update count = %v, want 2", got)
+	if with["op"] != "insert" || with["task"] != "39" {
+		t.Errorf("withLabel produced %v", with)
 	}
-	if got := mustValue(t, EventsTotal, remove); got != 1 {
-		t.Errorf("delete count = %v, want 1", got)
+	with["task"] = "changed"
+	if held["task"] != "39" {
+		t.Error("the two maps share storage")
 	}
 }
 
-// TestCountingAnEventDoesNotTouchTheCallersLabels guards the hot path.
-func TestCountingAnEventDoesNotTouchTheCallersLabels(t *testing.T) {
-	labels := Labels{"task": "shared", "engine": "redis"}
-	c := NewEventCounters(labels)
-	c.Count("insert", 1)
+func TestSetConnectedIsABoolean(t *testing.T) {
+	labels := labelsFor(t)
+	t.Cleanup(func() { Default.Forget(labels) })
 
-	if _, ok := labels["op"]; ok {
-		t.Fatalf("the caller's labels gained an op: %v", labels)
+	SetConnected(labels, true)
+	if got := sampleValue(t, Connected, labels); got != 1 {
+		t.Errorf("connected = %v, want 1", got)
+	}
+	SetConnected(labels, false)
+	if got := sampleValue(t, Connected, labels); got != 0 {
+		t.Errorf("disconnected = %v, want 0", got)
+	}
+}
+
+// TestSetTaskInfoCarriesTheEndpointsAsLabels covers the info metric's shape: the
+// value is always 1 and the endpoints are labels, which is how a dashboard shows
+// them as text.
+func TestSetTaskInfoCarriesTheEndpointsAsLabels(t *testing.T) {
+	labels := labelsFor(t)
+	with := Labels{"task": t.Name(), "engine": "test",
+		"source": "10.118.192.8:3306", "target": "10.60.117.91:6379"}
+	t.Cleanup(func() { Default.Forget(labels) })
+
+	SetTaskInfo(labels, "10.118.192.8:3306", "10.60.117.91:6379")
+
+	if got := sampleValue(t, TaskInfo, with); got != 1 {
+		t.Errorf("task info = %v, want 1", got)
 	}
 	if len(labels) != 2 {
-		t.Fatalf("the caller's labels were changed: %v", labels)
+		t.Errorf("the caller's label set was changed to %v", labels)
 	}
 }
 
-// TestAnUnpreparedOperationIsStillCounted: an operation this code does not know
-// about is exactly the one somebody needs to see, so it must not be dropped for
-// want of a prepared label set.
-func TestAnUnpreparedOperationIsStillCounted(t *testing.T) {
-	labels := Labels{"task": "novel", "engine": "mongodb"}
-	c := NewEventCounters(labels)
+func TestSetSourceInfoCarriesTheFileAndServer(t *testing.T) {
+	labels := labelsFor(t)
+	t.Cleanup(func() { Default.Forget(labels) })
 
-	c.Count("replace", 2)
+	SetSourceInfo(labels, "mysql-bin.000123", "10.118.192.8:3306")
 
-	want := Labels{"task": "novel", "engine": "mongodb", "op": "replace"}
-	if got := mustValue(t, EventsTotal, want); got != 2 {
-		t.Errorf("replace count = %v, want 2", got)
+	with := Labels{"task": t.Name(), "engine": "test",
+		"file": "mysql-bin.000123", "server": "10.118.192.8:3306"}
+	if got := sampleValue(t, SourceInfo, with); got != 1 {
+		t.Errorf("source info = %v, want 1", got)
 	}
 }
 
-// TestTransactionsAndEventsAreCountedSeparately is the pair that catches a
-// whole source transaction going missing.
-func TestTransactionsAndEventsAreCountedSeparately(t *testing.T) {
-	labels := Labels{"task": "tx", "engine": "mysql"}
-
-	CountTransaction(labels, 2)
-	CountEvent(labels, "insert", 6)
-
-	if got := mustValue(t, TransactionsCommittedTotal, labels); got != 2 {
-		t.Errorf("committed transactions = %v, want 2", got)
-	}
-	want := Labels{"task": "tx", "engine": "mysql", "op": "insert"}
-	if got := mustValue(t, EventsTotal, want); got != 6 {
-		t.Errorf("events = %v, want 6", got)
-	}
-}
-
-// TestARolledBackBatchIsCounted keeps the refused work visible.
-func TestARolledBackBatchIsCounted(t *testing.T) {
-	labels := Labels{"task": "rollback", "engine": "mysql"}
-
-	CountRolledBack(labels, 3)
-	CountRolledBack(labels, 0) // zero must not create a series full of noise
-
-	if got := mustValue(t, TransactionsRolledBackTotal, labels); got != 3 {
-		t.Errorf("rolled back = %v, want 3", got)
-	}
-}
-
-// TestConnectedIsNotTheSameAsUp is the distinction Debezium draws with
-// Connected and this codebase used to miss: a task can be up and disconnected
-// while it retries, and that is the window where the source's log rolls past a
-// position nobody is reading.
-func TestConnectedIsNotTheSameAsUp(t *testing.T) {
-	labels := Labels{"task": "conn", "engine": "redis"}
-
-	SetTaskUp(labels, true)
-	SetConnected(labels, false)
-
-	if got := mustValue(t, TaskUp, labels); got != 1 {
-		t.Errorf("task_up = %v, want 1", got)
-	}
-	if got := mustValue(t, Connected, labels); got != 0 {
-		t.Errorf("connected = %v, want 0 — an up task that is disconnected must "+
-			"be distinguishable from a healthy one", got)
-	}
-}
-
-// TestASnapshotReportsRunningThenCompleted walks the states Debezium's snapshot
-// context exposes.
-func TestASnapshotReportsRunningThenCompleted(t *testing.T) {
-	labels := Labels{"task": "snap", "engine": "mongodb"}
-
-	SnapshotStarted(labels, 4)
-	if got := mustValue(t, SnapshotRunning, labels); got != 1 {
-		t.Errorf("running = %v, want 1", got)
-	}
-	if got := mustValue(t, SnapshotObjectsRemaining, labels); got != 4 {
-		t.Errorf("remaining = %v, want 4", got)
-	}
-
-	SnapshotProgress(labels, 500, 2, 12)
-	if got := mustValue(t, SnapshotRowsScannedTotal, labels); got != 500 {
-		t.Errorf("rows scanned = %v, want 500", got)
-	}
-	if got := mustValue(t, SnapshotObjectsRemaining, labels); got != 2 {
-		t.Errorf("remaining = %v, want 2", got)
-	}
-	if got := mustValue(t, SnapshotDurationSeconds, labels); got != 12 {
-		t.Errorf("duration = %v, want 12", got)
-	}
-
-	SnapshotFinished(labels, true, 30)
-	if got := mustValue(t, SnapshotRunning, labels); got != 0 {
-		t.Errorf("running after finishing = %v, want 0", got)
-	}
-	if got := mustValue(t, SnapshotCompleted, labels); got != 1 {
-		t.Errorf("completed = %v, want 1", got)
-	}
-	if got := mustValue(t, SnapshotAborted, labels); got != 0 {
-		t.Errorf("aborted = %v, want 0", got)
-	}
-	if got := mustValue(t, SnapshotObjectsRemaining, labels); got != 0 {
-		t.Errorf("remaining after finishing = %v, want 0", got)
-	}
-}
-
-// TestAnAbandonedSnapshotIsNotReportedAsCompleted is the case that matters
-// operationally: a copy that stopped half way must not look like one that
-// finished, or the stream starts from a position the target never reached.
-func TestAnAbandonedSnapshotIsNotReportedAsCompleted(t *testing.T) {
-	labels := Labels{"task": "abandoned", "engine": "redis"}
-
-	SnapshotStarted(labels, 3)
-	SnapshotFinished(labels, false, 7)
-
-	if got := mustValue(t, SnapshotCompleted, labels); got != 0 {
-		t.Errorf("completed = %v, want 0", got)
-	}
-	if got := mustValue(t, SnapshotAborted, labels); got != 1 {
-		t.Errorf("aborted = %v, want 1", got)
-	}
-	if got := mustValue(t, SnapshotRunning, labels); got != 0 {
-		t.Errorf("running = %v, want 0", got)
-	}
-}
-
-// TestSchemaChangesAreCountedApartFromRefusals: carrying a DDL and refusing to
-// carry one are opposite outcomes, and a single counter would add them
-// together. The refusal is the one that needs a human.
-func TestSchemaChangesAreCountedApartFromRefusals(t *testing.T) {
-	labels := Labels{"task": "ddl", "engine": "mysql"}
-
-	CountSchemaChange(labels, 2)
-	CountSchemaRefused(labels, "blocked")
-	CountSchemaRefused(labels, "blocked")
-	CountSchemaRefused(labels, "skipped")
-
-	if got := mustValue(t, SchemaChangesTotal, labels); got != 2 {
-		t.Errorf("applied schema changes = %v, want 2", got)
-	}
-	blocked := Labels{"task": "ddl", "engine": "mysql", "reason": "blocked"}
-	if got := mustValue(t, SchemaChangesRefusedTotal, blocked); got != 2 {
-		t.Errorf("blocked refusals = %v, want 2", got)
-	}
-	skipped := Labels{"task": "ddl", "engine": "mysql", "reason": "skipped"}
-	if got := mustValue(t, SchemaChangesRefusedTotal, skipped); got != 1 {
-		t.Errorf("skipped refusals = %v, want 1", got)
-	}
-}
-
-// TestTheSourceInfoSeriesCarriesTheSlowMovingPartsOfThePosition guards the
-// cardinality decision.
-func TestTheSourceInfoSeriesCarriesTheSlowMovingPartsOfThePosition(t *testing.T) {
-	labels := Labels{"task": "pos", "engine": "mysql"}
+func TestThePositionAndOffsetSetters(t *testing.T) {
+	labels := labelsFor(t)
+	t.Cleanup(func() { Default.Forget(labels) })
 
 	SetSourcePosition(labels, 4096)
-	SetSourceInfo(labels, "mysql-bin.000052", "10.60.0.5:3306/bench")
+	SetAppliedPosition(labels, 4000)
+	SetQueue(labels, 12, 2000)
+	SetQueueBytes(labels, 1<<20)
 
-	if got := mustValue(t, SourcePositionBytes, labels); got != 4096 {
-		t.Errorf("position = %v, want 4096", got)
-	}
-	want := Labels{
-		"task": "pos", "engine": "mysql",
-		"file": "mysql-bin.000052", "server": "10.60.0.5:3306/bench",
-	}
-	if got := mustValue(t, SourceInfo, want); got != 1 {
-		t.Errorf("info series = %v, want 1", got)
-	}
-}
-
-// TestTheQueueReportsDepthAndBytes: a queue can be shallow in events and huge
-// in bytes, and the two lead to different answers.
-func TestTheQueueReportsDepthAndBytes(t *testing.T) {
-	labels := Labels{"task": "queue", "engine": "mongodb"}
-
-	SetQueue(labels, 12, 1000)
-	SetQueueBytes(labels, 4_000_000)
-
-	if got := mustValue(t, QueueUsedEvents, labels); got != 12 {
-		t.Errorf("used = %v, want 12", got)
-	}
-	if got := mustValue(t, QueueCapacityEvents, labels); got != 1000 {
-		t.Errorf("capacity = %v, want 1000", got)
-	}
-	if got := mustValue(t, QueueBytes, labels); got != 4_000_000 {
-		t.Errorf("bytes = %v, want 4000000", got)
-	}
-}
-
-// TestTheRedisOffsetsAlsoPublishTheNeutralNames keeps one dashboard panel
-// working across engines: the Redis relay measures in stream bytes, and those
-// same numbers appear under the engine-neutral position names.
-func TestTheRedisOffsetsAlsoPublishTheNeutralNames(t *testing.T) {
-	labels := Labels{"task": "redispos", "engine": "redis"}
-
-	SetStreamOffset(labels, 900, 128)
-	SetAppliedOffset(labels, 850)
-
-	if got := mustValue(t, StreamOffsetBytes, labels); got != 900 {
-		t.Errorf("stream offset = %v, want 900", got)
-	}
-	if got := mustValue(t, AppliedPositionBytes, labels); got != 850 {
-		t.Errorf("neutral applied position = %v, want 850", got)
-	}
-	if got := mustValue(t, BufferBytes, labels); got != 128 {
-		t.Errorf("buffer bytes = %v, want 128", got)
-	}
-}
-
-// TestEveryCatalogueMetricRendersWithHelpAndType is what makes the exposition
-// readable by Grafana's metric browser: a series with no HELP or TYPE line is
-// one nobody can find without knowing its name already.
-func TestEveryCatalogueMetricRendersWithHelpAndType(t *testing.T) {
-	r := New()
-	labels := Labels{"task": "render", "engine": "mysql"}
-
-	r.SetGauge(LagSeconds, helpLag, labels, 1)
-	r.AddCounter(EventsTotal, helpEvents, withLabel(labels, "op", "insert"), 1)
-	r.SetGauge(SnapshotRunning, helpSnapshotRunning, labels, 1)
-	r.AddCounter(SchemaChangesTotal, helpSchemaChanges, labels, 1)
-
-	out := exposition(t, r)
-	for _, name := range []string{LagSeconds, EventsTotal, SnapshotRunning, SchemaChangesTotal} {
-		if !strings.Contains(out, "# HELP "+name+" ") {
-			t.Errorf("%s has no HELP line", name)
-		}
-		if !strings.Contains(out, "# TYPE "+name+" ") {
-			t.Errorf("%s has no TYPE line", name)
+	for name, want := range map[string]float64{
+		SourcePositionBytes:  4096,
+		AppliedPositionBytes: 4000,
+		QueueUsedEvents:      12,
+		QueueCapacityEvents:  2000,
+		QueueBytes:           1 << 20,
+	} {
+		if got := sampleValue(t, name, labels); got != want {
+			t.Errorf("%s = %v, want %v", name, got, want)
 		}
 	}
-	if !strings.Contains(out, "# TYPE "+EventsTotal+" counter") {
-		t.Errorf("%s is not typed as a counter", EventsTotal)
-	}
-	if !strings.Contains(out, "# TYPE "+SnapshotRunning+" gauge") {
-		t.Errorf("%s is not typed as a gauge", SnapshotRunning)
+}
+
+// TestTheRedisOffsetSettersPublishTwice pins a deliberate double write. Redis
+// positions are byte offsets in a replication stream, which is engine-specific,
+// but the dashboard's cross-engine panels read the generic position and buffer
+// metrics -- so each setter writes both, and a Redis task appears in both
+// places. Dropping either leaves one of them permanently empty for Redis.
+func TestTheRedisOffsetSettersPublishTwice(t *testing.T) {
+	labels := labelsFor(t)
+	t.Cleanup(func() { Default.Forget(labels) })
+
+	SetStreamOffset(labels, 1276319, 8192)
+	SetAppliedOffset(labels, 1276000)
+
+	for name, want := range map[string]float64{
+		StreamOffsetBytes: 1276319,
+		// Engine-specific and generic, from the same call.
+		BufferHeldBytes:      8192,
+		BufferBytes:          8192,
+		AppliedOffsetBytes:   1276000,
+		AppliedPositionBytes: 1276000,
+	} {
+		if got := sampleValue(t, name, labels); got != want {
+			t.Errorf("%s = %v, want %v", name, got, want)
+		}
 	}
 }
 
-// TestObserveBatchRecordsEveryPartOfTheCost keeps the batch sums together: a
-// batch that is slow because of round trips and one that is slow because of the
-// commit need different fixes.
-func TestObserveBatchRecordsEveryPartOfTheCost(t *testing.T) {
-	labels := Labels{"task": "batch", "engine": "mysql"}
+// TestEventCountersCountPerOperation covers the op label: a task that only ever
+// deletes and one that only ever inserts are the same total without it.
+func TestEventCountersCountPerOperation(t *testing.T) {
+	labels := labelsFor(t)
+	counters := NewEventCounters(labels)
+	t.Cleanup(func() { Default.Forget(labels) })
 
-	ObserveBatch(labels, 200*time.Millisecond, 50*time.Millisecond, 3, 2, 40)
+	counters.Count("insert", 5)
+	counters.Count("insert", 2)
+	counters.Count("delete", 1)
 
-	if got := mustValue(t, BatchApplyCount, labels); got != 1 {
-		t.Errorf("batches = %v, want 1", got)
-	}
-	if got := mustValue(t, BatchApplySeconds, labels); got != 0.2 {
-		t.Errorf("apply seconds = %v, want 0.2", got)
-	}
-	if got := mustValue(t, BatchCommitSeconds, labels); got != 0.05 {
-		t.Errorf("commit seconds = %v, want 0.05", got)
-	}
-	if got := mustValue(t, BatchRoundTripsSum, labels); got != 3 {
-		t.Errorf("round trips = %v, want 3", got)
-	}
-	if got := mustValue(t, BatchEventsSum, labels); got != 40 {
-		t.Errorf("events = %v, want 40", got)
+	for op, want := range map[string]float64{"insert": 7, "delete": 1} {
+		with := withLabel(labels, "op", op)
+		if got := sampleValue(t, EventsTotal, with); got != want {
+			t.Errorf("%s events = %v, want %v", op, got, want)
+		}
 	}
 }
 
-// TestTheTaskInfoSeriesCarriesTheEndpoints: the endpoints were labels on every
-// metric a task published, which put one engine's snapshot on a different
-// series from the pipeline's and left a dashboard querying by task with two.
-func TestTheTaskInfoSeriesCarriesTheEndpoints(t *testing.T) {
-	labels := Labels{"task": "info", "engine": "mysql"}
+// TestAnUnpreparedOperationIsStillCounted covers the fallback. An operation
+// nobody listed is exactly the one worth seeing, so it is counted under its own
+// name rather than dropped or folded into "unknown".
+func TestAnUnpreparedOperationIsStillCounted(t *testing.T) {
+	labels := labelsFor(t)
+	counters := NewEventCounters(labels)
+	t.Cleanup(func() { Default.Forget(labels) })
 
-	SetTaskInfo(labels, "tokyo:3306/shop", "osaka:3306/shop")
-	SetTaskUp(labels, true)
+	counters.Count("replace", 3)
 
-	want := Labels{
-		"task": "info", "engine": "mysql",
-		"source": "tokyo:3306/shop", "target": "osaka:3306/shop",
+	with := withLabel(labels, "op", "replace")
+	if got := sampleValue(t, EventsTotal, with); got != 3 {
+		t.Errorf("replace events = %v, want 3", got)
 	}
-	if got := mustValue(t, TaskInfo, want); got != 1 {
-		t.Errorf("info series = %v, want 1", got)
+}
+
+func TestEventCountersIgnoreAZeroAndANilReceiver(t *testing.T) {
+	labels := labelsFor(t)
+	counters := NewEventCounters(labels)
+	t.Cleanup(func() { Default.Forget(labels) })
+
+	counters.Count("insert", 0)
+	if _, ok := seriesFor(Default, EventsTotal, withLabel(labels, "op", "insert")); ok {
+		t.Error("a series was created for a count of zero")
 	}
-	if _, ok := value(t, TaskUp, want); ok {
-		t.Error("sync_task_up carries the endpoints, so it is a series of its own")
+
+	var absent *EventCounters
+	absent.Count("insert", 1)
+}
+
+// TestASnapshotThatStartsIsRunningAndNotYetDone covers the three-way state the
+// dashboard reads. All three are written at once, because a task restarting
+// into a fresh copy has to clear the previous run's "completed".
+func TestASnapshotThatStartsIsRunningAndNotYetDone(t *testing.T) {
+	labels := labelsFor(t)
+	t.Cleanup(func() { Default.Forget(labels) })
+
+	SnapshotFinished(labels, true, 100) // a previous run
+	SnapshotStarted(labels, 12)
+
+	for name, want := range map[string]float64{
+		SnapshotRunning:          1,
+		SnapshotCompleted:        0,
+		SnapshotAborted:          0,
+		SnapshotObjectsTotal:     12,
+		SnapshotObjectsRemaining: 12,
+		SnapshotDurationSeconds:  0,
+	} {
+		if got := sampleValue(t, name, labels); got != want {
+			t.Errorf("%s = %v, want %v", name, got, want)
+		}
 	}
-	if got := mustValue(t, TaskUp, labels); got != 1 {
-		t.Errorf("up = %v, want 1", got)
+}
+
+func TestSnapshotProgressAdvancesTheRowsAndCountsDownTheObjects(t *testing.T) {
+	labels := labelsFor(t)
+	t.Cleanup(func() { Default.Forget(labels) })
+
+	SnapshotStarted(labels, 12)
+	SnapshotProgress(labels, 5000, 9, 30)
+	SnapshotProgress(labels, 4000, 7, 61)
+
+	for name, want := range map[string]float64{
+		SnapshotRowsScannedTotal: 9000,
+		SnapshotObjectsRemaining: 7,
+		SnapshotDurationSeconds:  61,
+	} {
+		if got := sampleValue(t, name, labels); got != want {
+			t.Errorf("%s = %v, want %v", name, got, want)
+		}
+	}
+}
+
+// TestASnapshotThatFinishesCleanlyHasNothingLeft: a completed copy with objects
+// still outstanding is a contradiction the dashboard would draw as a stalled
+// bar.
+func TestASnapshotThatFinishesCleanlyHasNothingLeft(t *testing.T) {
+	labels := labelsFor(t)
+	t.Cleanup(func() { Default.Forget(labels) })
+
+	SnapshotStarted(labels, 12)
+	SnapshotProgress(labels, 100, 4, 10)
+	SnapshotFinished(labels, true, 120)
+
+	for name, want := range map[string]float64{
+		SnapshotRunning:          0,
+		SnapshotCompleted:        1,
+		SnapshotAborted:          0,
+		SnapshotObjectsRemaining: 0,
+		SnapshotDurationSeconds:  120,
+	} {
+		if got := sampleValue(t, name, labels); got != want {
+			t.Errorf("%s = %v, want %v", name, got, want)
+		}
+	}
+}
+
+// TestAnAbortedSnapshotKeepsWhatWasLeft: how much was outstanding when it gave
+// up is the diagnostic, so it is not zeroed.
+func TestAnAbortedSnapshotKeepsWhatWasLeft(t *testing.T) {
+	labels := labelsFor(t)
+	t.Cleanup(func() { Default.Forget(labels) })
+
+	SnapshotStarted(labels, 12)
+	SnapshotProgress(labels, 100, 4, 10)
+	SnapshotFinished(labels, false, 45)
+
+	for name, want := range map[string]float64{
+		SnapshotRunning:          0,
+		SnapshotCompleted:        0,
+		SnapshotAborted:          1,
+		SnapshotObjectsRemaining: 4,
+	} {
+		if got := sampleValue(t, name, labels); got != want {
+			t.Errorf("%s = %v, want %v", name, got, want)
+		}
+	}
+}
+
+func TestSchemaChangesAreCountedAndRefusalsCarryTheReason(t *testing.T) {
+	labels := labelsFor(t)
+	t.Cleanup(func() { Default.Forget(labels) })
+
+	CountSchemaChange(labels, 0)
+	if _, ok := seriesFor(Default, SchemaChangesTotal, labels); ok {
+		t.Error("a series was created for zero schema changes")
+	}
+
+	CountSchemaChange(labels, 2)
+	if got := sampleValue(t, SchemaChangesTotal, labels); got != 2 {
+		t.Errorf("schema changes = %v, want 2", got)
+	}
+
+	CountSchemaRefused(labels, "drops a column")
+	CountSchemaRefused(labels, "drops a column")
+	with := withLabel(labels, "reason", "drops a column")
+	if got := sampleValue(t, SchemaChangesRefusedTotal, with); got != 2 {
+		t.Errorf("refusals = %v, want 2", got)
+	}
+}
+
+// TestObserveBatchAdvancesEverySum covers the six counters a batch writes. They
+// are sums rather than averages so a dashboard can divide by the count over any
+// window; a missing one makes the ratio that uses it wrong rather than absent.
+func TestObserveBatchAdvancesEverySum(t *testing.T) {
+	labels := labelsFor(t)
+	t.Cleanup(func() { Default.Forget(labels) })
+
+	ObserveBatch(labels, 200*time.Millisecond, 50*time.Millisecond, 3, 2, 500)
+	ObserveBatch(labels, 100*time.Millisecond, 25*time.Millisecond, 1, 1, 100)
+
+	for name, want := range map[string]float64{
+		BatchApplyCount:    2,
+		BatchApplySeconds:  0.3,
+		BatchCommitSeconds: 0.075,
+		BatchRoundTripsSum: 4,
+		BatchNamespacesSum: 3,
+		BatchEventsSum:     600,
+	} {
+		got := sampleValue(t, name, labels)
+		if diff := got - want; diff > 1e-9 || diff < -1e-9 {
+			t.Errorf("%s = %v, want %v", name, got, want)
+		}
 	}
 }
