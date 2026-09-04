@@ -209,7 +209,12 @@ func (s *supervisor) start(parentCtx context.Context, sc config.SyncConfig) {
 
 	go func() {
 		defer close(done)
-		task.err = syncer(ctx)
+		// A panic here used to end the process, and with it every other task: four
+		// replication links stopped because one of them dereferenced something.
+		// It becomes this task's error, which reconsider restarts with backoff --
+		// and the pipeline resumes from its stored position, so the restart begins
+		// from a point the target agrees with.
+		task.err = domain.Guard(func() error { return syncer(ctx) })
 	}()
 	metrics.SetTaskBlocked(taskLabels(sc), false)
 	s.log.Infof("Task %d (%s) started", sc.ID, sc.Type)

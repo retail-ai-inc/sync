@@ -246,7 +246,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	producers.Add(1)
 	go func() {
 		defer producers.Done()
-		readErr <- r.read(readCtx, queue)
+		readErr <- domain.Guard(func() error { return r.read(readCtx, queue) })
 	}()
 
 	stopReporting := r.report(readCtx)
@@ -314,6 +314,11 @@ func (r *Runner) startResyncs(ctx context.Context, queue chan<- *domain.Event, p
 		producers.Add(1)
 		go func() {
 			defer producers.Done()
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					failed <- domain.Recovered(recovered)
+				}
+			}()
 			r.log().Infof(r.tag("Re-copying %s alongside the stream"), resync.NS)
 			err := resync.run(ctx, read, func(events []*domain.Event) error {
 				if len(events) == 0 {
@@ -404,6 +409,12 @@ func (r *Runner) copy(ctx context.Context, pinned domain.Position, queue chan *d
 func (r *Runner) watchQueuePressure(ctx context.Context, queue chan *domain.Event) func() {
 	done := make(chan struct{})
 	go func() {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				r.log().Errorf(r.tag("The queue-pressure watch stopped: %v"),
+					domain.Recovered(recovered))
+			}
+		}()
 		ticker := time.NewTicker(r.Opts.reportInterval())
 		defer ticker.Stop()
 		warned := false
@@ -801,6 +812,12 @@ func (r *Runner) report(ctx context.Context) (stop func()) {
 	done := make(chan struct{})
 
 	go func() {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				r.log().Errorf(r.tag("The health reporter stopped, so its gauges are "+
+					"now stale: %v"), domain.Recovered(recovered))
+			}
+		}()
 		defer ticker.Stop()
 		for {
 			select {

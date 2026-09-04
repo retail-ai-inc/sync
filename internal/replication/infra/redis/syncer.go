@@ -126,7 +126,11 @@ func (s *Syncer) Start(ctx context.Context) error {
 	for i, shard := range shards {
 		shard, trigger := shard, triggers[i]
 		group.Go(func() error {
-			return s.runShard(groupCtx, shard, source, target, commands, trigger, guard)
+			// errgroup does not recover a panic, so a shard's panic would end the
+			// process rather than the shard.
+			return domain.Guard(func() error {
+				return s.runShard(groupCtx, shard, source, target, commands, trigger, guard)
+			})
 		})
 	}
 	err = group.Wait()
