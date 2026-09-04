@@ -103,9 +103,21 @@ CREATE TABLE IF NOT EXISTS changestream_statistics (
     UNIQUE(task_id, collection_name)
 );
 
+CREATE TABLE IF NOT EXISTS audit_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    at          DATETIME DEFAULT CURRENT_TIMESTAMP,
+    username    TEXT,
+    access      TEXT,
+    method      TEXT NOT NULL,
+    path        TEXT NOT NULL,
+    status      INTEGER,
+    remote_addr TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_last_updated ON changestream_statistics(last_updated);
 CREATE INDEX IF NOT EXISTS idx_monitoring_log_logged_at ON monitoring_log(logged_at);
 CREATE INDEX IF NOT EXISTS idx_monitoring_log_task ON monitoring_log(sync_task_id);
+CREATE INDEX IF NOT EXISTS idx_audit_log_at ON audit_log(at);
 `
 
 // ensured records the database files this process has already applied the

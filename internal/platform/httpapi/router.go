@@ -9,6 +9,7 @@ import (
 	"github.com/retail-ai-inc/sync/internal/dbinspect"
 	identityhttp "github.com/retail-ai-inc/sync/internal/identity/http"
 	monitoringhttp "github.com/retail-ai-inc/sync/internal/monitoring/http"
+	"github.com/retail-ai-inc/sync/internal/platform/audit"
 	replicationapp "github.com/retail-ai-inc/sync/internal/replication/app"
 	replicationhttp "github.com/retail-ai-inc/sync/internal/replication/http"
 )
@@ -63,7 +64,13 @@ func NewRouter() http.Handler {
 	//    and the schema reader take a host, a port and credentials and connect
 	//    to them, which is a scanner unless it is held to administrators.
 	r.Group(func(r chi.Router) {
-		r.Use(identityhttp.RequireAuth, identityhttp.RequireAdmin)
+		// The audit trail sits between the two checks deliberately. After
+		// RequireAuth, so the caller is known; before RequireAdmin, so an
+		// authenticated caller who tried a write and was refused is in the
+		// trail with the 403 -- somebody probing the administrative endpoints
+		// is worth recording. Not before RequireAuth: a caller with no token
+		// would then be able to fill the control database from outside.
+		r.Use(identityhttp.RequireAuth, audit.Middleware(principal), identityhttp.RequireAdmin)
 
 		r.Post("/test-connection", dbinspect.TestConnectionHandler)
 		r.Post("/tables/schema", dbinspect.GetTableSchemaHandler)
@@ -92,6 +99,17 @@ func NewRouter() http.Handler {
 	})
 
 	return r
+}
+
+// principal tells the audit trail who a request belongs to. The resolution
+// lives here, with the rest of the wiring, so the audit package does not import
+// the identity context to record what it is handed.
+func principal(r *http.Request) (username, access string) {
+	caller, ok := identityhttp.PrincipalFrom(r.Context())
+	if !ok {
+		return "", ""
+	}
+	return caller.Username, caller.Access
 }
 
 func Health(w http.ResponseWriter, r *http.Request) {
