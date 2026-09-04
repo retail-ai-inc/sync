@@ -24,7 +24,11 @@ type Config struct {
 	MysqlPositionPath      string                   `json:"mysql_position_path"`
 	MongodbResumeTokenPath string                   `json:"mongodb_resume_token_path"`
 	RedisPositionPath      string                   `json:"redis_position_path"`
-	SecurityEnabled        bool                     `json:"securityEnabled"`
+	// RedisBufferDir is where a Redis task spools the replication stream. A
+	// task without one refuses to start, so an endpoint that dropped it made
+	// the engine unusable through the API and the UI both.
+	RedisBufferDir  string `json:"redis_buffer_dir,omitempty"`
+	SecurityEnabled bool   `json:"securityEnabled"`
 }
 
 // Request is the body the create and update endpoints accept. It is Config with
@@ -44,6 +48,7 @@ type Request struct {
 	MysqlPositionPath      string                   `json:"mysql_position_path"`
 	MongodbResumeTokenPath string                   `json:"mongodb_resume_token_path"`
 	RedisPositionPath      string                   `json:"redis_position_path"`
+	RedisBufferDir         string                   `json:"redis_buffer_dir,omitempty"`
 	SecurityEnabled        bool                     `json:"securityEnabled"`
 }
 
@@ -89,6 +94,7 @@ func ConfigFrom(req Request) Config {
 		MysqlPositionPath:      req.MysqlPositionPath,
 		MongodbResumeTokenPath: req.MongodbResumeTokenPath,
 		RedisPositionPath:      req.RedisPositionPath,
+		RedisBufferDir:         req.RedisBufferDir,
 		SecurityEnabled:        req.SecurityEnabled,
 	}
 }

@@ -71,6 +71,7 @@ func taskPayload(id interface{}, enable bool, status, lastUpdate, lastRun, name 
 		"mysql_position_path":       c.MysqlPositionPath,
 		"mongodb_resume_token_path": c.MongodbResumeTokenPath,
 		"redis_position_path":       c.RedisPositionPath,
+		"redis_buffer_dir":          c.RedisBufferDir,
 		"securityEnabled":           c.SecurityEnabled,
 	}
 }

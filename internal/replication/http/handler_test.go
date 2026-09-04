@@ -1,6 +1,7 @@
 package replicationhttp
 
 import (
+	"github.com/retail-ai-inc/sync/internal/replication/domain"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -218,5 +219,28 @@ func TestStartingAMissingTaskIsRejected(t *testing.T) {
 	resp := decodeEnvelope(t, rec)
 	if resp["success"] != false {
 		t.Errorf("success = %v, want false for a task that does not exist", resp["success"])
+	}
+}
+
+// TestARedisTaskKeepsItsBufferDirectory: a Redis task refuses to start without
+// one, and the endpoints used to drop it, which made the engine unusable
+// through the API and the UI both.
+func TestARedisTaskKeepsItsBufferDirectory(t *testing.T) {
+	req := domain.Request{
+		TaskName:       "redis",
+		SourceType:     "redis",
+		Status:         "Stopped",
+		RedisBufferDir: "/mnt/state/redis_buffer_42",
+	}
+
+	stored := domain.ConfigFrom(req)
+	if stored.RedisBufferDir != req.RedisBufferDir {
+		t.Fatalf("stored buffer directory = %q, want %q",
+			stored.RedisBufferDir, req.RedisBufferDir)
+	}
+
+	payload := taskPayload(42, false, stored.Status, "", "", stored.TaskName, stored)
+	if got := payload["redis_buffer_dir"]; got != req.RedisBufferDir {
+		t.Errorf("the payload answers %v, so an edit would save the task without it", got)
 	}
 }
