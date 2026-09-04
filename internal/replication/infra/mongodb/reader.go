@@ -137,7 +137,13 @@ func (r *Reader) Open(ctx context.Context, from domain.Position) error {
 		r.nudge = startNudging(ctx, r.Client, r.Logger)
 	}
 	metrics.SetConnected(r.Labels, true)
-	metrics.SetCapturedTables(r.Labels, r.capturedCollections())
+	// Only when the task lists its collections. One that lists none replicates
+	// the database as a whole, and this counts the task's list, so it would
+	// report nothing captured while every collection was being replicated. The
+	// syncer's scan of the source publishes that case.
+	if n := r.capturedCollections(); n > 0 {
+		metrics.SetCapturedTables(r.Labels, n)
+	}
 	return nil
 }
 

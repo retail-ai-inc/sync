@@ -21,11 +21,17 @@ const (
 	// TaskUp: a task can be up and disconnected while it retries, which is exactly
 	// when the source's log rolls past a position nobody is reading.
 	Connected = "sync_source_connected"
+	// TaskInfo is 1, labelled with the endpoints a task runs between. They are
+	// here and not on the other metrics because a label multiplies every series
+	// that carries it, and because the two sides of a task have to agree on a
+	// label set to be graphed together at all.
+	TaskInfo = "sync_task_info"
 
 	helpTaskUp    = "1 while the task is replicating, 0 once it has stopped"
 	helpBlocked   = "1 while a task is stopped for a reason retrying cannot fix"
 	helpRestarts  = "Times a task has been restarted after stopping by itself"
 	helpConnected = "1 while the source stream is established, 0 while disconnected"
+	helpTaskInfo  = "1, labelled with the endpoints this task replicates between"
 )
 
 func SetTaskUp(labels Labels, up bool) { setBool(TaskUp, helpTaskUp, labels, up) }
@@ -38,6 +44,13 @@ func CountRestart(labels Labels) { Default.AddCounter(RestartsTotal, helpRestart
 
 func SetConnected(labels Labels, connected bool) {
 	setBool(Connected, helpConnected, labels, connected)
+}
+
+// SetTaskInfo records the endpoints a task runs between. Callers pass them
+// without credentials: an exposition is scraped and kept for months.
+func SetTaskInfo(labels Labels, source, target string) {
+	with := withLabel(withLabel(labels, "source", source), "target", target)
+	Default.SetGauge(TaskInfo, helpTaskInfo, with, 1)
 }
 
 func setBool(name, help string, labels Labels, on bool) {

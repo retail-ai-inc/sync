@@ -131,7 +131,10 @@ func (r *Reader) Open(ctx context.Context, from domain.Position) error {
 	r.inTransaction = false
 
 	metrics.SetConnected(r.Labels, true)
-	metrics.SetCapturedTables(r.Labels, r.capturedTables())
+	// Only when the task lists its tables; see the MongoDB reader's copy of this.
+	if n := r.capturedTables(); n > 0 {
+		metrics.SetCapturedTables(r.Labels, n)
+	}
 
 	go func() {
 		// out is deliberately not closed here: the stream ends by way of fail, and

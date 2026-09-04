@@ -388,8 +388,12 @@ func TestTheMetricsNameTheTaskWithoutItsCredentials(t *testing.T) {
 	if labels["task"] != "11" || labels["engine"] != "postgresql" {
 		t.Errorf("labels = %v", labels)
 	}
-	if labels["source"] != "tokyo:5432/shop" || labels["target"] != "osaka:5432/shop" {
-		t.Errorf("endpoints = %q -> %q", labels["source"], labels["target"])
+	// The endpoints are on sync_task_info, not on every series a task publishes.
+	if _, ok := labels["source"]; ok {
+		t.Errorf("labels carry the endpoints: %v", labels)
+	}
+	if _, ok := labels["target"]; ok {
+		t.Errorf("labels carry the endpoints: %v", labels)
 	}
 	for name, value := range labels {
 		if strings.Contains(value, "hunter2") {

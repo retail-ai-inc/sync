@@ -140,6 +140,9 @@ func (s *PostgreSQLSyncer) Start(ctx context.Context) error {
 	defer releaseGuard()
 
 	s.checkpoints = s.checkpointStore()
+	metrics.SetTaskInfo(s.metricLabels(),
+		dsn.Endpoint("postgresql", s.cfg.SourceConnection),
+		dsn.Endpoint("postgresql", s.cfg.TargetConnection))
 	metrics.SetTaskUp(s.metricLabels(), true)
 	defer metrics.SetTaskUp(s.metricLabels(), false)
 
@@ -1101,10 +1104,10 @@ func (s *PostgreSQLSyncer) recordLSN(ctx context.Context, lsn pglogrepl.LSN) err
 // metricLabels identify this task in the metrics. The endpoints are named
 // without their credentials, because the exposition is scraped and stored.
 func (s *PostgreSQLSyncer) metricLabels() metrics.Labels {
+	// Task and engine, and nothing else, for the reason given on the MySQL
+	// syncer's copy of this: endpoint labels split a task's series in two.
 	return metrics.Labels{
 		"task":   strconv.Itoa(s.cfg.ID),
 		"engine": "postgresql",
-		"source": dsn.Endpoint("postgresql", s.cfg.SourceConnection),
-		"target": dsn.Endpoint("postgresql", s.cfg.TargetConnection),
 	}
 }

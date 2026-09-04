@@ -114,6 +114,9 @@ func (s *Syncer) Start(ctx context.Context) error {
 	}
 
 	labels := metrics.Labels{"task": fmt.Sprint(s.cfg.ID), "engine": "mysql"}
+	metrics.SetTaskInfo(labels,
+		dsn.Endpoint(s.cfg.Type, s.cfg.SourceConnection),
+		dsn.Endpoint(s.cfg.Type, s.cfg.TargetConnection))
 
 	var targetDB *sql.DB
 	err := resilience.Retry(ctx, 5, 2*time.Second, 2.0, func() error {
@@ -175,7 +178,7 @@ func (s *Syncer) Start(ctx context.Context) error {
 	// A task that names its tables means it, so nothing here widens the scope.
 	// What it does is say which tables are not in the copy, because the
 	// alternative is finding out during a failover.
-	go s.warnAboutUnlistedTables(ctx, dsn.GetDatabaseName(s.cfg.Type, s.cfg.SourceConnection), labels)
+	go s.watchSourceTables(ctx, dsn.GetDatabaseName(s.cfg.Type, s.cfg.SourceConnection), labels)
 
 	runner := &pipeline.Runner{
 		Reader: reader,
@@ -264,10 +267,13 @@ func (s *Syncer) resyncs(store *checkpoint.SQLStore) []*pipeline.Resync {
 // against what the source actually holds.
 const unlistedScanEvery = 5 * time.Minute
 
-// warnAboutUnlistedTables reports the tables the source has and this task does
-// not replicate. It does not start replicating them: a task that names its
-// tables means it, and quietly widening the scope would be worse than the gap.
-func (s *Syncer) warnAboutUnlistedTables(ctx context.Context, sourceDBName string,
+// watchSourceTables scans the source on an interval and publishes what it
+// finds: the tables this task does not replicate, for a task that names its
+// tables, and the number it captures, for one that names none.
+//
+// It never starts replicating an unlisted table: a task that names its tables
+// means it, and quietly widening the scope would be worse than the gap.
+func (s *Syncer) watchSourceTables(ctx context.Context, sourceDBName string,
 	labels metrics.Labels) {
 
 	listed := map[string]bool{}
@@ -278,10 +284,6 @@ func (s *Syncer) warnAboutUnlistedTables(ctx context.Context, sourceDBName strin
 			}
 		}
 	}
-	if len(listed) == 0 {
-		return // the task replicates the database as a whole
-	}
-
 	source, err := sql.Open("mysql", s.cfg.SourceConnection)
 	if err != nil {
 		s.logger.Debugf("[MySQL] Could not open the source to check which tables it "+
@@ -295,6 +297,12 @@ func (s *Syncer) warnAboutUnlistedTables(ctx context.Context, sourceDBName strin
 		tables, err := discovery.MySQLTables(ctx, source, sourceDBName)
 		if err != nil {
 			s.logger.Debugf("[MySQL] Could not list the tables in %s: %v", sourceDBName, err)
+			return
+		}
+		if len(listed) == 0 {
+			// The task replicates the database as a whole, so it captures whatever
+			// the source holds, and that moves as tables are created.
+			metrics.SetCapturedTables(labels, len(tables))
 			return
 		}
 		missing := discovery.Unlisted(listed, warned, tables)

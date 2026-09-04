@@ -328,3 +328,27 @@ func TestObserveBatchRecordsEveryPartOfTheCost(t *testing.T) {
 		t.Errorf("events = %v, want 40", got)
 	}
 }
+
+// TestTheTaskInfoSeriesCarriesTheEndpoints: the endpoints were labels on every
+// metric a task published, which put one engine's snapshot on a different
+// series from the pipeline's and left a dashboard querying by task with two.
+func TestTheTaskInfoSeriesCarriesTheEndpoints(t *testing.T) {
+	labels := Labels{"task": "info", "engine": "mysql"}
+
+	SetTaskInfo(labels, "tokyo:3306/shop", "osaka:3306/shop")
+	SetTaskUp(labels, true)
+
+	want := Labels{
+		"task": "info", "engine": "mysql",
+		"source": "tokyo:3306/shop", "target": "osaka:3306/shop",
+	}
+	if got := mustValue(t, TaskInfo, want); got != 1 {
+		t.Errorf("info series = %v, want 1", got)
+	}
+	if _, ok := value(t, TaskUp, want); ok {
+		t.Error("sync_task_up carries the endpoints, so it is a series of its own")
+	}
+	if got := mustValue(t, TaskUp, labels); got != 1 {
+		t.Errorf("up = %v, want 1", got)
+	}
+}

@@ -872,11 +872,15 @@ func (s *MySQLSyncer) claimDirection(ctx context.Context, targetDB *sql.DB) (fun
 // metricLabels identify this task in the metrics. The endpoints are named
 // without their credentials, because the exposition is scraped and stored.
 func (s *MySQLSyncer) metricLabels() metrics.Labels {
+	// Task and engine, and nothing else. The endpoints used to be labels here,
+	// which put this syncer's snapshot series beside the pipeline's rather than
+	// on it: two series per metric per task, the pipeline's left holding the
+	// zero it starts from, and a dashboard querying by task getting both. The
+	// endpoints belong on the info series, where a slow string costs one sample
+	// instead of multiplying every series that carries it.
 	return metrics.Labels{
 		"task":   strconv.Itoa(s.cfg.ID),
 		"engine": s.cfg.Type,
-		"source": dsn.Endpoint(s.cfg.Type, s.cfg.SourceConnection),
-		"target": dsn.Endpoint(s.cfg.Type, s.cfg.TargetConnection),
 	}
 }
 

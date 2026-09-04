@@ -13,6 +13,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo"
 
 	"github.com/retail-ai-inc/sync/internal/platform/config"
+	"github.com/retail-ai-inc/sync/internal/platform/metrics"
 	"github.com/retail-ai-inc/sync/test/harness"
 )
 
@@ -122,5 +123,39 @@ func TestTheCopyCreatesTheSourceIndexes(t *testing.T) {
 			}
 		}
 		return nil
+	})
+}
+
+// A task that lists no collections replicates the database as a whole, and the
+// captured count is then knowable only from the source. It used to be read off
+// the task's own list, which is empty in exactly that case, so the one task
+// shape a disaster-recovery copy uses reported nothing captured while it
+// replicated everything.
+func TestAWholeDatabaseTaskReportsWhatItCaptures(t *testing.T) {
+	ctx := context.Background()
+	src := connect(t, harness.MongoSource)
+
+	name := harness.UniqueName("captured")
+	if _, err := src.Database(sourceDB).Collection(name).InsertOne(ctx, bson.M{"v": 1}); err != nil {
+		t.Fatalf("seed source: %v", err)
+	}
+	t.Cleanup(func() { _ = src.Database(sourceDB).Collection(name).Drop(ctx) })
+
+	cfg := syncTask(t, name)
+	cfg.Mappings = []config.DatabaseMapping{{}} // names no collection: the database as a whole
+	startSyncer(t, cfg)
+
+	labels := metrics.Labels{"task": fmt.Sprint(cfg.ID), "engine": "mongodb"}
+	harness.Eventually(t, 60*time.Second, func() error {
+		for _, s := range metrics.Default.Snapshot(metrics.CapturedTables) {
+			if s.Labels.Key() != labels.Key() {
+				continue
+			}
+			if s.Value < 1 {
+				return fmt.Errorf("captured = %v, want the collections the source holds", s.Value)
+			}
+			return nil
+		}
+		return fmt.Errorf("%s{%s} was never recorded", metrics.CapturedTables, labels.Key())
 	})
 }

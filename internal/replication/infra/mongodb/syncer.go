@@ -191,6 +191,9 @@ func (s *Syncer) Start(ctx context.Context) error {
 	labels := metrics.Labels{"task": fmt.Sprint(s.cfg.ID), "engine": "mongodb"}
 	sourceDBName := dsn.GetDatabaseName(s.cfg.Type, s.cfg.SourceConnection)
 	targetDBName := dsn.GetDatabaseName(s.cfg.Type, s.cfg.TargetConnection)
+	metrics.SetTaskInfo(labels,
+		dsn.Endpoint(s.cfg.Type, s.cfg.SourceConnection),
+		dsn.Endpoint(s.cfg.Type, s.cfg.TargetConnection))
 
 	inner := NewMongoDBSyncer(s.cfg, s.global, s.logger)
 	if inner.sourceClient == nil || inner.targetClient == nil {
@@ -282,17 +285,21 @@ func (s *Syncer) Start(ctx context.Context) error {
 	// A task that names its collections means it, so nothing here widens the
 	// scope. What it does is say which collections are not in the copy, because
 	// the alternative is finding out during a failover.
-	go s.warnAboutUnlistedCollections(ctx, inner, sourceDBName, labels)
+	go s.watchSourceCollections(ctx, inner, sourceDBName, labels)
 
 	s.logger.Info("[MongoDB] Starting synchronization...")
 	return runner.Run(ctx)
 }
 
-// warnAboutUnlistedCollections reports the collections the source has and this
-// task does not replicate. A task that lists nothing replicates the database
-// as a whole, so there is nothing to report; one that lists its collections
-// has a gap whenever the source grows another, and the gap is invisible.
-func (s *Syncer) warnAboutUnlistedCollections(ctx context.Context, inner *MongoDBSyncer,
+// watchSourceCollections scans the source on an interval and publishes what it
+// finds: the collections this task does not replicate, for a task that lists
+// its collections, and the number it captures, for one that lists none.
+//
+// A task that lists its collections has a gap whenever the source grows
+// another, and the gap is invisible. A task that lists none has no gap, but its
+// captured count is knowable only here -- the reader counts the task's list,
+// which is empty in exactly that case.
+func (s *Syncer) watchSourceCollections(ctx context.Context, inner *MongoDBSyncer,
 	sourceDB string, labels metrics.Labels) {
 
 	listed := map[string]bool{}
@@ -303,10 +310,6 @@ func (s *Syncer) warnAboutUnlistedCollections(ctx context.Context, inner *MongoD
 			}
 		}
 	}
-	if len(listed) == 0 {
-		return // the task replicates the database as a whole
-	}
-
 	database := inner.sourceClient.Database(sourceDB)
 	warned := map[string]bool{}
 
@@ -315,6 +318,12 @@ func (s *Syncer) warnAboutUnlistedCollections(ctx context.Context, inner *MongoD
 		if err != nil {
 			s.logger.Debugf("[MongoDB] Could not list the collections in %s: %v",
 				sourceDB, err)
+			return
+		}
+		if len(listed) == 0 {
+			// The task replicates the database as a whole, so it captures whatever
+			// the source holds, and that moves as collections are created.
+			metrics.SetCapturedTables(labels, len(names))
 			return
 		}
 		missing := discovery.Unlisted(listed, warned, names)
