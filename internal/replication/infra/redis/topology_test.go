@@ -95,3 +95,35 @@ func TestASourceThatReportsNoOffsetIsAnError(t *testing.T) {
 		t.Fatal("want an error: publishing an unknown lag as zero would hide a stall")
 	}
 }
+
+// A shard is named by the slots it owns, so a master that failed over to
+// another address is the same shard and its stream reconnects on its own.
+// Slots moving between shards is a different thing: the readers were built at
+// start, so a range that appeared has none, and carrying on would replicate
+// part of the cluster and say nothing about the rest.
+func TestAFailoverIsNotAReshard(t *testing.T) {
+	before := map[string]string{"0-5460": "a:6379", "5461-10922": "b:6379"}
+	sameRangesNewAddress := map[string]string{"0-5460": "a2:6379", "5461-10922": "b:6379"}
+
+	if added, removed := rangesMoved(before, sameRangesNewAddress); added != "" || removed != "" {
+		t.Errorf("a failover read as a reshard: %q %q", added, removed)
+	}
+}
+
+func TestASplitRangeIsAReshard(t *testing.T) {
+	before := map[string]string{"0-5460": "a:6379"}
+	after := map[string]string{"0-2730": "a:6379", "2731-5460": "c:6379"}
+
+	added, removed := rangesMoved(before, after)
+	if added == "" {
+		t.Error("the ranges that appeared were not reported, so nothing would read them")
+	}
+	if removed == "" {
+		t.Error("the range that is gone was not reported")
+	}
+	for _, want := range []string{"0-2730", "2731-5460", "0-5460"} {
+		if !strings.Contains(added+removed, want) {
+			t.Errorf("%q missing from %q %q", want, added, removed)
+		}
+	}
+}

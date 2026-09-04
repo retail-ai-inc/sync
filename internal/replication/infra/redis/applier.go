@@ -137,7 +137,7 @@ func (a *Applier) Apply(ctx context.Context, runs [][]*domain.Event, pos domain.
 		return false, err
 	}
 	if containsFlush(events) {
-		if err := a.applyInOrder(ctx, events, batchEnd, markers, pos.Payload); err != nil {
+		if err := a.applyAroundFlush(ctx, events, batchEnd, markers, pos.Payload); err != nil {
 			return false, err
 		}
 	} else if err := a.run(ctx, jobs, batchEnd, markers); err != nil {
@@ -425,6 +425,162 @@ func containsFlush(events []*domain.Event) bool {
 		}
 	}
 	return false
+}
+
+// applyAroundFlush writes a batch that contains a flush.
+//
+// A flush empties whole databases, so nothing may be applied beside it: the
+// ordinary path commits slots concurrently, and a write that landed beside a
+// flush rather than before or after it would be erased or spared by a race. The
+// batch is split at each flush and the pieces go through the ordinary per-slot
+// path, with the flush executed between them.
+//
+// The pieces keep that path rather than becoming one transaction of their own,
+// because a cluster has no transaction spanning slots -- and the client does
+// not say so. It splits a cross-slot MULTI into one per slot and reports
+// success, so a batch written that way looks atomic and is not.
+func (a *Applier) applyAroundFlush(ctx context.Context, events []*domain.Event,
+	batchEnd int64, markers []int64, position string) error {
+
+	segment := make([]*domain.Event, 0, len(events))
+
+	writeSegment := func() error {
+		if len(segment) == 0 {
+			return nil
+		}
+		jobs, err := a.plan(segment, markers)
+		if err != nil {
+			return err
+		}
+		segment = segment[:0]
+		return a.run(ctx, jobs, batchEnd, markers)
+	}
+
+	for _, event := range events {
+		flushed, isFlush := event.Payload.(*flush)
+		if !isFlush {
+			segment = append(segment, event)
+			continue
+		}
+		if err := writeSegment(); err != nil {
+			return err
+		}
+		if err := a.flushTarget(ctx, flushed, batchEnd, markers, position); err != nil {
+			return err
+		}
+	}
+	return writeSegment()
+}
+
+// flushTarget empties the target the way the source was emptied, and puts back
+// what this task keeps there.
+//
+// On one server that is a single transaction, so there is no moment where the
+// position and the direction claim are missing. A cluster has no such
+// transaction: the flush has to reach every master, and no MULTI spans them. So
+// the order carries the safety instead -- the markers go first, because a crash
+// between any two steps then costs a replay rather than a skip.
+func (a *Applier) flushTarget(ctx context.Context, f *flush, batchEnd int64,
+	markers []int64, position string) error {
+
+	cluster, isCluster := a.Target.(*goredis.ClusterClient)
+	if !isCluster {
+		if err := a.flushOneServer(ctx, f, position); err != nil {
+			return err
+		}
+		a.forgetMarkers(markers, batchEnd)
+		return nil
+	}
+
+	if err := a.dropMarkers(ctx); err != nil {
+		return err
+	}
+	// Every master: a flush sent to one node empties one shard, and the other
+	// shards would keep data the source no longer has.
+	if err := cluster.ForEachMaster(ctx, func(ctx context.Context, node *goredis.Client) error {
+		return node.Do(ctx, f.arguments()...).Err()
+	}); err != nil {
+		return fmt.Errorf("carry %s to every master: %w", f.name(), err)
+	}
+	if a.RestoreState != nil {
+		pipe := a.Target.Pipeline()
+		a.RestoreState(ctx, pipe, position)
+		if _, err := pipe.Exec(ctx); err != nil && err != goredis.Nil {
+			return fmt.Errorf("restore this task's state after %s: %w", f.name(), err)
+		}
+	}
+	a.forgetMarkers(markers, batchEnd)
+	return nil
+}
+
+// flushOneServer is the whole operation as one transaction, which is available
+// on a single server and is what keeps the state from being missing for an
+// instant.
+func (a *Applier) flushOneServer(ctx context.Context, f *flush, position string) error {
+	tx := a.Target.TxPipeline()
+
+	if f.db != a.BookkeepingDB {
+		tx.Do(ctx, "select", f.db)
+	}
+	tx.Do(ctx, f.arguments()...)
+	if f.db != a.BookkeepingDB {
+		tx.Do(ctx, "select", a.BookkeepingDB)
+	}
+
+	keys := make([]string, 0, SlotCount)
+	for slot := 0; slot < SlotCount; slot++ {
+		keys = append(keys, OffsetKey(slot, a.Positions.TaskID))
+	}
+	tx.Del(ctx, keys...)
+
+	// The flush may have emptied the database these live in -- FLUSHALL always
+	// does, and FLUSHDB does when the source flushes the one this task keeps its
+	// state in. Writing them back inside the same transaction is what leaves no
+	// moment where they are gone.
+	if a.RestoreState != nil {
+		a.RestoreState(ctx, tx, position)
+	}
+
+	results, err := tx.Exec(ctx)
+	if err != nil && err != goredis.Nil {
+		return fmt.Errorf("carry %s to the target: %w", f.name(), err)
+	}
+	for _, result := range results {
+		if err := result.Err(); err != nil && err != goredis.Nil {
+			return domain.Unrecoverable(
+				"%v failed on the target: %v. The target's copy has diverged from the "+
+					"source; a transaction that fails part way is not something a retry "+
+					"can put right", result.Args(), err)
+		}
+	}
+	return nil
+}
+
+// dropMarkers removes every slot marker, one slot at a time.
+//
+// A marker says a slot has been applied to some offset, and the flush is about
+// to destroy what it was attesting to; one left standing above the resume floor
+// would skip, on the next replay, exactly the writes that have to be made
+// again. They go before the flush rather than after it so that a crash in
+// between leaves markers missing rather than data missing: a missing marker
+// replays, a stale one skips.
+func (a *Applier) dropMarkers(ctx context.Context) error {
+	pipe := a.Target.Pipeline()
+	for slot := 0; slot < SlotCount; slot++ {
+		pipe.Del(ctx, OffsetKey(slot, a.Positions.TaskID))
+	}
+	if _, err := pipe.Exec(ctx); err != nil && err != goredis.Nil {
+		return fmt.Errorf("drop the slot markers before a flush: %w", err)
+	}
+	return nil
+}
+
+// forgetMarkers matches in memory what the flush did on the target: nothing may
+// be skipped against a marker that is no longer there.
+func (a *Applier) forgetMarkers(markers []int64, batchEnd int64) {
+	for slot := range markers {
+		markers[slot] = batchEnd
+	}
 }
 
 // applyInOrder writes a batch that contains a flush.

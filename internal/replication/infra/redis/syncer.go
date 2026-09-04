@@ -108,9 +108,12 @@ func (s *Syncer) Start(ctx context.Context) error {
 			}
 		},
 	}
-	go watcher.Run(ctx)
-
 	group, groupCtx := errgroup.WithContext(ctx)
+
+	// In the group rather than beside it: a reshard is reported as an error, and
+	// that has to stop every shard rather than be logged past.
+	group.Go(func() error { return watcher.Run(groupCtx) })
+
 	for i, shard := range shards {
 		shard, trigger := shard, triggers[i]
 		group.Go(func() error {

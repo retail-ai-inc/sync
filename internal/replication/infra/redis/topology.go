@@ -3,6 +3,7 @@ package redis
 import (
 	"context"
 	"fmt"
+	"github.com/retail-ai-inc/sync/internal/replication/domain"
 	"sort"
 	"strings"
 	"time"
@@ -35,11 +36,15 @@ func (w *topologyWatcher) every() time.Duration {
 
 func (w *topologyWatcher) logger() logrus.FieldLogger { return orDefault(w.Logger) }
 
-func (w *topologyWatcher) Run(ctx context.Context) {
+// Run watches the source's shape until the context ends, or until the slots
+// themselves are rearranged -- which it reports as an error, because the task
+// cannot carry on through one.
+func (w *topologyWatcher) Run(ctx context.Context) error {
 	cluster, ok := w.Source.(*goredis.ClusterClient)
 	if !ok {
 		// One server owns everything; there is nothing for a slot to move to.
-		return
+		<-ctx.Done()
+		return nil
 	}
 
 	ticker := time.NewTicker(w.every())
@@ -53,14 +58,14 @@ func (w *topologyWatcher) Run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return nil
 		case <-ticker.C:
 		}
 
 		current, err := ownership(ctx, cluster)
 		if err != nil {
 			if ctx.Err() != nil {
-				return
+				return nil
 			}
 			w.logger().Warnf("[Redis] Could not read the source's shape: %v", err)
 			continue
@@ -68,6 +73,22 @@ func (w *topologyWatcher) Run(ctx context.Context) {
 		if previous == nil {
 			previous = current
 			continue
+		}
+
+		// A shard is named by the slots it owns, so a master that failed over to
+		// another address is the same shard and its stream reconnects on its own.
+		// Slots moving between shards is a different thing: the shard list this
+		// task started with no longer covers the key space, and the ranges that
+		// appeared have no reader at all. Nothing here can add one -- the readers
+		// were built at start -- so carrying on would replicate part of the
+		// cluster and say nothing about the rest.
+		if added, removed := rangesMoved(previous, current); added != "" || removed != "" {
+			return domain.Unrecoverable(
+				"the source was resharded while this task was running: %s%s. A shard is "+
+					"identified by the slots it owns, so the ranges that appeared have no "+
+					"reader and nothing is being replicated from them. Restart the task: "+
+					"it will pick up the new shape, and the new ranges will take a first "+
+					"copy each", added, removed)
 		}
 
 		if changes := describe(previous, current); changes != "" {
@@ -87,6 +108,34 @@ func (w *topologyWatcher) Run(ctx context.Context) {
 		}
 		previous = current
 	}
+}
+
+// rangesMoved reports slot ranges that appeared or vanished. An address
+// changing under an unchanged range is a failover, not a reshard.
+func rangesMoved(before, after map[string]string) (added, removed string) {
+	var appeared, vanished []string
+	for id := range after {
+		if _, had := before[id]; !had {
+			appeared = append(appeared, id)
+		}
+	}
+	for id := range before {
+		if _, still := after[id]; !still {
+			vanished = append(vanished, id)
+		}
+	}
+	sort.Strings(appeared)
+	sort.Strings(vanished)
+	if len(appeared) > 0 {
+		added = "slots " + strings.Join(appeared, ", ") + " appeared"
+	}
+	if len(vanished) > 0 {
+		if added != "" {
+			removed = "; "
+		}
+		removed += "slots " + strings.Join(vanished, ", ") + " are gone"
+	}
+	return added, removed
 }
 
 func ownership(ctx context.Context, cluster *goredis.ClusterClient) (map[string]string, error) {
