@@ -404,3 +404,30 @@ func TestAnUnreadablePayloadIsReported(t *testing.T) {
 		t.Error("Decode accepted a payload it cannot have read")
 	}
 }
+
+// TestTheTableIsCreatedOncePerProcess: MySQL writes a CREATE TABLE to the
+// binary log whether or not there was anything to create, and Save runs per
+// source transaction. Issuing it every time put a DDL statement into the
+// source's log twenty-five times a second, and every task reading that log
+// counted each one as a schema change it had refused to carry.
+//
+// The creation is not counted directly -- it is observed: the table is taken
+// away after the first save, and a store that creates it again would not
+// notice.
+func TestTheTableIsCreatedOncePerProcess(t *testing.T) {
+	store := sqlStore(t, 1)
+	ctx := context.Background()
+
+	if err := store.Save(ctx, "shard-0", "position"); err != nil {
+		t.Fatalf("first save: %v", err)
+	}
+	if _, err := store.DB.ExecContext(ctx, "DROP TABLE "+tableName); err != nil {
+		t.Fatalf("drop: %v", err)
+	}
+
+	err := store.Save(ctx, "shard-0", "position")
+	if err == nil {
+		t.Error("the second save created the table again, so every save writes a " +
+			"CREATE TABLE into the source's binary log")
+	}
+}
