@@ -234,3 +234,81 @@ func TestTheStateIsRestoredAfterTheFlushNotBefore(t *testing.T) {
 		t.Errorf("restore recorded %v, want the position it was given", order)
 	}
 }
+
+// TestAWriteAfterAFlushInTheSameBatchIsNotSkipped is the regression the review
+// found: a flush does not stand alone in its batch, and resetting every marker
+// to the batch's end made plan drop everything that came after it -- silently,
+// reporting success, with the resume floor then moved past the loss.
+func TestAWriteAfterAFlushInTheSameBatchIsNotSkipped(t *testing.T) {
+	a := &Applier{Positions: &Checkpoints{TaskID: 1, Shard: "0"}}
+	markers := make([]int64, SlotCount)
+
+	after := &command{args: [][]byte{[]byte("set"), []byte("k")}, slot: 7, offset: 120}
+	batch := []*domain.Event{
+		{Payload: &command{args: [][]byte{[]byte("set"), []byte("k")}, slot: 7, offset: 100}},
+		{Payload: &flush{args: [][]byte{[]byte("flushall")}, offset: 110}},
+		{Payload: after},
+	}
+	if endOf(batch) != 120 {
+		t.Fatalf("batch end = %d, want the last event's offset", endOf(batch))
+	}
+
+	// What the flush does to the markers, at its own offset rather than the
+	// batch's.
+	a.forgetMarkers(markers, &flush{offset: 110})
+
+	jobs, err := a.plan([]*domain.Event{{Payload: after}}, markers)
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("the write after the flush planned %d jobs, want 1: it would be "+
+			"dropped with the batch reported as applied", len(jobs))
+	}
+	if a.Skipped() != 0 {
+		t.Errorf("skipped = %d, want none", a.Skipped())
+	}
+}
+
+// A segment records how far it reached, not how far the batch reaches.
+func TestASegmentIsMarkedAtItsOwnEnd(t *testing.T) {
+	segment := []*domain.Event{
+		{Payload: &command{args: [][]byte{[]byte("set")}, slot: 1, offset: 100}},
+	}
+	whole := append(append([]*domain.Event{}, segment...),
+		&domain.Event{Payload: &command{args: [][]byte{[]byte("set")}, slot: 1, offset: 200}})
+
+	if endOf(segment) != 100 {
+		t.Errorf("segment end = %d, want 100", endOf(segment))
+	}
+	if endOf(whole) != 200 {
+		t.Errorf("batch end = %d, want 200", endOf(whole))
+	}
+	if endOf(segment) == endOf(whole) {
+		t.Error("a segment cannot be marked at the batch's end: the rest has not landed")
+	}
+}
+
+// The position restored after a flush names the flush, not the end of the batch
+// it arrived in -- a slot with no marker is taken to have applied up to the
+// floor, and the flush has just removed every marker.
+func TestTheRestoredPositionNamesTheFlush(t *testing.T) {
+	original, err := streamPosition{ReplID: "abc", Offset: 200, Phase: phaseCommand}.encode()
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	moved, err := positionAt(original, 110)
+	if err != nil {
+		t.Fatalf("positionAt: %v", err)
+	}
+	got, err := decodePosition(moved)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Offset != 110 {
+		t.Errorf("offset = %d, want the flush's 110 rather than the batch's 200", got.Offset)
+	}
+	if got.ReplID != "abc" || got.Phase != phaseCommand {
+		t.Errorf("the rest of the position changed: %+v", got)
+	}
+}

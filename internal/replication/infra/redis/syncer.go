@@ -108,11 +108,20 @@ func (s *Syncer) Start(ctx context.Context) error {
 			}
 		},
 	}
-	group, groupCtx := errgroup.WithContext(ctx)
+	// The watcher stops the shards through a cause rather than by joining the
+	// group. In the group it would only ever return on ctx.Done, so a group whose
+	// shards all returned nil while the parent context was still live would wait
+	// on it for ever -- and Start never returning means the supervisor never
+	// restarts the task and the direction claim is never released.
+	shardCtx, stopShards := context.WithCancelCause(ctx)
+	defer stopShards(nil)
+	go func() {
+		if err := watcher.Run(shardCtx); err != nil {
+			stopShards(err)
+		}
+	}()
 
-	// In the group rather than beside it: a reshard is reported as an error, and
-	// that has to stop every shard rather than be logged past.
-	group.Go(func() error { return watcher.Run(groupCtx) })
+	group, groupCtx := errgroup.WithContext(shardCtx)
 
 	for i, shard := range shards {
 		shard, trigger := shard, triggers[i]
@@ -120,7 +129,13 @@ func (s *Syncer) Start(ctx context.Context) error {
 			return s.runShard(groupCtx, shard, source, target, commands, trigger, guard)
 		})
 	}
-	return group.Wait()
+	err = group.Wait()
+	// A shard that stopped because the watcher cancelled it reports the
+	// cancellation; the reshard is the reason worth reporting.
+	if cause := context.Cause(shardCtx); cause != nil && cause != context.Canceled {
+		return cause
+	}
+	return err
 }
 
 type shard struct {

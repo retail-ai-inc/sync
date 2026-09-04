@@ -27,6 +27,11 @@ type topologyWatcher struct {
 
 const defaultTopologyInterval = 30 * time.Second
 
+// How many consecutive polls must agree before a changed shape is called a
+// reshard. One poll is not evidence: a master down with no replica vanishes
+// from CLUSTER SLOTS and comes back when it or its replacement does.
+const reshardPollsToConfirm = 3
+
 func (w *topologyWatcher) every() time.Duration {
 	if w.Every > 0 {
 		return w.Every
@@ -55,6 +60,11 @@ func (w *topologyWatcher) Run(ctx context.Context) error {
 		w.logger().Warnf("[Redis] Could not read the source's shape: %v", err)
 	}
 
+	// pending is the changed shape awaiting confirmation, and settled counts how
+	// many consecutive polls have agreed with it.
+	var pending map[string]string
+	settled := 0
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -82,7 +92,22 @@ func (w *topologyWatcher) Run(ctx context.Context) error {
 		// appeared have no reader at all. Nothing here can add one -- the readers
 		// were built at start -- so carrying on would replicate part of the
 		// cluster and say nothing about the rest.
-		if added, removed := rangesMoved(previous, current); added != "" || removed != "" {
+		added, removed := rangesMoved(previous, current)
+		if added == "" && removed == "" {
+			settled = 0
+		} else {
+			// A master that is down with no replica to take over drops out of
+			// CLUSTER SLOTS, and so does one that is briefly unreachable while the
+			// command runs. Either reads exactly like a reshard for one poll. The
+			// same changed shape has to hold across several before this stops a
+			// task for good, because stopping is not something a retry undoes.
+			if same := describe(pending, current) == "" && pending != nil; same {
+				settled++
+			} else {
+				settled, pending = 1, current
+			}
+		}
+		if settled >= reshardPollsToConfirm {
 			return domain.Unrecoverable(
 				"the source was resharded while this task was running: %s%s. A shard is "+
 					"identified by the slots it owns, so the ranges that appeared have no "+

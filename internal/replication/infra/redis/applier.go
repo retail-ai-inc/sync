@@ -132,16 +132,23 @@ func (a *Applier) Apply(ctx context.Context, runs [][]*domain.Event, pos domain.
 	// beside it: the slot transactions run concurrently, and a write that landed
 	// after a concurrent flush would be erased by it. The whole batch goes in
 	// one transaction, in the order the stream had it.
-	jobs, err := a.plan(events, markers)
-	if err != nil {
-		return false, err
-	}
+	// Planned per segment in the flush path, so planning the batch here as well
+	// would count every skipped command twice -- and Skipped() is the evidence
+	// that the replay path is being exercised at all.
+	var jobs []work
 	if containsFlush(events) {
 		if err := a.applyAroundFlush(ctx, events, batchEnd, markers, pos.Payload); err != nil {
 			return false, err
 		}
-	} else if err := a.run(ctx, jobs, batchEnd, markers); err != nil {
-		return false, err
+	} else {
+		planned, err := a.plan(events, markers)
+		if err != nil {
+			return false, err
+		}
+		jobs = planned
+		if err := a.run(ctx, jobs, batchEnd, markers); err != nil {
+			return false, err
+		}
 	}
 
 	// Every slot this batch touched has landed, so the resume floor may move to
@@ -221,7 +228,7 @@ func (a *Applier) plan(events []*domain.Event, markers []int64) ([]work, error) 
 			}
 
 		case *flush:
-			// Ordered separately; see applyInOrder.
+			// Ordered separately; see applyAroundFlush.
 
 		default:
 			return nil, fmt.Errorf("a batch carried a %T, which this applier cannot write",
@@ -444,6 +451,12 @@ func (a *Applier) applyAroundFlush(ctx context.Context, events []*domain.Event,
 
 	segment := make([]*domain.Event, 0, len(events))
 
+	// Each segment records how far it reached, not how far the batch reaches. A
+	// marker is what makes a replayed command skippable, so writing the batch's
+	// end against a segment claims the rest of the batch has landed when it has
+	// not -- and the events after a flush in the same batch would then be
+	// skipped, silently, on the way to being applied at all.
+
 	writeSegment := func() error {
 		if len(segment) == 0 {
 			return nil
@@ -452,8 +465,12 @@ func (a *Applier) applyAroundFlush(ctx context.Context, events []*domain.Event,
 		if err != nil {
 			return err
 		}
+		end := endOf(segment)
 		segment = segment[:0]
-		return a.run(ctx, jobs, batchEnd, markers)
+		if end == 0 {
+			end = batchEnd
+		}
+		return a.run(ctx, jobs, end, markers)
 	}
 
 	for _, event := range events {
@@ -465,7 +482,7 @@ func (a *Applier) applyAroundFlush(ctx context.Context, events []*domain.Event,
 		if err := writeSegment(); err != nil {
 			return err
 		}
-		if err := a.flushTarget(ctx, flushed, batchEnd, markers, position); err != nil {
+		if err := a.flushTarget(ctx, flushed, markers, position); err != nil {
 			return err
 		}
 	}
@@ -480,15 +497,22 @@ func (a *Applier) applyAroundFlush(ctx context.Context, events []*domain.Event,
 // transaction: the flush has to reach every master, and no MULTI spans them. So
 // the order carries the safety instead -- the markers go first, because a crash
 // between any two steps then costs a replay rather than a skip.
-func (a *Applier) flushTarget(ctx context.Context, f *flush, batchEnd int64,
+func (a *Applier) flushTarget(ctx context.Context, f *flush,
 	markers []int64, position string) error {
+
+	// Everything restored below names the flush, not the end of the batch it
+	// arrived in: the rest of the batch has not been applied yet.
+	here, err := positionAt(position, f.offset)
+	if err != nil {
+		return err
+	}
 
 	cluster, isCluster := a.Target.(*goredis.ClusterClient)
 	if !isCluster {
-		if err := a.flushOneServer(ctx, f, position); err != nil {
+		if err := a.flushOneServer(ctx, f, here); err != nil {
 			return err
 		}
-		a.forgetMarkers(markers, batchEnd)
+		a.forgetMarkers(markers, f)
 		return nil
 	}
 
@@ -504,12 +528,12 @@ func (a *Applier) flushTarget(ctx context.Context, f *flush, batchEnd int64,
 	}
 	if a.RestoreState != nil {
 		pipe := a.Target.Pipeline()
-		a.RestoreState(ctx, pipe, position)
+		a.RestoreState(ctx, pipe, here)
 		if _, err := pipe.Exec(ctx); err != nil && err != goredis.Nil {
 			return fmt.Errorf("restore this task's state after %s: %w", f.name(), err)
 		}
 	}
-	a.forgetMarkers(markers, batchEnd)
+	a.forgetMarkers(markers, f)
 	return nil
 }
 
@@ -575,102 +599,31 @@ func (a *Applier) dropMarkers(ctx context.Context) error {
 	return nil
 }
 
-// forgetMarkers matches in memory what the flush did on the target: nothing may
-// be skipped against a marker that is no longer there.
-func (a *Applier) forgetMarkers(markers []int64, batchEnd int64) {
+// forgetMarkers matches in memory what the flush did on the target: the markers
+// are gone, and every slot now stands where the flush did.
+//
+// It takes the flush rather than an offset on purpose. A marker is what makes a
+// command skippable, so passing the end of the batch here skips everything the
+// batch still has to apply after the flush -- a silent loss, and one that reads
+// as correct until somebody traces a missing write. Taking the flush leaves no
+// offset for a caller to choose.
+func (a *Applier) forgetMarkers(markers []int64, f *flush) {
 	for slot := range markers {
-		markers[slot] = batchEnd
+		markers[slot] = f.offset
 	}
 }
 
-// applyInOrder writes a batch that contains a flush.
+// positionAt rewrites a position so it names the flush rather than the end of
+// the batch the flush arrived in.
 //
-// One transaction, in stream order, because a flush empties whole databases and
-// the ordinary path applies slots concurrently: a write that landed beside a
-// flush rather than before or after it would be erased or spared by a race.
-//
-// The slot markers are dropped rather than advanced. A marker says a slot has
-// been applied to some offset, and the flush has just destroyed what it was
-// attesting to; a marker left standing above the resume floor would skip, on the
-// next replay, exactly the writes that have to be made again.
-func (a *Applier) applyInOrder(ctx context.Context, events []*domain.Event,
-	batchEnd int64, markers []int64, position string) error {
-
-	// Repairs read from the source, which cannot be done inside the transaction.
-	repairs := map[string]*repairedValue{}
-	for _, event := range events {
-		payload, ok := event.Payload.(*valueRepair)
-		if !ok {
-			continue
-		}
-		read, err := readValuesIn(ctx, a.Source, a.SourceHomeDB, payload.db, [][]byte{payload.key})
-		if err != nil {
-			return err
-		}
-		for _, value := range read {
-			repairs[strconv.Itoa(value.db)+":"+string(value.key)] = value
-		}
+// Restoring the batch's end would put the resume floor past writes that have
+// not been applied: a slot with no marker is taken to have applied up to the
+// floor, and dropMarkers has just removed every marker.
+func positionAt(payload string, offset int64) (string, error) {
+	position, err := decodePosition(payload)
+	if err != nil {
+		return "", err
 	}
-
-	tx := a.Target.TxPipeline()
-	at := a.BookkeepingDB
-	selectDB := func(db int) {
-		if db != at {
-			tx.Do(ctx, "select", db)
-			at = db
-		}
-	}
-
-	for _, event := range events {
-		switch payload := event.Payload.(type) {
-		case *command:
-			selectDB(payload.db)
-			tx.Do(ctx, payload.arguments()...)
-		case *valueRepair:
-			value, ok := repairs[strconv.Itoa(payload.db)+":"+string(payload.key)]
-			if !ok {
-				continue
-			}
-			selectDB(payload.db)
-			value.queue(ctx, tx)
-		case *flush:
-			selectDB(payload.db)
-			tx.Do(ctx, payload.arguments()...)
-		}
-	}
-
-	selectDB(a.BookkeepingDB)
-	keys := make([]string, 0, SlotCount)
-	for slot := 0; slot < SlotCount; slot++ {
-		keys = append(keys, OffsetKey(slot, a.Positions.TaskID))
-	}
-	tx.Del(ctx, keys...)
-
-	// The flush may have emptied the database these live in -- FLUSHALL always
-	// does, and FLUSHDB does when the source flushes the one this task keeps its
-	// state in. Writing them back here rather than afterwards is what leaves no
-	// moment where they are gone.
-	if a.RestoreState != nil {
-		a.RestoreState(ctx, tx, position)
-	}
-
-	results, err := tx.Exec(ctx)
-	if err != nil && err != goredis.Nil {
-		return fmt.Errorf("write a batch containing a flush: %w", err)
-	}
-	for _, result := range results {
-		if err := result.Err(); err != nil && err != goredis.Nil {
-			return domain.Unrecoverable(
-				"%v failed on the target: %v. The target's copy has diverged from the "+
-					"source; a transaction that fails part way is not something a retry "+
-					"can put right", result.Args(), err)
-		}
-	}
-
-	// The markers are gone from the target, so nothing may be skipped against
-	// them until they are written again.
-	for slot := range markers {
-		markers[slot] = batchEnd
-	}
-	return nil
+	position.Offset = offset
+	return position.encode()
 }
