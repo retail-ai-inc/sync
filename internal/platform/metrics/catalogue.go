@@ -403,6 +403,41 @@ const (
 	helpUnreplicated  = "Source objects that no mapping carries to the target"
 )
 
+// What the target was found to be set up wrong for, checked once when a task
+// starts.
+//
+// These are gauges and not warnings in the log because a warning at start-up is
+// read once, if at all -- and every one of them is a way for the replica to be
+// quietly incomplete while the task reports that it applied everything.
+const (
+	// TargetEvictsKeys is 1 when the target may delete keys to stay under its
+	// memory limit. A replica that evicts is missing rows nobody was told
+	// about.
+	TargetEvictsKeys = "sync_target_evicts_keys"
+	// TargetTooSmall is 1 when the target's memory limit is below what the
+	// source is already holding, so the copy cannot fit.
+	TargetTooSmall = "sync_target_too_small"
+	// TargetMissingModules is how many modules the source has and the target
+	// does not. A value of a module's type cannot be restored without it.
+	TargetMissingModules = "sync_target_missing_modules"
+
+	helpTargetEvicts   = "1 when the target's eviction policy may delete replicated keys"
+	helpTargetTooSmall = "1 when the target's memory limit is below the source's used memory"
+	helpTargetModules  = "Modules present on the source and missing from the target"
+)
+
+func SetTargetEvictsKeys(labels Labels, evicts bool) {
+	setBool(TargetEvictsKeys, helpTargetEvicts, labels, evicts)
+}
+
+func SetTargetTooSmall(labels Labels, tooSmall bool) {
+	setBool(TargetTooSmall, helpTargetTooSmall, labels, tooSmall)
+}
+
+func SetTargetMissingModules(labels Labels, n int) {
+	Default.SetGauge(TargetMissingModules, helpTargetModules, labels, float64(n))
+}
+
 func SetReconcileDifference(labels Labels, objects float64) {
 	Default.SetGauge(ReconcileDifference, helpReconcileDiff, labels, objects)
 }

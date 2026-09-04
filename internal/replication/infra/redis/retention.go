@@ -138,22 +138,10 @@ func backlogFromInfo(ctx context.Context, node goredis.UniversalClient) (int64, 
 // backlogFromInfoText is the parsing, apart from the round trip, so the shapes
 // a real server answers with can be pinned without one.
 func backlogFromInfoText(info string) (int64, error) {
-	fields := map[string]int64{}
-	for _, line := range strings.Split(info, "\n") {
-		name, value, found := strings.Cut(strings.TrimSpace(line), ":")
-		if !found {
-			continue
-		}
-		if name != "repl_backlog_size" && name != "repl_backlog_histlen" {
-			continue
-		}
-		n, convErr := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
-		if convErr == nil {
-			fields[name] = n
-		}
-	}
-
-	size, held := fields["repl_backlog_size"], fields["repl_backlog_histlen"]
+	// A value that is absent, or that is not a number, counts as zero -- the
+	// rules below already say what to do with a field the source did not give.
+	size := infoNumber(info, "repl_backlog_size")
+	held := infoNumber(info, "repl_backlog_histlen")
 	switch {
 	case size <= 0 && held <= 0:
 		return 0, fmt.Errorf("INFO replication reported no backlog, so the source " +

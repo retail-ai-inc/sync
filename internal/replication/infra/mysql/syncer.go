@@ -156,6 +156,15 @@ func (s *Syncer) Start(ctx context.Context) error {
 	}
 	defer releaseGuard()
 
+	// The target's own settings, now that there is a connection to it and the
+	// direction is settled. Checked here rather than beside the source check,
+	// which runs before either endpoint is open.
+	if err := targetPreflight(ctx, targetDB,
+		dsn.GetDatabaseName(s.cfg.Type, s.cfg.TargetConnection),
+		s.targetTables(), s.logger); err != nil {
+		return err
+	}
+
 	metrics.SetTaskUp(labels, true)
 	defer metrics.SetTaskUp(labels, false)
 
@@ -297,6 +306,25 @@ func withoutForeignKeyChecks(connection string) (string, error) {
 }
 
 const unlistedScanEvery = 5 * time.Minute
+
+// targetTables names the tables this task writes to, which is what makes the
+// target's trigger check specific rather than a scan of the whole schema.
+//
+// A mapping that names no target table writes to one with the source's name.
+func (s *Syncer) targetTables() []string {
+	var tables []string
+	for _, mapping := range s.cfg.Mappings {
+		for _, table := range mapping.Tables {
+			switch {
+			case table.TargetTable != "":
+				tables = append(tables, table.TargetTable)
+			case table.SourceTable != "":
+				tables = append(tables, table.SourceTable)
+			}
+		}
+	}
+	return tables
+}
 
 // watchSourceTables scans the source on an interval and publishes what it
 // finds: the tables this task does not replicate, for a task that names its

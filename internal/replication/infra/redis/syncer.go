@@ -76,6 +76,7 @@ func (s *Syncer) Start(ctx context.Context) error {
 	if err := s.warnAboutUnreplicatedThings(ctx, source, target); err != nil {
 		return err
 	}
+	s.targetPreflight(ctx, source, target, labels)
 
 	// The command specifications come from the target: it is the server that has
 	// to execute what arrives, so its idea of which key a command touches is the
