@@ -86,10 +86,19 @@ func (s *Snapshotter) Copy(ctx context.Context) error {
 	}
 
 	// A cluster has one database and its client cannot SELECT, so it is copied
-	// as it always was. A standalone server holds up to sixteen, and a copy that
-	// walks only the one the connection is on leaves the rest out of the standby
-	// with nothing saying so.
-	if _, cluster := from.(*goredis.ClusterClient); cluster || s.SourceConn == "" {
+	// as it always was: this shard's own master, scanned directly. A standalone
+	// server holds up to sixteen databases, and a copy that walks only the one
+	// its connection is on leaves the rest out of the standby with nothing
+	// saying so.
+	//
+	// The test is on the source rather than on `from`. Every shard of a cluster
+	// is handed its own master as a plain client -- that is the whole point, so
+	// that each scans its own slots -- so asking `from` whether it is a cluster
+	// answers no for every shard, and all of them took the multi-database path
+	// instead: each opened a fresh cluster client, each scanned whichever single
+	// node that client picked, and the same keys were copied three times while
+	// two thirds of the key space was never read. The copy reported success.
+	if _, cluster := s.Source.(*goredis.ClusterClient); cluster || s.SourceConn == "" {
 		return s.copyDatabase(ctx, from, s.Source, s.Target, -1)
 	}
 
@@ -156,8 +165,18 @@ func (s *Snapshotter) copyDatabase(ctx context.Context, from, source,
 		for _, value := range values {
 			value.queue(ctx, pipe)
 		}
-		if _, err := pipe.Exec(ctx); err != nil && err != goredis.Nil {
+		written, err := pipe.Exec(ctx)
+		if err != nil && err != goredis.Nil {
 			return fmt.Errorf("write %d copied keys: %w", len(values), err)
+		}
+		// Per command, not just the batch. A cluster pipeline reports a command
+		// that a node refused on the command, and returns nothing for the batch,
+		// so counting the batch as copied is how a first copy loses keys and says
+		// it succeeded.
+		for _, cmd := range written {
+			if err := cmd.Err(); err != nil && err != goredis.Nil {
+				return fmt.Errorf("write a copied key: %w", err)
+			}
 		}
 		copied += len(values)
 		// Debezium: RowsScanned. A first copy of a live key space has no total
