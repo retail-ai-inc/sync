@@ -12,7 +12,7 @@ import (
 type Limits struct {
 	// MaxEvents is the event count a batch aims for. Zero means the default.
 	MaxEvents int
-	// MaxBytes is the size a batch aims for. Zero means no size limit.
+	// MaxBytes is the size a batch aims for. Zero means the default.
 	MaxBytes int
 	// MaxTransactionEvents is the point at which a single source transaction is
 	// refused rather than buffered further. Zero means the default.
@@ -20,7 +20,14 @@ type Limits struct {
 }
 
 const (
-	defaultMaxEvents            = 500
+	defaultMaxEvents = 500
+	// A batch is held in memory and written to the target in one transaction, and
+	// the event count does not bound either: a MongoDB document may be 16MB and a
+	// Redis value 512MB, so five hundred events is anywhere from a few kilobytes
+	// to eight gigabytes. Sixty-four is large enough that the per-batch cost is
+	// still amortised over a useful number of events and small enough that a
+	// batch of large ones is a batch rather than an outage.
+	defaultMaxBytes             = 64 << 20
 	defaultMaxTransactionEvents = 200_000
 )
 
@@ -29,6 +36,13 @@ func (l Limits) maxEvents() int {
 		return l.MaxEvents
 	}
 	return defaultMaxEvents
+}
+
+func (l Limits) maxBytes() int {
+	if l.MaxBytes > 0 {
+		return l.MaxBytes
+	}
+	return defaultMaxBytes
 }
 
 func (l Limits) maxTransactionEvents() int {
@@ -80,7 +94,7 @@ func (b *batch) full(l Limits) bool {
 	if len(b.events) >= l.maxEvents() {
 		return true
 	}
-	return l.MaxBytes > 0 && b.bytes >= l.MaxBytes
+	return b.bytes >= l.maxBytes()
 }
 
 // overrunning reports whether one source transaction has grown past what may be

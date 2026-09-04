@@ -30,6 +30,11 @@ type Options struct {
 	// QueueCapacity bounds how far the reader may run ahead. Reaching it stops the
 	// reader, so the backlog sits in the source log where it is durable.
 	QueueCapacity int
+	// QueueBytes bounds how much change data may be held between the reader and
+	// the applier. The capacities above bound the event count, which is not a
+	// bound on memory: a MongoDB document may be 16MB and a Redis value 512MB.
+	// Zero means the default.
+	QueueBytes int64
 	// SnapshotQueueCapacity bounds it while the initial copy runs, when nothing
 	// drains the queue yet. Reaching this one is not durable the way reaching
 	// QueueCapacity is: the reader stops, and the pinned point then ages out of
@@ -57,6 +62,9 @@ type Options struct {
 const (
 	defaultFlushInterval = 500 * time.Millisecond
 	defaultQueueCapacity = 2000
+	// Enough to hold a batch of the largest events several times over, and far
+	// short of what two hundred thousand of them would be.
+	defaultQueueBytes = 512 << 20
 	// Slots are a pointer each, so a deep queue costs almost nothing until the
 	// changes actually arrive; what it buys is a copy that survives a source
 	// still being written to.
@@ -71,6 +79,13 @@ func (o Options) flushInterval() time.Duration {
 		return o.FlushInterval
 	}
 	return defaultFlushInterval
+}
+
+func (o Options) queueBytes() int64 {
+	if o.QueueBytes > 0 {
+		return o.QueueBytes
+	}
+	return defaultQueueBytes
 }
 
 func (o Options) queueCapacity() int {
@@ -147,8 +162,10 @@ type Runner struct {
 	// events counts what the stream carried by operation, built once because
 	// counting happens per event.
 	events *metrics.EventCounters
-	// queueBytes is how much unapplied change data the batch is holding.
-	queueBytes int64
+	// held bounds the change data between the reader and the applier, which the
+	// queue's own capacity does not: it counts events, and an event has no fixed
+	// size.
+	held *budget
 }
 
 func (r *Runner) counters() *metrics.EventCounters {
@@ -215,6 +232,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	if owed {
 		r.queueCap = r.Opts.snapshotQueueCapacity()
 	}
+	r.held = newBudget(r.Opts.queueBytes())
 	queue := make(chan *domain.Event, r.queueCap)
 	readCtx, stopReading := context.WithCancel(ctx)
 	defer stopReading()
@@ -306,9 +324,11 @@ func (r *Runner) startResyncs(ctx context.Context, queue chan<- *domain.Event, p
 				events[len(events)-1].EndsTransaction = true
 				for _, event := range events {
 					event.Pos = domain.Position{}
+					r.held.acquire(ctx, int64(event.Bytes))
 					select {
 					case queue <- event:
 					case <-ctx.Done():
+						r.held.release(int64(event.Bytes))
 						return ctx.Err()
 					}
 				}
@@ -439,9 +459,14 @@ func (r *Runner) read(ctx context.Context, queue chan<- *domain.Event) error {
 			metrics.SetReadLag(r.Opts.Labels, now.Sub(event.SourceTime).Seconds())
 		}
 
+		// Charged before the hand-over and released when the batch holding it has
+		// landed, so the reader waits on memory as well as on the event count.
+		r.held.acquire(ctx, int64(event.Bytes))
+
 		select {
 		case queue <- event:
 		case <-ctx.Done():
+			r.held.release(int64(event.Bytes))
 			return nil
 		}
 	}
@@ -477,8 +502,16 @@ func (r *Runner) apply(ctx context.Context, queue <-chan *domain.Event) error {
 		}
 		defer giveUp()
 
+		// The room these events took is given back once they have landed: until
+		// then they are still held, and the reader must not run further ahead on
+		// the strength of a batch that has not been written.
+		held := int64(b.bytes)
 		events := b.take()
-		return r.applyBatch(writeCtx, events, pending)
+		err := r.applyBatch(writeCtx, events, pending)
+		if err == nil {
+			r.held.release(held)
+		}
+		return err
 	}
 
 	for {
@@ -524,7 +557,6 @@ func (r *Runner) apply(ctx context.Context, queue <-chan *domain.Event) error {
 			}
 			r.mu.Lock()
 			r.queueUsed = len(queue)
-			r.queueBytes = int64(b.bytes)
 			r.mu.Unlock()
 
 			// Nothing else waiting, so holding the batch back only costs latency —
@@ -784,8 +816,11 @@ func (r *Runner) report(ctx context.Context) (stop func()) {
 				read := r.lastReadAt
 				heard := r.lastHeardAt
 				used := r.queueUsed
-				held := r.queueBytes
 				r.mu.Unlock()
+				// What is held between the reader and the applier, not what the
+				// current batch happens to hold: the events still in the queue are
+				// held too, and they are the ones the count cannot bound.
+				held := r.held.heldBytes()
 
 				// See lagSeconds for which clock each case is measured from.
 				lag, known := lagSeconds(now, oldest, read, applied)
