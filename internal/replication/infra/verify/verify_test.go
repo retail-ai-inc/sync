@@ -981,3 +981,26 @@ func TestADocumentHashesTheSameWhicheverShapeItArrivedIn(t *testing.T) {
 			canonical(asDoc), canonical(reversed))
 	}
 }
+
+// TestARepairStopsAtAKeyItCannotRead, reporting what it wrote first. A key is
+// decoded from the difference the comparison produced, so one that cannot be
+// read means the two sides disagree about what a key is -- and carrying on past
+// it would repair rows against keys that were guessed. The count still has to
+// be the rows actually written, because it is what the run reports as put right.
+func TestARepairStopsAtAKeyItCannotRead(t *testing.T) {
+	source := ordersEnd(t, "source", [2]string{"1", "100"})
+	target := ordersEnd(t, "target")
+	r := &SQLRepairer{Source: source, Target: target, Upsert: upsertFor}
+
+	fixed, err := r.Repair(context.Background(), []Difference{
+		{Key: keyOf("1"), Kind: Missing},
+		{Key: "not an encoded key", Kind: Missing},
+	})
+
+	if err == nil {
+		t.Fatal("a key that cannot be read was accepted")
+	}
+	if fixed != 1 {
+		t.Errorf("fixed = %d, want the 1 row it actually wrote", fixed)
+	}
+}
