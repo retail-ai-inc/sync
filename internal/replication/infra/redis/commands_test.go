@@ -187,3 +187,14 @@ func TestABatchWithAFlushIsRecognised(t *testing.T) {
 			"applied slot by slot and a write could land beside the flush")
 	}
 }
+
+// TestABatchOfOnlyAFlushCarriesItsOffset: a batch with no offset is refused and
+// held, so a flush that did not report one stopped the stream behind it.
+func TestABatchOfOnlyAFlushCarriesItsOffset(t *testing.T) {
+	events := []*domain.Event{
+		{Payload: &flush{args: [][]byte{[]byte("flushdb")}, db: 5, offset: 4242}},
+	}
+	if got := endOf(events); got != 4242 {
+		t.Errorf("batch end = %d, want 4242: a batch that reports none is refused", got)
+	}
+}

@@ -389,6 +389,10 @@ func endOf(events []*domain.Event) int64 {
 			if payload.offset > end {
 				end = payload.offset
 			}
+		case *flush:
+			if payload.offset > end {
+				end = payload.offset
+			}
 		}
 	}
 	return end
