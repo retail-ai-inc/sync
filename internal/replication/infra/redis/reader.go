@@ -190,6 +190,10 @@ func (r *Reader) take(ctx context.Context) error {
 		r.streamDB = db
 		return nil
 
+	case classFlush:
+		r.hand(flushEvent(&flush{args: args, db: r.streamDB, offset: end}, at))
+		return nil
+
 	case classIgnored:
 		return nil
 

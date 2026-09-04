@@ -73,6 +73,45 @@ type valueRepair struct {
 	offset int64
 }
 
+// flush empties or rearranges whole databases: FLUSHDB, FLUSHALL, SWAPDB. It
+// names no key, so it has no slot to be committed in, and everything before it
+// has to land before it and everything after it afterwards.
+type flush struct {
+	args   [][]byte
+	db     int
+	offset int64
+}
+
+func (f *flush) arguments() []interface{} {
+	out := make([]interface{}, len(f.args))
+	for i, arg := range f.args {
+		out[i] = arg
+	}
+	return out
+}
+
+func (f *flush) name() string {
+	if len(f.args) == 0 {
+		return ""
+	}
+	return string(f.args[0])
+}
+
+// flushEvent wraps one for the pipeline. It always ends its block: a batch cut
+// here is a batch the applier can order around.
+func flushEvent(f *flush, at time.Time) *domain.Event {
+	return &domain.Event{
+		NS:         domain.Namespace{DB: strconv.Itoa(f.db)},
+		Op:         domain.OpDelete,
+		Key:        f.name(),
+		Payload:    f,
+		Bytes:      len(f.args),
+		SourceTime: at,
+		// A flush is a barrier, so it is never in the middle of anything.
+		EndsTransaction: true,
+	}
+}
+
 // commandEvent wraps a command as an event for the pipeline.
 //
 // Every event ends its transaction: a Redis stream has no transactions to

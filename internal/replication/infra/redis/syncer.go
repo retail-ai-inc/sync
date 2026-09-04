@@ -66,6 +66,9 @@ func (s *Syncer) Start(ctx context.Context) error {
 	}
 	defer stopGuard()
 
+	metrics.SetTaskInfo(labels,
+		dsn.Endpoint("redis", s.cfg.SourceConnection),
+		dsn.Endpoint("redis", s.cfg.TargetConnection))
 	metrics.SetTaskUp(labels, true)
 	defer metrics.SetTaskUp(labels, false)
 
@@ -474,13 +477,13 @@ func (s *Syncer) claimDirection(ctx context.Context, source, target goredis.Univ
 	}, nil
 }
 
-// labels identify this task in the metrics. The endpoints are named without
-// their credentials, because the exposition is scraped and stored.
+// labels identify this task in the metrics. Task and engine, as every other
+// engine publishes, with the shard added per shard because a cluster's shards
+// genuinely differ. The endpoints go on sync_task_info: a label is repeated on
+// every series that carries it, and these two are long and never change.
 func (s *Syncer) labels() metrics.Labels {
 	return metrics.Labels{
 		"task":   strconv.Itoa(s.cfg.ID),
 		"engine": "redis",
-		"source": dsn.Endpoint("redis", s.cfg.SourceConnection),
-		"target": dsn.Endpoint("redis", s.cfg.TargetConnection),
 	}
 }

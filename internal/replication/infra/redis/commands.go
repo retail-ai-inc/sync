@@ -31,6 +31,10 @@ const (
 	classTransactionEnd
 	// classIgnored is something with no effect on the target's data.
 	classIgnored
+	// classFlush empties or rearranges whole databases. It belongs to no key,
+	// so it belongs to no slot, and it cannot be applied beside the batch's
+	// other work.
+	classFlush
 	// classSelect changes which database the commands after it belong to.
 	classSelect
 	// classRefused is something that cannot be replicated safely.
@@ -90,13 +94,16 @@ var keyless = map[string]classification{
 	"select": classSelect,
 	"ping\n": classHeartbeat,
 
-	// The rest cannot be replicated safely, each for its own reason. Emptying the
-	// target is the one operation that destroys the disaster recovery copy, and
-	// it is indistinguishable at this level from an operator mistake on the
-	// source.
-	"flushall": classRefused,
-	"flushdb":  classRefused,
-	"swapdb":   classRefused,
+	// These empty or rearrange whole databases. They were refused, on the
+	// reasoning that emptying the target destroys the disaster recovery copy and
+	// that an accident on the source must not take the copy with it. That holds
+	// for a standby somebody fails over to; it does not hold for a copy that is
+	// meant to be what the source is, where refusing them means the two diverge
+	// the first time the source clears a cache -- and sources do that as a matter
+	// of routine. They are carried, and the applier makes them a barrier.
+	"flushall": classFlush,
+	"flushdb":  classFlush,
+	"swapdb":   classFlush,
 }
 
 func (t *commandTable) classify(ctx context.Context, client goredis.UniversalClient,

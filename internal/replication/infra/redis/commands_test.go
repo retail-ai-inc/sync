@@ -24,22 +24,24 @@ func table() *commandTable {
 	}
 }
 
-// FLUSHALL on the source and FLUSHALL typed by mistake are indistinguishable
-// from here, and replicating it would mean one fat-fingered command in Tokyo
-// destroys the disaster-recovery copy in Osaka at the same moment.
-func TestEmptyingTheSourceIsNeverReplicated(t *testing.T) {
+// Emptying the source empties the target with it. This was refused for a long
+// time, because a FLUSHALL typed by mistake in Tokyo is indistinguishable from
+// here and would destroy the copy in Osaka at the same moment. A copy that is
+// meant to be what the source is has the opposite problem: refusing it means
+// the two diverge the first time the source clears a cache, and sources do that
+// as a matter of routine.
+func TestEmptyingTheSourceIsCarriedAsABarrier(t *testing.T) {
 	for _, name := range []string{"FLUSHALL", "flushall", "FLUSHDB", "SWAPDB"} {
 		t.Run(name, func(t *testing.T) {
 			class, key, err := table().classify(context.Background(), nil, cmd(name))
 			if err != nil {
 				t.Fatalf("classify: %v", err)
 			}
-			if class != classRefused {
-				t.Errorf("%s classified as %v, want refused — replicating it "+
-					"would empty the disaster-recovery copy", name, class)
+			if class != classFlush {
+				t.Errorf("%s classified as %v, want the flush class", name, class)
 			}
 			if key != nil {
-				t.Errorf("%s produced key %q, want none", name, key)
+				t.Errorf("%s produced key %q, want none: it belongs to no slot", name, key)
 			}
 		})
 	}
@@ -164,5 +166,24 @@ func TestTheDatabaseIsReadFromSelect(t *testing.T) {
 	}
 	if _, err := selectedDB(cmd("SELECT")); err == nil {
 		t.Error("SELECT with no database was accepted")
+	}
+}
+
+// A flush belongs to no key, so it belongs to no slot, and the ordinary path
+// applies slots concurrently. It has to be recognised as a batch that cannot be
+// applied that way.
+func TestABatchWithAFlushIsRecognised(t *testing.T) {
+	plain := []*domain.Event{
+		{Payload: &command{args: [][]byte{[]byte("set"), []byte("k")}, slot: 1}},
+	}
+	if containsFlush(plain) {
+		t.Error("a batch of ordinary writes was taken for one containing a flush")
+	}
+
+	withFlush := append(plain,
+		&domain.Event{Payload: &flush{args: [][]byte{[]byte("flushdb")}, db: 2}})
+	if !containsFlush(withFlush) {
+		t.Error("a batch containing a flush was not recognised, so it would be " +
+			"applied slot by slot and a write could land beside the flush")
 	}
 }

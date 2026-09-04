@@ -113,12 +113,21 @@ func (a *Applier) Apply(ctx context.Context, runs [][]*domain.Event, pos domain.
 		return false, fmt.Errorf("a batch of %d events carries no stream offset", len(events))
 	}
 
+	started := time.Now()
+
+	// A flush empties whole databases, so nothing in this batch may be applied
+	// beside it: the slot transactions run concurrently, and a write that landed
+	// after a concurrent flush would be erased by it. The whole batch goes in
+	// one transaction, in the order the stream had it.
 	jobs, err := a.plan(events, markers)
 	if err != nil {
 		return false, err
 	}
-	started := time.Now()
-	if err := a.run(ctx, jobs, batchEnd, markers); err != nil {
+	if containsFlush(events) {
+		if err := a.applyInOrder(ctx, events, batchEnd, markers); err != nil {
+			return false, err
+		}
+	} else if err := a.run(ctx, jobs, batchEnd, markers); err != nil {
 		return false, err
 	}
 
@@ -197,6 +206,9 @@ func (a *Applier) plan(events []*domain.Event, markers []int64) ([]work, error) 
 				job.seen[string(payload.key)] = true
 				job.repairs = append(job.repairs, repairKey{db: payload.db, key: payload.key})
 			}
+
+		case *flush:
+			// Ordered separately; see applyInOrder.
 
 		default:
 			return nil, fmt.Errorf("a batch carried a %T, which this applier cannot write",
@@ -387,4 +399,97 @@ func describeResult(results []goredis.Cmder, index int) string {
 		return "a command"
 	}
 	return results[index].Name()
+}
+
+func containsFlush(events []*domain.Event) bool {
+	for _, event := range events {
+		if _, ok := event.Payload.(*flush); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// applyInOrder writes a batch that contains a flush.
+//
+// One transaction, in stream order, because a flush empties whole databases and
+// the ordinary path applies slots concurrently: a write that landed beside a
+// flush rather than before or after it would be erased or spared by a race.
+//
+// The slot markers are dropped rather than advanced. A marker says a slot has
+// been applied to some offset, and the flush has just destroyed what it was
+// attesting to; a marker left standing above the resume floor would skip, on the
+// next replay, exactly the writes that have to be made again.
+func (a *Applier) applyInOrder(ctx context.Context, events []*domain.Event,
+	batchEnd int64, markers []int64) error {
+
+	// Repairs read from the source, which cannot be done inside the transaction.
+	repairs := map[string]*repairedValue{}
+	for _, event := range events {
+		payload, ok := event.Payload.(*valueRepair)
+		if !ok {
+			continue
+		}
+		read, err := readValuesIn(ctx, a.Source, a.SourceHomeDB, payload.db, [][]byte{payload.key})
+		if err != nil {
+			return err
+		}
+		for _, value := range read {
+			repairs[strconv.Itoa(value.db)+":"+string(value.key)] = value
+		}
+	}
+
+	tx := a.Target.TxPipeline()
+	at := a.BookkeepingDB
+	selectDB := func(db int) {
+		if db != at {
+			tx.Do(ctx, "select", db)
+			at = db
+		}
+	}
+
+	for _, event := range events {
+		switch payload := event.Payload.(type) {
+		case *command:
+			selectDB(payload.db)
+			tx.Do(ctx, payload.arguments()...)
+		case *valueRepair:
+			value, ok := repairs[strconv.Itoa(payload.db)+":"+string(payload.key)]
+			if !ok {
+				continue
+			}
+			selectDB(payload.db)
+			value.queue(ctx, tx)
+		case *flush:
+			selectDB(payload.db)
+			tx.Do(ctx, payload.arguments()...)
+		}
+	}
+
+	selectDB(a.BookkeepingDB)
+	keys := make([]string, 0, SlotCount)
+	for slot := 0; slot < SlotCount; slot++ {
+		keys = append(keys, OffsetKey(slot, a.Positions.TaskID))
+	}
+	tx.Del(ctx, keys...)
+
+	results, err := tx.Exec(ctx)
+	if err != nil && err != goredis.Nil {
+		return fmt.Errorf("write a batch containing a flush: %w", err)
+	}
+	for _, result := range results {
+		if err := result.Err(); err != nil && err != goredis.Nil {
+			return domain.Unrecoverable(
+				"%v failed on the target: %v. The target's copy has diverged from the "+
+					"source; a transaction that fails part way is not something a retry "+
+					"can put right", result.Args(), err)
+		}
+	}
+
+	// The markers are gone from the target, so nothing may be skipped against
+	// them until they are written again.
+	for slot := range markers {
+		markers[slot] = batchEnd
+	}
+	return nil
 }
