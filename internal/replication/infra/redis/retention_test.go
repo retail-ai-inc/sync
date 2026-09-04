@@ -90,3 +90,36 @@ func TestNoTimeBetweenSamplesIsRefused(t *testing.T) {
 		t.Fatal("a rate was produced with no time between samples")
 	}
 }
+
+// A managed Redis commonly refuses CONFIG -- Memorystore answers "unknown
+// command" -- while leaving INFO alone. Reading the backlog from INFO is what
+// lets a window be published for exactly the sources whose backlog cannot be
+// enlarged, and so most needs watching.
+func TestTheBacklogIsReadFromInfo(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		info string
+		want int64
+		bad  bool
+	}{
+		{"filled", "repl_backlog_size:1048576\r\nrepl_backlog_histlen:1048576\r\n", 1048576, false},
+		{"still filling", "repl_backlog_size:1048576\r\nrepl_backlog_histlen:4096\r\n", 4096, false},
+		{"allocated, empty", "repl_backlog_size:1048576\r\nrepl_backlog_histlen:0\r\n", 1048576, false},
+		{"Memorystore", "repl_backlog_size:16384\r\nrepl_backlog_histlen:16384\r\n", 16384, false},
+		{"no backlog", "repl_backlog_size:0\r\nrepl_backlog_histlen:0\r\n", 0, true},
+		{"absent", "role:master\r\nconnected_slaves:0\r\n", 0, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := backlogFromInfoText(c.info)
+			if c.bad {
+				if err == nil {
+					t.Errorf("%q was accepted as %d bytes", c.info, got)
+				}
+				return
+			}
+			if err != nil || got != c.want {
+				t.Errorf("= %d, %v; want %d", got, err, c.want)
+			}
+		})
+	}
+}
