@@ -31,6 +31,8 @@ const (
 	classTransactionEnd
 	// classIgnored is something with no effect on the target's data.
 	classIgnored
+	// classSelect changes which database the commands after it belong to.
+	classSelect
 	// classRefused is something that cannot be replicated safely.
 	classRefused
 )
@@ -80,9 +82,12 @@ var keyless = map[string]classification{
 	// listening in both regions.
 	"publish":  classIgnored,
 	"spublish": classIgnored,
-	// SELECT appears in a stream from a server with more than one database. A
-	// cluster has only database zero, so it is only ever "select 0" there.
-	"select": classIgnored,
+	// SELECT says which database the commands after it belong to. A cluster has
+	// only database zero, so it is only ever "select 0" there; a standalone
+	// server with several databases interleaves all of them into one stream, and
+	// dropping this left every database's writes landing in whichever one the
+	// target connection happened to be on.
+	"select": classSelect,
 	"ping\n": classHeartbeat,
 
 	// The rest cannot be replicated safely, each for its own reason. Emptying the

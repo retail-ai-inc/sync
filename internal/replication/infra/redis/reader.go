@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"sync"
 	"time"
 
@@ -37,6 +38,11 @@ type Reader struct {
 	// Configured is the retention window the task was told, for a source that
 	// cannot be asked. Zero means measure it.
 	Configured time.Duration
+	// SourceDB is the database this task replicates. A standalone server
+	// interleaves every database into one replication stream, separated by
+	// SELECT, so a task that copies one of them has to drop the rest: they
+	// would otherwise be applied to the target as though they were its own.
+	SourceDB int
 
 	Logger logrus.FieldLogger
 	Labels metrics.Labels
@@ -50,6 +56,11 @@ type Reader struct {
 	// a round trip every time the window is worked out.
 	backlogBytes int64
 	backlogAt    time.Time
+
+	// streamDB is the database the stream is currently in, which SELECT moves.
+	// A stream starts in database zero, which is what a master assumes of a
+	// replica that has just connected.
+	streamDB int
 
 	// position is what was resumed from. Its phase decides whether a change is
 	// applied by replaying the command or by re-reading the key's value.
@@ -102,6 +113,21 @@ func (r *Reader) Open(ctx context.Context, from domain.Position) error {
 }
 
 func (r *Reader) logger() logrus.FieldLogger { return orDefault(r.Logger) }
+
+// selectedDB reads the database index out of a SELECT. A stream that says
+// SELECT and does not say where is one this cannot follow: guessing would
+// silently attribute every command after it to the wrong database.
+func selectedDB(cmd *Command) (int, error) {
+	if len(cmd.Args) < 2 {
+		return 0, domain.Unrecoverable("the source sent SELECT with no database")
+	}
+	db, err := strconv.Atoi(string(cmd.Args[1]))
+	if err != nil || db < 0 {
+		return 0, domain.Unrecoverable(
+			"the source sent SELECT %q, which is not a database index", cmd.Args[1])
+	}
+	return db, nil
+}
 
 func (r *Reader) Next(ctx context.Context) (*domain.Event, error) {
 	for {
@@ -161,6 +187,14 @@ func (r *Reader) take(ctx context.Context) error {
 		r.hand(heartbeatEvent(at))
 		return nil
 
+	case classSelect:
+		db, err := selectedDB(cmd)
+		if err != nil {
+			return err
+		}
+		r.streamDB = db
+		return nil
+
 	case classIgnored:
 		return nil
 
@@ -186,6 +220,13 @@ func (r *Reader) take(ctx context.Context) error {
 			r.ready = append(r.ready, r.pending...)
 			r.pending = nil
 		}
+		return nil
+	}
+
+	// A write from another database is not this task's to carry. Applying it
+	// would put another database's key into this target under the same name,
+	// which is indistinguishable from the source having written it here.
+	if r.streamDB != r.SourceDB {
 		return nil
 	}
 

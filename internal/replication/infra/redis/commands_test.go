@@ -59,7 +59,8 @@ func TestTheCommandsThatCarryNoDataAreRecognised(t *testing.T) {
 		{"REPLCONF", classIgnored},
 		{"PUBLISH", classIgnored},
 		{"SPUBLISH", classIgnored},
-		{"SELECT", classIgnored},
+		// SELECT is not ignored: it says which database follows it.
+		{"SELECT", classSelect},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			class, _, err := table().classify(context.Background(), nil, cmd(c.name, "x"))
@@ -132,5 +133,36 @@ func TestAnEmptyCommandIsIgnored(t *testing.T) {
 	}
 	if key != nil {
 		t.Errorf("key = %q, want none", key)
+	}
+}
+
+// TestTheDatabaseIsReadFromSelect: a standalone server interleaves every
+// database into one replication stream, so which one a command belongs to is
+// only knowable from the SELECT before it.
+func TestTheDatabaseIsReadFromSelect(t *testing.T) {
+	for _, c := range []struct {
+		arg  string
+		want int
+		bad  bool
+	}{
+		{"0", 0, false},
+		{"1", 1, false},
+		{"11", 11, false},
+		{"-1", 0, true},
+		{"x", 0, true},
+	} {
+		got, err := selectedDB(cmd("SELECT", c.arg))
+		if c.bad {
+			if err == nil {
+				t.Errorf("SELECT %q was accepted as database %d", c.arg, got)
+			}
+			continue
+		}
+		if err != nil || got != c.want {
+			t.Errorf("SELECT %q = %d, %v; want %d", c.arg, got, err, c.want)
+		}
+	}
+	if _, err := selectedDB(cmd("SELECT")); err == nil {
+		t.Error("SELECT with no database was accepted")
 	}
 }

@@ -134,6 +134,20 @@ func (s *Syncer) sourceAddr() string {
 	return dsn.HostPort("redis", s.cfg.SourceConnection)
 }
 
+// databaseIndex reads the database a Redis DSN addresses. An unnumbered DSN
+// means database zero, which is what a client that says nothing connects to.
+func databaseIndex(connection string) (int, error) {
+	name := dsn.GetDatabaseName("redis", connection)
+	if name == "" {
+		return 0, nil
+	}
+	db, err := strconv.Atoi(name)
+	if err != nil || db < 0 {
+		return 0, fmt.Errorf("the database in the connection is %q, not an index", name)
+	}
+	return db, nil
+}
+
 // shardsOf finds the masters of a source. A shard is named by the slots it owns
 // rather than by its address, so that a shard which fails over to another node
 // keeps its position.
@@ -214,6 +228,14 @@ func (s *Syncer) runShard(ctx context.Context, sh shard, source, target goredis.
 	// connection that still takes ordinary commands.
 	connection.node = node
 
+	// Which database of the source this task carries. The replication stream
+	// interleaves every database the server has, so the reader needs to know
+	// which one is this task's.
+	sourceDB, err := databaseIndex(s.cfg.SourceConnection)
+	if err != nil {
+		return err
+	}
+
 	positions := &Checkpoints{Target: target, TaskID: s.cfg.ID, Shard: sh.id}
 
 	runner := &pipeline.Runner{
@@ -224,6 +246,7 @@ func (s *Syncer) runShard(ctx context.Context, sh shard, source, target goredis.
 			Commands:   commands,
 			Node:       node,
 			Configured: s.cfg.RetentionWindow,
+			SourceDB:   sourceDB,
 			Logger:     s.logger,
 			Labels:     labels,
 		},
