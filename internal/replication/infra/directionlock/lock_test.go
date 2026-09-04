@@ -2,6 +2,7 @@ package directionlock
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"runtime"
@@ -711,5 +712,41 @@ func TestAConcurrentClaimIsNotBlocking(t *testing.T) {
 	if IsBlocking(err) {
 		t.Errorf("error = %v, want it retryable: the old pod exits and the claim "+
 			"clears on its own", err)
+	}
+}
+
+// TestTheTargetClaimIsEncodedForSomebodyElseToWrite: a replicated flush empties
+// the database the claim lives in, and the transaction carrying that flush has
+// to write the claim back in the same breath. The heartbeat cannot cover it --
+// it refreshes a claim rather than noticing one has gone.
+func TestTheTargetClaimIsEncodedForSomebodyElseToWrite(t *testing.T) {
+	g := &Guard{
+		TaskID: 42,
+		Source: newStore("tokyo:6379/0"),
+		Target: newStore("osaka:6379/0"),
+		Now:    func() time.Time { return fixedNow },
+		Owner:  "syncer-osaka-0",
+	}
+
+	encoded, err := g.TargetClaim()
+	if err != nil {
+		t.Fatalf("TargetClaim: %v", err)
+	}
+	var claim Claim
+	if err := json.Unmarshal([]byte(encoded), &claim); err != nil {
+		t.Fatalf("the claim is not what the store writes: %v", err)
+	}
+	if claim.TaskID != 42 {
+		t.Errorf("task = %d, want 42", claim.TaskID)
+	}
+	if claim.Role != RoleTarget {
+		t.Errorf("role = %q, want the target's: restoring the source's role on the "+
+			"target tells it that it is a source", claim.Role)
+	}
+	if claim.Peer != "tokyo:6379/0" {
+		t.Errorf("peer = %q, want the source's endpoint", claim.Peer)
+	}
+	if claim.UpdatedAt.IsZero() {
+		t.Error("the claim has no timestamp, so it reads as stale the moment it lands")
 	}
 }

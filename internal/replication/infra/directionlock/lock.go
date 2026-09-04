@@ -7,6 +7,7 @@ package directionlock
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -235,6 +236,29 @@ func (g *Guard) Acquire(ctx context.Context) error {
 
 // Heartbeat refreshes both claims, which is what keeps them from going stale
 // while the task runs.
+// TargetClaim reports this task's claim on the target, encoded the way the
+// store writes it.
+//
+// It exists for the one caller that has to write the claim back itself: a
+// replicated FLUSHDB or FLUSHALL empties the database the claim lives in, and
+// the transaction that carries the flush restores it in the same breath. The
+// heartbeat cannot cover that -- it refreshes a claim rather than noticing one
+// has gone, so between the flush and the next tick the target would be
+// unclaimed and something else could take it for a source.
+func (g *Guard) TargetClaim() (string, error) {
+	encoded, err := json.Marshal(Claim{
+		TaskID:    g.TaskID,
+		Role:      RoleTarget,
+		Peer:      g.Source.Endpoint(),
+		Owner:     g.owner(),
+		UpdatedAt: g.now(),
+	})
+	if err != nil {
+		return "", err
+	}
+	return string(encoded), nil
+}
+
 func (g *Guard) Heartbeat(ctx context.Context) error {
 	now := g.now()
 	owner := g.owner()

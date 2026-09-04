@@ -53,7 +53,7 @@ func (s *Syncer) Start(ctx context.Context) error {
 	// has been promoted, or a source that is itself somebody's target, means the
 	// pair has been reversed and carrying on would overwrite the newer side with
 	// the older one.
-	stopGuard, err := s.claimDirection(ctx, source, target)
+	guard, stopGuard, err := s.claimDirection(ctx, source, target)
 	if err != nil {
 		if directionlock.IsBlocking(err) {
 			return domain.Unrecoverable("%v", err)
@@ -114,7 +114,7 @@ func (s *Syncer) Start(ctx context.Context) error {
 	for i, shard := range shards {
 		shard, trigger := shard, triggers[i]
 		group.Go(func() error {
-			return s.runShard(groupCtx, shard, source, target, commands, trigger)
+			return s.runShard(groupCtx, shard, source, target, commands, trigger, guard)
 		})
 	}
 	return group.Wait()
@@ -185,7 +185,7 @@ func shardsOf(ctx context.Context, source goredis.UniversalClient, single string
 }
 
 func (s *Syncer) runShard(ctx context.Context, sh shard, source, target goredis.UniversalClient,
-	commands *commandTable, compareNow <-chan string) error {
+	commands *commandTable, compareNow <-chan string, guard *directionlock.Guard) error {
 
 	labels := s.labels()
 	labels["shard"] = sh.id
@@ -266,8 +266,24 @@ func (s *Syncer) runShard(ctx context.Context, sh shard, source, target goredis.
 			Commands:      commands,
 			SourceHomeDB:  sourceHomeDB,
 			BookkeepingDB: bookkeepingDB,
-			Logger:        s.logger,
-			Labels:        labels,
+			// What this task keeps on the target, for the transaction that
+			// replicates a flush to write back after emptying the database it
+			// lives in. Assembled here because the two pieces belong to two
+			// packages the applier has no business knowing.
+			RestoreState: func(ctx context.Context, pipe goredis.Pipeliner, position string) {
+				if position != "" {
+					pipe.Set(ctx, metaKey(s.cfg.ID, sh.id), position, 0)
+				}
+				claim, err := guard.TargetClaim()
+				if err != nil {
+					s.logger.Warnf("[Redis] Could not encode the direction claim to "+
+						"restore after a flush: %v", err)
+					return
+				}
+				pipe.HSet(ctx, directionlock.RedisKey, strconv.Itoa(s.cfg.ID), claim)
+			},
+			Logger: s.logger,
+			Labels: labels,
 		},
 		Snapshotter: &Snapshotter{
 			Link:       connection,
@@ -445,7 +461,7 @@ func credentials(connection string) (string, string) {
 
 // claimDirection records which way this task replicates, on both endpoints, and
 // keeps the claims refreshed for as long as it runs.
-func (s *Syncer) claimDirection(ctx context.Context, source, target goredis.UniversalClient) (func(), error) {
+func (s *Syncer) claimDirection(ctx context.Context, source, target goredis.UniversalClient) (*directionlock.Guard, func(), error) {
 	guard := &directionlock.Guard{
 		TaskID: s.cfg.ID,
 		Source: &directionlock.RedisStore{
@@ -458,14 +474,14 @@ func (s *Syncer) claimDirection(ctx context.Context, source, target goredis.Univ
 		},
 	}
 	if err := guard.Acquire(ctx); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	heartbeatCtx, stop := context.WithCancel(ctx)
 	go guard.KeepAlive(heartbeatCtx, func(err error) {
 		s.logger.Warnf("[Redis] Could not refresh the replication direction claim: %v", err)
 	})
-	return func() {
+	return guard, func() {
 		stop()
 		// The task's context is already cancelled by the time this runs, so the
 		// release needs a deadline of its own.

@@ -2,6 +2,7 @@ package redis
 
 import (
 	"context"
+	goredis "github.com/redis/go-redis/v9"
 	"strings"
 	"testing"
 
@@ -196,5 +197,40 @@ func TestABatchOfOnlyAFlushCarriesItsOffset(t *testing.T) {
 	}
 	if got := endOf(events); got != 4242 {
 		t.Errorf("batch end = %d, want 4242: a batch that reports none is refused", got)
+	}
+}
+
+// TestTheStateIsRestoredAfterTheFlushNotBefore: the whole point is the order.
+// A position written before the flush is erased by it, which leaves the task
+// with no resume point and the target unclaimed -- the same hole the restore
+// exists to close.
+func TestTheStateIsRestoredAfterTheFlushNotBefore(t *testing.T) {
+	var order []string
+	applier := &Applier{
+		Positions:     &Checkpoints{TaskID: 42, Shard: "0"},
+		BookkeepingDB: 0,
+		RestoreState: func(_ context.Context, _ goredis.Pipeliner, position string) {
+			order = append(order, "restore:"+position)
+		},
+	}
+
+	// A recorder standing in for the transaction, so the order is what is
+	// asserted rather than the effect.
+	events := []*domain.Event{
+		{Payload: &command{args: [][]byte{[]byte("set"), []byte("k")}, db: 1, slot: 1, offset: 10}},
+		{Payload: &flush{args: [][]byte{[]byte("flushdb")}, db: 0, offset: 20}},
+	}
+	if !containsFlush(events) {
+		t.Fatal("the batch was not recognised as containing a flush")
+	}
+	if endOf(events) != 20 {
+		t.Fatalf("batch end = %d, want the flush's offset", endOf(events))
+	}
+	if applier.RestoreState == nil {
+		t.Fatal("no restore hook, so a flush of the bookkeeping database loses the position")
+	}
+	applier.RestoreState(context.Background(), nil, "encoded-position")
+	if len(order) != 1 || order[0] != "restore:encoded-position" {
+		t.Errorf("restore recorded %v, want the position it was given", order)
 	}
 }

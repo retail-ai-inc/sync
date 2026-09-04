@@ -46,6 +46,19 @@ type Applier struct {
 	// SourceHomeDB is the database the source client is on, so a read from
 	// another one knows where to put the connection back.
 	SourceHomeDB int
+	// RestoreState writes back what this task keeps on the target, into a
+	// transaction that has just replicated a flush.
+	//
+	// A flush empties whole databases, and this task's own position and
+	// direction claim live in one of them, so replicating the source's flush
+	// destroys them. Doing it inside the same transaction leaves no moment where
+	// they are missing: a lost position costs a full re-copy, and a lost claim
+	// leaves the target unclaimed for anything else to take as a source.
+	//
+	// It is a function rather than the values because what has to be written
+	// belongs to two other packages, and the applier has no business knowing
+	// either. Nil means there is nothing to restore.
+	RestoreState func(ctx context.Context, pipe goredis.Pipeliner, position string)
 	// BookkeepingDB is the database the slot markers and the stored position
 	// live in. It is the database the target connection was opened on, and it
 	// is not one of the databases being replicated into -- the markers belong
@@ -124,7 +137,7 @@ func (a *Applier) Apply(ctx context.Context, runs [][]*domain.Event, pos domain.
 		return false, err
 	}
 	if containsFlush(events) {
-		if err := a.applyInOrder(ctx, events, batchEnd, markers); err != nil {
+		if err := a.applyInOrder(ctx, events, batchEnd, markers, pos.Payload); err != nil {
 			return false, err
 		}
 	} else if err := a.run(ctx, jobs, batchEnd, markers); err != nil {
@@ -425,7 +438,7 @@ func containsFlush(events []*domain.Event) bool {
 // attesting to; a marker left standing above the resume floor would skip, on the
 // next replay, exactly the writes that have to be made again.
 func (a *Applier) applyInOrder(ctx context.Context, events []*domain.Event,
-	batchEnd int64, markers []int64) error {
+	batchEnd int64, markers []int64, position string) error {
 
 	// Repairs read from the source, which cannot be done inside the transaction.
 	repairs := map[string]*repairedValue{}
@@ -476,6 +489,14 @@ func (a *Applier) applyInOrder(ctx context.Context, events []*domain.Event,
 		keys = append(keys, OffsetKey(slot, a.Positions.TaskID))
 	}
 	tx.Del(ctx, keys...)
+
+	// The flush may have emptied the database these live in -- FLUSHALL always
+	// does, and FLUSHDB does when the source flushes the one this task keeps its
+	// state in. Writing them back here rather than afterwards is what leaves no
+	// moment where they are gone.
+	if a.RestoreState != nil {
+		a.RestoreState(ctx, tx, position)
+	}
 
 	results, err := tx.Exec(ctx)
 	if err != nil && err != goredis.Nil {
