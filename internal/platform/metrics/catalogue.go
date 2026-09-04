@@ -486,3 +486,30 @@ func ObserveBatch(labels Labels, apply, commit time.Duration, roundTrips, namesp
 	Default.AddCounter(BatchNamespacesSum, helpBatchNamespaces, labels, float64(namespaces))
 	Default.AddCounter(BatchEventsSum, helpBatchEvents, labels, float64(events))
 }
+
+// keptOnStop names the gauges that survive a task stopping.
+//
+// Everything else a task reports is a measurement of how it is doing now, and
+// stops being true the moment it stops. These are not: three of them say
+// whether it is running, and the rest record something that already happened or
+// name what the task is. Clearing those would take away the answer to "did the
+// initial copy ever finish" from a task that is stopped, which is exactly when
+// somebody asks.
+//
+// A gauge that is not named here is cleared when a task stops. See
+// (*Registry).ForgetStale for why that is the safe default.
+var keptOnStop = map[string]bool{
+	// Whether it is running. The point of clearing the rest is that these are
+	// what is left to alert on.
+	TaskUp:      true,
+	TaskBlocked: true,
+
+	// What it is, rather than how it is doing.
+	TaskInfo:   true,
+	SourceInfo: true,
+
+	// Something that happened, and stays true afterwards.
+	SnapshotCompleted:       true,
+	SnapshotAborted:         true,
+	SnapshotDurationSeconds: true,
+}

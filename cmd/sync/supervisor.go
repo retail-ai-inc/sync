@@ -214,6 +214,13 @@ func (s *supervisor) start(parentCtx context.Context, sc config.SyncConfig) {
 
 	go func() {
 		defer close(done)
+		// Whatever this task was reporting stops being true when it returns.
+		// Its own deferred SetTaskUp(false) has already run by here, so what is
+		// left standing is the lag, the queue depth and the retention window it
+		// had while it was healthy -- and an alert reading a gauge that never
+		// moves again never fires. Clearing them makes the series absent, and
+		// leaves task_up=0 as the thing to alert on.
+		defer metrics.Default.ForgetStale(taskLabels(sc))
 		// A panic here used to end the process, and with it every other task: four
 		// replication links stopped because one of them dereferenced something.
 		// It becomes this task's error, which reconsider restarts with backoff --

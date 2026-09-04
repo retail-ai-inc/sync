@@ -137,16 +137,66 @@ func (r *Registry) AddCounter(name, help string, labels Labels, delta float64) {
 	r.find(name, Counter, help, labels).value += delta
 }
 
-// Forget removes every series of a metric carrying the given labels, so a task
-// that has stopped does not go on reporting the lag it had when it did.
-func (r *Registry) Forget(labels Labels) {
-	want := labels.Key()
+// covers reports whether a series carries every label in want, with the same
+// value. A series may carry more -- a Redis task's lag is per shard, and
+// clearing "task 42" has to reach all three of them.
+//
+// This is a comparison of label sets and not of the rendered key, which is what
+// it used to be. Key() renders name=value with no delimiter around the value,
+// so a substring search for task=4 found task=42 and clearing one task cleared
+// another; and a two-label subset like {engine, task} is not contiguous in a
+// key that also carries shard, so clearing a sharded task's series found
+// nothing at all.
+func (l Labels) covers(want Labels) bool {
+	for name, value := range want {
+		if l[name] != value {
+			return false
+		}
+	}
+	return true
+}
 
+// Forget removes every series carrying the given labels, whatever the metric.
+func (r *Registry) Forget(labels Labels) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, m := range r.metrics {
-		for key := range m.series {
-			if strings.Contains(key, want) {
+		for key, s := range m.series {
+			if s.labels.covers(labels) {
+				delete(m.series, key)
+			}
+		}
+	}
+}
+
+// ForgetStale removes the measurements a task was reporting when it stopped,
+// keeping what says that it stopped.
+//
+// A gauge is a statement about now. A task that exits leaves its last value
+// standing, so a link that died three hours behind goes on reporting the lag it
+// had when it was healthy -- and an alert reading that gauge never fires,
+// because the gauge never moves again. Clearing it makes the series absent,
+// which is a condition that can be alerted on.
+//
+// Counters are kept: they are a task's history rather than a claim about now,
+// and deleting one makes Prometheus read the next value as a counter reset, so
+// every rate over that window is wrong. The gauges in keptOnStop are kept for
+// the same reason -- they record something that happened, or say what the task
+// is rather than how it is doing.
+//
+// Anything not named there is cleared, so a gauge added later is cleared by
+// default. That is the safe direction: the cost of clearing one that could have
+// stayed is a gap in a stopped task's dashboard row, and the cost of keeping
+// one that should have gone is an alert that cannot fire.
+func (r *Registry) ForgetStale(labels Labels) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for name, m := range r.metrics {
+		if m.kind != Gauge || keptOnStop[name] {
+			continue
+		}
+		for key, s := range m.series {
+			if s.labels.covers(labels) {
 				delete(m.series, key)
 			}
 		}
