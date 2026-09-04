@@ -312,3 +312,40 @@ func TestTheRestoredPositionNamesTheFlush(t *testing.T) {
 		t.Errorf("the rest of the position changed: %+v", got)
 	}
 }
+
+// A flush reaches one node of a cluster and empties what that node holds --
+// its slots, and no more. Carrying it to every master of the target empties
+// the other shards' data too, which the source still has. Verified on a real
+// three-master pair: flushing one source master left the whole target empty.
+func TestAShardsFlushCoversItsOwnSlotsOnly(t *testing.T) {
+	for _, c := range []struct {
+		shard      string
+		start, end int
+		ok         bool
+	}{
+		{"0-5460", 0, 5460, true},
+		{"5461-10922", 5461, 10922, true},
+		{"10923-16383", 10923, 16383, true},
+		{"0", 0, 0, false},            // one server: no range, the whole database
+		{"5461-10922-x", 0, 0, false}, // not a range
+		{"10922-5461", 0, 0, false},   // backwards
+		{"0-16384", 0, 0, false},      // past the end
+	} {
+		start, end, ok := slotRange(c.shard)
+		if ok != c.ok {
+			t.Errorf("slotRange(%q) ok = %v, want %v", c.shard, ok, c.ok)
+			continue
+		}
+		if ok && (start != c.start || end != c.end) {
+			t.Errorf("slotRange(%q) = %d-%d, want %d-%d", c.shard, start, end, c.start, c.end)
+		}
+	}
+
+	// The range has to be the one the key's slot is tested against, so a key
+	// belonging to another shard survives its neighbour's flush.
+	mine := SlotOf([]byte("clustertest:1"))
+	start, end, _ := slotRange("0-5460")
+	if (mine >= start && mine <= end) == (mine > 5460) {
+		t.Errorf("slot %d was placed on the wrong side of 0-5460", mine)
+	}
+}

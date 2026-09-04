@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -516,15 +517,21 @@ func (a *Applier) flushTarget(ctx context.Context, f *flush,
 		return nil
 	}
 
-	if err := a.dropMarkers(ctx); err != nil {
+	// A flush reaches one node of a cluster and empties what that node holds,
+	// which is its slots and no more. Sending it on to every master of the
+	// target empties the whole key space instead -- the other shards' data
+	// included, which the source still has. Only the keys this shard is
+	// responsible for go.
+	start, end, ranged := slotRange(a.Positions.Shard)
+	if !ranged {
+		return fmt.Errorf("shard %q does not name a slot range, so the reach of %s "+
+			"on the target cannot be worked out", a.Positions.Shard, f.name())
+	}
+	if err := a.dropMarkersIn(ctx, start, end); err != nil {
 		return err
 	}
-	// Every master: a flush sent to one node empties one shard, and the other
-	// shards would keep data the source no longer has.
-	if err := cluster.ForEachMaster(ctx, func(ctx context.Context, node *goredis.Client) error {
-		return node.Do(ctx, f.arguments()...).Err()
-	}); err != nil {
-		return fmt.Errorf("carry %s to every master: %w", f.name(), err)
+	if err := deleteSlotRange(ctx, cluster, start, end); err != nil {
+		return fmt.Errorf("carry %s across slots %d-%d: %w", f.name(), start, end, err)
 	}
 	if a.RestoreState != nil {
 		pipe := a.Target.Pipeline()
@@ -580,17 +587,69 @@ func (a *Applier) flushOneServer(ctx context.Context, f *flush, position string)
 	return nil
 }
 
-// dropMarkers removes every slot marker, one slot at a time.
+// slotRange reads the slots a shard owns out of its name. A single server is
+// named "0" and owns no range, which is what tells the caller its flush covers
+// the whole database rather than a slice of one.
+func slotRange(shard string) (start, end int, ok bool) {
+	first, last, found := strings.Cut(shard, "-")
+	if !found {
+		return 0, 0, false
+	}
+	start, err := strconv.Atoi(first)
+	if err != nil {
+		return 0, 0, false
+	}
+	end, err = strconv.Atoi(last)
+	if err != nil || start > end || start < 0 || end >= SlotCount {
+		return 0, 0, false
+	}
+	return start, end, true
+}
+
+// deleteSlotRange empties the target of the keys one shard is responsible for.
 //
-// A marker says a slot has been applied to some offset, and the flush is about
-// to destroy what it was attesting to; one left standing above the resume floor
-// would skip, on the next replay, exactly the writes that have to be made
-// again. They go before the flush rather than after it so that a crash in
-// between leaves markers missing rather than data missing: a missing marker
-// replays, a stale one skips.
-func (a *Applier) dropMarkers(ctx context.Context) error {
+// There is no command for "flush these slots", so the target is walked and the
+// keys whose slot falls in the range are removed. A flush is rare enough to
+// afford the walk, and the alternative -- sending the flush to every master --
+// deletes the other shards' data, which the source still has.
+func deleteSlotRange(ctx context.Context, cluster *goredis.ClusterClient, start, end int) error {
+	return cluster.ForEachMaster(ctx, func(ctx context.Context, node *goredis.Client) error {
+		var cursor uint64
+		for {
+			keys, next, err := node.Scan(ctx, cursor, "*", 500).Result()
+			if err != nil {
+				return err
+			}
+			var doomed []string
+			for _, key := range keys {
+				if slot := SlotOf([]byte(key)); slot >= start && slot <= end {
+					doomed = append(doomed, key)
+				}
+			}
+			if len(doomed) > 0 {
+				// Through the cluster client: this node holds them now, but the
+				// delete is addressed by key so a slot that has moved still lands.
+				pipe := cluster.Pipeline()
+				for _, key := range doomed {
+					pipe.Del(ctx, key)
+				}
+				if _, err := pipe.Exec(ctx); err != nil && err != goredis.Nil {
+					return err
+				}
+			}
+			if next == 0 {
+				return nil
+			}
+			cursor = next
+		}
+	})
+}
+
+// dropMarkersIn removes the markers of the slots a flush covers. The others
+// belong to shards this flush says nothing about.
+func (a *Applier) dropMarkersIn(ctx context.Context, start, end int) error {
 	pipe := a.Target.Pipeline()
-	for slot := 0; slot < SlotCount; slot++ {
+	for slot := start; slot <= end; slot++ {
 		pipe.Del(ctx, OffsetKey(slot, a.Positions.TaskID))
 	}
 	if _, err := pipe.Exec(ctx); err != nil && err != goredis.Nil {
