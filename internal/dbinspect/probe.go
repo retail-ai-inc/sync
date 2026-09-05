@@ -20,7 +20,15 @@ import (
 
 // probeTimeout bounds server selection and the dial. A probe answers a person
 // waiting in a browser, so it is short.
-const probeTimeout = 5 * time.Second
+//
+// A variable so a test can shorten it. Every unreachable-host case pays it in
+// full, and four of them at five and ten seconds were most of this package's
+// test time.
+var probeTimeout = 5 * time.Second
+
+// probeReadTimeout bounds the work a probe does once it has a connection. A
+// variable for the same reason as probeTimeout.
+var probeReadTimeout = 10 * time.Second
 
 // teardownTimeout is how long the handler waits for the client to close before
 // leaving it to finish on its own. Short because it is paid after the answer is
@@ -124,7 +132,7 @@ func TestConnectionHandler(w http.ResponseWriter, r *http.Request) {
 		// The request's own context, so a client that gives up stops the probe
 		// with it. It used to be context.Background(), so a ten-second MongoDB
 		// probe ran to completion however long the caller had been gone.
-		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(r.Context(), probeReadTimeout)
 		defer cancel()
 
 		// The driver's own deadlines, not just the request's. Without them the

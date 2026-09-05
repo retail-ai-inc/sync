@@ -11,6 +11,16 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+// openRetryPause is the wait between attempts to open the control database.
+//
+// Short on purpose. The DSN above already carries _busy_timeout=5000, so lock
+// contention is waited out inside the driver; what reaches the loop is a
+// failure the busy timeout could not fix, and a second between attempts only
+// made the caller wait four of them to be told so. The readiness probe opens
+// this database, and a probe that took four seconds to answer would be timed
+// out by the thing asking.
+var openRetryPause = 50 * time.Millisecond
+
 // DefaultPath is where the control database lives when SYNC_DB_PATH says
 // nothing: alongside the working directory, not a path baked in at build time.
 const DefaultPath = "sync.db"
@@ -52,7 +62,7 @@ func OpenSQLiteDB() (*sql.DB, error) {
 
 	for i := 0; i < maxRetries; i++ {
 		if i > 0 {
-			time.Sleep(time.Second) // Wait 1 second before retrying
+			time.Sleep(openRetryPause)
 		}
 
 		db, err = sql.Open("sqlite3", dsn)

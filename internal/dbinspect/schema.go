@@ -138,6 +138,15 @@ func sortFieldsByName(schema *SchemaResponse) {
 	})
 }
 
+// schemaTimeout bounds one schema read, and schemaDialTimeout the connection it
+// needs. Variables rather than constants so a test can shorten them: an
+// unreachable host pays them in full, and four such cases were most of this
+// package's test time.
+var (
+	schemaTimeout     = 30 * time.Second
+	schemaDialTimeout = 10 * time.Second
+)
+
 func getMongoDBSchema(c context.Context, req SchemaRequest) (SchemaResponse, error) {
 	uri := fmt.Sprintf("mongodb://%s:%s/%s", req.Connection.Host, req.Connection.Port, req.Connection.Database)
 	if req.Connection.User != "" && req.Connection.Password != "" {
@@ -149,15 +158,16 @@ func getMongoDBSchema(c context.Context, req SchemaRequest) (SchemaResponse, err
 			req.Connection.Host, req.Connection.Port, req.Connection.Database)
 	}
 
-	ctx, cancel := context.WithTimeout(c, 30*time.Second)
+	ctx, cancel := context.WithTimeout(c, schemaTimeout)
 	defer cancel()
 
-	// Connect to MongoDB - set connection options
+	// Direct mode: this reads one server's schema, so discovering a replica set
+	// would only add a way to fail.
 	clientOptions := options.Client().
 		ApplyURI(uri).
-		SetConnectTimeout(10 * time.Second).
-		SetServerSelectionTimeout(10 * time.Second).
-		SetDirect(true) // Direct mode, don't try to discover replica set
+		SetConnectTimeout(schemaDialTimeout).
+		SetServerSelectionTimeout(schemaDialTimeout).
+		SetDirect(true)
 
 	client, err := mongo.Connect(clientOptions)
 	if err != nil {
@@ -309,7 +319,7 @@ func getMySQLSchema(c context.Context, req SchemaRequest) (SchemaResponse, error
 	db.SetMaxOpenConns(10)
 	db.SetMaxIdleConns(10)
 
-	ctx, cancel := context.WithTimeout(c, 10*time.Second)
+	ctx, cancel := context.WithTimeout(c, schemaDialTimeout)
 	defer cancel()
 
 	if err := db.PingContext(ctx); err != nil {
@@ -373,7 +383,7 @@ func getPostgreSQLSchema(c context.Context, req SchemaRequest) (SchemaResponse, 
 	}
 	defer db.Close()
 
-	ctx, cancel := context.WithTimeout(c, 10*time.Second)
+	ctx, cancel := context.WithTimeout(c, schemaDialTimeout)
 	defer cancel()
 
 	if err := db.PingContext(ctx); err != nil {

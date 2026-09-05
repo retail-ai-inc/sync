@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestOpenSQLiteDBCreatesTheFileAndItsDirectory(t *testing.T) {
@@ -107,4 +108,28 @@ func indexOf(haystack, needle string) int {
 		}
 	}
 	return -1
+}
+
+// A control database that cannot be opened has to be reported quickly.
+//
+// The readiness probe opens it on every call. With a second between attempts
+// this took four seconds to fail, which is longer than the probe that asked.
+func TestAnUnopenableDatabaseIsReportedPromptly(t *testing.T) {
+	// A directory where the file should be: openable by name, not by SQLite.
+	path := filepath.Join(t.TempDir(), "sync.db")
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	t.Setenv("SYNC_DB_PATH", path)
+
+	started := time.Now()
+	db, err := OpenSQLiteDB()
+	if err == nil {
+		_ = db.Close()
+		t.Fatal("opening a directory as a database reported success")
+	}
+	if taken := time.Since(started); taken > 2*time.Second {
+		t.Errorf("failing took %v, which is longer than the readiness probe that "+
+			"waits for it", taken)
+	}
 }
