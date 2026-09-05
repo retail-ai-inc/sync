@@ -21,37 +21,47 @@ func CountAndLogRedis(ctx context.Context, sc config.SyncConfig, log *logrus.Log
 	// takes a single host, so a cluster DSN either failed to parse — and the
 	// comparison was skipped with one line in the log — or was silently reduced
 	// to its first node.
-	srcClient, err := dbconnredis.GetRedisClient(sc.SourceConnection)
-	if err != nil {
-		log.WithError(err).WithField("db_type", dbType).
+	// A side that cannot be reached is still reported, as -1. Returning here
+	// wrote no row at all, so the dashboard went on showing the last successful
+	// comparison and a target that had been unreachable for hours looked the
+	// same as one that matched.
+	srcClient, srcErr := dbconnredis.GetRedisClient(sc.SourceConnection)
+	if srcErr != nil {
+		log.WithError(srcErr).WithField("db_type", dbType).
 			Error("[Monitor] Fail to connect to source Redis")
-		return
+	} else {
+		defer srcClient.Close()
 	}
-	defer srcClient.Close()
 
-	tgtClient, err := dbconnredis.GetRedisClient(sc.TargetConnection)
-	if err != nil {
-		log.WithError(err).WithField("db_type", dbType).
+	tgtClient, tgtErr := dbconnredis.GetRedisClient(sc.TargetConnection)
+	if tgtErr != nil {
+		log.WithError(tgtErr).WithField("db_type", dbType).
 			Error("[Monitor] Fail to connect to target Redis")
-		return
+	} else {
+		defer tgtClient.Close()
 	}
-	defer tgtClient.Close()
 
 	srcDBName := dsn.GetDatabaseName(sc.Type, sc.SourceConnection)
 	tgtDBName := dsn.GetDatabaseName(sc.Type, sc.TargetConnection)
 
-	srcCount, srcErr := keyCount(ctx, srcClient)
-	if srcErr != nil {
-		log.WithError(srcErr).WithField("db_type", dbType).
-			Error("Failed to get source DB size")
-		srcCount = -1
+	srcCount := int64(-1)
+	if srcErr == nil {
+		srcCount, srcErr = keyCount(ctx, srcClient)
+		if srcErr != nil {
+			log.WithError(srcErr).WithField("db_type", dbType).
+				Error("Failed to get source DB size")
+			srcCount = -1
+		}
 	}
 
-	tgtCount, tgtErr := keyCount(ctx, tgtClient)
-	if tgtErr != nil {
-		log.WithError(tgtErr).WithField("db_type", dbType).
-			Error("Failed to get target DB size")
-		tgtCount = -1
+	tgtCount := int64(-1)
+	if tgtErr == nil {
+		tgtCount, tgtErr = keyCount(ctx, tgtClient)
+		if tgtErr != nil {
+			log.WithError(tgtErr).WithField("db_type", dbType).
+				Error("Failed to get target DB size")
+			tgtCount = -1
+		}
 	}
 
 	// One row. What is being reported is the size of each database, which has

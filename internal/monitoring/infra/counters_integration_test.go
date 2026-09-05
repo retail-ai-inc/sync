@@ -121,11 +121,10 @@ func TestTheRedisCounterComparesTheTwoDatabaseSizes(t *testing.T) {
 	}
 }
 
-// A target that cannot be connected to stops the counter before it writes
-// anything, so monitoring_log keeps the last successful comparison and the
-// dashboard goes on showing it. That is the behaviour as it stands, pinned
-// here rather than endorsed: only the log says the comparison did not happen.
-func TestAnUnreachableTargetLeavesNoComparisonBehind(t *testing.T) {
+// A side that cannot be reached is recorded as -1 rather than not recorded at
+// all. Writing no row left the dashboard showing the last successful
+// comparison, so an unreachable target looked the same as a matching one.
+func TestAnUnreachableTargetIsRecordedAsMinusOne(t *testing.T) {
 	control := useMonitoringDB(t)
 	logger, out := captureLog()
 
@@ -135,11 +134,44 @@ func TestAnUnreachableTargetLeavesNoComparisonBehind(t *testing.T) {
 		TargetConnection: "redis://127.0.0.1:1/0",
 	}, logger)
 
-	if rows := loggedRows(t, control); len(rows) != 0 {
-		t.Errorf("an unreachable target wrote %d rows", len(rows))
+	rows := loggedRows(t, control)
+	if len(rows) != 1 {
+		t.Fatalf("an unreachable target wrote %d rows, want 1", len(rows))
+	}
+	if rows[0].Target != -1 {
+		t.Errorf("the unreachable target was recorded as %d, want -1", rows[0].Target)
+	}
+	// The source was reachable, so its count is real -- the row says which side
+	// failed rather than blanking both.
+	if rows[0].Source < 0 {
+		t.Errorf("the reachable source was recorded as %d", rows[0].Source)
+	}
+	if rows[0].Action != actionCountFailed {
+		t.Errorf("the row is marked %q, want %q", rows[0].Action, actionCountFailed)
 	}
 	if !strings.Contains(out.String(), "Fail to connect to target Redis") {
 		t.Error("nothing in the log says the target could not be reached")
+	}
+}
+
+// Both ends gone is still one row, so a task whose whole comparison stopped
+// working is visible rather than absent.
+func TestBothEndsUnreachableStillWritesARow(t *testing.T) {
+	control := useMonitoringDB(t)
+	logger, _ := captureLog()
+
+	CountAndLogRedis(briefCtx(t), config.SyncConfig{
+		ID: 9205, Type: "redis",
+		SourceConnection: "redis://127.0.0.1:1/0",
+		TargetConnection: "redis://127.0.0.1:2/0",
+	}, logger)
+
+	rows := loggedRows(t, control)
+	if len(rows) != 1 {
+		t.Fatalf("two unreachable ends wrote %d rows, want 1", len(rows))
+	}
+	if rows[0].Source != -1 || rows[0].Target != -1 {
+		t.Errorf("counted %d/%d, want -1/-1", rows[0].Source, rows[0].Target)
 	}
 }
 

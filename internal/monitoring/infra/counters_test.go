@@ -45,6 +45,7 @@ func oneMapping() []config.DatabaseMapping {
 // Nothing is written to monitoring_log, so the dashboard keeps showing the
 // last figures it had with no indication that they are stale.
 func TestTheMySQLCounterReportsAnUnreachableSource(t *testing.T) {
+	useMonitoringDB(t)
 	logger, out := captureLog()
 
 	CountAndLogMySQLOrMariaDB(briefCtx(t), config.SyncConfig{
@@ -60,6 +61,7 @@ func TestTheMySQLCounterReportsAnUnreachableSource(t *testing.T) {
 }
 
 func TestTheMySQLCounterReportsAnUnparseableDSN(t *testing.T) {
+	useMonitoringDB(t)
 	logger, out := captureLog()
 
 	CountAndLogMySQLOrMariaDB(briefCtx(t), config.SyncConfig{
@@ -76,6 +78,7 @@ func TestTheMySQLCounterReportsAnUnparseableDSN(t *testing.T) {
 // reachable source and a dead target still produces no row, because both sides
 // are pinged before any counting starts.
 func TestTheMySQLCounterStopsAtTheTarget(t *testing.T) {
+	useMonitoringDB(t)
 	logger, out := captureLog()
 
 	CountAndLogMySQLOrMariaDB(briefCtx(t), config.SyncConfig{
@@ -95,6 +98,7 @@ func TestTheMySQLCounterStopsAtTheTarget(t *testing.T) {
 // TestThePostgreSQLCounterOpensItsOwnDriver covers a dependency this package
 // used to take on trust.
 func TestThePostgreSQLCounterOpensItsOwnDriver(t *testing.T) {
+	useMonitoringDB(t)
 	logger, out := captureLog()
 
 	CountAndLogPostgreSQL(briefCtx(t), config.SyncConfig{
@@ -113,6 +117,7 @@ func TestThePostgreSQLCounterOpensItsOwnDriver(t *testing.T) {
 }
 
 func TestTheRedisCounterReportsAnUnparseableDSN(t *testing.T) {
+	useMonitoringDB(t)
 	logger, out := captureLog()
 
 	CountAndLogRedis(briefCtx(t), config.SyncConfig{
@@ -131,6 +136,7 @@ func TestTheRedisCounterReportsAnUnparseableDSN(t *testing.T) {
 // TestTheRedisCounterAcceptsAClusterDSN records that a DSN naming more than one
 // host is read as a cluster rather than refused.
 func TestTheRedisCounterAcceptsAClusterDSN(t *testing.T) {
+	useMonitoringDB(t)
 	logger, out := captureLog()
 
 	CountAndLogRedis(briefCtx(t), config.SyncConfig{
@@ -148,6 +154,7 @@ func TestTheRedisCounterAcceptsAClusterDSN(t *testing.T) {
 }
 
 func TestTheRedisCounterReportsAnUnreachableSource(t *testing.T) {
+	useMonitoringDB(t)
 	logger, out := captureLog()
 
 	CountAndLogRedis(briefCtx(t), config.SyncConfig{
@@ -161,11 +168,11 @@ func TestTheRedisCounterReportsAnUnreachableSource(t *testing.T) {
 	}
 }
 
-// TestTheRedisCounterReportsAnUnparseableTarget covers the target half, which
-// needs a reachable source in production — here the source parse succeeds and
-// the ping fails first, so this documents the ordering rather than reaching the
-// target branch.
-func TestTheRedisCounterChecksTheSourceFirst(t *testing.T) {
+// Both ends are reported. The counter used to return at the first failure, so
+// a run with two broken ends named one of them and the operator fixed it only
+// to hit the second on the next pass.
+func TestBothEndsAreReportedWhenBothFail(t *testing.T) {
+	useMonitoringDB(t)
 	logger, out := captureLog()
 
 	CountAndLogRedis(briefCtx(t), config.SyncConfig{
@@ -174,8 +181,12 @@ func TestTheRedisCounterChecksTheSourceFirst(t *testing.T) {
 		TargetConnection: "not a redis url",
 	}, logger)
 
-	if strings.Contains(out.String(), "target") {
-		t.Errorf("output = %q, want the source checked first", out.String())
+	text := out.String()
+	if !strings.Contains(text, "Fail to connect to source Redis") {
+		t.Errorf("output = %q, want the source failure reported", text)
+	}
+	if !strings.Contains(text, "Fail to connect to target Redis") {
+		t.Errorf("output = %q, want the target failure reported too", text)
 	}
 }
 
@@ -183,6 +194,7 @@ func TestTheRedisCounterChecksTheSourceFirst(t *testing.T) {
 // connect call itself catches — the driver dials lazily, so everything else
 // surfaces later, per collection.
 func TestTheMongoDBCounterReportsAnInvalidURI(t *testing.T) {
+	useMonitoringDB(t)
 	logger, out := captureLog()
 
 	CountAndLogMongoDB(briefCtx(t), config.SyncConfig{

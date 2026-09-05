@@ -366,8 +366,14 @@ func (s *FileStore) Save(_ context.Context, key, payload string) error {
 // an id would resume from a stranger's offset rather than copying.
 func (s *SQLStore) Purge(ctx context.Context) error {
 	if err := s.ensure(ctx); err != nil {
-		// Nothing to purge if the table was never made.
-		return nil
+		// Reported, not swallowed. The table is made with IF NOT EXISTS, so this
+		// does not fail because the table is absent -- it fails because the target
+		// cannot be reached or will not allow it, and those leave the positions
+		// exactly where a new task reusing this id would read them. Deleting the
+		// task still succeeds: the caller treats this as a warning, which is what
+		// keeps an unreachable target from making a task undeletable.
+		return fmt.Errorf("reach %s to remove the positions of task %d: %w",
+			s.qualified(), s.TaskID, err)
 	}
 	_, err := s.DB.ExecContext(ctx,
 		fmt.Sprintf("DELETE FROM %s WHERE task_id = %s", s.qualified(), s.arg(1)), s.TaskID)

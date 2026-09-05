@@ -198,17 +198,20 @@ func TestPurgingATaskLeavesTheOthersAlone(t *testing.T) {
 	}
 }
 
-// Best effort by design: a target that cannot be reached must not make a task
-// undeletable, so this reports success. Pinned rather than endorsed -- it means
-// a purge against a target that is merely down leaves the positions in place,
-// which is the state the purge exists to prevent.
-func TestPurgingATargetThatIsNotThereReportsSuccess(t *testing.T) {
+// A target that cannot be reached leaves the positions exactly where a new task
+// reusing this id would read them, so the purge has to say so. Deleting the
+// task still succeeds -- DeleteTask treats this as a warning -- which is what
+// keeps an unreachable target from making a task undeletable.
+func TestPurgingATargetThatIsNotThereIsReported(t *testing.T) {
 	err := PurgeCheckpoints(context.Background(), config.SyncConfig{
 		ID: 9307, Type: "mysql",
 		TargetConnection: "root:root@tcp(127.0.0.1:1)/nothing",
 	})
-	if err != nil {
-		t.Errorf("purging an unreachable target reported %v, which would make the "+
-			"task undeletable", err)
+	if err == nil {
+		t.Fatal("purging a target that could not be reached reported success, so " +
+			"the positions were left behind silently")
+	}
+	if !strings.Contains(err.Error(), "9307") {
+		t.Errorf("the error does not name the task: %v", err)
 	}
 }

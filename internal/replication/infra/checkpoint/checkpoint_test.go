@@ -6,8 +6,10 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -477,5 +479,46 @@ func TestPurgeRemovesOnlyThisTasksPositions(t *testing.T) {
 func TestPurgingATaskThatNeverRanIsFine(t *testing.T) {
 	if err := sqlStore(t, 11).Purge(context.Background()); err != nil {
 		t.Errorf("purge of an unused task = %v, want nil", err)
+	}
+}
+
+// A purge that cannot reach the target used to report success, which is the
+// one answer that leaves the positions in place with nothing to show for it.
+func TestAPurgeReportsATargetItCannotReach(t *testing.T) {
+	db, err := sql.Open("mysql", "root:root@tcp(127.0.0.1:1)/nothing")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer db.Close()
+
+	store := &SQLStore{DB: db, Schema: "nothing", TaskID: 4242}
+	err = store.Purge(context.Background())
+	if err == nil {
+		t.Fatal("purging an unreachable target reported success")
+	}
+	if !strings.Contains(err.Error(), "4242") {
+		t.Errorf("the error does not name the task whose positions were left: %v", err)
+	}
+}
+
+// Deleting a task must still succeed when the purge fails, or an unreachable
+// target makes the task undeletable. That is the caller's rule, and this is the
+// property the error above depends on.
+func TestAPurgeOfAReachableTargetStillSucceeds(t *testing.T) {
+	store := sqlStore(t, 7)
+	ctx := context.Background()
+
+	if err := store.Save(ctx, "", `{"file":"a","pos":1}`); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if err := store.Purge(ctx); err != nil {
+		t.Fatalf("Purge: %v", err)
+	}
+	payload, err := store.Load(ctx, "")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if payload != "" {
+		t.Errorf("the position survived the purge: %q", payload)
 	}
 }
