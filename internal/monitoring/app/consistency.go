@@ -62,7 +62,12 @@ func repairEnabled() bool {
 // applied — never what it failed to read: an event dropped before the offset
 // was written, a row written during a reconnect, a change somebody made on the
 // replica by hand.
-func StartConsistencyChecks(ctx context.Context, cfg *config.Config, log *logrus.Logger) {
+//
+// tasks reports the current task list rather than being read from cfg once.
+// The sweep walks it on every tick, and a list captured at start-up went stale
+// the moment a task was added, edited, disabled or deleted.
+func StartConsistencyChecks(ctx context.Context, cfg *config.Config, log *logrus.Logger,
+	tasks func() []config.SyncConfig) {
 	interval := verifyInterval()
 	if interval == 0 {
 		log.Info("[Verify] Consistency checking is off; set SYNC_VERIFY_INTERVAL to turn it on")
@@ -82,17 +87,18 @@ func StartConsistencyChecks(ctx context.Context, cfg *config.Config, log *logrus
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				runConsistencyChecks(ctx, cfg, notifier, log)
+				runConsistencyChecks(ctx, tasks(), cfg, notifier, log)
 			}
 		}
 	})
 }
 
-func runConsistencyChecks(ctx context.Context, cfg *config.Config, n notifier, log *logrus.Logger) {
+func runConsistencyChecks(ctx context.Context, tasks []config.SyncConfig,
+	cfg *config.Config, n notifier, log *logrus.Logger) {
 	if cfg == nil {
 		return
 	}
-	for _, task := range cfg.SyncConfigs {
+	for _, task := range tasks {
 		if !task.Enable {
 			continue
 		}

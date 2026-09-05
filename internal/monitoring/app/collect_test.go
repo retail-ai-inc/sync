@@ -67,7 +67,7 @@ func TestStartRowCountMonitoringTakesNoMeasurementBeforeTheFirstTick(t *testing.
 		{ID: 1, Type: "cassandra", Enable: true},
 	}}
 
-	StartRowCountMonitoring(ctx, cfg, quietLogger(), time.Hour)
+	StartRowCountMonitoring(ctx, cfg, quietLogger(), time.Hour, func() []config.SyncConfig { return cfg.SyncConfigs })
 
 	// With an hour-long interval nothing can have run yet.
 	cancel()
@@ -81,7 +81,7 @@ func TestTheMonitorLoopStopsOnCancel(t *testing.T) {
 		{ID: 1, Type: "cassandra", Enable: true},
 	}}
 
-	StartRowCountMonitoring(ctx, cfg, quietLogger(), 10*time.Millisecond)
+	StartRowCountMonitoring(ctx, cfg, quietLogger(), 10*time.Millisecond, func() []config.SyncConfig { return cfg.SyncConfigs })
 	time.Sleep(60 * time.Millisecond) // let a few ticks pass
 	cancel()
 	time.Sleep(60 * time.Millisecond) // and a few more that must not run
@@ -102,7 +102,7 @@ func TestDisabledTasksAreNotMeasured(t *testing.T) {
 			TargetConnection: "mongodb://127.0.0.1:1/tgt"},
 	}}
 
-	StartRowCountMonitoring(ctx, cfg, quietLogger(), 10*time.Millisecond)
+	StartRowCountMonitoring(ctx, cfg, quietLogger(), 10*time.Millisecond, func() []config.SyncConfig { return cfg.SyncConfigs })
 	time.Sleep(80 * time.Millisecond)
 }
 

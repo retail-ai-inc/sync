@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"database/sql"
+	"github.com/sirupsen/logrus"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -288,11 +289,11 @@ func TestStartConsistencyChecksIsANoOpWhenOff(t *testing.T) {
 	defer cancel()
 
 	// Nothing configured, so this must return without starting anything.
-	StartConsistencyChecks(ctx, nil, quiet())
+	StartConsistencyChecks(ctx, nil, quiet(), func() []config.SyncConfig { return nil })
 }
 
 func TestRunningTheChecksWithNoConfigurationIsSafe(t *testing.T) {
-	runConsistencyChecks(context.Background(), nil, nil, quiet())
+	runConsistencyChecks(context.Background(), tasksOf(nil), nil, nil, quiet())
 }
 
 // TestADisabledTaskIsNotCompared keeps a comparison from loading a source the
@@ -307,7 +308,7 @@ func TestADisabledTaskIsNotCompared(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		runConsistencyChecks(context.Background(), cfg, nil, quiet())
+		runConsistencyChecks(context.Background(), tasksOf(cfg), cfg, nil, quiet())
 	}()
 
 	select {
@@ -315,4 +316,84 @@ func TestADisabledTaskIsNotCompared(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("a disabled task was compared anyway")
 	}
+}
+
+// tasksOf reports a configuration's task list, which the checker now takes
+// separately so it reads the current one rather than one captured at start-up.
+func tasksOf(cfg *config.Config) []config.SyncConfig {
+	if cfg == nil {
+		return nil
+	}
+	return cfg.SyncConfigs
+}
+
+// TestTheChecksWalkTheTaskListTheyAreGiven pins the wiring the live task list
+// depends on.
+//
+// The checker used to read cfg.SyncConfigs, which is the list captured when the
+// monitors started. Reading it again through the argument is what lets a task
+// added, disabled or deleted after start-up be picked up -- and, with repairs
+// enabled, what stops a task taken out of service from going on being written
+// to. The configuration here carries a different list from the argument, so a
+// checker that reached for the wrong one compares the wrong tasks.
+func TestTheChecksWalkTheTaskListTheyAreGiven(t *testing.T) {
+	log := &recordingConsistencyLogger{}
+
+	captured := &config.Config{SyncConfigs: []config.SyncConfig{
+		{ID: 111, Type: "mysql", Enable: true, SourceConnection: "not a dsn at all"},
+	}}
+	current := []config.SyncConfig{
+		{ID: 222, Type: "mysql", Enable: true, SourceConnection: "also not a dsn"},
+	}
+
+	runConsistencyChecks(context.Background(), current, captured, nil, log.logger())
+
+	if log.saw("Task 111") {
+		t.Error("the checker walked the captured list, so a task removed from the " +
+			"current one is still being compared")
+	}
+	if !log.saw("Task 222") {
+		t.Errorf("the checker did not walk the list it was given: %v", log.lines)
+	}
+}
+
+// TestADisabledTaskIsNotChecked covers the rule that makes removal effective:
+// the list may still hold a task, and being disabled is enough to leave it out.
+func TestADisabledTaskIsNotChecked(t *testing.T) {
+	log := &recordingConsistencyLogger{}
+
+	runConsistencyChecks(context.Background(),
+		[]config.SyncConfig{{ID: 333, Type: "mysql", Enable: false,
+			SourceConnection: "not a dsn"}},
+		&config.Config{}, nil, log.logger())
+
+	if log.saw("Task 333") {
+		t.Error("a disabled task was compared, and with repairs on that means " +
+			"written to")
+	}
+}
+
+type recordingConsistencyLogger struct {
+	lines []string
+}
+
+func (r *recordingConsistencyLogger) logger() *logrus.Logger {
+	log := logrus.New()
+	log.SetOutput(r)
+	log.SetLevel(logrus.DebugLevel)
+	return log
+}
+
+func (r *recordingConsistencyLogger) Write(p []byte) (int, error) {
+	r.lines = append(r.lines, string(p))
+	return len(p), nil
+}
+
+func (r *recordingConsistencyLogger) saw(substring string) bool {
+	for _, line := range r.lines {
+		if strings.Contains(line, substring) {
+			return true
+		}
+	}
+	return false
 }

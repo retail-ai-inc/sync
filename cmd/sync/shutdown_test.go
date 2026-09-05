@@ -42,65 +42,55 @@ func TestEveryStuckTaskSeesTheShutdownDeadline(t *testing.T) {
 	}
 }
 
-// The monitors keep the configuration they were started with: the row count
-// monitor and the consistency checker walk cfg.SyncConfigs on every tick, from
-// the pointer they were handed. So the fingerprint that decides whether to
-// restart them has to notice the task list changing.
+// The monitors walk the task list on every tick, through a function rather than
+// a configuration captured when they started. These cover that the function
+// tracks reloads -- the alternative, folding the task list into the monitor
+// fingerprint, would restart every monitor whenever any one task was edited,
+// which is the split globalFingerprint deliberately keeps.
 
-func configWith(tasks ...config.SyncConfig) *config.Config {
-	return &config.Config{
-		EnableTableRowCountMonitoring: true,
-		MonitorInterval:               time.Minute,
-		SyncConfigs:                   tasks,
+func TestTheMonitorsSeeATaskAddedAfterTheyStarted(t *testing.T) {
+	s := &supervisor{log: quietLogger(), running: map[int]*runningTask{}}
+	tasks := s.currentTasks
+
+	s.setTasks([]config.SyncConfig{{ID: 39, Type: "mongodb"}})
+	if got := len(tasks()); got != 1 {
+		t.Fatalf("the monitors see %d tasks, want 1", got)
+	}
+
+	s.setTasks([]config.SyncConfig{
+		{ID: 39, Type: "mongodb"},
+		{ID: 41, Type: "mysql"},
+	})
+	if got := len(tasks()); got != 2 {
+		t.Errorf("the monitors still see %d tasks after one was added; a new task "+
+			"would go unmonitored", got)
 	}
 }
 
-func TestTheMonitorsNoticeATaskBeingAdded(t *testing.T) {
-	before := globalFingerprint(configWith(config.SyncConfig{ID: 39, Type: "mongodb"}))
-	after := globalFingerprint(configWith(
-		config.SyncConfig{ID: 39, Type: "mongodb"},
-		config.SyncConfig{ID: 41, Type: "mysql"},
-	))
+// TestTheMonitorsStopSeeingARemovedTask is the sharp one: with repairs enabled
+// the consistency checker writes to the target it is comparing, so a task taken
+// out of service must stop being compared.
+func TestTheMonitorsStopSeeingARemovedTask(t *testing.T) {
+	s := &supervisor{log: quietLogger(), running: map[int]*runningTask{}}
 
-	if before == after {
-		t.Error("adding a task left the fingerprint unchanged, so the monitors " +
-			"would keep the old task list and the new task would go unmonitored")
+	s.setTasks([]config.SyncConfig{{ID: 39}, {ID: 41}})
+	s.setTasks([]config.SyncConfig{{ID: 39}})
+
+	got := s.currentTasks()
+	if len(got) != 1 || got[0].ID != 39 {
+		t.Errorf("the monitors see %v, want only task 39 -- a removed task would "+
+			"go on being compared, and repaired", got)
 	}
 }
 
-// TestTheMonitorsNoticeATaskBeingDisabled is the sharp one: with repairs
-// enabled, a checker still holding a disabled task writes to the target it was
-// taken off.
-func TestTheMonitorsNoticeATaskBeingDisabled(t *testing.T) {
-	before := globalFingerprint(configWith(config.SyncConfig{ID: 39, Enable: true}))
-	after := globalFingerprint(configWith(config.SyncConfig{ID: 39, Enable: false}))
+func TestATaskEditStillDoesNotRestartTheMonitors(t *testing.T) {
+	base := &config.Config{MonitorInterval: time.Minute,
+		SyncConfigs: []config.SyncConfig{{ID: 39, Type: "mongodb"}}}
+	edited := &config.Config{MonitorInterval: time.Minute,
+		SyncConfigs: []config.SyncConfig{{ID: 39, Type: "mongodb"}, {ID: 41}}}
 
-	if before == after {
-		t.Error("disabling a task left the fingerprint unchanged")
-	}
-}
-
-func TestTheMonitorsNoticeATaskBeingEditedOrRemoved(t *testing.T) {
-	base := configWith(config.SyncConfig{ID: 39, Type: "mongodb",
-		TargetConnection: "mongodb://osaka:27017/bk"})
-
-	edited := configWith(config.SyncConfig{ID: 39, Type: "mongodb",
-		TargetConnection: "mongodb://elsewhere:27017/bk"})
-	if globalFingerprint(base) == globalFingerprint(edited) {
-		t.Error("repointing a task's target left the fingerprint unchanged")
-	}
-
-	if globalFingerprint(base) == globalFingerprint(configWith()) {
-		t.Error("removing the last task left the fingerprint unchanged")
-	}
-}
-
-// TestAnUnchangedConfigurationKeepsItsFingerprint: the monitors must not be
-// torn down and restarted on every reload, which happens every ten seconds.
-func TestAnUnchangedConfigurationKeepsItsFingerprint(t *testing.T) {
-	tasks := []config.SyncConfig{{ID: 39, Type: "mongodb"}, {ID: 41, Type: "mysql"}}
-	if globalFingerprint(configWith(tasks...)) != globalFingerprint(configWith(tasks...)) {
-		t.Error("the same configuration produced two fingerprints, so the monitors " +
-			"would restart on every reload")
+	if globalFingerprint(base) != globalFingerprint(edited) {
+		t.Error("a task edit changed the monitor fingerprint, so every monitor " +
+			"would be torn down and restarted mid-sweep")
 	}
 }

@@ -14,7 +14,11 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-func StartRowCountMonitoring(ctx context.Context, cfg *config.Config, log *logrus.Logger, interval time.Duration) {
+// tasks reports the current task list rather than being read from cfg once.
+// The row count sweep walks it on every tick, and a list captured at start-up went stale
+// the moment a task was added, edited, disabled or deleted.
+func StartRowCountMonitoring(ctx context.Context, cfg *config.Config, log *logrus.Logger,
+	interval time.Duration, tasks func() []config.SyncConfig) {
 	ticker := time.NewTicker(interval)
 
 	watch(func() {
@@ -56,7 +60,7 @@ func StartRowCountMonitoring(ctx context.Context, cfg *config.Config, log *logru
 		defer ticker.Stop()
 
 		measure := func() {
-			for _, sc := range cfg.SyncConfigs {
+			for _, sc := range tasks() {
 				if !sc.Enable {
 					continue
 				}

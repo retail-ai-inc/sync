@@ -2,17 +2,15 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"github.com/retail-ai-inc/sync/internal/platform/resilience"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/mongodb"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/mysql"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/redis"
-	"io"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/retail-ai-inc/sync/internal/monitoring/app"
@@ -89,37 +87,14 @@ func globalFingerprint(cfg *config.Config) string {
 		Webhook    string
 		Channel    string
 		LogLevel   string
-		Tasks      string
 	}{
 		cfg.EnableTableRowCountMonitoring, cfg.MonitorInterval,
 		cfg.SlackWebhookURL, cfg.SlackChannel, cfg.LogLevel,
-		taskListFingerprint(cfg),
 	})
 	if err != nil {
 		return time.Now().String()
 	}
 	return string(encoded)
-}
-
-// taskListFingerprint digests the tasks the watchers read.
-//
-// The monitors keep the configuration they were started with: the row count
-// monitor and the consistency checker both walk cfg.SyncConfigs on every tick,
-// from the pointer handed to them. Leaving the task list out of this meant a
-// task added, edited, disabled or deleted changed nothing for them until a
-// global setting happened to change or the process restarted -- a new task went
-// unmonitored, and a disabled one went on being compared, with repairs enabled
-// still writing to the target it had been taken off.
-//
-// Digested rather than embedded whole: it is compared on every reload, and the
-// configurations carry credentials that are better not held twice.
-func taskListFingerprint(cfg *config.Config) string {
-	sum := sha256.New()
-	for _, task := range cfg.SyncConfigs {
-		_, _ = io.WriteString(sum, fingerprint(task))
-		_, _ = io.WriteString(sum, "\n")
-	}
-	return hex.EncodeToString(sum.Sum(nil))
 }
 
 // supervisor keeps the running syncers in step with the stored configuration.
@@ -135,6 +110,19 @@ type supervisor struct {
 
 	monitorFingerprint string
 	monitorCancel      context.CancelFunc
+
+	// tasksMu guards tasks, which is the task list as of the last reload.
+	//
+	// The monitors read it through a function rather than being handed a
+	// configuration once. They walk the list on every tick, so one captured at
+	// start-up went stale the moment a task was added, edited, disabled or
+	// deleted -- a new task went unmonitored, and a disabled one went on being
+	// compared, with repairs still writing to the target it had been taken off.
+	// Restarting them on every task edit would fix that and undo the reason the
+	// monitor fingerprint leaves the task list out: an edit to one task should
+	// not interrupt a sweep of all of them.
+	tasksMu sync.RWMutex
+	tasks   []config.SyncConfig
 
 	// build resolves a task's configuration to the function that runs it, a field
 	// so a test can substitute a stub for syncers that need databases.
@@ -178,7 +166,21 @@ func (s *supervisor) apply(ctx context.Context, cfg *config.Config) {
 		}
 	}
 
+	s.setTasks(cfg.SyncConfigs)
 	s.applyMonitoring(ctx, cfg)
+}
+
+func (s *supervisor) setTasks(tasks []config.SyncConfig) {
+	s.tasksMu.Lock()
+	defer s.tasksMu.Unlock()
+	s.tasks = tasks
+}
+
+// currentTasks reports the task list as of the last reload, for the monitors.
+func (s *supervisor) currentTasks() []config.SyncConfig {
+	s.tasksMu.RLock()
+	defer s.tasksMu.RUnlock()
+	return s.tasks
 }
 
 // reconsider decides what to do about a task that stopped by itself. Nothing
@@ -329,12 +331,12 @@ func (s *supervisor) applyMonitoring(ctx context.Context, cfg *config.Config) {
 	s.monitorCancel = cancel
 
 	app.StartLagAlerting(monitorCtx, cfg, s.log)
-	app.StartConsistencyChecks(monitorCtx, cfg, s.log)
+	app.StartConsistencyChecks(monitorCtx, cfg, s.log, s.currentTasks)
 	// Trimming runs whether or not row-count monitoring is on: rows written before
 	// it was turned off do not remove themselves.
 	app.StartMonitoringRetention(monitorCtx, s.log)
 	if cfg.EnableTableRowCountMonitoring {
-		app.StartRowCountMonitoring(monitorCtx, cfg, s.log, cfg.MonitorInterval)
+		app.StartRowCountMonitoring(monitorCtx, cfg, s.log, cfg.MonitorInterval, s.currentTasks)
 	}
 }
 
