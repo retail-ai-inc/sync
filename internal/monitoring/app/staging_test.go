@@ -114,8 +114,8 @@ func TestTheScheduledCheckComparesTheRealCluster(t *testing.T) {
 	}
 
 	notifier := &recordingNotifier{configured: true}
-	runConsistencyChecks(ctx, &config.Config{SyncConfigs: []config.SyncConfig{task}},
-		notifier, quiet())
+	runConsistencyChecks(ctx, []config.SyncConfig{task},
+		&config.Config{SyncConfigs: []config.SyncConfig{task}}, notifier, quiet())
 
 	var found float64
 	var reported bool
@@ -143,8 +143,8 @@ func TestTheScheduledCheckComparesTheRealCluster(t *testing.T) {
 
 	// With repair on, the same check has to make the replica right.
 	t.Setenv("SYNC_VERIFY_REPAIR", "true")
-	runConsistencyChecks(ctx, &config.Config{SyncConfigs: []config.SyncConfig{task}},
-		notifier, quiet())
+	runConsistencyChecks(ctx, []config.SyncConfig{task},
+		&config.Config{SyncConfigs: []config.SyncConfig{task}}, notifier, quiet())
 
 	if err := target.FindOne(ctx, bson.M{"_id": 7}).Err(); err != nil {
 		t.Errorf("the missing document was not repaired: %v", err)
@@ -158,8 +158,8 @@ func TestTheScheduledCheckComparesTheRealCluster(t *testing.T) {
 	}
 
 	// And a third pass finds nothing, which is what convergence means.
-	runConsistencyChecks(ctx, &config.Config{SyncConfigs: []config.SyncConfig{task}},
-		notifier, quiet())
+	runConsistencyChecks(ctx, []config.SyncConfig{task},
+		&config.Config{SyncConfigs: []config.SyncConfig{task}}, notifier, quiet())
 	for _, sample := range metrics.Default.Snapshot("sync_verify_differences") {
 		if sample.Labels["task"] == "991" && sample.Labels["table"] == collection {
 			if sample.Value != 0 {

@@ -349,6 +349,13 @@ func TestTheComparisonFindsAndFixesADifference(t *testing.T) {
 			Node: node, Source: source, Target: target, Shard: sh.id,
 			Repair: true, Settle: 200 * time.Millisecond, Logger: quiet,
 			Labels: metrics.Labels{"task": "recon", "shard": sh.id},
+			// Both ends were seeded directly, so nothing is in flight and the
+			// target is as far along as the source. Without this the repair is
+			// held back, which is the guard working rather than a failure.
+			Applied: func() int64 {
+				offset, _ := masterOffset(ctx, node)
+				return offset
+			},
 		}
 		found, err := reconciler.pass(ctx)
 		node.Close()

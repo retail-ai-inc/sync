@@ -77,12 +77,12 @@ func fill(ctx context.Context, counts domain.RowCounts, pairs [][2]string,
 		object := domain.ObjectCount{Source: pair[0], Target: pair[1]}
 
 		var err error
-		object.SourceRows, err = countRows(ctx, source, sourceDB, pair[0])
+		object.SourceRows, err = countTable(ctx, source, sourceDB, pair[0])
 		if err != nil {
 			object.SourceRows = -1
 			object.Note = fmt.Sprintf("source: %v", err)
 		}
-		object.TargetRows, err = countRows(ctx, target, targetDB, pair[1])
+		object.TargetRows, err = countTable(ctx, target, targetDB, pair[1])
 		if err != nil {
 			object.TargetRows = -1
 			if object.Note != "" {
@@ -95,10 +95,10 @@ func fill(ctx context.Context, counts domain.RowCounts, pairs [][2]string,
 	return counts
 }
 
-// countRows counts one table. The name is quoted rather than bound because a
+// countTable counts one table. The name is quoted rather than bound because a
 // table name cannot be a parameter, and it comes from the source's own
 // catalogue or the task's configuration.
-func countRows(ctx context.Context, db *sql.DB, schema, table string) (int64, error) {
+func countTable(ctx context.Context, db *sql.DB, schema, table string) (int64, error) {
 	var n int64
 	err := db.QueryRowContext(ctx,
 		fmt.Sprintf("SELECT COUNT(*) FROM %s.%s", quoteName(schema), quoteName(table))).Scan(&n)

@@ -498,7 +498,8 @@ func TestStartRowCountMonitoringWritesOnEachTick(t *testing.T) {
 	cfg := &config.Config{SyncConfigs: []config.SyncConfig{enabled, disabled}}
 
 	ctx, cancel := context.WithCancel(t.Context())
-	StartRowCountMonitoring(ctx, cfg, quietLogger(), 300*time.Millisecond)
+	StartRowCountMonitoring(ctx, cfg, quietLogger(), 300*time.Millisecond,
+		func() []config.SyncConfig { return cfg.SyncConfigs })
 
 	harness.Eventually(t, 5*time.Second, func() error {
 		if n := len(readMonitoringLog(t, conn)); n < 2 {
@@ -531,7 +532,8 @@ func TestStartRowCountMonitoringStopsOnCancel(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(t.Context())
 	StartRowCountMonitoring(ctx, &config.Config{SyncConfigs: []config.SyncConfig{sc}},
-		quietLogger(), 200*time.Millisecond)
+		quietLogger(), 200*time.Millisecond,
+		func() []config.SyncConfig { return []config.SyncConfig{sc} })
 
 	harness.Eventually(t, 5*time.Second, func() error {
 		if len(readMonitoringLog(t, conn)) == 0 {
@@ -570,7 +572,8 @@ func TestAMeasurementIsTakenAtStartup(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	StartRowCountMonitoring(ctx, &config.Config{SyncConfigs: []config.SyncConfig{sc}},
-		quietLogger(), time.Hour)
+		quietLogger(), time.Hour,
+		func() []config.SyncConfig { return []config.SyncConfig{sc} })
 
 	harness.Eventually(t, 5*time.Second, func() error {
 		if n := len(readMonitoringLog(t, conn)); n == 0 {

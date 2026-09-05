@@ -180,8 +180,8 @@ func TestTheCountNamesTheTableItAsksFor(t *testing.T) {
 	fake := &fakeDB{replies: []reply{countReply("COUNT", 1)}}
 	db := fake.open(t)
 
-	if _, err := countRows(context.Background(), db, "shop", "orders"); err != nil {
-		t.Fatalf("countRows: %v", err)
+	if _, err := countTable(context.Background(), db, "shop", "orders"); err != nil {
+		t.Fatalf("countTable: %v", err)
 	}
 
 	statements := fake.statements()
