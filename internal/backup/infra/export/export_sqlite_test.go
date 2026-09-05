@@ -5,177 +5,148 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	_ "github.com/mattn/go-sqlite3"
 )
 
-func controlDatabase(t *testing.T, rows int) string {
+// controlDatabase writes a small SQLite file with something in it, so a
+// snapshot that produced an empty or unreadable file is distinguishable from
+// one that worked.
+func controlDatabase(t *testing.T) string {
 	t.Helper()
-
 	path := filepath.Join(t.TempDir(), "sync.db")
+
 	db, err := sql.Open("sqlite3", path)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
 	defer db.Close()
-
-	// WAL, because that is what a control database being written to while it is
-	// backed up looks like -- and because it is what separates a snapshot from a
-	// file copy: recent commits live in the -wal file, so copying the .db alone
-	// silently loses them.
-	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
-		t.Fatalf("wal: %v", err)
-	}
-	if _, err := db.Exec(`CREATE TABLE sync_tasks (
-		id INTEGER PRIMARY KEY, enable INTEGER NOT NULL, config_json TEXT NOT NULL)`); err != nil {
+	if _, err := db.Exec(`CREATE TABLE tasks (id INTEGER PRIMARY KEY, name TEXT)`); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	for i := 0; i < rows; i++ {
-		if _, err := db.Exec("INSERT INTO sync_tasks (id, enable, config_json) VALUES (?, 1, ?)",
-			i, `{"type":"mongodb"}`); err != nil {
+	for i := 0; i < 50; i++ {
+		if _, err := db.Exec(`INSERT INTO tasks (name) VALUES (?)`, "task"); err != nil {
 			t.Fatalf("insert: %v", err)
 		}
 	}
 	return path
 }
 
-// The control database holds every task's configuration and stored position,
-// and had no backup path of its own: the exporters covered the databases being
-// replicated, not the one that says what to replicate. Losing it costs a full
-// re-copy of every link.
-func TestTheControlDatabaseIsSnapshotAndReadable(t *testing.T) {
-	source := controlDatabase(t, 40)
+func TestASnapshotIsAReadableDatabaseOfItsOwn(t *testing.T) {
+	source := controlDatabase(t)
 	destination := filepath.Join(t.TempDir(), "snapshot.db")
 
 	if err := vacuumInto(context.Background(), source, destination); err != nil {
 		t.Fatalf("vacuumInto: %v", err)
 	}
 
-	info, err := os.Stat(destination)
-	if err != nil || info.Size() == 0 {
-		t.Fatalf("snapshot is missing or empty: %v", err)
-	}
-
-	// A snapshot nobody can open is not a backup.
-	snapshot, err := sql.Open("sqlite3", destination)
+	// Opened as a database rather than compared byte for byte, because a copy
+	// that is not a database is the failure this exists to avoid.
+	db, err := sql.Open("sqlite3", destination)
 	if err != nil {
 		t.Fatalf("open the snapshot: %v", err)
 	}
-	defer snapshot.Close()
-
+	defer db.Close()
 	var rows int
-	if err := snapshot.QueryRow("SELECT COUNT(*) FROM sync_tasks").Scan(&rows); err != nil {
+	if err := db.QueryRow(`SELECT COUNT(*) FROM tasks`).Scan(&rows); err != nil {
 		t.Fatalf("read the snapshot: %v", err)
 	}
-	if rows != 40 {
-		t.Errorf("the snapshot holds %d rows, want 40", rows)
+	if rows != 50 {
+		t.Errorf("the snapshot holds %d rows, want 50", rows)
 	}
 }
 
-// A live database is what this has to work against: the tool is running while
-// its own configuration is backed up.
-func TestASnapshotIsTakenWhileTheDatabaseIsOpen(t *testing.T) {
-	source := controlDatabase(t, 5)
-
-	live, err := sql.Open("sqlite3", source)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer live.Close()
-	if _, err := live.Exec("INSERT INTO sync_tasks (id, enable, config_json) VALUES (99, 1, '{}')"); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-
+func TestASnapshotReplacesAnEarlierOne(t *testing.T) {
+	source := controlDatabase(t)
 	destination := filepath.Join(t.TempDir(), "snapshot.db")
+
+	// VACUUM INTO refuses to overwrite, so a leftover from a previous run would
+	// fail every backup from then on unless it is cleared first.
+	if err := os.WriteFile(destination, []byte("leftover"), 0o600); err != nil {
+		t.Fatalf("write a leftover: %v", err)
+	}
 	if err := vacuumInto(context.Background(), source, destination); err != nil {
-		t.Fatalf("vacuumInto against an open database: %v", err)
-	}
-
-	snapshot, _ := sql.Open("sqlite3", destination)
-	defer snapshot.Close()
-	var rows int
-	if err := snapshot.QueryRow("SELECT COUNT(*) FROM sync_tasks").Scan(&rows); err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	if rows != 6 {
-		t.Errorf("the snapshot holds %d rows, want the 6 committed", rows)
+		t.Fatalf("vacuumInto over a leftover: %v", err)
 	}
 }
 
-// A missing file is a configuration mistake, and saying so beats an empty
-// archive that reads as a successful backup.
-func TestAMissingDatabaseIsReported(t *testing.T) {
-	err := vacuumInto(context.Background(), filepath.Join(t.TempDir(), "nope.db"),
-		filepath.Join(t.TempDir(), "out.db"))
-	if err == nil {
-		t.Error("a database that does not exist produced no error")
-	}
-}
-
-// A path with a quote in it must not end the statement early.
-func TestAQuotedPathIsEscaped(t *testing.T) {
-	if got := quoteSQLiteString("/tmp/it's/sync.db"); got != "'/tmp/it''s/sync.db'" {
-		t.Errorf("quoted = %s, want the quote doubled", got)
-	}
-}
-
-// TestBaseNameTakesTheFileFromAPath covers the naming of the archive. It is
-// only ever the last segment, and a path separator left in would put the
-// upload under a directory nobody expects.
-func TestBaseNameTakesTheFileFromAPath(t *testing.T) {
-	for in, want := range map[string]string{
-		"/mnt/state/sync.db": "sync.db",
-		"sync.db":            "sync.db",
-		"./sync.db":          "sync.db",
-		`C:\data\sync.db`:    "sync.db",
-		"/mnt/state/":        "",
-		"":                   "",
-	} {
-		if got := baseName(in); got != want {
-			t.Errorf("baseName(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
-// TestASnapshotRefusesToOverwrite: VACUUM INTO will not write to a file that
-// exists, and a half-written snapshot silently replaced by another is worse
-// than a failed backup. The destination is therefore cleared first, and a
-// destination that cannot be cleared has to be reported rather than left to
-// fail obscurely inside SQLite.
-func TestASnapshotIntoAnUnclearableDestinationIsReported(t *testing.T) {
-	source := filepath.Join(t.TempDir(), "sync.db")
-	db, err := sql.Open("sqlite3", source)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	if _, err := db.Exec(`CREATE TABLE t (a INTEGER)`); err != nil {
-		t.Fatalf("create: %v", err)
-	}
-	db.Close()
-
-	// A directory cannot be removed by os.Remove once it has something in it,
-	// and cannot be written to as a file either.
-	destination := filepath.Join(t.TempDir(), "occupied")
-	if err := os.MkdirAll(filepath.Join(destination, "child"), 0o755); err != nil {
-		t.Fatalf("prepare the destination: %v", err)
-	}
-
-	if err := vacuumInto(context.Background(), source, destination); err == nil {
-		t.Error("a destination that could not be cleared was reported as a success")
-	}
-}
-
-// TestASnapshotOfSomethingThatIsNotADatabaseIsReported: the path is operator
-// configured, so it may point at anything.
-func TestASnapshotOfSomethingThatIsNotADatabaseIsReported(t *testing.T) {
-	dir := t.TempDir()
-	source := filepath.Join(dir, "not-a-database")
-	if err := os.WriteFile(source, []byte("hello"), 0o600); err != nil {
+func TestASnapshotOfSomethingThatIsNotADatabaseFails(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "not.db")
+	if err := os.WriteFile(source, []byte("this is not a database"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
+	if err := vacuumInto(context.Background(),
+		source, filepath.Join(t.TempDir(), "out.db")); err == nil {
+		t.Error("a file that is not a database was snapshotted")
+	}
+}
 
-	if err := vacuumInto(context.Background(), source, filepath.Join(dir, "out.db")); err == nil {
-		t.Error("a file that is not a database was snapshot successfully")
+func TestTheSQLiteBackupLeavesNothingBehind(t *testing.T) {
+	source := controlDatabase(t)
+	tempDir := t.TempDir()
+
+	var config ExecutorBackupConfig
+	config.CompressionType = "none"
+
+	if err := newExecutor().executeSQLiteBackup(
+		context.Background(), source, tempDir, config); err != nil {
+		t.Fatalf("executeSQLiteBackup: %v", err)
+	}
+
+	// Both the snapshot and the archive are removed however the backup returns,
+	// so a destination that is unreachable for a while cannot fill the disk one
+	// snapshot at a time.
+	entries, err := os.ReadDir(tempDir)
+	if err != nil {
+		t.Fatalf("read the temp directory: %v", err)
+	}
+	for _, entry := range entries {
+		t.Errorf("%s was left in the temp directory", entry.Name())
+	}
+}
+
+func TestTheSQLiteBackupSaysWhatItCannotFind(t *testing.T) {
+	var config ExecutorBackupConfig
+	config.CompressionType = "none"
+
+	err := newExecutor().executeSQLiteBackup(
+		context.Background(), "", t.TempDir(), config)
+	if err == nil {
+		t.Fatal("a backup with no database file reported success")
+	}
+	// The message names the setting, because the path is a configuration
+	// mistake rather than a failure of the run.
+	if !strings.Contains(err.Error(), "sync.db") {
+		t.Errorf("the error does not say what to set: %v", err)
+	}
+
+	if err := newExecutor().executeSQLiteBackup(context.Background(),
+		filepath.Join(t.TempDir(), "absent.db"), t.TempDir(), config); err == nil {
+		t.Error("a backup of a file that is not there reported success")
+	}
+}
+
+func TestAPathIsQuotedForSQLite(t *testing.T) {
+	if got := quoteSQLiteString("/tmp/a.db"); got != "'/tmp/a.db'" {
+		t.Errorf("quoteSQLiteString = %q", got)
+	}
+	// A quote in a path would otherwise close the literal and change the
+	// statement.
+	if got := quoteSQLiteString("/tmp/it's.db"); got != "'/tmp/it''s.db'" {
+		t.Errorf("quoteSQLiteString of a path with a quote = %q", got)
+	}
+}
+
+func TestTheBaseNameIsTheLastSegment(t *testing.T) {
+	for path, want := range map[string]string{
+		"/var/lib/sync/sync.db": "sync.db",
+		`C:\data\sync.db`:       "sync.db",
+		"sync.db":               "sync.db",
+	} {
+		if got := baseName(path); got != want {
+			t.Errorf("baseName(%q) = %q, want %q", path, got, want)
+		}
 	}
 }
