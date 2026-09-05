@@ -346,10 +346,13 @@ func (s *Syncer) runShard(ctx context.Context, sh shard, source, target goredis.
 	// a gap in assurance is not a reason to create a gap in the copy.
 	if s.cfg.RedisReconcileInterval >= 0 {
 		reconciler := &Reconciler{
-			Node:     node,
-			Source:   source,
-			Target:   target,
-			Shard:    sh.id,
+			Node:   node,
+			Source: source,
+			Target: target,
+			Shard:  sh.id,
+			// How far the target has been written, so a repair waits until the
+			// buffered commands have arrived rather than writing over them.
+			Applied:  connection.appliedOffset,
 			Interval: s.cfg.RedisReconcileInterval,
 			ReadRate: s.cfg.RedisSourceReadRate,
 			Repair:   true,

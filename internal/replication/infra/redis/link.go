@@ -332,3 +332,8 @@ func parseMasterOffset(info string) (int64, error) {
 	}
 	return 0, fmt.Errorf("the source did not report master_repl_offset")
 }
+
+// appliedOffset reports how far the target has been written, in the source's
+// own offsets. The reconciler reads it to decide whether a repair would land
+// on top of commands still in flight.
+func (l *link) appliedOffset() int64 { return l.applied.Load() }

@@ -194,3 +194,55 @@ func selfSignedFor(t *testing.T, host string) (tls.Certificate, *x509.CertPool) 
 
 	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}, pool
 }
+
+// The repair writes the source's value straight to the target, outside the
+// applier. That is only safe once the target holds everything the source had
+// when the comparison read it: anything still buffered applies on top of the
+// repair, and for a command that is not idempotent that compounds rather than
+// corrects -- a counter repaired to 100 with ten increments still to come ends
+// at 110.
+//
+// Before this, the only guard was Settle, a two-second wait and a second look.
+// Settle is a guess at how long replication takes, so whenever the link was
+// further behind than that, an ordinary pending change looked like divergence.
+
+func TestARepairWaitsUntilTheTargetHasCaughtUp(t *testing.T) {
+	for name, c := range map[string]struct {
+		applied func() int64
+		head    int64
+		want    bool
+	}{
+		"caught up exactly":    {func() int64 { return 1000 }, 1000, true},
+		"past it":              {func() int64 { return 1200 }, 1000, true},
+		"still behind":         {func() int64 { return 900 }, 1000, false},
+		"far behind":           {func() int64 { return 0 }, 1000, false},
+		"nobody can say":       {nil, 1000, false},
+		"source would not say": {func() int64 { return 1000 }, 0, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := &Reconciler{Applied: c.applied}
+			got, err := r.caughtUpTo(context.Background(), c.head)
+			if err != nil {
+				t.Fatalf("caughtUpTo: %v", err)
+			}
+			if got != c.want {
+				t.Errorf("caughtUpTo(%d) = %v, want %v", c.head, got, c.want)
+			}
+		})
+	}
+}
+
+// TestNotKnowingHowFarBehindMeansNoRepair is the direction that matters. Being
+// unable to say is not a reason to write to the target -- the whole hazard is
+// repairing over changes that have not arrived.
+func TestNotKnowingHowFarBehindMeansNoRepair(t *testing.T) {
+	r := &Reconciler{Applied: nil}
+	if ok, _ := r.caughtUpTo(context.Background(), 1000); ok {
+		t.Error("a reconciler that cannot read the applied offset repaired anyway")
+	}
+
+	r = &Reconciler{Applied: func() int64 { return 1 << 40 }}
+	if ok, _ := r.caughtUpTo(context.Background(), 0); ok {
+		t.Error("a source that would not report its offset was treated as caught up")
+	}
+}

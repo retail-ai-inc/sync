@@ -36,6 +36,21 @@ type Reconciler struct {
 	// it off, differences are counted and reported but not touched, which is
 	// what to do while finding out whether the comparison itself is right.
 	Repair bool
+	// Applied reports how far the target has been written, in the source's own
+	// offsets. A repair is only safe once everything the source had when the
+	// comparison read it has reached the target.
+	//
+	// Without this the comparison could not tell divergence from a change still
+	// in flight: it waited Settle and looked again, and Settle is a guess at how
+	// long replication takes. When the link was further behind than that, an
+	// ordinary pending change looked like divergence, and the repair wrote the
+	// source's current value straight to the target -- outside the applier and
+	// ahead of the commands still buffered. For anything not idempotent that
+	// compounds rather than corrects: a counter repaired to 100 with ten
+	// increments still to come ends at 110.
+	//
+	// Nil means the caller cannot say, and no repair is made.
+	Applied func() int64
 
 	// Now asks for a comparison before the timer would. The source's shape
 	// changing is what sends one: a slot moving between shards can leave a key
@@ -157,6 +172,14 @@ func (r *Reconciler) compare(ctx context.Context, keys []string) (int, error) {
 		return 0, nil
 	}
 
+	// Where the source is before anything is read, so a repair can be held back
+	// until the target holds at least this much. Read first: taken afterwards it
+	// would already include the changes the comparison is about to see.
+	head, err := r.sourceHead(ctx)
+	if err != nil {
+		return 0, err
+	}
+
 	found, err := r.differing(ctx, wanted)
 	if err != nil {
 		return 0, err
@@ -182,6 +205,20 @@ func (r *Reconciler) compare(ctx context.Context, keys []string) (int, error) {
 			"a second look", r.Shard, value.key)
 	}
 	if !r.Repair {
+		return len(differing), nil
+	}
+
+	// Only once the target holds everything the source had when this comparison
+	// started. Anything still buffered would apply on top of the repair.
+	caughtUp, err := r.caughtUpTo(ctx, head)
+	if err != nil {
+		return len(differing), err
+	}
+	if !caughtUp {
+		r.logger().Infof("[Redis] Shard %s: %d keys differ, and the target is "+
+			"still behind the point this comparison read; leaving them to the "+
+			"stream rather than repairing over changes in flight",
+			r.Shard, len(differing))
 		return len(differing), nil
 	}
 
@@ -233,6 +270,32 @@ func (r *Reconciler) differing(ctx context.Context, keys [][]byte) ([]*repairedV
 		}
 	}
 	return found, nil
+}
+
+// sourceHead reports where the source's stream is now, in the offsets the
+// applied position is counted in.
+func (r *Reconciler) sourceHead(ctx context.Context) (int64, error) {
+	if r.Node == nil {
+		return 0, nil
+	}
+	return masterOffset(ctx, r.Node)
+}
+
+// caughtUpTo reports whether the target holds everything the source had at the
+// given offset.
+//
+// No answer means no repair. Being unable to say how far behind the target is
+// is not a reason to write to it: the whole hazard here is repairing over
+// changes that have not arrived yet.
+func (r *Reconciler) caughtUpTo(ctx context.Context, head int64) (bool, error) {
+	if head == 0 {
+		// The source would not say, so neither can this.
+		return false, nil
+	}
+	if r.Applied == nil {
+		return false, nil
+	}
+	return r.Applied() >= head, nil
 }
 
 // settle is how long to wait before looking again, which has to be longer than
