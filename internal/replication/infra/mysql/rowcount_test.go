@@ -9,6 +9,7 @@ import (
 
 	"github.com/retail-ai-inc/sync/internal/platform/config"
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
+	"github.com/retail-ai-inc/sync/internal/replication/infra/discovery"
 )
 
 // Which objects get counted. The periodic monitor loops over the tables a task
@@ -53,7 +54,7 @@ func TestATaskThatNamesTablesIsNotDiscovered(t *testing.T) {
 	if discovered {
 		t.Error("a task that names its tables had them discovered instead")
 	}
-	if len(pairs) != 1 || pairs[0][0] != "orders" || pairs[0][1] != "orders_bk" {
+	if len(pairs) != 1 || pairs[0].Source != "orders" || pairs[0].Target != "orders_bk" {
 		t.Errorf("pairs = %v", pairs)
 	}
 }
@@ -63,7 +64,7 @@ func TestATaskThatNamesTablesIsNotDiscovered(t *testing.T) {
 // such table as missing.
 func TestAMappingWithNoTargetCountsTheSameName(t *testing.T) {
 	pairs, _ := tablePairs(config.SyncConfig{Mappings: mappingOf([2]string{"orders", ""})})
-	if len(pairs) != 1 || pairs[0][1] != "orders" {
+	if len(pairs) != 1 || pairs[0].Target != "orders" {
 		t.Errorf("pairs = %v, want the source's name on both sides", pairs)
 	}
 }
@@ -106,7 +107,7 @@ func TestBothSidesAreCountedForEveryPair(t *testing.T) {
 	db := fake.open(t)
 
 	counts := fill(context.Background(), domain.RowCounts{Engine: "mysql"},
-		[][2]string{{"orders", "orders_bk"}, {"payments", "payments"}},
+		[]discovery.Pair{{Source: "orders", Target: "orders_bk"}, {Source: "payments", Target: "payments"}},
 		db, db, "shop", "shop_bk")
 
 	if len(counts.Objects) != 2 {
@@ -134,7 +135,7 @@ func TestASideThatCannotBeCountedIsUnknown(t *testing.T) {
 	db := fake.open(t)
 
 	counts := fill(context.Background(), domain.RowCounts{},
-		[][2]string{{"orders", "orders"}}, db, db, "shop", "shop_bk")
+		[]discovery.Pair{{Source: "orders", Target: "orders"}}, db, db, "shop", "shop_bk")
 
 	object := counts.Objects[0]
 	if object.TargetRows >= 0 {
@@ -162,7 +163,7 @@ func TestBothSidesFailingIsReportedForBoth(t *testing.T) {
 	db := fake.open(t)
 
 	counts := fill(context.Background(), domain.RowCounts{},
-		[][2]string{{"orders", "orders"}}, db, db, "shop", "shop_bk")
+		[]discovery.Pair{{Source: "orders", Target: "orders"}}, db, db, "shop", "shop_bk")
 
 	object := counts.Objects[0]
 	if object.SourceRows >= 0 || object.TargetRows >= 0 {

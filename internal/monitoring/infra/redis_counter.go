@@ -25,17 +25,17 @@ func CountAndLogRedis(ctx context.Context, sc config.SyncConfig, log *logrus.Log
 	// wrote no row at all, so the dashboard went on showing the last successful
 	// comparison and a target that had been unreachable for hours looked the
 	// same as one that matched.
-	srcClient, srcErr := dbconnredis.GetRedisClient(sc.SourceConnection)
-	if srcErr != nil {
-		log.WithError(srcErr).WithField("db_type", dbType).
+	srcClient, srcConnErr := dbconnredis.GetRedisClient(sc.SourceConnection)
+	if srcConnErr != nil {
+		log.WithError(srcConnErr).WithField("db_type", dbType).
 			Error("[Monitor] Fail to connect to source Redis")
 	} else {
 		defer srcClient.Close()
 	}
 
-	tgtClient, tgtErr := dbconnredis.GetRedisClient(sc.TargetConnection)
-	if tgtErr != nil {
-		log.WithError(tgtErr).WithField("db_type", dbType).
+	tgtClient, tgtConnErr := dbconnredis.GetRedisClient(sc.TargetConnection)
+	if tgtConnErr != nil {
+		log.WithError(tgtConnErr).WithField("db_type", dbType).
 			Error("[Monitor] Fail to connect to target Redis")
 	} else {
 		defer tgtClient.Close()
@@ -44,25 +44,8 @@ func CountAndLogRedis(ctx context.Context, sc config.SyncConfig, log *logrus.Log
 	srcDBName := dsn.GetDatabaseName(sc.Type, sc.SourceConnection)
 	tgtDBName := dsn.GetDatabaseName(sc.Type, sc.TargetConnection)
 
-	srcCount := int64(-1)
-	if srcErr == nil {
-		srcCount, srcErr = keyCount(ctx, srcClient)
-		if srcErr != nil {
-			log.WithError(srcErr).WithField("db_type", dbType).
-				Error("Failed to get source DB size")
-			srcCount = -1
-		}
-	}
-
-	tgtCount := int64(-1)
-	if tgtErr == nil {
-		tgtCount, tgtErr = keyCount(ctx, tgtClient)
-		if tgtErr != nil {
-			log.WithError(tgtErr).WithField("db_type", dbType).
-				Error("Failed to get target DB size")
-			tgtCount = -1
-		}
-	}
+	srcCount, srcErr := sizeOrMark(ctx, srcClient, srcConnErr, "source", dbType, log)
+	tgtCount, tgtErr := sizeOrMark(ctx, tgtClient, tgtConnErr, "target", dbType, log)
 
 	// One row. What is being reported is the size of each database, which has
 	// nothing to do with how many mappings the task lists — and the loop used to
@@ -114,4 +97,25 @@ func keyCount(ctx context.Context, client goredis.UniversalClient) (int64, error
 		return 0, err
 	}
 	return total, nil
+}
+
+// sizeOrMark reports how many keys one end holds, or -1 when it could not be
+// asked -- either because connecting failed or because the count did.
+//
+// -1 rather than nothing: writing no row at all left the dashboard showing the
+// last successful comparison, so a target that had been unreachable for hours
+// looked the same as one that matched.
+func sizeOrMark(ctx context.Context, client goredis.UniversalClient, connectErr error,
+	side, dbType string, log *logrus.Logger) (int64, error) {
+
+	if connectErr != nil {
+		return -1, connectErr
+	}
+	count, err := keyCount(ctx, client)
+	if err != nil {
+		log.WithError(err).WithField("db_type", dbType).
+			Errorf("Failed to get %s DB size", side)
+		return -1, err
+	}
+	return count, nil
 }

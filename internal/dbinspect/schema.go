@@ -138,12 +138,14 @@ func sortFieldsByName(schema *SchemaResponse) {
 	})
 }
 
-// schemaTimeout bounds one schema read, and schemaDialTimeout the connection it
-// needs. Variables rather than constants so a test can shorten them: an
-// unreachable host pays them in full, and four such cases were most of this
-// package's test time.
+// Variables rather than constants so a test can shorten them: an unreachable
+// host pays them in full, and four such cases were most of this package's test
+// time.
 var (
+	// schemaTimeout bounds a whole MongoDB schema read, schemaReadTimeout the
+	// same for the SQL engines, and schemaDialTimeout only the connection.
 	schemaTimeout     = 30 * time.Second
+	schemaReadTimeout = 10 * time.Second
 	schemaDialTimeout = 10 * time.Second
 )
 
@@ -319,7 +321,7 @@ func getMySQLSchema(c context.Context, req SchemaRequest) (SchemaResponse, error
 	db.SetMaxOpenConns(10)
 	db.SetMaxIdleConns(10)
 
-	ctx, cancel := context.WithTimeout(c, schemaDialTimeout)
+	ctx, cancel := context.WithTimeout(c, schemaReadTimeout)
 	defer cancel()
 
 	if err := db.PingContext(ctx); err != nil {
@@ -383,7 +385,7 @@ func getPostgreSQLSchema(c context.Context, req SchemaRequest) (SchemaResponse, 
 	}
 	defer db.Close()
 
-	ctx, cancel := context.WithTimeout(c, schemaDialTimeout)
+	ctx, cancel := context.WithTimeout(c, schemaReadTimeout)
 	defer cancel()
 
 	if err := db.PingContext(ctx); err != nil {

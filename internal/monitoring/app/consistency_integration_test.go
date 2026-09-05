@@ -58,12 +58,12 @@ func TestATaskThatNamesNoTablesComparesWhatTheSourceHolds(t *testing.T) {
 
 	var found bool
 	for _, pair := range pairs {
-		if pair.source == table {
+		if pair.Source == table {
 			found = true
 			// Discovered tables are compared against the same name, because
 			// nothing said otherwise.
-			if pair.target != table {
-				t.Errorf("%s is compared against %q", table, pair.target)
+			if pair.Target != table {
+				t.Errorf("%s is compared against %q", table, pair.Target)
 			}
 		}
 	}
@@ -83,7 +83,7 @@ func TestATaskThatNamesItsTablesIsNotDiscovered(t *testing.T) {
 		}},
 	}, db, "source_db", logger)
 
-	if len(pairs) != 1 || pairs[0].source != "orders" || pairs[0].target != "orders_copy" {
+	if len(pairs) != 1 || pairs[0].Source != "orders" || pairs[0].Target != "orders_copy" {
 		t.Errorf("a task that names one table produced %+v", pairs)
 	}
 }

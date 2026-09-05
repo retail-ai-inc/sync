@@ -486,8 +486,10 @@ func (r *Runner) read(ctx context.Context, queue chan<- *domain.Event) error {
 		now := r.now()
 		r.mu.Lock()
 		r.lastHeardAt = now
-		if !event.Heartbeat && r.oldestPending.IsZero() && !event.SourceTime.IsZero() {
-			r.oldestPending = event.SourceTime
+		if !event.Heartbeat && r.oldestPending.IsZero() {
+			if at := measuredAt(event); !at.IsZero() {
+				r.oldestPending = at
+			}
 		}
 		if !event.SourceTime.IsZero() && event.SourceTime.After(r.lastReadAt) {
 			r.lastReadAt = event.SourceTime
@@ -504,14 +506,10 @@ func (r *Runner) read(ctx context.Context, queue chan<- *domain.Event) error {
 		// grow on its own; a reader that has stopped shows up in
 		// sync_source_last_event_age_seconds, which is what that one is for.
 		//
-		// The wall clock when the source reports one: an ordering clock that
-		// counts whole seconds cannot measure a delay shorter than one.
-		switch {
-		case event.Heartbeat:
-		case !event.WallTime.IsZero():
-			metrics.SetReadLag(r.Opts.Labels, now.Sub(event.WallTime).Seconds())
-		case !event.SourceTime.IsZero():
-			metrics.SetReadLag(r.Opts.Labels, now.Sub(event.SourceTime).Seconds())
+		if !event.Heartbeat {
+			if at := measuredAt(event); !at.IsZero() {
+				metrics.SetReadLag(r.Opts.Labels, now.Sub(at).Seconds())
+			}
 		}
 
 		// Charged before the hand-over and released when the batch holding it has
@@ -989,16 +987,35 @@ func (r *Runner) reportRetention(ctx context.Context, now time.Time, lag float64
 	metrics.SetRetention(r.Opts.Labels, r.window.Seconds(), r.window.Seconds()-lag)
 }
 
+// measuredAt is when the source made a change, for measuring a delay against.
+//
+// The wall clock when the source reports one, because an ordering clock that
+// counts whole seconds cannot measure a delay shorter than one -- MongoDB's
+// cluster time does exactly that, and every lag it fed carried up to a second
+// that was not there. Nothing that orders may use this: a wall clock can jump,
+// and the re-copy gates its chunks against SourceTime for that reason.
+func measuredAt(event *domain.Event) time.Time {
+	if !event.WallTime.IsZero() {
+		return event.WallTime
+	}
+	return event.SourceTime
+}
+
 // newestSourceTime reports when the source made the most recent change in a
-// batch, ignoring heartbeats.
+// batch, ignoring heartbeats. Measured rather than ordered: this feeds the
+// applied lag, which is the gauge an alert reads.
 func newestSourceTime(events []*domain.Event) time.Time {
 	var newest time.Time
 	for _, e := range events {
-		if e.Heartbeat || e.SourceTime.IsZero() {
+		if e.Heartbeat {
 			continue
 		}
-		if e.SourceTime.After(newest) {
-			newest = e.SourceTime
+		at := measuredAt(e)
+		if at.IsZero() {
+			continue
+		}
+		if at.After(newest) {
+			newest = at
 		}
 	}
 	return newest

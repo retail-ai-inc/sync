@@ -168,9 +168,8 @@ func newRouter() *chi.Mux {
 	// replication is caught up: a probe that failed because Tokyo was
 	// unreachable would restart the one process still able to answer what the
 	// tasks are and where their positions stand.
-	httpapi.ReadyCheck = controlPlaneReady
 	router.Get("/healthz", httpapi.Health)
-	router.Get("/readyz", httpapi.Ready)
+	router.Get("/readyz", httpapi.Ready(controlPlaneReady))
 
 	// The exposition a scraper reads. It sits outside /api and takes no
 	// credential, which is what every scraper expects; keeping the port off the
@@ -212,8 +211,11 @@ func controlPlaneReady() error {
 	}
 	defer db.Close()
 
-	var tasks int
-	if err := db.QueryRow("SELECT COUNT(*) FROM sync_tasks").Scan(&tasks); err != nil {
+	// One row, not a count. Both prove the same things -- the file is readable,
+	// the table is there, a page decodes -- and a count walks every leaf page of
+	// a table whose rows carry the whole task configuration.
+	if err := db.QueryRow(
+		"SELECT COUNT(*) FROM (SELECT 1 FROM sync_tasks LIMIT 1)").Scan(new(int)); err != nil {
 		return fmt.Errorf("read the control database: %w", err)
 	}
 	return nil

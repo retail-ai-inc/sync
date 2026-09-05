@@ -531,16 +531,14 @@ func TestRetiredPositionPathsAreReported(t *testing.T) {
 				"no longer does anything"},
 		},
 		{
-			name: "mysql",
-			set:  func(sc *config.SyncConfig) { sc.MySQLPositionPath = "/mnt/mysql" },
-			expects: []string{"mysql_position_path", "/mnt/mysql",
-				"no longer stores a position", "copied again"},
+			name:    "mysql",
+			set:     func(sc *config.SyncConfig) { sc.MySQLPositionPath = "/mnt/mysql" },
+			expects: []string{"mysql_position_path", "/mnt/mysql", "no longer does anything"},
 		},
 		{
-			name: "mongodb",
-			set:  func(sc *config.SyncConfig) { sc.MongoDBResumeTokenPath = "/mnt/mongo" },
-			expects: []string{"mongodb_resume_token_path", "/mnt/mongo",
-				"no longer stores a position"},
+			name:    "mongodb",
+			set:     func(sc *config.SyncConfig) { sc.MongoDBResumeTokenPath = "/mnt/mongo" },
+			expects: []string{"mongodb_resume_token_path", "/mnt/mongo", "no longer does anything"},
 		},
 	} {
 		t.Run(c.name, func(t *testing.T) {

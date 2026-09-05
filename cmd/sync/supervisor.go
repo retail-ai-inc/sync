@@ -279,31 +279,28 @@ func (s *supervisor) start(parentCtx context.Context, sc config.SyncConfig) {
 	s.log.Infof("Task %d (%s) started", sc.ID, sc.Type)
 }
 
-// warnAboutRetiredPaths reports the position paths that no longer mean what
-// their names say.
+// warnAboutRetiredPaths reports the position paths that no longer do anything.
 //
-// Positions live in the target database now. Accepting a path and doing
-// nothing with it is worse than rejecting it: somebody configures one and
-// believes there is a local copy of the position to fall back on. Two of the
-// three are not inert either -- they silently double as "re-copy a target that
-// already holds rows", which is a different decision entirely.
+// Positions live in the target database now, and nothing is written to any of
+// these. Accepting a path and doing nothing with it is worse than rejecting
+// it: somebody configures one and believes there is a local copy of the
+// position to fall back on.
+//
+// Two of them used to double as "leave a target that already holds rows
+// alone", which was a different decision wearing this name. That gate is gone
+// -- whether a copy is owed is read from the position on the target -- so all
+// three are inert and say so alike.
 func warnAboutRetiredPaths(sc config.SyncConfig, log *logrus.Logger) {
-	if sc.RedisPositionPath != "" {
-		log.Warnf("Task %d: redis_position_path (%s) no longer does anything. A "+
-			"Redis position is the per-slot markers and the metadata key on the "+
-			"target, and nothing is written to this path.",
-			sc.ID, sc.RedisPositionPath)
-	}
 	for _, retired := range []struct{ name, value string }{
+		{"redis_position_path", sc.RedisPositionPath},
 		{"mysql_position_path", sc.MySQLPositionPath},
 		{"mongodb_resume_token_path", sc.MongoDBResumeTokenPath},
 	} {
 		if retired.value == "" {
 			continue
 		}
-		log.Warnf("Task %d: %s (%s) no longer stores a position -- positions are "+
-			"kept in the target database. Setting it now means only that a target "+
-			"which already holds data is left alone instead of being copied again.",
+		log.Warnf("Task %d: %s (%s) no longer does anything. Positions are kept in "+
+			"the target database, and nothing is written to this path.",
 			sc.ID, retired.name, retired.value)
 	}
 }

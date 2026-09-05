@@ -233,7 +233,7 @@ func TestTheRefusalSaysWhy(t *testing.T) {
 func TestTheProbesAnswer(t *testing.T) {
 	for name, handler := range map[string]http.HandlerFunc{
 		"healthz": Health,
-		"readyz":  Ready,
+		"readyz":  Ready(func() error { return nil }),
 	} {
 		t.Run(name, func(t *testing.T) {
 			rec := httptest.NewRecorder()

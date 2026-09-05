@@ -1,11 +1,5 @@
 package domain
 
-import "strings"
-
-// lower is strings.ToLower, named so the engine comparisons read the same way
-// wherever they appear.
-func lower(s string) string { return strings.ToLower(s) }
-
 // TableStat is one table's replication progress for a day, as the tables
 // endpoint reports it.
 type TableStat struct {

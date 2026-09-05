@@ -182,19 +182,19 @@ func checkSQLTask(ctx context.Context, task config.SyncConfig, n notifier, log *
 	targetDB := dsn.GetDatabaseName(task.Type, task.TargetConnection)
 
 	for _, pair := range sqlTablePairs(ctx, task, source, sourceDB, log) {
-		columns, err := verify.SQLColumns(ctx, source, sourceDB, pair.source)
+		columns, err := verify.SQLColumns(ctx, source, sourceDB, pair.Source)
 		if err != nil {
 			log.Errorf("[Verify] Task %d: %v", task.ID, err)
 			continue
 		}
-		keys, err := primaryKey(ctx, source, sourceDB, pair.source)
+		keys, err := primaryKey(ctx, source, sourceDB, pair.Source)
 		if err != nil {
-			log.Warnf("[Verify] Task %d: %s cannot be compared: %v", task.ID, pair.source, err)
+			log.Warnf("[Verify] Task %d: %s cannot be compared: %v", task.ID, pair.Source, err)
 			continue
 		}
 
-		sourceSide := &verify.SQLEnd{DB: source, Schema: sourceDB, Table: pair.source, Keys: keys, Columns: columns}
-		targetSide := &verify.SQLEnd{DB: target, Schema: targetDB, Table: pair.target, Keys: keys, Columns: columns}
+		sourceSide := &verify.SQLEnd{DB: source, Schema: sourceDB, Table: pair.Source, Keys: keys, Columns: columns}
+		targetSide := &verify.SQLEnd{DB: target, Schema: targetDB, Table: pair.Target, Keys: keys, Columns: columns}
 
 		// Repairing during the walk rather than from the reported sample
 		// afterwards: the sample is capped, so a table a thousand rows apart
@@ -207,7 +207,7 @@ func checkSQLTask(ctx context.Context, task config.SyncConfig, n notifier, log *
 				_, err := repairer.Repair(ctx, []verify.Difference{d})
 				if err != nil {
 					log.Errorf("[Verify] Task %d: could not repair %s of %s: %v",
-						task.ID, d.Key, pair.source, err)
+						task.ID, d.Key, pair.Source, err)
 				}
 				return err
 			}
@@ -215,19 +215,17 @@ func checkSQLTask(ctx context.Context, task config.SyncConfig, n notifier, log *
 
 		result, err := verify.CompareAndRepair(ctx, sourceSide, targetSide, 0, fix)
 		if err != nil {
-			log.Errorf("[Verify] Task %d: comparing %s: %v", task.ID, pair.source, err)
+			log.Errorf("[Verify] Task %d: comparing %s: %v", task.ID, pair.Source, err)
 			continue
 		}
-		report(ctx, n, log, task, pair.source, result)
+		report(ctx, n, log, task, pair.Source, result)
 	}
 }
 
-type tablePair struct{ source, target string }
-
 // sqlTablePairs reports the tables to compare, discovering them when the task
 // lists none — which is the same rule replication itself follows.
-func sqlTablePairs(ctx context.Context, task config.SyncConfig, source *sql.DB, sourceDB string, log *logrus.Logger) []tablePair {
-	if pairs := configuredPairs(task); len(pairs) > 0 {
+func sqlTablePairs(ctx context.Context, task config.SyncConfig, source *sql.DB, sourceDB string, log *logrus.Logger) []discovery.Pair {
+	if pairs := discovery.ConfiguredPairs(task.Mappings); len(pairs) > 0 {
 		return pairs
 	}
 
@@ -236,7 +234,7 @@ func sqlTablePairs(ctx context.Context, task config.SyncConfig, source *sql.DB, 
 		log.Errorf("[Verify] Task %d: %v", task.ID, err)
 		return nil
 	}
-	return samePairs(tables)
+	return discovery.SamePairs(tables)
 }
 
 // primaryKey reports the columns a table's rows are identified by, in order.
@@ -307,8 +305,8 @@ func checkMongoTask(ctx context.Context, task config.SyncConfig, n notifier, log
 	targetDB := target.Database(dsn.GetDatabaseName(task.Type, task.TargetConnection))
 
 	for _, pair := range mongoCollectionPairs(ctx, task, sourceDB, log) {
-		sourceColl := sourceDB.Collection(pair.source)
-		targetColl := targetDB.Collection(pair.target)
+		sourceColl := sourceDB.Collection(pair.Source)
+		targetColl := targetDB.Collection(pair.Target)
 
 		var fix func(verify.Difference) error
 		if repairEnabled() {
@@ -317,7 +315,7 @@ func checkMongoTask(ctx context.Context, task config.SyncConfig, n notifier, log
 				_, err := repairer.Repair(ctx, []verify.Difference{d})
 				if err != nil {
 					log.Errorf("[Verify] Task %d: could not repair %s of %s: %v",
-						task.ID, d.Key, pair.source, err)
+						task.ID, d.Key, pair.Source, err)
 				}
 				return err
 			}
@@ -326,17 +324,17 @@ func checkMongoTask(ctx context.Context, task config.SyncConfig, n notifier, log
 		result, err := verify.CompareAndRepair(ctx,
 			&verify.MongoEnd{Coll: sourceColl}, &verify.MongoEnd{Coll: targetColl}, 0, fix)
 		if err != nil {
-			log.Errorf("[Verify] Task %d: comparing %s: %v", task.ID, pair.source, err)
+			log.Errorf("[Verify] Task %d: comparing %s: %v", task.ID, pair.Source, err)
 			continue
 		}
-		report(ctx, n, log, task, pair.source, result)
+		report(ctx, n, log, task, pair.Source, result)
 	}
 }
 
 // mongoCollectionPairs reports the collections to compare, discovering them when
 // the task lists none.
-func mongoCollectionPairs(ctx context.Context, task config.SyncConfig, sourceDB *mongo.Database, log *logrus.Logger) []tablePair {
-	if pairs := configuredPairs(task); len(pairs) > 0 {
+func mongoCollectionPairs(ctx context.Context, task config.SyncConfig, sourceDB *mongo.Database, log *logrus.Logger) []discovery.Pair {
+	if pairs := discovery.ConfiguredPairs(task.Mappings); len(pairs) > 0 {
 		return pairs
 	}
 
@@ -345,38 +343,5 @@ func mongoCollectionPairs(ctx context.Context, task config.SyncConfig, sourceDB 
 		log.Errorf("[Verify] Task %d: %v", task.ID, err)
 		return nil
 	}
-	return samePairs(names)
-}
-
-// configuredPairs reports the pairs the task names, which is nothing when it
-// names none — that is the signal to go and discover them.
-//
-// A mapping with no target named copies into a table of the same name, which is
-// what the task form produces when the two sides match. Both engines used to
-// carry their own copy of this loop, and of the one below.
-func configuredPairs(task config.SyncConfig) []tablePair {
-	var pairs []tablePair
-	for _, mapping := range task.Mappings {
-		for _, table := range mapping.Tables {
-			if table.SourceTable == "" {
-				continue
-			}
-			target := table.TargetTable
-			if target == "" {
-				target = table.SourceTable
-			}
-			pairs = append(pairs, tablePair{source: table.SourceTable, target: target})
-		}
-	}
-	return pairs
-}
-
-// samePairs pairs each discovered name with itself, which is what a task that
-// lists no tables replicates into.
-func samePairs(names []string) []tablePair {
-	pairs := make([]tablePair, 0, len(names))
-	for _, name := range names {
-		pairs = append(pairs, tablePair{source: name, target: name})
-	}
-	return pairs
+	return discovery.SamePairs(names)
 }

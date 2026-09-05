@@ -411,15 +411,25 @@ func TestSilenceFromTheSourceIsVisible(t *testing.T) {
 	}
 }
 
-func gauge(t *testing.T, name string, labels metrics.Labels) float64 {
+// gaugeOK reports a gauge's value and whether it was set at all. Never set and
+// set to zero are different answers, and some of these tests turn on which.
+func gaugeOK(t *testing.T, name string, labels metrics.Labels) (float64, bool) {
 	t.Helper()
 	for _, s := range metrics.Default.Snapshot(name) {
 		if s.Labels.Key() == labels.Key() {
-			return s.Value
+			return s.Value, true
 		}
 	}
-	t.Fatalf("no sample for %s", name)
-	return 0
+	return 0, false
+}
+
+func gauge(t *testing.T, name string, labels metrics.Labels) float64 {
+	t.Helper()
+	value, ok := gaugeOK(t, name, labels)
+	if !ok {
+		t.Fatalf("no sample for %s", name)
+	}
+	return value
 }
 
 // TestTheSnapshotPinsBeforeItCopies is the ordering that decides whether the
@@ -598,12 +608,7 @@ func (w *windowedReader) asked() int {
 
 func headroomOf(t *testing.T, labels metrics.Labels) (float64, bool) {
 	t.Helper()
-	for _, s := range metrics.Default.Snapshot(metrics.RetentionHeadroomSeconds) {
-		if s.Labels.Key() == labels.Key() {
-			return s.Value, true
-		}
-	}
-	return 0, false
+	return gaugeOK(t, metrics.RetentionHeadroomSeconds, labels)
 }
 
 // runReporting drives one reporting tick for a task that is behind, with its

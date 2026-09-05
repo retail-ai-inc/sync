@@ -47,8 +47,6 @@ func TestARealChangeStreamEventCarriesAWallTime(t *testing.T) {
 		Logger: quiet,
 		Labels: metrics.Labels{"task": "9501"},
 	}
-	reader.mapped = reader.mappedCollections()
-	reader.databases = reader.mappedDatabaseSet()
 	if err := reader.Open(ctx, domain.Position{}); err != nil {
 		t.Fatalf("Open: %v", err)
 	}

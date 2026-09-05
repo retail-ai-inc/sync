@@ -8,17 +8,6 @@ import (
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
 )
 
-// gaugeFor reads one sample of a gauge back.
-func readLagOf(t *testing.T, labels metrics.Labels) (float64, bool) {
-	t.Helper()
-	for _, sample := range metrics.Default.Snapshot(metrics.ReadLagSeconds) {
-		if sample.Labels["task"] == labels["task"] {
-			return sample.Value, true
-		}
-	}
-	return 0, false
-}
-
 // A heartbeat leaves the gauge alone. Measuring its own age made the gauge walk
 // up to the heartbeat interval and back on a link with no delay; writing zero
 // instead is no better, because heartbeats outnumber events on a quiet source
@@ -47,7 +36,7 @@ func TestAHeartbeatDoesNotDisturbTheReadLag(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	lag, ok := readLagOf(t, labels)
+	lag, ok := gaugeOK(t, metrics.ReadLagSeconds, labels)
 	if !ok {
 		t.Fatal("the read lag was never reported")
 	}
@@ -79,12 +68,44 @@ func TestTheReadLagPrefersTheWallClock(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	lag, ok := readLagOf(t, labels)
+	lag, ok := gaugeOK(t, metrics.ReadLagSeconds, labels)
 	if !ok {
 		t.Fatal("the read lag was never reported")
 	}
 	if lag > 5 {
 		t.Errorf("the read lag is %v, so it was measured from the ordering clock "+
 			"rather than the wall clock", lag)
+	}
+}
+
+// The applied lag is the gauge an alert reads, and it carried the same
+// whole-second artefact the read lag did: the fix reached one of the two.
+func TestTheAppliedLagAlsoPrefersTheWallClock(t *testing.T) {
+	ns := domain.Namespace{DB: "shop", Object: "orders"}
+	now := time.Now()
+	reader := &fakeReader{events: []*domain.Event{
+		{NS: ns, Op: domain.OpInsert, Key: "1", Bytes: 1,
+			// The ordering clock says a minute ago; the wall clock says now.
+			SourceTime: now.Add(-time.Minute),
+			WallTime:   now,
+			Pos:        domain.Position{Payload: "p1"}, EndsTransaction: true},
+	}}
+
+	r := newRunner(t, reader, &fakeApplier{}, newStore())
+	labels := metrics.Labels{"task": t.Name()}
+	r.Opts.Labels = labels
+	t.Cleanup(func() { metrics.Default.Forget(labels) })
+
+	if err := runFor(t, r, 400*time.Millisecond); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	lag, ok := gaugeOK(t, metrics.LagSeconds, labels)
+	if !ok {
+		t.Fatal("the applied lag was never reported")
+	}
+	if lag > 10 {
+		t.Errorf("the applied lag is %v, so it was measured from the ordering "+
+			"clock rather than the wall clock", lag)
 	}
 }

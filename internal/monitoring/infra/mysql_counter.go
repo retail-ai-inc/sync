@@ -63,7 +63,7 @@ func CountAndLogMySQLOrMariaDB(ctx context.Context, sc config.SyncConfig, log *l
 	}
 
 	for _, pair := range pairs {
-		srcName, tgtName := pair.source, pair.target
+		srcName, tgtName := pair.Source, pair.Target
 
 		srcCount, srcOK := countOrMark(ctx, db, fmt.Sprintf("%s.%s", srcDBName, srcName), log)
 		tgtCount, tgtOK := countOrMark(ctx, db2, fmt.Sprintf("%s.%s", tgtDBName, tgtName), log)

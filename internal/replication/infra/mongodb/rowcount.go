@@ -46,20 +46,20 @@ func RowCounts(ctx context.Context, cfg config.SyncConfig) (domain.RowCounts, er
 			return domain.RowCounts{}, err
 		}
 		for _, name := range names {
-			pairs = append(pairs, [2]string{name, name})
+			pairs = append(pairs, discovery.Pair{Source: name, Target: name})
 		}
 	}
 
 	for _, pair := range pairs {
-		object := domain.ObjectCount{Source: pair[0], Target: pair[1]}
+		object := domain.ObjectCount{Source: pair.Source, Target: pair.Target}
 
 		var err error
-		object.SourceRows, err = countDocuments(ctx, sourceDB, pair[0])
+		object.SourceRows, err = countDocuments(ctx, sourceDB, pair.Source)
 		if err != nil {
 			object.SourceRows = -1
 			object.Note = fmt.Sprintf("source: %v", err)
 		}
-		object.TargetRows, err = countDocuments(ctx, targetDB, pair[1])
+		object.TargetRows, err = countDocuments(ctx, targetDB, pair.Target)
 		if err != nil {
 			object.TargetRows = -1
 			if object.Note != "" {
@@ -72,19 +72,8 @@ func RowCounts(ctx context.Context, cfg config.SyncConfig) (domain.RowCounts, er
 	return counts, nil
 }
 
-func collectionPairs(cfg config.SyncConfig) (pairs [][2]string, discovered bool) {
-	for _, mapping := range cfg.Mappings {
-		for _, table := range mapping.Tables {
-			if table.SourceTable == "" {
-				continue
-			}
-			target := table.TargetTable
-			if target == "" {
-				target = table.SourceTable
-			}
-			pairs = append(pairs, [2]string{table.SourceTable, target})
-		}
-	}
+func collectionPairs(cfg config.SyncConfig) (pairs []discovery.Pair, discovered bool) {
+	pairs = discovery.ConfiguredPairs(cfg.Mappings)
 	return pairs, len(pairs) == 0
 }
 

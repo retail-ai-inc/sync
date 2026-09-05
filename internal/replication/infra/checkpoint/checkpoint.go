@@ -234,66 +234,6 @@ func (s *RedisStore) Save(ctx context.Context, key, payload string) error {
 	return nil
 }
 
-// Layered reads from the first store with an answer and writes to all of them,
-// for the migration: a deployment upgrading from the file-only version has its
-// position on disk and nothing on the target.
-type Layered struct {
-	Stores []Store
-	// OnError is called for a store that fails, so a degraded layer is visible
-	// rather than silent. May be nil.
-	OnError func(error)
-}
-
-func (l *Layered) report(err error) {
-	if err != nil && l.OnError != nil {
-		l.OnError(err)
-	}
-}
-
-func (l *Layered) Load(ctx context.Context, key string) (string, error) {
-	var lastErr error
-	for _, store := range l.Stores {
-		payload, err := store.Load(ctx, key)
-		if err != nil {
-			l.report(err)
-			lastErr = err
-			continue
-		}
-		if payload != "" {
-			return payload, nil
-		}
-	}
-	if lastErr != nil {
-		// Every store failed or had nothing. Reporting the failure matters: "no
-		// checkpoint" and "could not read it" lead to opposite decisions, and
-		// confusing them re-copies a database or skips what was in flight.
-		return "", lastErr
-	}
-	return "", nil
-}
-
-// Save writes to every store, failing only when none took it: one unreachable
-// store must not stop the others recording.
-func (l *Layered) Save(ctx context.Context, key, payload string) error {
-	var lastErr error
-	saved := 0
-	for _, store := range l.Stores {
-		if err := store.Save(ctx, key, payload); err != nil {
-			l.report(err)
-			lastErr = err
-			continue
-		}
-		saved++
-	}
-	if saved == 0 {
-		if lastErr != nil {
-			return lastErr
-		}
-		return fmt.Errorf("no checkpoint store is configured")
-	}
-	return nil
-}
-
 func Encode(v interface{}) (string, error) {
 	encoded, err := json.Marshal(v)
 	if err != nil {

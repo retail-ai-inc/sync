@@ -118,32 +118,28 @@ func Health(w http.ResponseWriter, r *http.Request) {
 	writeStatus(w, http.StatusOK, map[string]interface{}{"status": "ok"})
 }
 
-// ReadyCheck reports whether this process can serve the control plane. Nil
-// means it is not wired, and readiness is then the fact that the server
-// answered at all.
-//
-// Deliberately not replication health. A readiness probe that failed because
-// Tokyo was unreachable would have Kubernetes restart the one process that is
-// still working -- the one holding the task list, the positions and the
-// switch-over reports, which is what an operator needs most at that moment.
-// Whether the replica is caught up is sync_task_up and the progress endpoint;
-// this is whether the control plane can answer.
-var ReadyCheck func() error
-
 // Ready answers the readiness probe. A rolling update has no way to know when
 // a replica can take traffic without one, so Kubernetes sends requests to a
 // container that is still starting.
-func Ready(w http.ResponseWriter, r *http.Request) {
-	if ReadyCheck != nil {
-		if err := ReadyCheck(); err != nil {
+//
+// check reports whether this process can serve the control plane. Deliberately
+// not replication health: a probe that failed because Tokyo was unreachable
+// would have Kubernetes restart the one process that is still working -- the
+// one holding the task list, the positions and the switch-over reports, which
+// is what an operator needs most at that moment. Whether the replica is caught
+// up is sync_task_up and the progress endpoint; this is whether the control
+// plane can answer.
+func Ready(check func() error) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if err := check(); err != nil {
 			writeStatus(w, http.StatusServiceUnavailable, map[string]interface{}{
 				"status": "not ready",
 				"reason": err.Error(),
 			})
 			return
 		}
+		writeStatus(w, http.StatusOK, map[string]interface{}{"status": "ready"})
 	}
-	writeStatus(w, http.StatusOK, map[string]interface{}{"status": "ready"})
 }
 
 func writeStatus(w http.ResponseWriter, status int, body map[string]interface{}) {

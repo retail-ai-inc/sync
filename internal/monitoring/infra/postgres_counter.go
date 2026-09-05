@@ -80,7 +80,7 @@ func CountAndLogPostgreSQL(ctx context.Context, sc config.SyncConfig, log *logru
 		}
 
 		for _, pair := range pairs {
-			srcName, tgtName := pair.source, pair.target
+			srcName, tgtName := pair.Source, pair.Target
 
 			fullSrc := fmt.Sprintf("%s.%s", srcSchema, srcName)
 			fullTgt := fmt.Sprintf("%s.%s", tgtSchema, tgtName)

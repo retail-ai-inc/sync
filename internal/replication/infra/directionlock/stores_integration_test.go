@@ -47,6 +47,13 @@ func redisStore(t *testing.T) *RedisStore {
 	return &RedisStore{Client: client, Address: harness.RedisTarget}
 }
 
+// stores is every backend the claim has to behave the same way on. Each test
+// below runs against all of them.
+var stores = map[string]func(*testing.T) store{
+	"mongo": func(t *testing.T) store { return mongoStore(t) },
+	"redis": func(t *testing.T) store { return redisStore(t) },
+}
+
 // store is what both of them are.
 type store interface {
 	Endpoint() string
@@ -56,10 +63,7 @@ type store interface {
 }
 
 func TestEveryStoreHoldsAClaimTheSameWay(t *testing.T) {
-	for name, build := range map[string]func(*testing.T) store{
-		"mongo": func(t *testing.T) store { return mongoStore(t) },
-		"redis": func(t *testing.T) store { return redisStore(t) },
-	} {
+	for name, build := range stores {
 		t.Run(name, func(t *testing.T) {
 			s := build(t)
 			ctx := context.Background()
@@ -146,10 +150,7 @@ func TestEveryStoreHoldsAClaimTheSameWay(t *testing.T) {
 // used to overwrite the first, leaving two writers on one target -- the single
 // thing this lock exists to prevent.
 func TestOnlyOneOfTwoStartersTakesTheClaim(t *testing.T) {
-	for name, build := range map[string]func(*testing.T) store{
-		"mongo": func(t *testing.T) store { return mongoStore(t) },
-		"redis": func(t *testing.T) store { return redisStore(t) },
-	} {
+	for name, build := range stores {
 		t.Run(name, func(t *testing.T) {
 			s := build(t)
 			ctx := context.Background()
@@ -189,10 +190,7 @@ func TestOnlyOneOfTwoStartersTakesTheClaim(t *testing.T) {
 
 // The holder refreshing its own claim is not a competing claim.
 func TestTheHolderKeepsRefreshingItsOwnClaim(t *testing.T) {
-	for name, build := range map[string]func(*testing.T) store{
-		"mongo": func(t *testing.T) store { return mongoStore(t) },
-		"redis": func(t *testing.T) store { return redisStore(t) },
-	} {
+	for name, build := range stores {
 		t.Run(name, func(t *testing.T) {
 			s := build(t)
 			ctx := context.Background()
@@ -213,10 +211,7 @@ func TestTheHolderKeepsRefreshingItsOwnClaim(t *testing.T) {
 // process may take it -- otherwise a crashed syncer would block its own task
 // for ever.
 func TestAnAbandonedClaimCanBeTakenOver(t *testing.T) {
-	for name, build := range map[string]func(*testing.T) store{
-		"mongo": func(t *testing.T) store { return mongoStore(t) },
-		"redis": func(t *testing.T) store { return redisStore(t) },
-	} {
+	for name, build := range stores {
 		t.Run(name, func(t *testing.T) {
 			s := build(t)
 			ctx := context.Background()

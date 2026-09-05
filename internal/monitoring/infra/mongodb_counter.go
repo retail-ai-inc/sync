@@ -42,7 +42,7 @@ func CountAndLogMongoDB(ctx context.Context, sc config.SyncConfig, log *logrus.L
 		var err error
 
 		var countQuery *domain.CountQuery
-		if tblMap.CountQuery != nil && len(tblMap.CountQuery) > 0 {
+		if len(tblMap.CountQuery) > 0 {
 			if conditions, ok := tblMap.CountQuery["conditions"]; ok {
 				conditionBytes, err := json.Marshal(conditions)
 				if err == nil {
@@ -261,7 +261,7 @@ func LogYesterdayMongoDBVolume(ctx context.Context, sc config.SyncConfig, log *l
 			var hasDateRangeCondition bool
 			var dateRangeField string
 
-			if tblMap.CountQuery != nil && len(tblMap.CountQuery) > 0 {
+			if len(tblMap.CountQuery) > 0 {
 				if conditions, ok := tblMap.CountQuery["conditions"]; ok {
 					conditionBytes, err := json.Marshal(conditions)
 					if err == nil {

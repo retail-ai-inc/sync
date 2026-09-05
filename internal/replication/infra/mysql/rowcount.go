@@ -46,43 +46,33 @@ func RowCounts(ctx context.Context, cfg config.SyncConfig) (domain.RowCounts, er
 		return domain.RowCounts{}, err
 	}
 	for _, name := range names {
-		pairs = append(pairs, [2]string{name, name})
+		pairs = append(pairs, discovery.Pair{Source: name, Target: name})
 	}
 	counts := domain.RowCounts{Engine: cfg.Type, Discovered: true}
 	return fill(ctx, counts, pairs, source, target, sourceDB, targetDB), nil
 }
 
 // tablePairs reports the source/target pairs the task names, and whether it
-// named none.
-func tablePairs(cfg config.SyncConfig) (pairs [][2]string, discovered bool) {
-	for _, mapping := range cfg.Mappings {
-		for _, table := range mapping.Tables {
-			if table.SourceTable == "" {
-				continue
-			}
-			target := table.TargetTable
-			if target == "" {
-				target = table.SourceTable
-			}
-			pairs = append(pairs, [2]string{table.SourceTable, target})
-		}
-	}
+// named none. The rule itself is discovery's, which the consistency check and
+// the monitoring counters ask the same question of.
+func tablePairs(cfg config.SyncConfig) (pairs []discovery.Pair, discovered bool) {
+	pairs = discovery.ConfiguredPairs(cfg.Mappings)
 	return pairs, len(pairs) == 0
 }
 
-func fill(ctx context.Context, counts domain.RowCounts, pairs [][2]string,
+func fill(ctx context.Context, counts domain.RowCounts, pairs []discovery.Pair,
 	source, target *sql.DB, sourceDB, targetDB string) domain.RowCounts {
 
 	for _, pair := range pairs {
-		object := domain.ObjectCount{Source: pair[0], Target: pair[1]}
+		object := domain.ObjectCount{Source: pair.Source, Target: pair.Target}
 
 		var err error
-		object.SourceRows, err = countTable(ctx, source, sourceDB, pair[0])
+		object.SourceRows, err = countTable(ctx, source, sourceDB, pair.Source)
 		if err != nil {
 			object.SourceRows = -1
 			object.Note = fmt.Sprintf("source: %v", err)
 		}
-		object.TargetRows, err = countTable(ctx, target, targetDB, pair[1])
+		object.TargetRows, err = countTable(ctx, target, targetDB, pair.Target)
 		if err != nil {
 			object.TargetRows = -1
 			if object.Note != "" {

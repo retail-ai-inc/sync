@@ -403,7 +403,7 @@ func TestPostgresPairsStayWithTheirOwnMapping(t *testing.T) {
 	if err != nil {
 		t.Fatalf("postgresPairs: %v", err)
 	}
-	if len(pairs) != 1 || pairs[0].source != "orders" || pairs[0].target != "orders" {
+	if len(pairs) != 1 || pairs[0].Source != "orders" || pairs[0].Target != "orders" {
 		t.Errorf("configured pairs came back as %+v", pairs)
 	}
 }

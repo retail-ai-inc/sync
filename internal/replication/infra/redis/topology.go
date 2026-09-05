@@ -108,17 +108,8 @@ func (w *topologyWatcher) Run(ctx context.Context) error {
 			}
 		}
 		if settled >= reshardPollsToConfirm {
-			// Retryable, not Unrecoverable. Both stop the shards; the difference is
-			// what happens next. Unrecoverable leaves the task blocked until somebody
-			// notices, and the ranges that appeared stay unreplicated for as long as
-			// that takes -- on a disaster-recovery link that is the worse outcome of
-			// the two. A restart rediscovers the shape and covers them again. It is
-			// not cheap: the new shards have names this task has no position for, so
-			// each takes a first copy. The supervisor's backoff is what stops a
-			// flapping cluster from doing that repeatedly.
-			w.logger().Warnf("[Redis] The source was resharded: %s%s. Stopping the "+
-				"task so it restarts and picks up the new shape. The ranges that "+
-				"appeared have no position, so each takes a first copy.", added, removed)
+			// The error carries the reason; see reshardError for why it is
+			// retryable. Logging it here as well told the operator twice.
 			return reshardError(added, removed)
 		}
 

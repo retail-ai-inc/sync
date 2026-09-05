@@ -17,5 +17,7 @@ func TestMain(m *testing.M) {
 	probeReadTimeout = 2 * time.Second
 	schemaTimeout = 2 * time.Second
 	schemaDialTimeout = 500 * time.Millisecond
+	// The read is against a server on this machine, so it needs room to answer.
+	schemaReadTimeout = 5 * time.Second
 	os.Exit(m.Run())
 }

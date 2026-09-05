@@ -19,7 +19,7 @@ import (
 // made the caller wait four of them to be told so. The readiness probe opens
 // this database, and a probe that took four seconds to answer would be timed
 // out by the thing asking.
-var openRetryPause = 50 * time.Millisecond
+const openRetryPause = 50 * time.Millisecond
 
 // DefaultPath is where the control database lives when SYNC_DB_PATH says
 // nothing: alongside the working directory, not a path baked in at build time.

@@ -40,16 +40,3 @@ func TestTableStatCarriesItsFields(t *testing.T) {
 		t.Errorf("TableStat = %+v", s)
 	}
 }
-
-func TestLowerIsCaseFolding(t *testing.T) {
-	for in, want := range map[string]string{
-		"MongoDB": "mongodb",
-		"MYSQL":   "mysql",
-		"redis":   "redis",
-		"":        "",
-	} {
-		if got := lower(in); got != want {
-			t.Errorf("lower(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
