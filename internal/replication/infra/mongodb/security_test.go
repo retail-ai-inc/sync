@@ -1,8 +1,11 @@
 package mongodb
 
 import (
+	"bytes"
+	"strings"
 	"testing"
 
+	"github.com/sirupsen/logrus"
 	"go.mongodb.org/mongo-driver/v2/bson"
 
 	"github.com/retail-ai-inc/sync/internal/platform/config"
@@ -55,5 +58,37 @@ func TestMaskingABsonMStillWorks(t *testing.T) {
 	document := documentOf(masked)
 	if document["card"] != "****" {
 		t.Errorf("card = %v, want it masked", document["card"])
+	}
+}
+
+// The warning is one a collection, not one an event: a busy collection would
+// otherwise fill the log with the same line, which is how a warning stops
+// being read.
+func TestDroppedDeletesAreReportedOncePerCollection(t *testing.T) {
+	var out bytes.Buffer
+	logger := logrus.New()
+	logger.SetOutput(&out)
+	logger.SetLevel(logrus.InfoLevel)
+
+	syncer := &MongoDBSyncer{logger: logger}
+	for i := 0; i < 5; i++ {
+		syncer.warnAboutDroppedDeletes("shop", "orders")
+	}
+	syncer.warnAboutDroppedDeletes("shop", "customers")
+
+	text := out.String()
+	if n := strings.Count(text, "shop.orders"); n != 1 {
+		t.Errorf("shop.orders was reported %d times, want 1", n)
+	}
+	if n := strings.Count(text, "shop.customers"); n != 1 {
+		t.Errorf("shop.customers was reported %d times, want 1", n)
+	}
+	// At warning level, because Debug is not shown in production and the target
+	// silently keeping deleted documents is what this is for.
+	if !strings.Contains(text, "level=warning") {
+		t.Errorf("the report is not a warning: %s", text)
+	}
+	if !strings.Contains(text, "ignoreDeleteOps") {
+		t.Error("the report does not name the setting that caused it")
 	}
 }

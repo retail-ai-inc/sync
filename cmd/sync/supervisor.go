@@ -275,7 +275,37 @@ func (s *supervisor) start(parentCtx context.Context, sc config.SyncConfig) {
 		task.err = resilience.Guard(func() error { return syncer(ctx) })
 	}()
 	metrics.SetTaskBlocked(taskLabels(sc), false)
+	warnAboutRetiredPaths(sc, s.log)
 	s.log.Infof("Task %d (%s) started", sc.ID, sc.Type)
+}
+
+// warnAboutRetiredPaths reports the position paths that no longer mean what
+// their names say.
+//
+// Positions live in the target database now. Accepting a path and doing
+// nothing with it is worse than rejecting it: somebody configures one and
+// believes there is a local copy of the position to fall back on. Two of the
+// three are not inert either -- they silently double as "re-copy a target that
+// already holds rows", which is a different decision entirely.
+func warnAboutRetiredPaths(sc config.SyncConfig, log *logrus.Logger) {
+	if sc.RedisPositionPath != "" {
+		log.Warnf("Task %d: redis_position_path (%s) no longer does anything. A "+
+			"Redis position is the per-slot markers and the metadata key on the "+
+			"target, and nothing is written to this path.",
+			sc.ID, sc.RedisPositionPath)
+	}
+	for _, retired := range []struct{ name, value string }{
+		{"mysql_position_path", sc.MySQLPositionPath},
+		{"mongodb_resume_token_path", sc.MongoDBResumeTokenPath},
+	} {
+		if retired.value == "" {
+			continue
+		}
+		log.Warnf("Task %d: %s (%s) no longer stores a position -- positions are "+
+			"kept in the target database. Setting it now means only that a target "+
+			"which already holds data is left alone instead of being copied again.",
+			sc.ID, retired.name, retired.value)
+	}
 }
 
 func (s *supervisor) stop(id int) {

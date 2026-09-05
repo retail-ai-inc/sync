@@ -85,8 +85,7 @@ func (s *MongoDBSyncer) convertRawBSONToWriteModel(rawData bson.Raw, sourceDB, c
 		// Check if delete operations should be ignored for this collection
 		advancedSettings := s.findTableAdvancedSettings(collectionName)
 		if advancedSettings.IgnoreDeleteOps {
-			s.logger.Debugf("[MongoDB] Ignoring delete operation for %s.%s (ignoreDeleteOps=true)",
-				sourceDB, collectionName)
+			s.warnAboutDroppedDeletes(sourceDB, collectionName)
 			return nil, nil
 		}
 

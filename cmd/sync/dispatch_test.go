@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -511,5 +513,65 @@ func TestCorrectingAnUnknownEngineStartsTheTask(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatalf("the corrected task never started (build called %d times)", resolved)
+	}
+}
+
+// Accepting a path and doing nothing with it is worse than rejecting it:
+// somebody configures one and believes there is a local copy of the position.
+func TestRetiredPositionPathsAreReported(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		set     func(*config.SyncConfig)
+		expects []string
+	}{
+		{
+			name: "redis",
+			set:  func(sc *config.SyncConfig) { sc.RedisPositionPath = "/mnt/redis" },
+			expects: []string{"redis_position_path", "/mnt/redis",
+				"no longer does anything"},
+		},
+		{
+			name: "mysql",
+			set:  func(sc *config.SyncConfig) { sc.MySQLPositionPath = "/mnt/mysql" },
+			expects: []string{"mysql_position_path", "/mnt/mysql",
+				"no longer stores a position", "copied again"},
+		},
+		{
+			name: "mongodb",
+			set:  func(sc *config.SyncConfig) { sc.MongoDBResumeTokenPath = "/mnt/mongo" },
+			expects: []string{"mongodb_resume_token_path", "/mnt/mongo",
+				"no longer stores a position"},
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var out bytes.Buffer
+			log := logrus.New()
+			log.SetOutput(&out)
+
+			sc := baseTask()
+			c.set(&sc)
+			warnAboutRetiredPaths(sc, log)
+
+			text := out.String()
+			for _, want := range c.expects {
+				if !strings.Contains(text, want) {
+					t.Errorf("the report does not mention %q: %s", want, text)
+				}
+			}
+			if !strings.Contains(text, "level=warning") {
+				t.Errorf("the report is not a warning: %s", text)
+			}
+		})
+	}
+}
+
+func TestATaskWithNoRetiredPathsIsSilent(t *testing.T) {
+	var out bytes.Buffer
+	log := logrus.New()
+	log.SetOutput(&out)
+
+	warnAboutRetiredPaths(baseTask(), log)
+	if out.Len() != 0 {
+		t.Errorf("a task configuring none of them was reported anyway: %s", out.String())
 	}
 }

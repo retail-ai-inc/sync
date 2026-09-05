@@ -3,7 +3,6 @@ package mongodb
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -38,6 +37,37 @@ type MongoDBSyncer struct {
 	// value: the first reason is the one worth acting on and the rest follow
 	// from it.
 	faults chan error
+	// droppedDeletes remembers which collections have already been reported for
+	// ignoreDeleteOps, so the warning is one a collection rather than one an
+	// event.
+	droppedDeletes  map[string]bool
+	droppedDeletesM sync.Mutex
+}
+
+// warnAboutDroppedDeletes reports, once a collection, that deletes are being
+// discarded.
+//
+// It used to be a Debug line, which production log levels do not show. The
+// target then keeps documents the source has deleted for ever, and the
+// consistency check reports every one of them as extra -- so the first visible
+// sign of a deliberate setting was a comparison that looked broken.
+func (s *MongoDBSyncer) warnAboutDroppedDeletes(sourceDB, collectionName string) {
+	name := sourceDB + "." + collectionName
+
+	s.droppedDeletesM.Lock()
+	if s.droppedDeletes == nil {
+		s.droppedDeletes = map[string]bool{}
+	}
+	warned := s.droppedDeletes[name]
+	s.droppedDeletes[name] = true
+	s.droppedDeletesM.Unlock()
+
+	if warned {
+		return
+	}
+	s.logger.Warnf("[MongoDB] %s has ignoreDeleteOps set, so deletes are not "+
+		"replicated. The target keeps documents the source has removed, and the "+
+		"consistency check reports each of them as extra.", name)
 }
 
 // NewMongoDBSyncer builds the syncer for one task. It never returns nil.
@@ -58,11 +88,6 @@ func NewMongoDBSyncer(cfg config.SyncConfig, globalConfig *config.Config, logger
 	}
 
 	resumeMap := make(map[string]bson.Raw)
-	if cfg.MongoDBResumeTokenPath != "" {
-		if e2 := os.MkdirAll(cfg.MongoDBResumeTokenPath, os.ModePerm); e2 != nil {
-			logger.Warnf("[MongoDB] Failed to create resume token dir %s: %v", cfg.MongoDBResumeTokenPath, e2)
-		}
-	}
 
 	return &MongoDBSyncer{
 		sourceClient:     sourceClient,
