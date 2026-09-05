@@ -328,6 +328,11 @@ func (r *Runner) startResyncs(ctx context.Context, queue chan<- *domain.Event, p
 				// A chunk is its own batch: it carries no position, and its last event
 				// closes the batch so it is not held for a boundary that will not come.
 				events[len(events)-1].EndsTransaction = true
+				// Closed by the applier once the batch carrying the chunk has
+				// reached the target, which is what the re-copy waits on before
+				// recording its progress.
+				landed := make(chan struct{})
+				events[len(events)-1].Landed = landed
 				for i, event := range events {
 					event.Pos = domain.Position{}
 					// A chunk is one unit to the applier, so only its first event
@@ -346,7 +351,18 @@ func (r *Runner) startResyncs(ctx context.Context, queue chan<- *domain.Event, p
 						return ctx.Err()
 					}
 				}
-				return nil
+
+				// Handing the chunk over is not applying it. The caller records
+				// its progress when this returns, so returning early would let a
+				// crash lose rows that were still in the queue -- the next run
+				// would resume past them and the re-copy would have skipped part
+				// of what it was asked to repair.
+				select {
+				case <-landed:
+					return nil
+				case <-ctx.Done():
+					return ctx.Err()
+				}
 			})
 			if err == nil {
 				r.log().Infof(r.tag("Finished re-copying %s"), resync.NS)
@@ -543,6 +559,13 @@ func (r *Runner) apply(ctx context.Context, queue <-chan *domain.Event) error {
 		err := r.applyBatch(writeCtx, events, pending)
 		if err == nil {
 			r.held.release(held)
+			// Whoever is waiting to hear that these reached the target, chiefly
+			// a re-copy deciding whether it may record its progress.
+			for _, event := range events {
+				if event.Landed != nil {
+					close(event.Landed)
+				}
+			}
 		}
 		return err
 	}

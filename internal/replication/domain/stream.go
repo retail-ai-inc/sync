@@ -80,6 +80,16 @@ type Event struct {
 	// measured from it.
 	SourceTime time.Time
 
+	// Landed, when set, is closed once the batch carrying this event has been
+	// applied to the target. It is nil for everything the stream produces.
+	//
+	// It exists for the re-copy, whose progress is stored so an interrupted run
+	// resumes where it stopped. Handing a chunk to the queue is not applying it,
+	// and recording progress on the hand-over meant a crash between the two lost
+	// those rows for good: the next run resumed past them, and the re-copy that
+	// was meant to repair the target had quietly skipped part of it.
+	Landed chan struct{}
+
 	// EndsTransaction marks the last event of a source transaction, and a batch
 	// may only be cut where it is true: a transaction split across two batches
 	// shows the target the order without its payment, permanently so if the

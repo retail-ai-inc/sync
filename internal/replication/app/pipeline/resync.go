@@ -83,9 +83,14 @@ func (r *Resync) run(ctx context.Context, read streamClock, emit func([]*domain.
 			}
 		}
 
-		// The progress moves only after the chunk has been handed over, so an
+		// The progress moves only after the chunk has reached the target, so an
 		// interrupted re-copy repeats a chunk rather than skipping one. Repeating
 		// is safe: the writes are upserts.
+		//
+		// It used to move once the chunk had been handed to the queue, which is
+		// not the same thing and gave the opposite guarantee: a crash between the
+		// hand-over and the write lost those rows, because the stored progress
+		// had already passed them. emit now returns when the batch has landed.
 		if chunk.After != "" && r.Progress != nil {
 			if err := r.Progress.Save(ctx, r.ProgressKey, chunk.After); err != nil {
 				return fmt.Errorf("record the re-copy's progress: %w", err)

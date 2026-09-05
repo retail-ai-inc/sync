@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -311,4 +312,75 @@ func TestATransactionLargerThanTheBudgetStillReplicates(t *testing.T) {
 	if applied != 3 {
 		t.Errorf("applied %d events, want the whole transaction of 3", applied)
 	}
+}
+
+// TestARecopyRecordsProgressOnlyAfterTheRowsLand covers a re-copy quietly
+// skipping part of what it was asked to repair.
+//
+// Progress is stored so an interrupted run resumes where it stopped. Handing a
+// chunk to the queue is not applying it, and recording progress on the
+// hand-over meant a crash between the two lost those rows for good: the next
+// run resumed past them. The comment above the save said the opposite -- that
+// an interrupted run repeats a chunk rather than skipping one -- which is the
+// guarantee this restores.
+func TestARecopyRecordsProgressOnlyAfterTheRowsLand(t *testing.T) {
+	ns := domain.Namespace{DB: "shop", Object: "orders"}
+	progress := newStore()
+
+	// An applier that refuses to accept anything until released, so the chunk
+	// is in the queue and unapplied for as long as the test needs.
+	blocked := make(chan struct{})
+	applier := &fakeApplier{block: blocked}
+
+	resync := &Resync{
+		NS:          ns,
+		ProgressKey: "orders",
+		Progress:    progress,
+		Reader: &oneChunkReader{chunk: Chunk{
+			ReadAt: time.Now().Add(-time.Hour),
+			Events: []*domain.Event{{NS: ns, Op: domain.OpInsert, Key: "1", Bytes: 1}},
+			After:  "1",
+			Done:   true,
+		}},
+	}
+
+	// The chunk is held until the stream has been read past the moment it was
+	// read at, so the stream has to have delivered something newer.
+	stream := &fakeReader{events: []*domain.Event{
+		{NS: ns, Op: domain.OpInsert, Key: "stream", Bytes: 1,
+			SourceTime: time.Now(), EndsTransaction: true,
+			Pos: domain.Position{Payload: "p1"}},
+	}}
+
+	r := newRunner(t, stream, applier, newStore())
+	labels := metrics.Labels{"task": t.Name()}
+	r.Opts.Labels = labels
+	r.Resyncs = []*Resync{resync}
+	t.Cleanup(func() { metrics.Default.Forget(labels) })
+
+	go func() { _ = runFor(t, r, 2*time.Second) }()
+
+	// While the applier is blocked the chunk cannot have landed, so nothing may
+	// have been recorded.
+	time.Sleep(250 * time.Millisecond)
+	if stored, _ := progress.Load(context.Background(), "orders"); stored != "" {
+		t.Errorf("progress was recorded as %q while the rows were still in the "+
+			"queue; a crash here loses them and the next run resumes past them",
+			stored)
+	}
+	close(blocked)
+}
+
+// oneChunkReader hands out a single chunk and then reports it is done.
+type oneChunkReader struct {
+	chunk Chunk
+	given bool
+}
+
+func (o *oneChunkReader) NextChunk(context.Context, domain.Namespace, string, int) (Chunk, error) {
+	if o.given {
+		return Chunk{Done: true}, nil
+	}
+	o.given = true
+	return o.chunk, nil
 }
