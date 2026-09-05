@@ -187,3 +187,72 @@ func TestHoldsSchemaChangeFindsOneAnywhere(t *testing.T) {
 		})
 	}
 }
+
+// What the lag figure means. It answers one question -- how far behind is the
+// target -- and the whole point of these is that it must not answer a different
+// one when the first has no interesting answer.
+
+func TestLagIsTheAgeOfTheOldestUnappliedChange(t *testing.T) {
+	now := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+	oldest := now.Add(-90 * time.Second)
+
+	got, known := lagSeconds(now, oldest, now.Add(-time.Second), now.Add(-time.Hour))
+	if !known {
+		t.Fatal("a task with a backlog reported an unknown lag")
+	}
+	if got != 90 {
+		t.Errorf("lag = %v, want 90 -- the age of the oldest change still waiting", got)
+	}
+}
+
+// TestCaughtUpIsZeroNotTheAgeOfTheLastHeartbeat is the fix this exists for.
+//
+// Nothing waiting means nothing is behind. Reporting the age of the newest
+// thing heard instead answered a different question, and on a quiet source the
+// newest thing heard is the last heartbeat -- so the gauge walked from zero up
+// to the heartbeat interval and dropped back, reading as three to five seconds
+// of steady lag on links measured end to end at about a tenth of a second.
+func TestCaughtUpIsZeroNotTheAgeOfTheLastHeartbeat(t *testing.T) {
+	now := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+
+	for name, c := range map[string]struct{ read, applied time.Time }{
+		"heartbeat nine seconds ago":      {now.Add(-9 * time.Second), now.Add(-time.Hour)},
+		"nothing read for an hour":        {now.Add(-time.Hour), now.Add(-time.Hour)},
+		"applied long ago, read just now": {now, now.Add(-24 * time.Hour)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, known := lagSeconds(now, time.Time{}, c.read, c.applied)
+			if !known {
+				t.Fatal("a task that has read something reported an unknown lag")
+			}
+			if got != 0 {
+				t.Errorf("lag = %v with nothing waiting to be applied; the target is "+
+					"not behind, and this is measuring how long since we last heard "+
+					"from the source instead", got)
+			}
+		})
+	}
+}
+
+// TestALagIsUnknownBeforeAnythingIsRead: a task that has not reached its source
+// is not caught up, and publishing zero for it would show a healthy figure for
+// a link that has never worked.
+func TestALagIsUnknownBeforeAnythingIsRead(t *testing.T) {
+	now := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+
+	if _, known := lagSeconds(now, time.Time{}, time.Time{}, time.Time{}); known {
+		t.Error("a task that has read nothing published a lag")
+	}
+}
+
+// TestABacklogWinsOverEverythingElse: once something is waiting, that is the
+// answer regardless of how recently the stream was heard from.
+func TestABacklogWinsOverEverythingElse(t *testing.T) {
+	now := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+
+	got, known := lagSeconds(now, now.Add(-10*time.Minute), now, now)
+	if !known || got != 600 {
+		t.Errorf("lag = %v (known=%v), want 600 -- a fresh heartbeat does not clear "+
+			"a ten-minute backlog", got, known)
+	}
+}

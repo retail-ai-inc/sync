@@ -558,9 +558,12 @@ func TestAQuietSourceDoesNotLookLikeALag(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	if got := gauge(t, metrics.LagSeconds, labels); got > 60 {
-		t.Errorf("lag = %.0fs for a quiet but caught-up stream; the last change being "+
-			"an hour old is not a lag", got)
+	// Caught up is zero, not "how long since we last heard anything". The
+	// heartbeat is a second old and the last change an hour old; neither is a
+	// lag, because nothing is waiting to be applied.
+	if got := gauge(t, metrics.LagSeconds, labels); got > 1 {
+		t.Errorf("lag = %.2fs for a quiet but caught-up stream; nothing is waiting "+
+			"to be applied, so nothing is behind", got)
 	}
 }
 
@@ -603,10 +606,20 @@ func headroomOf(t *testing.T, labels metrics.Labels) (float64, bool) {
 	return 0, false
 }
 
-func runReporting(t *testing.T, r *Runner, lastRead time.Time) {
+// runReporting drives one reporting tick for a task that is behind, with its
+// oldest unapplied change made at oldestPending.
+//
+// The backlog is what the headroom is computed from: a task that is caught up
+// holds a position at the head of the source's log and can afford the whole
+// window, and one carrying an unapplied change from an hour ago has an hour
+// less. It used to be set up by ageing lastReadAt instead, which measured how
+// long since anything was heard -- a different quantity, and one a heartbeat
+// resets.
+func runReporting(t *testing.T, r *Runner, oldestPending time.Time) {
 	t.Helper()
 	r.mu.Lock()
-	r.lastReadAt = lastRead
+	r.oldestPending = oldestPending
+	r.lastReadAt = oldestPending
 	r.mu.Unlock()
 
 	stop := r.report(context.Background())
@@ -857,7 +870,9 @@ func TestASourceThatSaysNotYetAndThenAnswersIsPublished(t *testing.T) {
 		clock:  func() time.Time { return now },
 		Opts:   Options{Labels: labels, ReportInterval: time.Millisecond, Logger: quietLogger()},
 	}
+	// Thirty seconds of backlog, so the headroom is the window less that.
 	r.mu.Lock()
+	r.oldestPending = now.Add(-30 * time.Second)
 	r.lastReadAt = now.Add(-30 * time.Second)
 	r.mu.Unlock()
 

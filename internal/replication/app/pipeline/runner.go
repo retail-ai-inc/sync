@@ -859,19 +859,35 @@ func (r *Runner) report(ctx context.Context) (stop func()) {
 	return func() { once.Do(func() { close(done) }) }
 }
 
-// lagSeconds measures from the oldest change still waiting while behind, and
-// from the newest thing the stream reported once caught up — measuring from the
-// last change applied made a quiet source report an hour of lag.
+// lagSeconds reports how far behind the target is: the age of the oldest change
+// that has been read and not yet applied.
+//
+// Nothing waiting means nothing is behind, so the answer is zero. It used to be
+// the age of the newest thing the stream had reported, which is a different
+// question -- and on a quiet source the newest thing reported is the last
+// heartbeat, so the figure walked from zero up to the heartbeat interval and
+// dropped back. That read as three to five seconds of steady lag on links whose
+// measured end-to-end delay was about a tenth of a second, and it was not a
+// small number being reported imprecisely: it was the wrong quantity. The
+// earlier spelling, measuring from the last change applied, was wrong the same
+// way in the other direction -- an hour since the last write reported an hour
+// of lag.
+//
+// Whether the stream is alive is a separate question with its own metric.
+// sync_source_last_event_age_seconds measures the age of the newest thing heard
+// from the source, heartbeats included, and rising there is what says a link has
+// gone quiet. Folding the two together left neither answerable.
+//
+// Unknown, rather than zero, until something has been read or applied: a task
+// that has not reached its source yet is not caught up.
 func lagSeconds(now, oldest, read, applied time.Time) (float64, bool) {
-	switch {
-	case !oldest.IsZero():
+	if !oldest.IsZero() {
 		return now.Sub(oldest).Seconds(), true
-	case !read.IsZero():
-		return now.Sub(read).Seconds(), true
-	case !applied.IsZero():
-		return now.Sub(applied).Seconds(), true
 	}
-	return 0, false
+	if read.IsZero() && applied.IsZero() {
+		return 0, false
+	}
+	return 0, true
 }
 
 // reportRetention publishes how long the task could afford to be stopped. The
