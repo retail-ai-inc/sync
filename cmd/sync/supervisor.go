@@ -2,12 +2,15 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"github.com/retail-ai-inc/sync/internal/platform/resilience"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/mongodb"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/mysql"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/redis"
+	"io"
 	"strconv"
 	"strings"
 	"time"
@@ -86,14 +89,37 @@ func globalFingerprint(cfg *config.Config) string {
 		Webhook    string
 		Channel    string
 		LogLevel   string
+		Tasks      string
 	}{
 		cfg.EnableTableRowCountMonitoring, cfg.MonitorInterval,
 		cfg.SlackWebhookURL, cfg.SlackChannel, cfg.LogLevel,
+		taskListFingerprint(cfg),
 	})
 	if err != nil {
 		return time.Now().String()
 	}
 	return string(encoded)
+}
+
+// taskListFingerprint digests the tasks the watchers read.
+//
+// The monitors keep the configuration they were started with: the row count
+// monitor and the consistency checker both walk cfg.SyncConfigs on every tick,
+// from the pointer handed to them. Leaving the task list out of this meant a
+// task added, edited, disabled or deleted changed nothing for them until a
+// global setting happened to change or the process restarted -- a new task went
+// unmonitored, and a disabled one went on being compared, with repairs enabled
+// still writing to the target it had been taken off.
+//
+// Digested rather than embedded whole: it is compared on every reload, and the
+// configurations carry credentials that are better not held twice.
+func taskListFingerprint(cfg *config.Config) string {
+	sum := sha256.New()
+	for _, task := range cfg.SyncConfigs {
+		_, _ = io.WriteString(sum, fingerprint(task))
+		_, _ = io.WriteString(sum, "\n")
+	}
+	return hex.EncodeToString(sum.Sum(nil))
 }
 
 // supervisor keeps the running syncers in step with the stored configuration.
