@@ -88,18 +88,27 @@ func TestStopEndsTheLoop(t *testing.T) {
 	n.Stop()
 }
 
-// The interval is the floor on latency for a sharded source whose shards are
-// not all busy, so it has to stay well under a second -- a second was measured
-// against a real cluster and turned out to be the whole of the delay.
-func TestTheNudgeIntervalIsBelowTheLatencyAnyoneWouldNotice(t *testing.T) {
-	if nudgeInterval > 500*time.Millisecond {
-		t.Errorf("nudgeInterval is %v, which puts that much under every event's "+
-			"delay on a quiet sharded cluster", nudgeInterval)
-	}
-	// Not the interval: a timeout that short would abandon every nudge that took
-	// longer than one tick to reach every shard, which is the case it exists for.
+// The timeout is not the interval. Tied to it, a nudge that took longer than
+// one tick to reach every shard would be abandoned every time -- which is the
+// case the nudger exists for.
+func TestTheNudgeTimeoutIsNotTheInterval(t *testing.T) {
 	if nudgeTimeout <= nudgeInterval {
 		t.Errorf("nudgeTimeout (%v) is not longer than nudgeInterval (%v), so a "+
 			"nudge slower than one tick would never finish", nudgeTimeout, nudgeInterval)
+	}
+}
+
+// The await window is the delay; the heartbeat interval is liveness. They were
+// one constant, so shortening the delay would have multiplied the position
+// writes and the source clock reads by the same factor.
+func TestTheAwaitWindowIsShorterThanTheHeartbeat(t *testing.T) {
+	if streamAwait >= idleHeartbeat {
+		t.Errorf("streamAwait (%v) is not shorter than idleHeartbeat (%v), so the "+
+			"await window is doing nothing for latency", streamAwait, idleHeartbeat)
+	}
+	// mongos returns when the window ends rather than when the event arrives, so
+	// this is a floor under every change's latency on a sharded source.
+	if streamAwait > 500*time.Millisecond {
+		t.Errorf("streamAwait is %v, which is that much under every event", streamAwait)
 	}
 }

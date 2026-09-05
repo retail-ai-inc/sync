@@ -17,13 +17,14 @@ import (
 // entry per shard, so it does not want to be shorter than the latency anyone
 // will notice.
 //
-// A second was measured against a real sharded source and turned out to be the
-// whole of the delay: events arrived between 0.6 and 2.2 seconds old, which is
-// one nudge window plus the merge. A quarter of a second costs four no-op
-// entries a second per shard instead of one -- each is around a hundred bytes,
-// so about forty megabytes of oplog a day against a source whose window holds
-// thirty-one hours of real traffic.
-const nudgeInterval = 250 * time.Millisecond
+// Measured against a real sharded source, this buys nothing there: counting the
+// oplog of each shard found no entry this had written, while the shards carried
+// twenty-four no-ops a second of their own. The command is accepted by mongos
+// and does not reach the shards. Left at a second rather than shortened, since
+// a shorter one would only send an ineffective command more often -- and left
+// in rather than removed, because a deployment where it does land is the one it
+// was written for. See docs: it is recorded as a thing to confirm.
+const nudgeInterval = time.Second
 
 // nudger keeps a sharded source's shards from going quiet.  # Why this exists
 // On a sharded cluster mongos merges one change stream per shard and must

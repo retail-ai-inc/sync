@@ -55,6 +55,10 @@ type Reader struct {
 	openID string
 	ready  []*domain.Event
 	lastAt time.Time
+	// lastBeat is when the last heartbeat was emitted. The await window is much
+	// shorter than the heartbeat interval, so without this every empty window
+	// would produce one.
+	lastBeat time.Time
 
 	closeOnce sync.Once
 }
@@ -74,6 +78,23 @@ type Reader struct {
 // One second costs one getMore return per second on an idle stream, which is
 // the cadence the shard nudger already runs at.
 const idleHeartbeat = time.Second
+
+// streamAwait is how long the server may hold a getMore that has nothing to
+// return. It is separate from the heartbeat cadence because it is not a
+// liveness setting: it is the delay.
+//
+// mongos does not return an event as it arrives. It returns when the current
+// await window ends, so this is a floor under every change's latency on a
+// sharded source. Measured against the real cluster with a change stream of its
+// own and no replication involved: at one second events arrived after 1011 to
+// 2013ms, at 200ms after 412 to 1825ms, at 100ms after 414 to 940ms. What does
+// not go away is the merge -- mongos may not release an event stamped T until
+// every shard has reported past T -- so this buys the difference and not the
+// whole of it.
+//
+// The cost is one getMore per interval on one cluster-wide stream, not one per
+// collection.
+const streamAwait = 200 * time.Millisecond
 
 // Open starts the change stream at a position, or at the current end when there
 // is none.
@@ -103,7 +124,7 @@ func (r *Reader) Open(ctx context.Context, from domain.Position) error {
 		SetShowExpandedEvents(true).
 		// Without this the stream blocks for as long as the server likes, and a
 		// reader that never returns cannot report that it is alive.
-		SetMaxAwaitTime(idleHeartbeat)
+		SetMaxAwaitTime(streamAwait)
 
 	if !from.IsZero() {
 		stored, err := decodePosition(from)
@@ -219,6 +240,13 @@ func (r *Reader) fill(ctx context.Context) error {
 			return nil
 		}
 
+		// The await window is short so that an event is not held, but a heartbeat
+		// is a different thing: it writes a position to the target and asks the
+		// source for its clock, and doing that five times a second buys nothing.
+		if !r.lastBeat.IsZero() && time.Since(r.lastBeat) < idleHeartbeat {
+			continue
+		}
+
 		token := r.stream.ResumeToken()
 		if token == nil {
 			continue
@@ -235,6 +263,7 @@ func (r *Reader) fill(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		r.lastBeat = time.Now()
 		r.ready = append(r.ready, &domain.Event{
 			Heartbeat:       true,
 			EndsTransaction: true,
