@@ -87,3 +87,19 @@ func TestStopEndsTheLoop(t *testing.T) {
 	// Twice, because Close may run more than once.
 	n.Stop()
 }
+
+// The interval is the floor on latency for a sharded source whose shards are
+// not all busy, so it has to stay well under a second -- a second was measured
+// against a real cluster and turned out to be the whole of the delay.
+func TestTheNudgeIntervalIsBelowTheLatencyAnyoneWouldNotice(t *testing.T) {
+	if nudgeInterval > 500*time.Millisecond {
+		t.Errorf("nudgeInterval is %v, which puts that much under every event's "+
+			"delay on a quiet sharded cluster", nudgeInterval)
+	}
+	// Not the interval: a timeout that short would abandon every nudge that took
+	// longer than one tick to reach every shard, which is the case it exists for.
+	if nudgeTimeout <= nudgeInterval {
+		t.Errorf("nudgeTimeout (%v) is not longer than nudgeInterval (%v), so a "+
+			"nudge slower than one tick would never finish", nudgeTimeout, nudgeInterval)
+	}
+}

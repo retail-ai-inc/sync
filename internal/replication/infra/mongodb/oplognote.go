@@ -16,7 +16,14 @@ import (
 // not all busy, so it wants to be short; every tick costs one no-op oplog
 // entry per shard, so it does not want to be shorter than the latency anyone
 // will notice.
-const nudgeInterval = time.Second
+//
+// A second was measured against a real sharded source and turned out to be the
+// whole of the delay: events arrived between 0.6 and 2.2 seconds old, which is
+// one nudge window plus the merge. A quarter of a second costs four no-op
+// entries a second per shard instead of one -- each is around a hundred bytes,
+// so about forty megabytes of oplog a day against a source whose window holds
+// thirty-one hours of real traffic.
+const nudgeInterval = 250 * time.Millisecond
 
 // nudger keeps a sharded source's shards from going quiet.  # Why this exists
 // On a sharded cluster mongos merges one change stream per shard and must
@@ -86,11 +93,18 @@ func (n *nudger) run() {
 	}
 }
 
+// nudgeTimeout bounds one nudge. It is not the interval: the interval is short
+// on purpose, and a timeout that short would abandon every nudge that took
+// longer than one tick to reach every shard -- which is the case this exists
+// for. A nudge that runs long delays the next tick instead, because the loop
+// is sequential and a Go ticker drops what it cannot deliver.
+const nudgeTimeout = 2 * time.Second
+
 // nudge advances every shard's oplog once, and reports whether to keep going.
 // A failure that is the credentials refusing the command will fail identically
 // for ever, so it stops rather than logging the same line every second.
 func (n *nudger) nudge() bool {
-	ctx, cancel := context.WithTimeout(context.Background(), n.interval)
+	ctx, cancel := context.WithTimeout(context.Background(), nudgeTimeout)
 	defer cancel()
 
 	err := n.client.Database("admin").RunCommand(ctx, bson.D{
