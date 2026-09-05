@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/retail-ai-inc/sync/internal/platform/config"
+
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
 )
 
@@ -20,6 +22,15 @@ func oneColumn(match string, values ...string) reply {
 		rows = append(rows, []driver.Value{v})
 	}
 	return reply{match: match, columns: []string{"COLUMN_NAME"}, rows: rows}
+}
+
+// twoColumn answers the column query, which now also reads EXTRA.
+func twoColumn(match string, rows [][2]string) reply {
+	out := make([][]driver.Value, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, []driver.Value{r[0], r[1]})
+	}
+	return reply{match: match, columns: []string{"COLUMN_NAME", "EXTRA"}, rows: out}
 }
 
 func chunkSource(t *testing.T, replies ...reply) (*Chunks, *fakeDB) {
@@ -45,7 +56,7 @@ func TestTheSourcesClockIsReadBeforeTheRows(t *testing.T) {
 	chunks, fake := chunkSource(t,
 		clockReply(1757000000),
 		oneColumn("KEY_COLUMN_USAGE", "id"),
-		oneColumn("information_schema.COLUMNS", "id", "amount"),
+		twoColumn("information_schema.COLUMNS", [][2]string{{"id", ""}, {"amount", ""}}),
 		reply{match: "FROM tenant_trial_naviee.orders",
 			columns: []string{"id", "amount"},
 			rows:    [][]driver.Value{{int64(1), int64(100)}}},
@@ -83,7 +94,7 @@ func TestAChunkCarriesTheRowsAsUpserts(t *testing.T) {
 	chunks, _ := chunkSource(t,
 		clockReply(1757000000),
 		oneColumn("KEY_COLUMN_USAGE", "id"),
-		oneColumn("information_schema.COLUMNS", "id", "amount"),
+		twoColumn("information_schema.COLUMNS", [][2]string{{"id", ""}, {"amount", ""}}),
 		reply{match: "FROM tenant_trial_naviee.orders",
 			columns: []string{"id", "amount"},
 			rows: [][]driver.Value{
@@ -123,7 +134,7 @@ func TestAFullChunkIsNotTheLast(t *testing.T) {
 	chunks, _ := chunkSource(t,
 		clockReply(1),
 		oneColumn("KEY_COLUMN_USAGE", "id"),
-		oneColumn("information_schema.COLUMNS", "id"),
+		twoColumn("information_schema.COLUMNS", [][2]string{{"id", ""}}),
 		reply{match: "FROM tenant_trial_naviee.orders", columns: []string{"id"},
 			rows: [][]driver.Value{{int64(1)}, {int64(2)}}},
 	)
@@ -142,7 +153,7 @@ func TestAShortChunkIsTheLast(t *testing.T) {
 	chunks, _ := chunkSource(t,
 		clockReply(1),
 		oneColumn("KEY_COLUMN_USAGE", "id"),
-		oneColumn("information_schema.COLUMNS", "id"),
+		twoColumn("information_schema.COLUMNS", [][2]string{{"id", ""}}),
 		reply{match: "FROM tenant_trial_naviee.orders", columns: []string{"id"},
 			rows: [][]driver.Value{{int64(1)}}},
 	)
@@ -163,7 +174,7 @@ func TestTheKeyIsBoundNotInterpolated(t *testing.T) {
 	chunks, fake := chunkSource(t,
 		clockReply(1),
 		oneColumn("KEY_COLUMN_USAGE", "id"),
-		oneColumn("information_schema.COLUMNS", "id"),
+		twoColumn("information_schema.COLUMNS", [][2]string{{"id", ""}}),
 		reply{match: "FROM tenant_trial_naviee.orders", columns: []string{"id"}},
 	)
 
@@ -211,7 +222,7 @@ func TestATableWithNoColumnsIsReported(t *testing.T) {
 	chunks, _ := chunkSource(t,
 		clockReply(1),
 		oneColumn("KEY_COLUMN_USAGE", "id"),
-		oneColumn("information_schema.COLUMNS"),
+		twoColumn("information_schema.COLUMNS", nil),
 	)
 
 	if _, err := chunks.NextChunk(context.Background(),
@@ -237,7 +248,7 @@ func TestTheTargetTableIsResolved(t *testing.T) {
 	chunks, _ := chunkSource(t,
 		clockReply(1),
 		oneColumn("KEY_COLUMN_USAGE", "id"),
-		oneColumn("information_schema.COLUMNS", "id"),
+		twoColumn("information_schema.COLUMNS", [][2]string{{"id", ""}}),
 		reply{match: "FROM tenant_trial_naviee.orders", columns: []string{"id"},
 			rows: [][]driver.Value{{int64(1)}}},
 	)
@@ -315,5 +326,149 @@ func TestAColumnWithNoNameIsReported(t *testing.T) {
 	syncer := &MySQLSyncer{}
 	if _, err := syncer.getTableColumns(context.Background(), conn, "db", "orders"); err == nil {
 		t.Fatal("a column with no name was accepted")
+	}
+}
+
+// TestACursorKeySurvivesBeingReadBack covers the value that continues the walk.
+//
+// The driver hands VARCHAR and binary columns back as []byte, and %v on those
+// prints the bytes: a key of "abc" became "[97 98 99]", which was then bound to
+// "WHERE key > ?" and matched nothing like the row it came from. Once a table
+// spanned more than one chunk that repeated pages or skipped the rest of it.
+func TestACursorKeySurvivesBeingReadBack(t *testing.T) {
+	for name, c := range map[string]struct {
+		value interface{}
+		want  string
+	}{
+		"varchar as bytes": {[]byte("abc"), "abc"},
+		"binary as bytes":  {[]byte{0x41, 0x42}, "AB"},
+		"string":           {"abc", "abc"},
+		"int64":            {int64(1234), "1234"},
+		"nil":              {nil, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := cursorKey(c.value); got != c.want {
+				t.Errorf("cursorKey(%#v) = %q, want %q", c.value, got, c.want)
+			}
+		})
+	}
+}
+
+// TestTheWalkContinuesFromAStringKey drives the whole chunk, because the bug
+// was only visible once the key went back into the next statement.
+func TestTheWalkContinuesFromAStringKey(t *testing.T) {
+	chunks, _ := chunkSource(t,
+		clockReply(1),
+		oneColumn("KEY_COLUMN_USAGE", "code"),
+		twoColumn("information_schema.COLUMNS", [][2]string{{"code", ""}}),
+		reply{match: "FROM tenant_trial_naviee.orders", columns: []string{"code"},
+			rows: [][]driver.Value{{[]byte("abc")}, {[]byte("abd")}}},
+	)
+
+	chunk, err := chunks.NextChunk(context.Background(),
+		domain.Namespace{Object: "orders"}, "", 10)
+	if err != nil {
+		t.Fatalf("NextChunk: %v", err)
+	}
+	if chunk.After != "abd" {
+		t.Errorf("After = %q, want the last key as text", chunk.After)
+	}
+	if strings.Contains(chunk.Events[0].Key, "[") {
+		t.Errorf("the ordering key is a byte list: %q", chunk.Events[0].Key)
+	}
+}
+
+// TestGeneratedColumnsAreLeftOutOfTheRecopy covers the defect the stream path
+// was fixed for and this one was not: a generated column is computed by the
+// server, which refuses a write that supplies one, so a re-copy of a table
+// holding one failed outright.
+func TestGeneratedColumnsAreLeftOutOfTheRecopy(t *testing.T) {
+	chunks, _ := chunkSource(t,
+		clockReply(1),
+		oneColumn("KEY_COLUMN_USAGE", "id"),
+		twoColumn("information_schema.COLUMNS", [][2]string{
+			{"id", "auto_increment"},
+			{"total", "VIRTUAL GENERATED"},
+			{"amount", ""},
+			{"tax", "STORED GENERATED"},
+			{"created_at", "DEFAULT_GENERATED"},
+		}),
+		reply{match: "FROM tenant_trial_naviee.orders",
+			columns: []string{"id", "amount", "created_at"},
+			rows:    [][]driver.Value{{int64(1), int64(100), "2026-09-05"}}},
+	)
+
+	chunk, err := chunks.NextChunk(context.Background(),
+		domain.Namespace{Object: "orders"}, "", 10)
+	if err != nil {
+		t.Fatalf("NextChunk: %v", err)
+	}
+	written := chunk.Events[0].Payload.(statement)
+	for _, generated := range []string{"total", "tax"} {
+		if strings.Contains(written.query, generated) {
+			t.Errorf("the upsert assigns the generated column %q, which MySQL "+
+				"refuses: %q", generated, written.query)
+		}
+	}
+	// DEFAULT_GENERATED is an ordinary default, not a generated column.
+	if !strings.Contains(written.query, "created_at") {
+		t.Errorf("a column with a plain default was dropped: %q", written.query)
+	}
+}
+
+// TestARecopyMasksWhatTheStreamMasks. Without the task's mappings the re-copy
+// read the source rows directly and wrote them raw, so asking for one replaced
+// protected fields on the target with plaintext.
+func TestARecopyMasksWhatTheStreamMasks(t *testing.T) {
+	const card = "4111111111111111"
+	chunks, _ := chunkSource(t,
+		clockReply(1),
+		oneColumn("KEY_COLUMN_USAGE", "id"),
+		twoColumn("information_schema.COLUMNS", [][2]string{{"id", ""}, {"card_number", ""}}),
+		reply{match: "FROM tenant_trial_naviee.orders",
+			columns: []string{"id", "card_number"},
+			rows:    [][]driver.Value{{int64(1), card}}},
+	)
+	chunks.Mappings = []config.DatabaseMapping{{Tables: []config.TableMapping{{
+		SourceTable:     "orders",
+		SecurityEnabled: true,
+		FieldSecurity: []interface{}{
+			map[string]interface{}{"field": "card_number", "securityType": "masked"},
+		},
+	}}}}
+
+	chunk, err := chunks.NextChunk(context.Background(),
+		domain.Namespace{Object: "orders"}, "", 10)
+	if err != nil {
+		t.Fatalf("NextChunk: %v", err)
+	}
+
+	written := chunk.Events[0].Payload.(statement)
+	for _, arg := range written.args {
+		if s, ok := arg.(string); ok && s == card {
+			t.Fatal("the re-copy sends the card number in the clear, overwriting " +
+				"the masked value the stream wrote")
+		}
+	}
+}
+
+func TestARecopyLeavesAnUnprotectedTableAlone(t *testing.T) {
+	chunks, _ := chunkSource(t,
+		clockReply(1),
+		oneColumn("KEY_COLUMN_USAGE", "id"),
+		twoColumn("information_schema.COLUMNS", [][2]string{{"id", ""}, {"amount", ""}}),
+		reply{match: "FROM tenant_trial_naviee.orders",
+			columns: []string{"id", "amount"},
+			rows:    [][]driver.Value{{int64(1), int64(100)}}},
+	)
+
+	chunk, err := chunks.NextChunk(context.Background(),
+		domain.Namespace{Object: "orders"}, "", 10)
+	if err != nil {
+		t.Fatalf("NextChunk: %v", err)
+	}
+	written := chunk.Events[0].Payload.(statement)
+	if got := written.args[1]; got != int64(100) {
+		t.Errorf("an unprotected value was changed to %v", got)
 	}
 }

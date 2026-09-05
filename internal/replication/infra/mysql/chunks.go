@@ -7,8 +7,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/retail-ai-inc/sync/internal/platform/config"
 	"github.com/retail-ai-inc/sync/internal/replication/app/pipeline"
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
+	"github.com/retail-ai-inc/sync/internal/replication/infra/security"
 )
 
 // Chunks reads a table in primary key order, for a re-copy that runs alongside
@@ -25,6 +27,33 @@ type Chunks struct {
 	// TargetDatabase and TargetOf resolve where the rows are written.
 	TargetDatabase string
 	TargetOf       func(source string) string
+	// Mappings carry the task's field security. Without them a re-copy wrote raw
+	// source values over fields the stream masks or encrypts, so asking for one
+	// replaced protected data on the target with plaintext -- the stream path
+	// has applied this from the start, and this path was reading the same rows
+	// and skipping it.
+	Mappings []config.DatabaseMapping
+}
+
+// mask applies the task's field security to one row, returning a new slice.
+//
+// A copy, not the row: the caller's slice is the scan buffer and is reused, and
+// the stream path builds a new slice for the same reason.
+func (c *Chunks) mask(table string, columns []string, values []interface{}) []interface{} {
+	policy := security.FindTableSecurityFromMappings(table, c.Mappings)
+	if !policy.SecurityEnabled || len(policy.FieldSecurity) == 0 {
+		return values
+	}
+
+	out := make([]interface{}, len(values))
+	for i, value := range values {
+		if i < len(columns) {
+			out[i] = security.ProcessValue(value, columns[i], policy)
+			continue
+		}
+		out[i] = value
+	}
+	return out
 }
 
 func (c *Chunks) NextChunk(ctx context.Context, ns domain.Namespace, after string, size int) (pipeline.Chunk, error) {
@@ -85,16 +114,17 @@ func (c *Chunks) NextChunk(ctx context.Context, ns domain.Namespace, after strin
 			return chunk, fmt.Errorf("read a row of %s: %w", ns, err)
 		}
 
+		key := cursorKey(values[keyAt])
 		chunk.Events = append(chunk.Events, &domain.Event{
 			NS:  ns,
 			Op:  domain.OpInsert,
-			Key: fmt.Sprintf("%v\x00", values[keyAt]),
+			Key: key + "\x00",
 			Payload: statement{
 				query: upsertStatement(c.Dialect, c.TargetDatabase, target, columns, 1),
-				args:  values,
+				args:  c.mask(ns.Object, columns, values),
 			},
 		})
-		chunk.After = fmt.Sprintf("%v", values[keyAt])
+		chunk.After = key
 	}
 	if err := rows.Err(); err != nil {
 		return chunk, fmt.Errorf("read %s: %w", ns, err)
@@ -134,8 +164,12 @@ func (c *Chunks) primaryKey(ctx context.Context, table string) (string, error) {
 }
 
 func (c *Chunks) columns(ctx context.Context, table string) ([]string, error) {
+	// EXTRA carries the generation clause. A generated column is computed by the
+	// server, which refuses a write that supplies one, so a re-copy of a table
+	// holding one failed outright -- the stream path filters them through
+	// writableColumns and this path did not.
 	rows, err := c.Source.QueryContext(ctx,
-		`SELECT COLUMN_NAME FROM information_schema.COLUMNS
+		`SELECT COLUMN_NAME, EXTRA FROM information_schema.COLUMNS
 		 WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION`,
 		c.Database, table)
 	if err != nil {
@@ -146,8 +180,12 @@ func (c *Chunks) columns(ctx context.Context, table string) ([]string, error) {
 	var columns []string
 	for rows.Next() {
 		var name string
-		if err := rows.Scan(&name); err != nil {
+		var extra sql.NullString
+		if err := rows.Scan(&name, &extra); err != nil {
 			return nil, err
+		}
+		if generatedColumn(extra.String) {
+			continue
 		}
 		columns = append(columns, name)
 	}
@@ -155,9 +193,30 @@ func (c *Chunks) columns(ctx context.Context, table string) ([]string, error) {
 		return nil, err
 	}
 	if len(columns) == 0 {
-		return nil, fmt.Errorf("%s.%s has no columns", c.Database, table)
+		return nil, fmt.Errorf("%s.%s has no columns that may be written", c.Database, table)
 	}
 	return columns, nil
+}
+
+// cursorKey renders a primary key so it can be bound back into the next
+// chunk's WHERE clause.
+//
+// The driver hands VARCHAR and binary columns back as []byte, and %v on those
+// prints the bytes: a key of "abc" became "[97 98 99]", which was then bound to
+// "WHERE key > ?" and matched nothing like the row it came from. Once a table
+// spanned more than one chunk that repeated pages or skipped the rest of the
+// table.
+func cursorKey(value interface{}) string {
+	switch typed := value.(type) {
+	case nil:
+		return ""
+	case []byte:
+		return string(typed)
+	case string:
+		return typed
+	default:
+		return fmt.Sprintf("%v", typed)
+	}
 }
 
 func indexOf(list []string, want string) int {

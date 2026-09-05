@@ -256,6 +256,9 @@ func (s *Syncer) resyncs(store *checkpoint.SQLStore) []*pipeline.Resync {
 		Source:         source,
 		Database:       sourceDB,
 		TargetDatabase: targetDB,
+		// The same field security the stream applies. A re-copy reads the source
+		// rows directly, so without this it writes what the stream masks.
+		Mappings: s.cfg.Mappings,
 		TargetOf: func(table string) string {
 			if targets := handler.targetsFor(sourceDB, table); len(targets) > 0 {
 				return targets[0]
