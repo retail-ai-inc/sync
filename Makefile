@@ -31,7 +31,24 @@ lint-upgrade: ## upgrade lint version
 test: ## run tests with race detactor
 	go test -race ./...
 
+vet-tags: ## compile the tagged tests, which a plain `go test` never builds
+	go vet ./...
+	go vet -tags integration ./...
+	go vet -tags staging ./...
+	go vet -tags perf ./...
+
+test-integration: ## run the tagged tests against the local database stack
+	./docker/test-stack.sh > .test-stack.env
+	set -a && . ./.test-stack.env && set +a && \
+		go test -tags integration -count=1 -timeout 540s -p 1 ./...
+
+cover: ## statement coverage over the whole repo, including the tagged tests
+	./docker/test-stack.sh > .test-stack.env
+	set -a && . ./.test-stack.env && set +a && \
+		go test -tags integration -count=1 -timeout 540s -p 1 -coverprofile=coverage.out ./...
+	go tool cover -func=coverage.out | tail -1
+
 clean: ## remove the output binary from go build, as well as go install and build cache
 	go clean -i -r -cache
 
-.PHONY: all download build build-race build-slim lint lint-upgrade test clean
+.PHONY: all download build build-race build-slim lint lint-upgrade test vet-tags test-integration cover clean

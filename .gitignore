@@ -91,3 +91,5 @@ decode_bson.js
 docs/
 # Binaries produced by "go build ./scripts/..."
 /mint
+coverage.out
+.test-stack.env
