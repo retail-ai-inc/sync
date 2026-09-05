@@ -3,7 +3,6 @@ package redis
 import (
 	"context"
 	"fmt"
-	"github.com/retail-ai-inc/sync/internal/replication/domain"
 	"sort"
 	"strings"
 	"time"
@@ -42,8 +41,9 @@ func (w *topologyWatcher) every() time.Duration {
 func (w *topologyWatcher) logger() logrus.FieldLogger { return orDefault(w.Logger) }
 
 // Run watches the source's shape until the context ends, or until the slots
-// themselves are rearranged -- which it reports as an error, because the task
-// cannot carry on through one.
+// themselves are rearranged -- which it reports as a retryable error, because
+// the task cannot carry on through one and a restart is what covers the ranges
+// that appeared.
 func (w *topologyWatcher) Run(ctx context.Context) error {
 	cluster, ok := w.Source.(*goredis.ClusterClient)
 	if !ok {
@@ -108,12 +108,18 @@ func (w *topologyWatcher) Run(ctx context.Context) error {
 			}
 		}
 		if settled >= reshardPollsToConfirm {
-			return domain.Unrecoverable(
-				"the source was resharded while this task was running: %s%s. A shard is "+
-					"identified by the slots it owns, so the ranges that appeared have no "+
-					"reader and nothing is being replicated from them. Restart the task: "+
-					"it will pick up the new shape, and the new ranges will take a first "+
-					"copy each", added, removed)
+			// Retryable, not Unrecoverable. Both stop the shards; the difference is
+			// what happens next. Unrecoverable leaves the task blocked until somebody
+			// notices, and the ranges that appeared stay unreplicated for as long as
+			// that takes -- on a disaster-recovery link that is the worse outcome of
+			// the two. A restart rediscovers the shape and covers them again. It is
+			// not cheap: the new shards have names this task has no position for, so
+			// each takes a first copy. The supervisor's backoff is what stops a
+			// flapping cluster from doing that repeatedly.
+			w.logger().Warnf("[Redis] The source was resharded: %s%s. Stopping the "+
+				"task so it restarts and picks up the new shape. The ranges that "+
+				"appeared have no position, so each takes a first copy.", added, removed)
+			return reshardError(added, removed)
 		}
 
 		if changes := describe(previous, current); changes != "" {
@@ -133,6 +139,24 @@ func (w *topologyWatcher) Run(ctx context.Context) error {
 		}
 		previous = current
 	}
+}
+
+// reshardError is why a task stops when the slots are rearranged.
+//
+// Deliberately not Unrecoverable. Both stop the shards; the difference is what
+// happens next. Unrecoverable leaves the task blocked until somebody notices,
+// and the ranges that appeared stay unreplicated for as long as that takes --
+// on a disaster-recovery link that is the worse outcome of the two. A restart
+// rediscovers the shape and covers them again. It is not cheap: the new shards
+// have names this task has no position for, so each takes a first copy. The
+// supervisor's backoff is what stops a flapping cluster from doing that
+// repeatedly.
+func reshardError(added, removed string) error {
+	return fmt.Errorf(
+		"the source was resharded while this task was running: %s%s. A shard is "+
+			"identified by the slots it owns, so the ranges that appeared have no "+
+			"reader and nothing is being replicated from them until the task has "+
+			"restarted, which it does by itself", added, removed)
 }
 
 // rangesMoved reports slot ranges that appeared or vanished. An address

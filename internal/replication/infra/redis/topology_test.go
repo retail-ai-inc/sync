@@ -8,6 +8,7 @@ import (
 
 	goredis "github.com/redis/go-redis/v9"
 	"github.com/retail-ai-inc/sync/internal/platform/config"
+	"github.com/retail-ai-inc/sync/internal/replication/domain"
 )
 
 // TestAFailoverIsReportedAsAMovedMaster covers the harmless change: the slots
@@ -124,6 +125,33 @@ func TestASplitRangeIsAReshard(t *testing.T) {
 	for _, want := range []string{"0-2730", "2731-5460", "0-5460"} {
 		if !strings.Contains(added+removed, want) {
 			t.Errorf("%q missing from %q %q", want, added, removed)
+		}
+	}
+}
+
+// A confirmed reshard has to stop the task in a way the supervisor restarts.
+// Unrecoverable would leave it blocked, and the ranges that appeared would stay
+// unreplicated for as long as it took somebody to notice.
+func TestAReshardStopsTheTaskWithoutBlockingIt(t *testing.T) {
+	before := map[string]string{"0-8191": "10.0.0.1:6379", "8192-16383": "10.0.0.2:6379"}
+	after := map[string]string{"0-5461": "10.0.0.1:6379", "5462-10922": "10.0.0.3:6379",
+		"10923-16383": "10.0.0.2:6379"}
+
+	added, removed := rangesMoved(before, after)
+	if added == "" && removed == "" {
+		t.Fatal("a reshard was not detected, so the rest of this proves nothing")
+	}
+
+	err := reshardError(added, removed)
+	if domain.IsUnrecoverable(err) {
+		t.Error("the reshard error is unrecoverable, so the supervisor would block " +
+			"the task rather than restart it")
+	}
+	// The ranges belong in the message: a restart that takes a first copy needs
+	// to be traceable to what caused it.
+	for _, want := range []string{"5462-10922", "resharded"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the reshard error does not mention %q: %v", want, err)
 		}
 	}
 }
