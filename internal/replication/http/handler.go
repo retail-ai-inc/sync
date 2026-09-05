@@ -317,3 +317,54 @@ func SyncPositionHandler(w http.ResponseWriter, r *http.Request) {
 		},
 	})
 }
+
+// GET /api/sync/{id}/rowcounts
+//
+// What the "objects captured" figure is made of: every replicated table or
+// collection with the number of rows on each side. Counted when asked, because
+// an exact count of both sides of a sharded MongoDB source takes minutes and
+// cannot sit on a monitoring interval.
+func SyncRowCountsHandler(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+
+	counts, err := app.TaskRowCounts(r.Context(), id)
+	if err != nil {
+		fail(w, "count the task's objects", err)
+		return
+	}
+
+	objects := make([]map[string]interface{}, 0, len(counts.Objects))
+	for _, object := range counts.Objects {
+		entry := map[string]interface{}{
+			"source": object.Source,
+			"target": object.Target,
+			"agrees": object.Agrees(),
+		}
+		// A side that could not be counted is absent rather than zero: a table
+		// that is missing and one that is empty are different problems, and a
+		// zero here would read as the second.
+		if object.SourceRows >= 0 {
+			entry["sourceRows"] = object.SourceRows
+		}
+		if object.TargetRows >= 0 {
+			entry["targetRows"] = object.TargetRows
+		}
+		if object.Agrees() || (object.SourceRows >= 0 && object.TargetRows >= 0) {
+			entry["difference"] = object.Difference()
+		}
+		if object.Note != "" {
+			entry["note"] = object.Note
+		}
+		objects = append(objects, entry)
+	}
+
+	httpx.WriteJSON(w, map[string]interface{}{
+		"success": true,
+		"data": map[string]interface{}{
+			"engine":     counts.Engine,
+			"discovered": counts.Discovered,
+			"objects":    objects,
+			"differing":  counts.Difference(),
+		},
+	})
+}
