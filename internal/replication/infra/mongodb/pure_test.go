@@ -3,6 +3,7 @@ package mongodb
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 
@@ -253,4 +254,25 @@ func bsonToString(t *testing.T, value interface{}) string {
 		return ""
 	}
 	return string(encoded)
+}
+
+// TestTheIdleHeartbeatKeepsTheLagGaugesHonest pins the cadence rather than the
+// number for its own sake.
+//
+// Every lag figure a task reports is the age of the newest thing the reader has
+// seen. While the source is quiet the newest thing is the last heartbeat, so
+// the gauges walk from zero up to this interval and drop back -- whatever the
+// real delay is. At ten seconds that read as three to five seconds of steady
+// lag on a link measured end to end at about a tenth of a second, and it left
+// ten-second windows in which a stream that had stopped looked the same as one
+// with nothing to carry.
+func TestTheIdleHeartbeatKeepsTheLagGaugesHonest(t *testing.T) {
+	if idleHeartbeat > time.Second {
+		t.Errorf("idleHeartbeat = %v; the reported lag of an idle task rises to "+
+			"that before resetting, so anything above a second cannot be read as "+
+			"a lag figure", idleHeartbeat)
+	}
+	if idleHeartbeat <= 0 {
+		t.Fatalf("idleHeartbeat = %v; the stream would spin", idleHeartbeat)
+	}
 }

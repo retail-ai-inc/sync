@@ -61,7 +61,19 @@ type Reader struct {
 
 // idleHeartbeat is how long the stream may return nothing before the reader
 // says it is alive anyway: silence looks exactly like being up to date.
-const idleHeartbeat = 10 * time.Second
+//
+// It is also what every lag figure for this task resolves to while the source
+// is quiet. The gauges report the age of the newest thing seen, and on an idle
+// source the newest thing is the last heartbeat -- so the reported lag walks
+// from zero up to this value and drops back, whatever the real delay is. At ten
+// seconds that read as a steady three to five seconds of lag on a link whose
+// measured end-to-end delay was around a tenth of a second, and it hid the
+// difference between "nothing is being written" and "we have stopped reading"
+// for ten seconds at a time.
+//
+// One second costs one getMore return per second on an idle stream, which is
+// the cadence the shard nudger already runs at.
+const idleHeartbeat = time.Second
 
 // Open starts the change stream at a position, or at the current end when there
 // is none.
