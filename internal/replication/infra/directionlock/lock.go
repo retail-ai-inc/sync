@@ -270,7 +270,7 @@ func (g *Guard) Heartbeat(ctx context.Context) error {
 		Owner:     owner,
 		UpdatedAt: now,
 	}); err != nil {
-		return fmt.Errorf("record the direction claim on %s: %w", g.Source.Endpoint(), err)
+		return claimFailure(g.Source.Endpoint(), err)
 	}
 
 	if err := g.Target.Put(ctx, Claim{
@@ -280,9 +280,30 @@ func (g *Guard) Heartbeat(ctx context.Context) error {
 		Owner:     owner,
 		UpdatedAt: now,
 	}); err != nil {
-		return fmt.Errorf("record the direction claim on %s: %w", g.Target.Endpoint(), err)
+		return claimFailure(g.Target.Endpoint(), err)
 	}
 	return nil
+}
+
+// claimFailure renders a refused claim as the conflict it is.
+//
+// A store that reports the claim held means another process is running this
+// task, which is the one conflict that resolves itself: the other process only
+// has to finish exiting. So it is marked Concurrent, and the task retries with
+// backoff rather than stopping for somebody to decide which side is
+// authoritative -- which is what a rolling restart needs, and what the
+// direction conflicts proper do need.
+//
+// Anything else is a failure to write, and stays one.
+func claimFailure(endpoint string, err error) error {
+	if errors.Is(err, ErrClaimHeld) {
+		return &Conflict{
+			Endpoint:   endpoint,
+			Reason:     "another process is already running this task against it",
+			Concurrent: true,
+		}
+	}
+	return fmt.Errorf("record the direction claim on %s: %w", endpoint, err)
 }
 
 // KeepAlive refreshes the claims until the context is cancelled. A failed

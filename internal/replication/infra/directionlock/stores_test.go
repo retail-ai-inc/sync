@@ -3,7 +3,9 @@ package directionlock
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -250,5 +252,181 @@ func TestReadingClaimsDoesNotRecreateTheTableEither(t *testing.T) {
 
 	if _, err := store.Claims(ctx); err == nil {
 		t.Error("reading the claims created the table again")
+	}
+}
+
+// The claim is what stops two processes writing to one target. It used to be an
+// unconditional delete and insert: two replicas starting the same task both
+// read no claim, both wrote one, and the second overwrote the first -- leaving
+// exactly the pair of writers the lock exists to prevent, with their heartbeats
+// overwriting each other for as long as both ran.
+
+func TestASecondOwnerCannotTakeALiveClaim(t *testing.T) {
+	store := sqlStore(t)
+	now := time.Now()
+
+	if err := store.Put(context.Background(), Claim{
+		TaskID: 41, Role: "target", Peer: "tokyo", Owner: "replica-a", UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("the first claim was refused: %v", err)
+	}
+
+	err := store.Put(context.Background(), Claim{
+		TaskID: 41, Role: "target", Peer: "tokyo", Owner: "replica-b", UpdatedAt: now,
+	})
+	if err == nil {
+		t.Fatal("a second owner took a live claim, so two processes would write " +
+			"to the same target")
+	}
+	if !errors.Is(err, ErrClaimHeld) {
+		t.Errorf("the refusal is %v, which callers cannot tell from a write failure", err)
+	}
+
+	claims, err := store.Claims(context.Background())
+	if err != nil {
+		t.Fatalf("Claims: %v", err)
+	}
+	if len(claims) != 1 || claims[0].Owner != "replica-a" {
+		t.Errorf("the stored claim is %v, want the first owner's", claims)
+	}
+}
+
+// TestAnOwnerKeepsRefreshingItsOwnClaim: the heartbeat runs every minute and
+// must not lock the owner out of its own claim.
+func TestAnOwnerKeepsRefreshingItsOwnClaim(t *testing.T) {
+	store := sqlStore(t)
+	now := time.Now()
+
+	for i := 0; i < 3; i++ {
+		if err := store.Put(context.Background(), Claim{
+			TaskID: 41, Role: "target", Peer: "tokyo", Owner: "replica-a",
+			UpdatedAt: now.Add(time.Duration(i) * time.Minute),
+		}); err != nil {
+			t.Fatalf("refresh %d was refused: %v", i, err)
+		}
+	}
+
+	claims, _ := store.Claims(context.Background())
+	if len(claims) != 1 {
+		t.Fatalf("the refreshes left %d claims", len(claims))
+	}
+}
+
+// TestAnAbandonedClaimCanBeTaken: a process that died leaves its claim behind,
+// and the task has to be startable again once it is old enough to count as
+// gone. Without this the lock would be a permanent lock-out after a crash.
+func TestAnAbandonedClaimCanBeTaken(t *testing.T) {
+	store := sqlStore(t)
+	now := time.Now()
+
+	if err := store.Put(context.Background(), Claim{
+		TaskID: 41, Role: "target", Peer: "tokyo", Owner: "replica-a",
+		UpdatedAt: now.Add(-2 * ConcurrentAfter),
+	}); err != nil {
+		t.Fatalf("the first claim was refused: %v", err)
+	}
+
+	if err := store.Put(context.Background(), Claim{
+		TaskID: 41, Role: "target", Peer: "tokyo", Owner: "replica-b", UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("an abandoned claim could not be taken over: %v", err)
+	}
+
+	claims, _ := store.Claims(context.Background())
+	if len(claims) != 1 || claims[0].Owner != "replica-b" {
+		t.Errorf("the claim is %v, want the new owner's", claims)
+	}
+}
+
+// TestOnlyOneOfTwoConcurrentClaimsSucceeds is the case that motivates all of
+// this: both processes start at the same moment and both find no claim.
+func TestOnlyOneOfTwoConcurrentClaimsSucceeds(t *testing.T) {
+	store := sqlStore(t)
+	now := time.Now()
+
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for _, owner := range []string{"replica-a", "replica-b"} {
+		owner := owner
+		go func() {
+			<-start
+			results <- store.Put(context.Background(), Claim{
+				TaskID: 41, Role: "target", Peer: "tokyo", Owner: owner, UpdatedAt: now,
+			})
+		}()
+	}
+	close(start)
+
+	taken := 0
+	for i := 0; i < 2; i++ {
+		if err := <-results; err == nil {
+			taken++
+		} else if !errors.Is(err, ErrClaimHeld) {
+			t.Errorf("a claim failed for an unexpected reason: %v", err)
+		}
+	}
+	if taken != 1 {
+		t.Errorf("%d of two concurrent claims succeeded, want exactly one", taken)
+	}
+}
+
+// TestDifferentTasksDoNotBlockEachOther: the claim is per task, not per
+// endpoint, and several tasks share a target.
+func TestDifferentTasksDoNotBlockEachOther(t *testing.T) {
+	store := sqlStore(t)
+	now := time.Now()
+
+	for _, id := range []int{39, 41, 44} {
+		if err := store.Put(context.Background(), Claim{
+			TaskID: id, Role: "target", Peer: "tokyo", Owner: "replica-a", UpdatedAt: now,
+		}); err != nil {
+			t.Fatalf("task %d was refused: %v", id, err)
+		}
+	}
+
+	claims, _ := store.Claims(context.Background())
+	if len(claims) != 3 {
+		t.Errorf("three tasks left %d claims", len(claims))
+	}
+}
+
+// TestAHeldClaimIsAConcurrentConflict pins how a refusal reaches the caller.
+//
+// A store reporting the claim held means another process is running this task,
+// which is the conflict that resolves itself: the other only has to finish
+// exiting. Marked Concurrent it is not blocking, so the task retries with
+// backoff and a rolling restart completes on its own. Left as a bare error it
+// would not be a *Conflict at all, IsBlocking would say false for the wrong
+// reason, and the message an operator sees would be a write failure.
+func TestAHeldClaimIsAConcurrentConflict(t *testing.T) {
+	err := claimFailure("osaka:3306/shop", ErrClaimHeld)
+
+	var conflict *Conflict
+	if !errors.As(err, &conflict) {
+		t.Fatalf("a held claim came back as %T, not a conflict", err)
+	}
+	if !conflict.Concurrent {
+		t.Error("a held claim was not marked concurrent, so the task would stop " +
+			"for somebody to decide rather than retrying past a rolling restart")
+	}
+	if IsBlocking(err) {
+		t.Error("a held claim reported itself blocking")
+	}
+	if conflict.Endpoint != "osaka:3306/shop" {
+		t.Errorf("the conflict names %q", conflict.Endpoint)
+	}
+}
+
+// TestAWriteFailureStaysAWriteFailure: only a held claim is a conflict, so a
+// target that cannot be written to is still reported as such.
+func TestAWriteFailureStaysAWriteFailure(t *testing.T) {
+	err := claimFailure("osaka:3306/shop", errors.New("connection refused"))
+
+	var conflict *Conflict
+	if errors.As(err, &conflict) {
+		t.Error("an unreachable endpoint was reported as a direction conflict")
+	}
+	if !strings.Contains(err.Error(), "osaka:3306/shop") {
+		t.Errorf("the error does not name the endpoint: %v", err)
 	}
 }

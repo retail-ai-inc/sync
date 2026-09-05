@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"sync"
@@ -20,6 +21,11 @@ import (
 // question it answers — "who is writing here?" — has to survive the syncer
 // being replaced, moved to another region, or run twice by mistake.
 const tableName = "_sync_direction_lock"
+
+// ErrClaimHeld reports that another process holds a live claim on the task, so
+// this one did not take it. It is what makes the claim mutually exclusive
+// rather than last-writer-wins.
+var ErrClaimHeld = errors.New("the direction claim is held by another process")
 
 type SQLStore struct {
 	DB *sql.DB
@@ -138,20 +144,48 @@ func (s *SQLStore) Put(ctx context.Context, c Claim) error {
 	if err != nil {
 		return err
 	}
-	// Delete and insert rather than an upsert, because the two flavours spell
-	// an upsert differently and this is one row.
-	if _, err := tx.ExecContext(ctx,
-		fmt.Sprintf("DELETE FROM %s WHERE task_id = %s", s.qualified(), s.arg(1)),
-		c.TaskID); err != nil {
+
+	// Only this owner's claim, or one nobody has refreshed for long enough to
+	// count as abandoned, may be cleared. Another process's live claim is left
+	// where it is, and the insert below then writes nothing.
+	stale := c.UpdatedAt.Add(-ConcurrentAfter).Format(time.RFC3339)
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf(
+		"DELETE FROM %s WHERE task_id = %s AND (owner = %s OR updated_at < %s)",
+		s.qualified(), s.arg(1), s.arg(2), s.arg(3)),
+		c.TaskID, c.Owner, stale); err != nil {
 		_ = tx.Rollback()
 		return fmt.Errorf("write %s: %w", s.qualified(), err)
 	}
-	if _, err := tx.ExecContext(ctx, fmt.Sprintf(
-		"INSERT INTO %s (task_id, role, peer, owner, updated_at) VALUES (%s, %s, %s, %s, %s)",
-		s.qualified(), s.arg(1), s.arg(2), s.arg(3), s.arg(4), s.arg(5)),
-		c.TaskID, string(c.Role), c.Peer, c.Owner, c.UpdatedAt.Format(time.RFC3339)); err != nil {
+
+	// Conditional on the row still being absent, in one statement, so two
+	// processes claiming the same task at the same moment cannot both succeed.
+	// It used to be an unconditional delete and insert: both read no claim, both
+	// wrote one, and the second overwrote the first -- leaving two writers on
+	// one target, which is the single thing this lock exists to prevent. Their
+	// heartbeats then overwrote each other for as long as both ran.
+	result, err := tx.ExecContext(ctx, fmt.Sprintf(
+		"INSERT INTO %s (task_id, role, peer, owner, updated_at) "+
+			"SELECT %s, %s, %s, %s, %s WHERE NOT EXISTS "+
+			"(SELECT 1 FROM %s WHERE task_id = %s)",
+		s.qualified(), s.arg(1), s.arg(2), s.arg(3), s.arg(4), s.arg(5),
+		s.qualified(), s.arg(6)),
+		c.TaskID, string(c.Role), c.Peer, c.Owner,
+		c.UpdatedAt.Format(time.RFC3339), c.TaskID)
+	if err != nil {
 		_ = tx.Rollback()
 		return fmt.Errorf("write %s: %w", s.qualified(), err)
+	}
+
+	written, err := result.RowsAffected()
+	if err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("write %s: %w", s.qualified(), err)
+	}
+	if written == 0 {
+		_ = tx.Rollback()
+		// Whoever holds it is reported by the caller's own read; this says only
+		// that the claim was not taken.
+		return fmt.Errorf("%w: task %d on %s", ErrClaimHeld, c.TaskID, s.Endpoint())
 	}
 	return tx.Commit()
 }
