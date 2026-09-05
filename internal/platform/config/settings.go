@@ -3,12 +3,10 @@ package config
 import (
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/retail-ai-inc/sync/internal/platform/sqlite"
-	"github.com/sirupsen/logrus"
 )
 
 // The settings an operator changes without a rebuild.
@@ -138,25 +136,4 @@ func Overridden() map[string]string {
 		}
 	}
 	return over
-}
-
-// DurationSetting resolves one duration: the environment variable when it is
-// set, otherwise the stored setting.
-func DurationSetting(envName string, stored time.Duration, log logrus.FieldLogger) time.Duration {
-	raw := strings.TrimSpace(os.Getenv(envName))
-	if raw == "" {
-		return stored
-	}
-	seconds, err := strconv.Atoi(raw)
-	if err != nil || seconds < 0 {
-		if log != nil {
-			log.Warnf("%s is %q, which is not a number of seconds; using the stored "+
-				"setting instead", envName, raw)
-		}
-		return stored
-	}
-	if log != nil && time.Duration(seconds)*time.Second != stored {
-		log.Infof("%s is set, so it takes precedence over the stored setting", envName)
-	}
-	return time.Duration(seconds) * time.Second
 }

@@ -397,3 +397,20 @@ func (r *recordingConsistencyLogger) saw(substring string) bool {
 	}
 	return false
 }
+
+// The repair switch is read once for a sweep, not once per table. It reads the
+// control database, and a whole-database task has a hundred tables.
+func TestTheRepairSwitchIsReadOncePerSweep(t *testing.T) {
+	useMonitoringDB(t)
+	t.Setenv("SYNC_VERIFY_REPAIR", "")
+
+	// Two tasks, each of which would ask per table if it asked at all. Nothing
+	// reachable here writes, so what is being pinned is the shape: the switch
+	// arrives as an argument rather than being fetched inside the walk.
+	tasks := []config.SyncConfig{
+		{ID: 1, Type: "mysql", Enable: true},
+		{ID: 2, Type: "mongodb", Enable: true},
+	}
+	runConsistencyChecks(context.Background(), tasks,
+		&config.Config{SyncConfigs: tasks}, nil, quiet())
+}

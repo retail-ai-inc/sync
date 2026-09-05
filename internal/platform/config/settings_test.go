@@ -57,30 +57,6 @@ func TestSettingsThatCannotBeReadAreReported(t *testing.T) {
 	}
 }
 
-// A variable that is set takes precedence, because that is how this is
-// deployed today and an upgrade must not change behaviour without being asked.
-func TestAVariableOverridesTheStoredSetting(t *testing.T) {
-	t.Setenv("SYNC_VERIFY_INTERVAL", "300")
-	if got := DurationSetting("SYNC_VERIFY_INTERVAL", time.Hour, nil); got != 5*time.Minute {
-		t.Errorf("DurationSetting = %v, want the variable's 5m", got)
-	}
-}
-
-func TestTheStoredSettingIsUsedWhenNoVariableIsSet(t *testing.T) {
-	t.Setenv("SYNC_VERIFY_INTERVAL", "")
-	if got := DurationSetting("SYNC_VERIFY_INTERVAL", time.Hour, nil); got != time.Hour {
-		t.Errorf("DurationSetting = %v, want the stored hour", got)
-	}
-}
-
-// A variable that is not a number is not a reason to change anything.
-func TestAnUnreadableVariableFallsBackToTheSetting(t *testing.T) {
-	t.Setenv("SYNC_VERIFY_INTERVAL", "later")
-	if got := DurationSetting("SYNC_VERIFY_INTERVAL", time.Hour, nil); got != time.Hour {
-		t.Errorf("DurationSetting = %v, want the stored hour", got)
-	}
-}
-
 func TestOverriddenNamesTheVariableAndItsValue(t *testing.T) {
 	t.Setenv("SYNC_VERIFY_REPAIR", "true")
 	over := Overridden()

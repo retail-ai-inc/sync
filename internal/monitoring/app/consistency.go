@@ -114,15 +114,19 @@ func runConsistencyChecks(ctx context.Context, tasks []config.SyncConfig,
 	if cfg == nil {
 		return
 	}
+	// Once for the sweep. It reads the control database, and asking per table
+	// meant one open per table -- a whole-database task has a hundred of them.
+	repair := repairEnabled()
+
 	for _, task := range tasks {
 		if !task.Enable {
 			continue
 		}
 		switch strings.ToLower(task.Type) {
 		case "mysql", "mariadb":
-			checkSQLTask(ctx, task, n, log)
+			checkSQLTask(ctx, task, n, log, repair)
 		case "mongodb":
-			checkMongoTask(ctx, task, n, log)
+			checkMongoTask(ctx, task, n, log, repair)
 		}
 	}
 }
@@ -179,7 +183,8 @@ func describe(sample []verify.Difference) string {
 	return strings.Join(parts, ", ")
 }
 
-func checkSQLTask(ctx context.Context, task config.SyncConfig, n notifier, log *logrus.Logger) {
+func checkSQLTask(ctx context.Context, task config.SyncConfig, n notifier, log *logrus.Logger,
+	repair bool) {
 	source, err := sql.Open("mysql", task.SourceConnection)
 	if err != nil {
 		log.Errorf("[Verify] Task %d: open the source: %v", task.ID, err)
@@ -217,7 +222,7 @@ func checkSQLTask(ctx context.Context, task config.SyncConfig, n notifier, log *
 		// used to need ten passes to converge with nothing saying how far along
 		// it was.
 		var fix func(verify.Difference) error
-		if repairEnabled() {
+		if repair {
 			repairer := &verify.SQLRepairer{Source: sourceSide, Target: targetSide, Upsert: mysqlUpsert}
 			fix = func(d verify.Difference) error {
 				_, err := repairer.Repair(ctx, []verify.Difference{d})
@@ -302,7 +307,8 @@ func mysqlUpsert(schema, table string, columns []string) string {
 		strings.Join(assignments, ", "))
 }
 
-func checkMongoTask(ctx context.Context, task config.SyncConfig, n notifier, log *logrus.Logger) {
+func checkMongoTask(ctx context.Context, task config.SyncConfig, n notifier, log *logrus.Logger,
+	repair bool) {
 	source, err := mongo.Connect(mongooptions.Client().ApplyURI(task.SourceConnection))
 	if err != nil {
 		log.Errorf("[Verify] Task %d: connect to the source: %v", task.ID, err)
@@ -325,7 +331,7 @@ func checkMongoTask(ctx context.Context, task config.SyncConfig, n notifier, log
 		targetColl := targetDB.Collection(pair.Target)
 
 		var fix func(verify.Difference) error
-		if repairEnabled() {
+		if repair {
 			repairer := &verify.MongoRepairer{Source: sourceColl, Target: targetColl}
 			fix = func(d verify.Difference) error {
 				_, err := repairer.Repair(ctx, []verify.Difference{d})
