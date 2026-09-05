@@ -1,23 +1,73 @@
 package postgresql
 
 import (
+	"context"
 	"database/sql"
 	"path/filepath"
 	"testing"
 
 	"github.com/jackc/pglogrepl"
+	"github.com/jackc/pgx/v5/pgproto3"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/retail-ai-inc/sync/internal/platform/config"
+	"github.com/retail-ai-inc/sync/internal/platform/metrics"
+	"github.com/retail-ai-inc/sync/internal/replication/domain"
 	"github.com/sirupsen/logrus"
 )
 
-// newSyncer builds a syncer with no connections.
-func newSyncer(t *testing.T, cfg config.SyncConfig) *PostgreSQLSyncer {
-	t.Helper()
-
+// quiet is a logger that discards, so the tests do not flood the log.
+func quiet() logrus.FieldLogger {
 	logger := logrus.New()
 	logger.SetOutput(discard{})
-	return NewPostgreSQLSyncer(cfg, logger)
+	return logger
+}
+
+// readerFor builds a reader over a stream of canned messages.
+func readerFor(t *testing.T, cfg config.SyncConfig, messages ...[]byte) *Reader {
+	t.Helper()
+
+	return &Reader{
+		Source: &cannedStream{messages: messages},
+		Config: cfg,
+		Logger: quiet(),
+		Labels: metrics.Labels{"task": t.Name(), "engine": "postgresql"},
+	}
+}
+
+// cannedStream hands out prepared messages and then blocks the way a quiet
+// source does, so the reader sees exactly what a real one would.
+type cannedStream struct {
+	messages [][]byte
+	at       int
+	// keepalives, when set, are returned once the messages run out rather than
+	// timing out, which is what a real source sends on an idle connection.
+	keepalives [][]byte
+}
+
+func (c *cannedStream) ReceiveMessage(ctx context.Context) (pgproto3.BackendMessage, error) {
+	if c.at < len(c.messages) {
+		payload := c.messages[c.at]
+		c.at++
+		return &pgproto3.CopyData{Data: payload}, nil
+	}
+	if len(c.keepalives) > 0 {
+		payload := c.keepalives[0]
+		c.keepalives = c.keepalives[1:]
+		return &pgproto3.CopyData{Data: payload}, nil
+	}
+	// Nothing more to say, which the reader must treat as a quiet source rather
+	// than a failure.
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// wal wraps a logical message as the XLogData the stream carries it in.
+func wal(walEnd uint64, body []byte) []byte {
+	out := []byte{pglogrepl.XLogDataByteID}
+	out = append(out, u64(walEnd)...) // start
+	out = append(out, u64(walEnd)...) // server WAL end
+	out = append(out, u64(0)...)      // server time
+	return append(out, body...)
 }
 
 type discard struct{}
@@ -69,17 +119,68 @@ func tuple(values ...*string) *pglogrepl.TupleData {
 
 func text(s string) *string { return &s }
 
-// stateWith returns a replication state that knows the given relations and
-// writes to db.
-func stateWith(db *sql.DB, rels ...*pglogrepl.RelationMessageV2) *replicationState {
-	st := &replicationState{
-		relations:   map[uint32]*pglogrepl.RelationMessageV2{},
-		replicaConn: db,
+// rig is a reader that knows some relations and a target to write what it
+// decodes, which is what the reader and the applier do between them.
+//
+// The two halves used to be one method, so a test could only see the row that
+// landed. Keeping the same end-to-end assertion here means these tests still
+// say what they said, while each half is now separately reachable.
+type rig struct {
+	reader *Reader
+	db     *sql.DB
+}
+
+func stateWith(t *testing.T, db *sql.DB, rels ...*pglogrepl.RelationMessageV2) *rig {
+	t.Helper()
+	return withConfig(t, config.SyncConfig{}, db, rels...)
+}
+
+func withConfig(t *testing.T, cfg config.SyncConfig, db *sql.DB,
+	rels ...*pglogrepl.RelationMessageV2) *rig {
+	t.Helper()
+
+	r := readerFor(t, cfg)
+	r.relations = map[uint32]*pglogrepl.RelationMessageV2{}
+	for _, rel := range rels {
+		r.relations[rel.RelationID] = rel
 	}
-	for _, r := range rels {
-		st.relations[r.RelationID] = r
+	r.inTransaction = true
+	return &rig{reader: r, db: db}
+}
+
+// keys tells the rig which columns address a row, as the source's catalogue
+// would.
+func (g *rig) keys(columns ...string) *rig {
+	g.reader.Keys = func(string, string) []string { return columns }
+	return g
+}
+
+func (g *rig) handleInsert(msg *pglogrepl.InsertMessageV2) (bool, error) {
+	return g.carry(g.reader.decode(msg))
+}
+
+func (g *rig) handleUpdate(msg *pglogrepl.UpdateMessageV2) (bool, error) {
+	return g.carry(g.reader.decode(msg))
+}
+
+func (g *rig) handleDelete(msg *pglogrepl.DeleteMessageV2) (bool, error) {
+	return g.carry(g.reader.decode(msg))
+}
+
+// carry writes whatever the decode produced, so a test can assert on the target
+// rather than on a statement.
+func (g *rig) carry(err error) (bool, error) {
+	if err != nil {
+		return false, err
 	}
-	return st
+	events := g.reader.open
+	g.reader.open = []*domain.Event{}
+	if len(events) == 0 {
+		return false, nil
+	}
+
+	applier := &Applier{DB: g.db, Logger: quiet()}
+	return applier.Apply(context.Background(), [][]*domain.Event{events}, domain.Position{})
 }
 
 // mappingWithSecurity builds the mapping list the handlers consult for field

@@ -2,13 +2,13 @@ package postgresql
 
 import (
 	"context"
+	"github.com/retail-ai-inc/sync/internal/replication/domain"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/jackc/pglogrepl"
-	"github.com/retail-ai-inc/sync/internal/platform/config"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/checkpoint"
 )
 
@@ -106,126 +106,101 @@ func TestAnLSNSurvivesTheRoundTrip(t *testing.T) {
 
 // fileBacked returns a syncer whose position is recorded in one file, which is
 // what the layered store falls back to when no target is configured.
-func fileBacked(t *testing.T, source string) (*PostgreSQLSyncer, string) {
-	t.Helper()
+// The stored position, which is a document rather than a bare number so it can
+// say which server it belongs to.
 
-	path := filepath.Join(t.TempDir(), "nested", "pos")
-	s := newSyncer(t, config.SyncConfig{
-		PGPositionPath:   path,
-		SourceConnection: source,
-	})
-	s.checkpoints = &checkpoint.FileStore{Path: path}
-	return s, path
-}
+const thisSource = "10.118.192.8:5432/shop"
 
 func TestTheRecordedPositionIsReadBack(t *testing.T) {
-	s, _ := fileBacked(t, "postgres://u:p@tokyo:5432/shop")
-	want := pglogrepl.LSN(uint64(7)<<32 + 0x1234)
+	want := pglogrepl.LSN(uint64(3)<<32 | 0x1A2B)
 
-	if err := s.recordLSN(context.Background(), want); err != nil {
-		t.Fatalf("recordLSN: %v", err)
-	}
-
-	got, err := s.loadStoredLSN(context.Background())
+	payload, err := encodeLSN(want, thisSource)
 	if err != nil {
-		t.Fatalf("loadStoredLSN: %v", err)
+		t.Fatalf("encodeLSN: %v", err)
+	}
+	got, elsewhere, err := decodeLSN(payload, thisSource)
+	if err != nil {
+		t.Fatalf("decodeLSN: %v", err)
+	}
+	if elsewhere != "" {
+		t.Errorf("a position from this source was attributed to %q", elsewhere)
 	}
 	if got != want {
-		t.Errorf("read back %s, recorded %s", got, want)
+		t.Errorf("read back %s, want %s", got, want)
 	}
 }
 
 func TestNoRecordedPositionIsZero(t *testing.T) {
-	s, _ := fileBacked(t, "postgres://u:p@tokyo:5432/shop")
-
-	got, err := s.loadStoredLSN(context.Background())
-	if err != nil {
-		t.Fatalf("loadStoredLSN: %v", err)
-	}
-	if got != 0 {
-		t.Errorf("lsn = %s with nothing recorded", got)
+	for _, payload := range []string{"", "   ", "\n"} {
+		got, _, err := decodeLSN(payload, thisSource)
+		if err != nil {
+			t.Fatalf("decodeLSN(%q): %v", payload, err)
+		}
+		if got != 0 {
+			t.Errorf("decodeLSN(%q) = %s, want zero", payload, got)
+		}
 	}
 }
 
 // TestAPlainTextPositionFileIsStillRead keeps an existing deployment resuming.
+// An older build wrote the LSN as bare text; refusing that form would make
+// every task that had already run copy its source again.
 func TestAPlainTextPositionFileIsStillRead(t *testing.T) {
-	s, path := fileBacked(t, "postgres://u:p@tokyo:5432/shop")
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	if err := os.WriteFile(path, []byte("2/16B3748\n"), 0o644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-
-	got, err := s.loadStoredLSN(context.Background())
+	got, _, err := decodeLSN("3/1A2B", thisSource)
 	if err != nil {
-		t.Fatalf("loadStoredLSN: %v", err)
+		t.Fatalf("decodeLSN: %v", err)
 	}
-	if want := pglogrepl.LSN(uint64(2)<<32 + 0x16B3748); got != want {
-		t.Errorf("lsn = %s, want %s", got, want)
+	if want := pglogrepl.LSN(uint64(3)<<32 | 0x1A2B); got != want {
+		t.Errorf("read %s, want %s", got, want)
 	}
 }
 
 func TestAMalformedPositionIsReported(t *testing.T) {
-	s, path := fileBacked(t, "postgres://u:p@tokyo:5432/shop")
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	if err := os.WriteFile(path, []byte("not-an-lsn"), 0o644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-
-	if _, err := s.loadStoredLSN(context.Background()); err == nil {
-		t.Error("a malformed position was accepted")
+	if _, _, err := decodeLSN("not a position", thisSource); err == nil {
+		t.Error("a position that cannot be read was accepted, so the task would " +
+			"resume from zero and copy the source again without saying why")
 	}
 }
 
-// An LSN means nothing on another server: read there it addresses unrelated
-// WAL and the read succeeds, so the task resumes from somewhere arbitrary with
-// nothing to show for it.
+// TestAPositionFromAnotherSourceIsIgnored: an LSN addresses one server's WAL
+// and nowhere else. Read against a different server it names unrelated bytes,
+// and the read succeeds -- so the task would resume from somewhere arbitrary
+// with nothing to show for it.
 func TestAPositionFromAnotherSourceIsIgnored(t *testing.T) {
-	s, _ := fileBacked(t, "postgres://u:p@tokyo:5432/shop")
-	if err := s.recordLSN(context.Background(), pglogrepl.LSN(uint64(7)<<32)); err != nil {
-		t.Fatalf("recordLSN: %v", err)
+	payload, err := encodeLSN(pglogrepl.LSN(1<<32), "10.118.192.9:5432/shop")
+	if err != nil {
+		t.Fatalf("encodeLSN: %v", err)
 	}
 
-	// The same task, repointed at a different server.
-	s.cfg.SourceConnection = "postgres://u:p@osaka:5432/shop"
-	got, err := s.loadStoredLSN(context.Background())
+	got, elsewhere, err := decodeLSN(payload, thisSource)
 	if err != nil {
-		t.Fatalf("loadStoredLSN: %v", err)
+		t.Fatalf("decodeLSN: %v", err)
 	}
 	if got != 0 {
-		t.Errorf("lsn = %s; a position from another server was accepted", got)
+		t.Errorf("a position from another server was used: %s", got)
+	}
+	if elsewhere != "10.118.192.9:5432/shop" {
+		t.Errorf("the other server was reported as %q", elsewhere)
 	}
 }
 
-// TestTheRecordedPositionCarriesNoCredentials pins what is written into a
-// database somebody will read.
+// TestTheRecordedPositionCarriesNoCredentials pins what is written down: the
+// position is stored on the target and read by whoever can read the target.
 func TestTheRecordedPositionCarriesNoCredentials(t *testing.T) {
-	s, path := fileBacked(t, "postgres://u:hunter2@tokyo:5432/shop")
-	if err := s.recordLSN(context.Background(), pglogrepl.LSN(1)); err != nil {
-		t.Fatalf("recordLSN: %v", err)
-	}
-
-	data, err := os.ReadFile(path)
+	payload, err := encodeLSN(pglogrepl.LSN(1), endpointOf(
+		"postgres://someone:hunter2@10.118.192.8:5432/shop"))
 	if err != nil {
-		t.Fatalf("read back: %v", err)
+		t.Fatalf("encodeLSN: %v", err)
 	}
-	if strings.Contains(string(data), "hunter2") {
-		t.Errorf("the recorded position carries the password: %s", data)
-	}
-	if !strings.Contains(string(data), "tokyo:5432/shop") {
-		t.Errorf("the recorded position does not name the source: %s", data)
+	if strings.Contains(payload, "hunter2") {
+		t.Errorf("the stored position carries the password: %s", payload)
 	}
 }
 
 func TestBuildReplicationDSNAddsTheReplicationParameter(t *testing.T) {
-	s := newSyncer(t, config.SyncConfig{})
-
-	got, err := s.buildReplicationDSN("postgres://u:p@host:5432/shop?sslmode=disable")
+	got, err := replicationConnection("postgres://u:p@host:5432/shop?sslmode=disable")
 	if err != nil {
-		t.Fatalf("buildReplicationDSN: %v", err)
+		t.Fatalf("replicationConnection: %v", err)
 	}
 	if !strings.Contains(got, "replication=database") {
 		t.Errorf("dsn = %q, want the replication parameter", got)
@@ -242,10 +217,9 @@ func TestBuildReplicationDSNAddsTheReplicationParameter(t *testing.T) {
 // ask for a different replication mode: whatever the configured DSN says is
 // replaced with "database".
 func TestBuildReplicationDSNOverwritesAnExistingValue(t *testing.T) {
-	got, err := newSyncer(t, config.SyncConfig{}).
-		buildReplicationDSN("postgres://host/shop?replication=true")
+	got, err := replicationConnection("postgres://host/shop?replication=true")
 	if err != nil {
-		t.Fatalf("buildReplicationDSN: %v", err)
+		t.Fatalf("replicationConnection: %v", err)
 	}
 	if strings.Contains(got, "replication=true") {
 		t.Errorf("dsn = %q, want the value replaced", got)
@@ -253,9 +227,8 @@ func TestBuildReplicationDSNOverwritesAnExistingValue(t *testing.T) {
 }
 
 func TestBuildReplicationDSNReportsAnUnparseableURL(t *testing.T) {
-	if _, err := newSyncer(t, config.SyncConfig{}).
-		buildReplicationDSN("postgres://host:port/shop"); err == nil {
-		t.Fatal("buildReplicationDSN on an invalid URL returned no error")
+	if _, err := replicationConnection("postgres://host:port/shop"); err == nil {
+		t.Fatal("replicationConnection on an invalid URL returned no error")
 	}
 }
 
@@ -264,20 +237,18 @@ func TestBuildReplicationDSNReportsAnUnparseableURL(t *testing.T) {
 // that has no query string, and the connection was refused with an error
 // naming neither.
 func TestBuildReplicationDSNAcceptsAKeywordDSN(t *testing.T) {
-	s := newSyncer(t, config.SyncConfig{})
-
-	got, err := s.buildReplicationDSN("host=127.0.0.1 dbname=shop")
+	got, err := replicationConnection("host=127.0.0.1 dbname=shop")
 	if err != nil {
-		t.Fatalf("buildReplicationDSN: %v", err)
+		t.Fatalf("replicationConnection: %v", err)
 	}
 	if want := "host=127.0.0.1 dbname=shop replication=database"; got != want {
 		t.Errorf("dsn = %q, want %q", got, want)
 	}
 
 	// A value already there is replaced rather than repeated.
-	got, err = s.buildReplicationDSN("host=127.0.0.1 replication=false dbname=shop")
+	got, err = replicationConnection("host=127.0.0.1 replication=false dbname=shop")
 	if err != nil {
-		t.Fatalf("buildReplicationDSN: %v", err)
+		t.Fatalf("replicationConnection: %v", err)
 	}
 	if strings.Contains(got, "replication=false") {
 		t.Errorf("dsn = %q, still carries the old value", got)
@@ -287,10 +258,8 @@ func TestBuildReplicationDSNAcceptsAKeywordDSN(t *testing.T) {
 // TestBuildReplicationDSNRefusesWhatIsNeitherForm covers a connection string
 // that is neither: it used to be accepted as a relative URL and fail much later.
 func TestBuildReplicationDSNRefusesWhatIsNeitherForm(t *testing.T) {
-	s := newSyncer(t, config.SyncConfig{})
-
 	for _, given := range []string{"", "   ", "127.0.0.1:5432/shop"} {
-		if got, err := s.buildReplicationDSN(given); err == nil {
+		if got, err := replicationConnection(given); err == nil {
 			t.Errorf("buildReplicationDSN(%q) = %q, want a refusal", given, got)
 		}
 	}
@@ -318,104 +287,159 @@ func TestExtractSequenceName(t *testing.T) {
 	}
 }
 
-// TestThePositionIsRecordedOnTheTarget is the reason the store is layered.
-func TestThePositionIsRecordedOnTheTarget(t *testing.T) {
-	target := targetDB(t, "")
-	s := newSyncer(t, config.SyncConfig{
-		ID:               3,
-		SourceConnection: "postgres://u:p@tokyo:5432/shop",
-	})
-	s.targetDB = target
-	s.checkpoints = s.checkpointStore()
+// The position is written by the applier, in the same transaction as the rows,
+// so the two cannot disagree. A task that also names a path gets a copy on
+// disk, written after the commit: only the target can take part in the
+// transaction, and the file is there to be looked at.
 
-	want := pglogrepl.LSN(uint64(9)<<32 + 0x2a)
-	if err := s.recordLSN(context.Background(), want); err != nil {
-		t.Fatalf("recordLSN: %v", err)
+func TestThePositionIsRecordedOnTheTargetWithTheRows(t *testing.T) {
+	target := targetDB(t, `CREATE TABLE orders (id TEXT)`)
+	store := &checkpoint.SQLStore{DB: target, TaskID: 3}
+	if err := store.Ensure(context.Background()); err != nil {
+		t.Fatalf("prepare the position table: %v", err)
 	}
 
-	// Read it through a fresh store, so nothing in-process is answering.
-	s.checkpoints = s.checkpointStore()
-	got, err := s.loadStoredLSN(context.Background())
+	payload, err := encodeLSN(pglogrepl.LSN(uint64(9)<<32+0x2a), thisSource)
 	if err != nil {
-		t.Fatalf("loadStoredLSN: %v", err)
+		t.Fatalf("encodeLSN: %v", err)
 	}
-	if got != want {
-		t.Errorf("read back %s, recorded %s", got, want)
+
+	applier := &Applier{DB: target, Checkpoints: store, Logger: quiet()}
+	committed, err := applier.Apply(context.Background(),
+		[][]*domain.Event{{{
+			NS:      domain.Namespace{DB: "public", Object: "orders"},
+			Op:      domain.OpInsert,
+			Payload: statement{query: `INSERT INTO orders (id) VALUES (?)`, args: []interface{}{"1"}},
+		}}},
+		domain.Position{Payload: payload})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if !committed {
+		t.Fatal("the applier did not record the position, so the runner would " +
+			"record it separately and the two could disagree")
 	}
 
 	var stored string
 	if err := target.QueryRow(
 		`SELECT payload FROM _sync_checkpoint WHERE task_id = 3`).Scan(&stored); err != nil {
-		t.Fatalf("read the checkpoint row: %v", err)
+		t.Fatalf("read the position row: %v", err)
 	}
 	if !strings.Contains(stored, "9/2A") {
 		t.Errorf("the target holds %q", stored)
+	}
+
+	// And the row landed in the same transaction.
+	var rows int
+	if err := target.QueryRow(`SELECT COUNT(*) FROM orders`).Scan(&rows); err != nil {
+		t.Fatalf("count rows: %v", err)
+	}
+	if rows != 1 {
+		t.Errorf("%d rows were written alongside the position", rows)
+	}
+}
+
+// TestAFailedBatchRecordsNoPosition is the property the shared transaction is
+// for: a position ahead of the rows it describes means the next start resumes
+// past changes the target never received.
+func TestAFailedBatchRecordsNoPosition(t *testing.T) {
+	target := targetDB(t, `CREATE TABLE orders (id TEXT)`)
+	store := &checkpoint.SQLStore{DB: target, TaskID: 5}
+	if err := store.Ensure(context.Background()); err != nil {
+		t.Fatalf("prepare the position table: %v", err)
+	}
+
+	payload, _ := encodeLSN(pglogrepl.LSN(1<<32), thisSource)
+	applier := &Applier{DB: target, Checkpoints: store, Logger: quiet()}
+
+	_, err := applier.Apply(context.Background(),
+		[][]*domain.Event{{{
+			NS:      domain.Namespace{DB: "public", Object: "orders"},
+			Op:      domain.OpInsert,
+			Payload: statement{query: `INSERT INTO nonexistent (id) VALUES (?)`, args: []interface{}{"1"}},
+		}}},
+		domain.Position{Payload: payload})
+	if err == nil {
+		t.Fatal("a batch against a table that is not there was reported as applied")
+	}
+
+	var rows int
+	if err := target.QueryRow(
+		`SELECT COUNT(*) FROM _sync_checkpoint WHERE task_id = 5`).Scan(&rows); err != nil {
+		t.Fatalf("count positions: %v", err)
+	}
+	if rows != 0 {
+		t.Error("a position was recorded for a batch that did not land")
 	}
 }
 
 // TestThePositionIsAlsoWrittenToTheConfiguredFile keeps the setting doing
 // something: an operator who configured a path still has a file to look at.
 func TestThePositionIsAlsoWrittenToTheConfiguredFile(t *testing.T) {
+	target := targetDB(t, `CREATE TABLE orders (id TEXT)`)
+	store := &checkpoint.SQLStore{DB: target, TaskID: 4}
+	if err := store.Ensure(context.Background()); err != nil {
+		t.Fatalf("prepare the position table: %v", err)
+	}
+
 	path := filepath.Join(t.TempDir(), "nested", "pos")
-	s := newSyncer(t, config.SyncConfig{
-		ID:               4,
-		PGPositionPath:   path,
-		SourceConnection: "postgres://u:p@tokyo:5432/shop",
-	})
-	s.targetDB = targetDB(t, "")
-	s.checkpoints = s.checkpointStore()
+	payload, _ := encodeLSN(pglogrepl.LSN(uint64(7)<<32), thisSource)
 
-	if err := s.recordLSN(context.Background(), pglogrepl.LSN(1)); err != nil {
-		t.Fatalf("recordLSN: %v", err)
+	applier := &Applier{
+		DB:          target,
+		Checkpoints: store,
+		Mirror:      &checkpoint.FileStore{Path: path},
+		Logger:      quiet(),
+	}
+	if _, err := applier.Apply(context.Background(),
+		[][]*domain.Event{{{
+			NS:      domain.Namespace{DB: "public", Object: "orders"},
+			Op:      domain.OpInsert,
+			Payload: statement{query: `INSERT INTO orders (id) VALUES (?)`, args: []interface{}{"1"}},
+		}}},
+		domain.Position{Payload: payload}); err != nil {
+		t.Fatalf("Apply: %v", err)
 	}
 
-	if _, err := os.Stat(path); err != nil {
-		t.Errorf("the configured position file was not written: %v", err)
+	written, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("the configured position file was not written: %v", err)
 	}
-}
-
-// TestTheMetricsNameTheTaskWithoutItsCredentials pins what goes into an
-// exposition that is scraped and stored for months.
-func TestTheMetricsNameTheTaskWithoutItsCredentials(t *testing.T) {
-	s := newSyncer(t, config.SyncConfig{
-		ID:               11,
-		SourceConnection: "postgres://u:hunter2@tokyo:5432/shop",
-		TargetConnection: "postgres://u:hunter2@osaka:5432/shop",
-	})
-
-	labels := s.metricLabels()
-
-	if labels["task"] != "11" || labels["engine"] != "postgresql" {
-		t.Errorf("labels = %v", labels)
-	}
-	// The endpoints are on sync_task_info, not on every series a task publishes.
-	if _, ok := labels["source"]; ok {
-		t.Errorf("labels carry the endpoints: %v", labels)
-	}
-	if _, ok := labels["target"]; ok {
-		t.Errorf("labels carry the endpoints: %v", labels)
-	}
-	for name, value := range labels {
-		if strings.Contains(value, "hunter2") {
-			t.Errorf("label %s carries the password: %q", name, value)
-		}
+	if !strings.Contains(string(written), "7/0") {
+		t.Errorf("the file holds %q", written)
 	}
 }
 
-// TestAnUnreachableSourceStopsTheDirectionClaim covers the refusal path: a task
-// that cannot record which way it replicates must not start replicating, or two
-// syncers can overwrite each other after a failover.
-func TestAnUnreachableSourceStopsTheDirectionClaim(t *testing.T) {
-	s := newSyncer(t, config.SyncConfig{
-		ID:               5,
-		SourceConnection: "postgres://u:p@127.0.0.1:1/shop?sslmode=disable&connect_timeout=1",
-		TargetConnection: "postgres://u:p@osaka:5432/shop",
-	})
-	s.targetDB = targetDB(t, "")
+// TestAnUnwritableFileDoesNotFailABatchThatLanded: the position on the target
+// is the one that is resumed from, and the batch is already committed by the
+// time the file is touched.
+func TestAnUnwritableFileDoesNotFailABatchThatLanded(t *testing.T) {
+	target := targetDB(t, `CREATE TABLE orders (id TEXT)`)
+	store := &checkpoint.SQLStore{DB: target, TaskID: 6}
+	if err := store.Ensure(context.Background()); err != nil {
+		t.Fatalf("prepare the position table: %v", err)
+	}
 
-	release, err := s.claimDirection(context.Background())
-	if err == nil {
-		release()
-		t.Fatal("the direction was claimed against an unreachable source")
+	payload, _ := encodeLSN(pglogrepl.LSN(1<<32), thisSource)
+	applier := &Applier{
+		DB:          target,
+		Checkpoints: store,
+		// A directory, which cannot be written to as a file.
+		Mirror: &checkpoint.FileStore{Path: t.TempDir()},
+		Logger: quiet(),
+	}
+
+	committed, err := applier.Apply(context.Background(),
+		[][]*domain.Event{{{
+			NS:      domain.Namespace{DB: "public", Object: "orders"},
+			Op:      domain.OpInsert,
+			Payload: statement{query: `INSERT INTO orders (id) VALUES (?)`, args: []interface{}{"1"}},
+		}}},
+		domain.Position{Payload: payload})
+	if err != nil {
+		t.Fatalf("a batch that landed was failed by the copy on disk: %v", err)
+	}
+	if !committed {
+		t.Error("the position was not recorded on the target")
 	}
 }

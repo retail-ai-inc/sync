@@ -1,7 +1,9 @@
 package postgresql
 
 import (
+	"context"
 	"database/sql"
+	"github.com/retail-ai-inc/sync/internal/replication/domain"
 	"strings"
 	"testing"
 
@@ -60,10 +62,10 @@ func deleteMessage(relID uint32, oldTup *pglogrepl.TupleData) *pglogrepl.DeleteM
 func TestHandleInsertWritesTheRow(t *testing.T) {
 	db := targetDB(t, ordersSchema)
 	rel := relation(1, "main", "orders", "id", "customer", "email")
-	st := stateWith(db, rel)
+	st := stateWith(t, db, rel)
 
-	commit, err := newSyncer(t, config.SyncConfig{}).handleInsert(
-		insertMessage(1, tuple(text("1"), text("Ada"), text("ada@example.com"))), st)
+	commit, err := st.handleInsert(
+		insertMessage(1, tuple(text("1"), text("Ada"), text("ada@example.com"))))
 	if err != nil {
 		t.Fatalf("handleInsert: %v", err)
 	}
@@ -77,10 +79,10 @@ func TestHandleInsertWritesTheRow(t *testing.T) {
 
 func TestHandleInsertWritesNullForANullColumn(t *testing.T) {
 	db := targetDB(t, ordersSchema)
-	st := stateWith(db, relation(1, "main", "orders", "id", "customer", "email"))
+	st := stateWith(t, db, relation(1, "main", "orders", "id", "customer", "email"))
 
-	if _, err := newSyncer(t, config.SyncConfig{}).handleInsert(
-		insertMessage(1, tuple(text("1"), nil, text("x"))), st); err != nil {
+	if _, err := st.handleInsert(
+		insertMessage(1, tuple(text("1"), nil, text("x")))); err != nil {
 		t.Fatalf("handleInsert: %v", err)
 	}
 	if got := rows(t, db); len(got) != 1 || got[0] != "1|<null>|x" {
@@ -97,15 +99,15 @@ func TestAnUnchangedToastedValueIsLeftAlone(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO orders VALUES ('1','Ada','ada@example.com')`); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	st := stateWith(db, relation(1, "main", "orders", "id", "customer", "email"))
+	st := stateWith(t, db, relation(1, "main", "orders", "id", "customer", "email"))
 
 	// The customer changes; the email is TOASTed and unchanged, so the server
 	// does not resend it.
 	newTup := tuple(text("1"), text("Grace"), nil)
 	newTup.Columns[2] = &pglogrepl.TupleDataColumn{DataType: 'u'}
 
-	if _, err := newSyncer(t, config.SyncConfig{}).handleUpdate(
-		updateMessage(1, tuple(text("1"), text("Ada"), text("ada@example.com")), newTup), st); err != nil {
+	if _, err := st.handleUpdate(
+		updateMessage(1, tuple(text("1"), text("Ada"), text("ada@example.com")), newTup)); err != nil {
 		t.Fatalf("handleUpdate: %v", err)
 	}
 	if got := rows(t, db); len(got) != 1 || got[0] != "1|Grace|ada@example.com" {
@@ -117,12 +119,12 @@ func TestAnUnchangedToastedValueIsLeftAlone(t *testing.T) {
 // send.
 func TestABinaryColumnIsReportedNotDropped(t *testing.T) {
 	db := targetDB(t, ordersSchema)
-	st := stateWith(db, relation(1, "main", "orders", "id", "customer", "email"))
+	st := stateWith(t, db, relation(1, "main", "orders", "id", "customer", "email"))
 
 	tup := tuple(text("1"), text("Ada"), text("x"))
 	tup.Columns[2] = &pglogrepl.TupleDataColumn{DataType: 'b', Data: []byte{0x01, 0x02}}
 
-	_, err := newSyncer(t, config.SyncConfig{}).handleInsert(insertMessage(1, tup), st)
+	_, err := st.handleInsert(insertMessage(1, tup))
 	if err == nil {
 		t.Fatal("handleInsert accepted a binary column")
 	}
@@ -140,11 +142,11 @@ func TestABinaryColumnIsReportedNotDropped(t *testing.T) {
 // source that nothing here checks.
 func TestAValueCannotReachTheStatementText(t *testing.T) {
 	db := targetDB(t, ordersSchema)
-	st := stateWith(db, relation(1, "main", "orders", "id", "customer", "email"))
+	st := stateWith(t, db, relation(1, "main", "orders", "id", "customer", "email"))
 
 	name := `O'Brien'); DROP TABLE orders; --`
-	if _, err := newSyncer(t, config.SyncConfig{}).handleInsert(
-		insertMessage(1, tuple(text("1"), text(name), text("x"))), st); err != nil {
+	if _, err := st.handleInsert(
+		insertMessage(1, tuple(text("1"), text(name), text("x")))); err != nil {
 		t.Fatalf("handleInsert: %v", err)
 	}
 
@@ -154,27 +156,26 @@ func TestAValueCannotReachTheStatementText(t *testing.T) {
 	}
 }
 
-func TestHandleInsertSkipsAnUnknownRelation(t *testing.T) {
+func TestAInsertForAnUnknownRelationStopsTheTask(t *testing.T) {
 	db := targetDB(t, ordersSchema)
-	st := stateWith(db)
+	st := stateWith(t, db)
 
-	commit, err := newSyncer(t, config.SyncConfig{}).handleInsert(
-		insertMessage(99, tuple(text("1"))), st)
-	if err != nil || commit {
-		t.Fatalf("handleInsert = %v, %v; an unknown relation should be skipped "+
-			"silently", commit, err)
+	_, err := st.handleInsert(
+		insertMessage(99, tuple(text("1"))))
+	if err == nil {
+		t.Fatal("a row for a table the source never described was dropped. It used to be, with a warning: the source sends a relation before any row of a table, so this means the stream began part way through, and skipping loses the row from the copy with nothing but a log line to say so")
 	}
-	if got := rows(t, db); len(got) != 0 {
-		t.Errorf("rows = %v", got)
+	if !domain.IsUnrecoverable(err) {
+		t.Errorf("err = %v; retrying will meet the same message again, so the task has to stop rather than spin", err)
 	}
 }
 
 func TestHandleInsertSkipsAnEmptyTuple(t *testing.T) {
 	db := targetDB(t, ordersSchema)
-	st := stateWith(db, relation(1, "main", "orders", "id"))
+	st := stateWith(t, db, relation(1, "main", "orders", "id"))
 
-	if _, err := newSyncer(t, config.SyncConfig{}).handleInsert(
-		insertMessage(1, nil), st); err != nil {
+	if _, err := st.handleInsert(
+		insertMessage(1, nil)); err != nil {
 		t.Fatalf("handleInsert: %v", err)
 	}
 	if got := rows(t, db); len(got) != 0 {
@@ -187,10 +188,10 @@ func TestHandleInsertSkipsAnEmptyTuple(t *testing.T) {
 // that has added a column and not re-announced the table sends.
 func TestATupleWiderThanItsRelationIsReported(t *testing.T) {
 	db := targetDB(t, ordersSchema)
-	st := stateWith(db, relation(1, "main", "orders", "id", "customer"))
+	st := stateWith(t, db, relation(1, "main", "orders", "id", "customer"))
 
-	_, err := newSyncer(t, config.SyncConfig{}).handleInsert(
-		insertMessage(1, tuple(text("1"), text("Ada"), text("extra"))), st)
+	_, err := st.handleInsert(
+		insertMessage(1, tuple(text("1"), text("Ada"), text("extra"))))
 	if err == nil {
 		t.Fatal("handleInsert accepted a tuple wider than its relation")
 	}
@@ -207,11 +208,11 @@ func TestATupleWiderThanItsRelationIsReported(t *testing.T) {
 // reaches it.
 func TestHandleInsertMasksASecuredField(t *testing.T) {
 	db := targetDB(t, ordersSchema)
-	st := stateWith(db, relation(1, "main", "orders", "id", "customer", "email"))
 	cfg := config.SyncConfig{Mappings: mappingWithSecurity("orders", "email")}
+	st := withConfig(t, cfg, db, relation(1, "main", "orders", "id", "customer", "email"))
 
-	if _, err := newSyncer(t, cfg).handleInsert(
-		insertMessage(1, tuple(text("1"), text("Ada"), text("ada@example.com"))), st); err != nil {
+	if _, err := st.handleInsert(
+		insertMessage(1, tuple(text("1"), text("Ada"), text("ada@example.com")))); err != nil {
 		t.Fatalf("handleInsert: %v", err)
 	}
 
@@ -233,11 +234,11 @@ func TestHandleInsertMasksASecuredField(t *testing.T) {
 // string.
 func TestMaskingIsNotAppliedToANullColumn(t *testing.T) {
 	db := targetDB(t, ordersSchema)
-	st := stateWith(db, relation(1, "main", "orders", "id", "customer", "email"))
 	cfg := config.SyncConfig{Mappings: mappingWithSecurity("orders", "email")}
+	st := withConfig(t, cfg, db, relation(1, "main", "orders", "id", "customer", "email"))
 
-	if _, err := newSyncer(t, cfg).handleInsert(
-		insertMessage(1, tuple(text("1"), text("Ada"), nil)), st); err != nil {
+	if _, err := st.handleInsert(
+		insertMessage(1, tuple(text("1"), text("Ada"), nil))); err != nil {
 		t.Fatalf("handleInsert: %v", err)
 	}
 	if got := rows(t, db); got[0] != "1|Ada|<null>" {
@@ -250,12 +251,12 @@ func TestHandleUpdateRewritesTheRow(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO orders VALUES ('1','Ada','ada@example.com')`); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	st := stateWith(db, relation(1, "main", "orders", "id", "customer", "email"))
+	st := stateWith(t, db, relation(1, "main", "orders", "id", "customer", "email"))
 
-	commit, err := newSyncer(t, config.SyncConfig{}).handleUpdate(
+	commit, err := st.handleUpdate(
 		updateMessage(1,
 			tuple(text("1"), text("Ada"), text("ada@example.com")),
-			tuple(text("1"), text("Grace"), text("grace@example.com"))), st)
+			tuple(text("1"), text("Grace"), text("grace@example.com"))))
 	if err != nil {
 		t.Fatalf("handleUpdate: %v", err)
 	}
@@ -277,7 +278,6 @@ func TestAnUpdateAddressesTheRowByItsKey(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 	rel := relation(1, "main", "orders", "id", "customer", "email")
-	st := stateWith(db, rel)
 
 	query, args, err := buildUpdate(rel,
 		tuple(text("1"), text("Ada"), text("ada@example.com")),
@@ -286,9 +286,13 @@ func TestAnUpdateAddressesTheRowByItsKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildUpdate: %v", err)
 	}
-	if err := newSyncer(t, config.SyncConfig{}).replicateQuery(
-		st.replicaConn, query, args, "UPDATE", "main.orders"); err != nil {
-		t.Fatalf("replicateQuery: %v", err)
+	applier := &Applier{DB: db, Logger: quiet()}
+	if _, err := applier.Apply(context.Background(), [][]*domain.Event{{{
+		NS:      domain.Namespace{DB: "main", Object: "orders"},
+		Op:      domain.OpUpdate,
+		Payload: statement{query: query, args: args},
+	}}}, domain.Position{}); err != nil {
+		t.Fatalf("Apply: %v", err)
 	}
 
 	if got := rows(t, db); len(got) != 1 || got[0] != "1|Grace|grace@example.com" {
@@ -304,7 +308,6 @@ func TestAnUpdateWithNoOldTupleUsesTheKeyFromTheNewOne(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 	rel := relation(1, "main", "orders", "id", "customer", "email")
-	st := stateWith(db, rel)
 
 	query, args, err := buildUpdate(rel, nil,
 		tuple(text("1"), text("Grace"), text("grace@example.com")),
@@ -312,9 +315,13 @@ func TestAnUpdateWithNoOldTupleUsesTheKeyFromTheNewOne(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildUpdate: %v", err)
 	}
-	if err := newSyncer(t, config.SyncConfig{}).replicateQuery(
-		st.replicaConn, query, args, "UPDATE", "main.orders"); err != nil {
-		t.Fatalf("replicateQuery: %v", err)
+	applier := &Applier{DB: db, Logger: quiet()}
+	if _, err := applier.Apply(context.Background(), [][]*domain.Event{{{
+		NS:      domain.Namespace{DB: "main", Object: "orders"},
+		Op:      domain.OpUpdate,
+		Payload: statement{query: query, args: args},
+	}}}, domain.Position{}); err != nil {
+		t.Fatalf("Apply: %v", err)
 	}
 
 	if got := rows(t, db); got[0] != "1|Grace|grace@example.com" {
@@ -322,21 +329,26 @@ func TestAnUpdateWithNoOldTupleUsesTheKeyFromTheNewOne(t *testing.T) {
 	}
 }
 
-func TestHandleUpdateSkipsAnUnknownRelation(t *testing.T) {
+func TestAUpdateForAnUnknownRelationStopsTheTask(t *testing.T) {
 	db := targetDB(t, ordersSchema)
+	st := stateWith(t, db)
 
-	if _, err := newSyncer(t, config.SyncConfig{}).handleUpdate(
-		updateMessage(99, nil, tuple(text("1"))), stateWith(db)); err != nil {
-		t.Fatalf("handleUpdate: %v", err)
+	_, err := st.handleUpdate(
+		updateMessage(99, nil, tuple(text("1"))))
+	if err == nil {
+		t.Fatal("a row for a table the source never described was dropped. It used to be, with a warning: the source sends a relation before any row of a table, so this means the stream began part way through, and skipping loses the row from the copy with nothing but a log line to say so")
+	}
+	if !domain.IsUnrecoverable(err) {
+		t.Errorf("err = %v; retrying will meet the same message again, so the task has to stop rather than spin", err)
 	}
 }
 
 func TestHandleUpdateSkipsAnEmptyNewTuple(t *testing.T) {
 	db := targetDB(t, ordersSchema)
-	st := stateWith(db, relation(1, "main", "orders", "id"))
+	st := stateWith(t, db, relation(1, "main", "orders", "id"))
 
-	if _, err := newSyncer(t, config.SyncConfig{}).handleUpdate(
-		updateMessage(1, tuple(text("1")), nil), st); err != nil {
+	if _, err := st.handleUpdate(
+		updateMessage(1, tuple(text("1")), nil)); err != nil {
 		t.Fatalf("handleUpdate: %v", err)
 	}
 }
@@ -348,10 +360,10 @@ func TestAnUpdateThatCannotBeBuiltWritesNothing(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO orders VALUES ('1','Ada','x')`); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	st := stateWith(db, relation(1, "main", "orders"))
+	st := stateWith(t, db, relation(1, "main", "orders"))
 
-	if _, err := newSyncer(t, config.SyncConfig{}).handleUpdate(
-		updateMessage(1, tuple(text("1")), tuple(text("2"))), st); err == nil {
+	if _, err := st.handleUpdate(
+		updateMessage(1, tuple(text("1")), tuple(text("2")))); err == nil {
 		t.Error("handleUpdate accepted a row it could not name a single column of")
 	}
 	if got := rows(t, db); got[0] != "1|Ada|x" {
@@ -369,7 +381,6 @@ func TestAnUpdateMasksTheSameFieldsAnInsertDoes(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 	rel := relation(1, "main", "orders", "id", "customer", "email")
-	st := stateWith(db, rel)
 	table := security.FindTableSecurityFromMappings("orders", mappingWithSecurity("orders", "email"))
 
 	query, args, err := buildUpdate(rel,
@@ -379,9 +390,13 @@ func TestAnUpdateMasksTheSameFieldsAnInsertDoes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildUpdate: %v", err)
 	}
-	if err := newSyncer(t, config.SyncConfig{}).replicateQuery(
-		st.replicaConn, query, args, "UPDATE", "main.orders"); err != nil {
-		t.Fatalf("replicateQuery: %v", err)
+	applier := &Applier{DB: db, Logger: quiet()}
+	if _, err := applier.Apply(context.Background(), [][]*domain.Event{{{
+		NS:      domain.Namespace{DB: "main", Object: "orders"},
+		Op:      domain.OpUpdate,
+		Payload: statement{query: query, args: args},
+	}}}, domain.Position{}); err != nil {
+		t.Fatalf("Apply: %v", err)
 	}
 
 	got := rows(t, db)
@@ -399,15 +414,18 @@ func TestADeleteWithNoKeyMatchesOnEveryColumn(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 	rel := relation(1, "main", "orders", "id", "customer", "email")
-	st := stateWith(db, rel)
 
 	query, args, err := buildDelete(rel, tuple(text("1"), text("Ada"), text("x")), nil)
 	if err != nil {
 		t.Fatalf("buildDelete: %v", err)
 	}
-	if err := newSyncer(t, config.SyncConfig{}).replicateQuery(
-		st.replicaConn, query, args, "DELETE", "main.orders"); err != nil {
-		t.Fatalf("replicateQuery: %v", err)
+	applier := &Applier{DB: db, Logger: quiet()}
+	if _, err := applier.Apply(context.Background(), [][]*domain.Event{{{
+		NS:      domain.Namespace{DB: "main", Object: "orders"},
+		Op:      domain.OpDelete,
+		Payload: statement{query: query, args: args},
+	}}}, domain.Position{}); err != nil {
+		t.Fatalf("Apply: %v", err)
 	}
 
 	if got := rows(t, db); len(got) != 1 || got[0] != "2|Grace|y" {
@@ -423,15 +441,18 @@ func TestADeleteAddressesTheRowByItsKey(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 	rel := relation(1, "main", "orders", "id", "customer", "email")
-	st := stateWith(db, rel)
 
 	query, args, err := buildDelete(rel, tuple(text("1"), text("Ada"), text("x")), []string{"id"})
 	if err != nil {
 		t.Fatalf("buildDelete: %v", err)
 	}
-	if err := newSyncer(t, config.SyncConfig{}).replicateQuery(
-		st.replicaConn, query, args, "DELETE", "main.orders"); err != nil {
-		t.Fatalf("replicateQuery: %v", err)
+	applier := &Applier{DB: db, Logger: quiet()}
+	if _, err := applier.Apply(context.Background(), [][]*domain.Event{{{
+		NS:      domain.Namespace{DB: "main", Object: "orders"},
+		Op:      domain.OpDelete,
+		Payload: statement{query: query, args: args},
+	}}}, domain.Position{}); err != nil {
+		t.Fatalf("Apply: %v", err)
 	}
 
 	if got := rows(t, db); len(got) != 0 {
@@ -445,15 +466,18 @@ func TestTheAllColumnsDeleteMatchesNullsToo(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 	rel := relation(1, "main", "orders", "id", "customer", "email")
-	st := stateWith(db, rel)
 
 	query, args, err := buildDelete(rel, tuple(text("1"), nil, text("x")), nil)
 	if err != nil {
 		t.Fatalf("buildDelete: %v", err)
 	}
-	if err := newSyncer(t, config.SyncConfig{}).replicateQuery(
-		st.replicaConn, query, args, "DELETE", "main.orders"); err != nil {
-		t.Fatalf("replicateQuery: %v", err)
+	applier := &Applier{DB: db, Logger: quiet()}
+	if _, err := applier.Apply(context.Background(), [][]*domain.Event{{{
+		NS:      domain.Namespace{DB: "main", Object: "orders"},
+		Op:      domain.OpDelete,
+		Payload: statement{query: query, args: args},
+	}}}, domain.Position{}); err != nil {
+		t.Fatalf("Apply: %v", err)
 	}
 
 	if got := rows(t, db); len(got) != 0 {
@@ -494,9 +518,8 @@ func TestADeleteDoesNotNeedTheSourceConnection(t *testing.T) {
 	}
 	rel := relation(1, "main", "orders", "id", "customer", "email")
 
-	if _, err := newSyncer(t, config.SyncConfig{}).handleDelete(
-		deleteMessage(1, tuple(text("1"), text("Ada"), text("x"))),
-		stateWith(db, rel)); err != nil {
+	if _, err := stateWith(t, db, rel).handleDelete(
+		deleteMessage(1, tuple(text("1"), text("Ada"), text("x")))); err != nil {
 		t.Fatalf("handleDelete: %v", err)
 	}
 	if got := rows(t, db); len(got) != 0 {
@@ -504,22 +527,38 @@ func TestADeleteDoesNotNeedTheSourceConnection(t *testing.T) {
 	}
 }
 
-func TestHandleDeleteSkipsAnUnknownRelation(t *testing.T) {
+func TestADeleteForAnUnknownRelationStopsTheTask(t *testing.T) {
 	db := targetDB(t, ordersSchema)
+	st := stateWith(t, db)
 
-	if _, err := newSyncer(t, config.SyncConfig{}).handleDelete(
-		deleteMessage(99, tuple(text("1"))), stateWith(db)); err != nil {
-		t.Fatalf("handleDelete: %v", err)
+	_, err := st.handleDelete(
+		deleteMessage(99, tuple(text("1"))))
+	if err == nil {
+		t.Fatal("a row for a table the source never described was dropped. It used to be, with a warning: the source sends a relation before any row of a table, so this means the stream began part way through, and skipping loses the row from the copy with nothing but a log line to say so")
+	}
+	if !domain.IsUnrecoverable(err) {
+		t.Errorf("err = %v; retrying will meet the same message again, so the task has to stop rather than spin", err)
 	}
 }
 
-func TestHandleDeleteSkipsAnEmptyOldTuple(t *testing.T) {
+func TestADeleteWithNoOldRowStopsTheTask(t *testing.T) {
 	db := targetDB(t, ordersSchema)
-	st := stateWith(db, relation(1, "main", "orders", "id"))
+	rel := relation(1, "main", "orders", "id", "customer", "email")
+	st := stateWith(t, db, rel)
 
-	if _, err := newSyncer(t, config.SyncConfig{}).handleDelete(
-		deleteMessage(1, nil), st); err != nil {
-		t.Fatalf("handleDelete: %v", err)
+	_, err := st.handleDelete(deleteMessage(1, nil))
+	if err == nil {
+		t.Fatal("a delete with no old row was dropped. The source sends one only " +
+			"when the table has a REPLICA IDENTITY, so without it there is nothing " +
+			"to say which row to delete -- and skipping leaves the target holding a " +
+			"row the source no longer has, for good, with nothing to show it")
+	}
+	if !domain.IsUnrecoverable(err) {
+		t.Errorf("err = %v; the table's REPLICA IDENTITY has to be changed, which "+
+			"retrying will not do", err)
+	}
+	if !strings.Contains(err.Error(), "REPLICA IDENTITY") {
+		t.Errorf("err = %v, want it to say what to set", err)
 	}
 }
 
@@ -574,28 +613,46 @@ func TestAKeyThatIsNullIsMatchedAsNull(t *testing.T) {
 	}
 }
 
-func TestProcessMessageReportsUnparseableWAL(t *testing.T) {
-	st := stateWith(nil)
+func TestUnparseableWALIsReported(t *testing.T) {
+	r := readerFor(t, config.SyncConfig{})
 
-	_, err := newSyncer(t, config.SyncConfig{}).processMessage(
-		pglogrepl.XLogData{WALData: []byte("not a pgoutput message")}, st)
-	if err == nil || !strings.Contains(err.Error(), "ParseV2") {
-		t.Fatalf("err = %v, want a parse failure", err)
+	err := r.wal(walBody(0, []byte("not a pgoutput message")))
+	if err == nil {
+		t.Fatal("a WAL record that cannot be read was accepted, so the stream " +
+			"would move past changes nobody decoded")
+	}
+	if !strings.Contains(err.Error(), "replication message") {
+		t.Errorf("err = %v, want it to say what could not be read", err)
 	}
 }
 
-// TestProcessMessageRecordsTheReceivedLSNBeforeParsing records the ordering:
-// on a parse failure the received LSN is *not* advanced, because the
-// assignment comes after the early return.
-func TestProcessMessageRecordsTheReceivedLSNBeforeParsing(t *testing.T) {
-	st := stateWith(nil)
+// TestTheReceivedPositionAdvancesOnEveryRecord, parse failure or not. It is
+// what the source is told has been received, and the source keeps WAL until it
+// is told otherwise -- so a record that arrived and was not counted holds the
+// source's disk, while the applied position, which is the one that matters for
+// safety, is reported separately and only moves when a batch lands.
+func TestTheReceivedPositionAdvancesOnEveryRecord(t *testing.T) {
+	r := readerFor(t, config.SyncConfig{})
 
-	if _, err := newSyncer(t, config.SyncConfig{}).processMessage(
-		pglogrepl.XLogData{ServerWALEnd: 99, WALData: []byte("bad")}, st); err == nil {
+	if err := r.wal(walBody(99, []byte("bad"))); err == nil {
 		t.Fatal("want a parse failure")
 	}
-	if st.lastReceivedLSN != 0 {
-		t.Errorf("lastReceivedLSN = %s, want it left alone on a parse failure",
-			st.lastReceivedLSN)
+
+	received, applied := r.Positions()
+	if received != 99 {
+		t.Errorf("received = %s, want the record counted as arrived", received)
 	}
+	if applied != 0 {
+		t.Errorf("applied = %s, want nothing applied for a record that did not "+
+			"decode", applied)
+	}
+}
+
+// walBody is the XLogData payload without its leading type byte, which is what
+// the reader is handed after the message type has been read.
+func walBody(walEnd uint64, body []byte) []byte {
+	out := u64(walEnd) // start
+	out = append(out, u64(walEnd)...)
+	out = append(out, u64(0)...) // server time
+	return append(out, body...)
 }

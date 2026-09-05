@@ -34,7 +34,7 @@ func NewMySQLSyncer(cfg config.SyncConfig, logger *logrus.Logger) *mysql.Syncer 
 	return mysql.NewSyncer(cfg, logger)
 }
 
-func NewPostgreSQLSyncer(cfg config.SyncConfig, logger *logrus.Logger) *postgresql.PostgreSQLSyncer {
+func NewPostgreSQLSyncer(cfg config.SyncConfig, logger *logrus.Logger) *postgresql.Syncer {
 	return postgresql.NewPostgreSQLSyncer(cfg, logger)
 }
 
