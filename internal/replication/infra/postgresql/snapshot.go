@@ -117,12 +117,16 @@ func orPublic(schema string) string {
 }
 
 func (s *Snapshotter) copyTable(ctx context.Context, pair tablePair) (int, error) {
+	// A target that cannot be counted is a stop, not a skip. It used to warn and
+	// carry on, which meant a table missing from the target -- because the schema
+	// preparation failed, or because nobody created it -- left the copy doing
+	// nothing and reporting success, and the link then ran with a table that was
+	// never filled.
 	var held int
 	if err := s.Schema.Target.QueryRowContext(ctx,
 		fmt.Sprintf("SELECT COUNT(*) FROM %s", pair.target())).Scan(&held); err != nil {
-		s.Logger.Warnf("[PostgreSQL] Could not check %s, so it is not copied: %v",
-			pair.target(), err)
-		return 0, nil
+		return 0, fmt.Errorf("count %s on the target, to see whether it needs "+
+			"copying: %w", pair.target(), err)
 	}
 	if held > 0 {
 		s.Logger.Infof("[PostgreSQL] %s already holds %d rows, so it is left alone",
