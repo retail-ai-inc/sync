@@ -89,3 +89,5 @@ decode_bson.js
 
 # Ignore internal docs
 docs/
+# Binaries produced by "go build ./scripts/..."
+/mint
