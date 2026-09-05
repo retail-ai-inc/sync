@@ -28,6 +28,26 @@ func newBudget(limit int64) *budget {
 	return b
 }
 
+// admit charges size without waiting for room.
+//
+// For an event that continues a source transaction. The applier may not cut a
+// batch inside one, so it cannot release anything until the transaction's last
+// event arrives -- and if the reader waits here for room before handing that
+// event over, neither side can move and replication stops for good. A
+// transaction two events long against a budget that fits one reproduces it.
+//
+// The budget bounds how far the reader runs ahead, and a transaction is the
+// smallest unit it can run ahead by; going over on one is the same trade the
+// single-event case already makes.
+func (b *budget) admit(size int64) {
+	if b == nil || b.limit <= 0 || size <= 0 {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.held += size
+}
+
 // acquire waits until size fits, then charges it.
 //
 // An event larger than the whole budget is admitted alone rather than waited

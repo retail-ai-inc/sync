@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/retail-ai-inc/sync/internal/platform/metrics"
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
 )
 
@@ -254,5 +255,60 @@ func TestABacklogWinsOverEverythingElse(t *testing.T) {
 	if !known || got != 600 {
 		t.Errorf("lag = %v (known=%v), want 600 -- a fresh heartbeat does not clear "+
 			"a ten-minute backlog", got, known)
+	}
+}
+
+// TestATransactionLargerThanTheBudgetStillReplicates covers a deadlock, so it
+// is written to fail by timing out rather than by an assertion.
+//
+// The applier may not cut a batch inside a source transaction, so while one is
+// open it releases nothing. A reader that waited for budget room before handing
+// over that transaction's last event was therefore waiting for a release that
+// only its own next event could bring about: neither side could move and
+// replication stopped for good. Two events against a budget that fits one
+// reproduces it, and a large enough MULTI block or MySQL transaction does the
+// same against the real default.
+func TestATransactionLargerThanTheBudgetStillReplicates(t *testing.T) {
+	ns := domain.Namespace{DB: "shop", Object: "orders"}
+	reader := &fakeReader{events: []*domain.Event{
+		// One transaction of three events, none of which ends it until the last.
+		{NS: ns, Op: domain.OpInsert, Key: "1", Bytes: 6, EndsTransaction: false},
+		{NS: ns, Op: domain.OpInsert, Key: "2", Bytes: 6, EndsTransaction: false},
+		{NS: ns, Op: domain.OpInsert, Key: "3", Bytes: 6,
+			Pos: domain.Position{Payload: "p1"}, EndsTransaction: true},
+	}}
+	applier := &fakeApplier{}
+
+	r := newRunner(t, reader, applier, newStore())
+	labels := metrics.Labels{"task": t.Name()}
+	r.Opts.Labels = labels
+	// A budget that fits one event of the three.
+	r.Opts.QueueBytes = 10
+	t.Cleanup(func() { metrics.Default.Forget(labels) })
+
+	done := make(chan error, 1)
+	go func() { done <- runFor(t, r, 300*time.Millisecond) }()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the runner never returned: the reader is waiting for budget room " +
+			"that only its own next event can release, and the applier cannot cut " +
+			"a batch inside the transaction")
+	}
+
+	applier.mu.Lock()
+	applied := 0
+	for _, batch := range applier.batches {
+		for _, run := range batch {
+			applied += len(run)
+		}
+	}
+	applier.mu.Unlock()
+	if applied != 3 {
+		t.Errorf("applied %d events, want the whole transaction of 3", applied)
 	}
 }

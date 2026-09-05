@@ -328,9 +328,17 @@ func (r *Runner) startResyncs(ctx context.Context, queue chan<- *domain.Event, p
 				// A chunk is its own batch: it carries no position, and its last event
 				// closes the batch so it is not held for a boundary that will not come.
 				events[len(events)-1].EndsTransaction = true
-				for _, event := range events {
+				for i, event := range events {
 					event.Pos = domain.Position{}
-					r.held.acquire(ctx, int64(event.Bytes))
+					// A chunk is one unit to the applier, so only its first event
+					// may wait for room: the rest are what will let the batch be
+					// cut and the room given back. Same rule as the stream's
+					// transactions.
+					if i == 0 {
+						r.held.acquire(ctx, int64(event.Bytes))
+					} else {
+						r.held.admit(int64(event.Bytes))
+					}
 					select {
 					case queue <- event:
 					case <-ctx.Done():
@@ -444,6 +452,9 @@ func (r *Runner) watchQueuePressure(ctx context.Context, queue chan *domain.Even
 }
 
 func (r *Runner) read(ctx context.Context, queue chan<- *domain.Event) error {
+	// Whether the last event handed over left a source transaction open, which
+	// is what decides whether the byte budget may make this one wait.
+	inTransaction := false
 	for {
 		event, err := r.Reader.Next(ctx)
 		if err != nil {
@@ -473,10 +484,20 @@ func (r *Runner) read(ctx context.Context, queue chan<- *domain.Event) error {
 
 		// Charged before the hand-over and released when the batch holding it has
 		// landed, so the reader waits on memory as well as on the event count.
-		r.held.acquire(ctx, int64(event.Bytes))
+		//
+		// Waiting only between transactions. The applier may not cut a batch
+		// inside one, so while a transaction is open it cannot release anything
+		// -- and a reader that waited here for room would be waiting for a
+		// release that only its own next event can bring about.
+		if inTransaction {
+			r.held.admit(int64(event.Bytes))
+		} else {
+			r.held.acquire(ctx, int64(event.Bytes))
+		}
 
 		select {
 		case queue <- event:
+			inTransaction = !event.EndsTransaction
 		case <-ctx.Done():
 			r.held.release(int64(event.Bytes))
 			return nil
