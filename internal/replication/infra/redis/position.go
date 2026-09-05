@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 
 	goredis "github.com/redis/go-redis/v9"
@@ -92,6 +93,42 @@ type Checkpoints struct {
 	mu      sync.Mutex
 	markers []int64
 	loaded  bool
+	// replID is the source history the markers belong to. An offset only means
+	// something within one: two masters number their streams independently, so
+	// a marker left by another history can say "already applied" about a
+	// command this one has never sent.
+	replID string
+}
+
+// ReplID reports the source history the applier should stamp its markers with.
+func (c *Checkpoints) ReplID() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.replID
+}
+
+// markerValue renders a marker: the history it belongs to, then the offset.
+func markerValue(replID string, offset int64) string {
+	return replID + ":" + strconv.FormatInt(offset, 10)
+}
+
+// markerOffset reads a marker back, and reports whether it belongs to the
+// history asked about.
+//
+// A marker written before this carried a history is a bare number, and reads
+// as belonging to no history -- which is the safe answer. Not trusting one
+// costs a replay from the resume floor; trusting the wrong one skips commands
+// that were never applied, and nothing afterwards would find out.
+func markerOffset(stored, replID string) (int64, bool) {
+	cut := strings.LastIndex(stored, ":")
+	if cut < 0 || stored[:cut] != replID || replID == "" {
+		return 0, false
+	}
+	offset, err := strconv.ParseInt(stored[cut+1:], 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return offset, true
 }
 
 // Load reads the metadata and the slot markers, and reports where to resume.
@@ -110,12 +147,12 @@ func (c *Checkpoints) Load(ctx context.Context, _ string) (string, error) {
 		return "", err
 	}
 
-	markers, err := c.readMarkers(ctx, position.Offset)
+	markers, err := c.readMarkers(ctx, position.Offset, position.ReplID)
 	if err != nil {
 		return "", err
 	}
 	c.mu.Lock()
-	c.markers, c.loaded = markers, true
+	c.markers, c.loaded, c.replID = markers, true, position.ReplID
 	c.mu.Unlock()
 
 	return position.encode()
@@ -123,7 +160,7 @@ func (c *Checkpoints) Load(ctx context.Context, _ string) (string, error) {
 
 // readMarkers fetches every slot's marker, defaulting the ones never written to
 // the offset the stream started at.
-func (c *Checkpoints) readMarkers(ctx context.Context, start int64) ([]int64, error) {
+func (c *Checkpoints) readMarkers(ctx context.Context, start int64, replID string) ([]int64, error) {
 	pipe := c.Target.Pipeline()
 	gets := make([]*goredis.StringCmd, SlotCount)
 	for slot := 0; slot < SlotCount; slot++ {
@@ -145,9 +182,14 @@ func (c *Checkpoints) readMarkers(ctx context.Context, start int64) ([]int64, er
 		if err != nil {
 			return nil, fmt.Errorf("read the marker for slot %d: %w", slot, err)
 		}
-		at, err := strconv.ParseInt(value, 10, 64)
-		if err != nil {
-			return nil, fmt.Errorf("the marker for slot %d reads %q", slot, value)
+		// A marker from another history is not an error, it is a marker that
+		// says nothing: the source was resharded or restarted, this slot is
+		// served by a master that numbers its stream differently, and the only
+		// safe reading is that nothing has been applied since the floor.
+		at, ours := markerOffset(value, replID)
+		if !ours {
+			markers[slot] = start
+			continue
 		}
 		markers[slot] = at
 	}
@@ -167,6 +209,7 @@ func (c *Checkpoints) Save(ctx context.Context, _, payload string) error {
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.replID = position.ReplID
 	if !c.loaded {
 		markers := make([]int64, SlotCount)
 		for slot := range markers {

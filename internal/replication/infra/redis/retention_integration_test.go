@@ -147,7 +147,8 @@ func TestRefreshReReadsTheMarkersFromTheTarget(t *testing.T) {
 	}
 	// Written behind the in-memory copy's back, which is what a second process
 	// applying the same task looks like.
-	if err := target.Set(ctx, OffsetKey(7, taskID), "4242", 0).Err(); err != nil {
+	if err := target.Set(ctx, OffsetKey(7, taskID),
+		markerValue("a", 4242), 0).Err(); err != nil {
 		t.Fatalf("write a marker: %v", err)
 	}
 
@@ -159,5 +160,71 @@ func TestRefreshReReadsTheMarkersFromTheTarget(t *testing.T) {
 	}
 	if after := checkpoints.markersFor(100)[7]; after != 4242 {
 		t.Errorf("after a refresh slot 7 reads %d, want 4242", after)
+	}
+}
+
+// A marker records how far one slot has been applied, as an offset. An offset
+// only means something within one replication history: after a reshard the
+// slot is served by another master, which numbers its stream independently.
+// Trusting the old number skips commands the new stream has never sent, and
+// nothing afterwards would find out.
+func TestAMarkerFromAnotherHistoryIsNotTrusted(t *testing.T) {
+	target := redisAt(t, addrsFrom(t, "SYNC_REDIS_TARGET"))
+	defer target.Close()
+	ctx := context.Background()
+
+	const taskID = 8851
+	checkpoints := &Checkpoints{Target: target, TaskID: taskID, Shard: "0"}
+	defer checkpoints.Purge(ctx)
+
+	// The shape a previous master left behind: a marker far ahead of where the
+	// new stream is, written under a history that no longer serves this slot.
+	if err := target.Set(ctx, OffsetKey(7, taskID),
+		markerValue("old-history", 999999), 0).Err(); err != nil {
+		t.Fatalf("seed an old marker: %v", err)
+	}
+	// And one this history did write.
+	if err := target.Set(ctx, OffsetKey(8, taskID),
+		markerValue("new-history", 4242), 0).Err(); err != nil {
+		t.Fatalf("seed our own marker: %v", err)
+	}
+	if err := target.Set(ctx, metaKey(taskID, "0"),
+		`{"replid":"new-history","offset":100}`, 0).Err(); err != nil {
+		t.Fatalf("seed a position: %v", err)
+	}
+
+	if _, err := checkpoints.Load(ctx, ""); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	markers := checkpoints.markersFor(100)
+
+	if markers[7] != 100 {
+		t.Errorf("slot 7 reads %d; a marker from another history has to fall back "+
+			"to the resume floor, not skip to %d", markers[7], 999999)
+	}
+	if markers[8] != 4242 {
+		t.Errorf("slot 8 reads %d, want this history's own 4242", markers[8])
+	}
+}
+
+// Markers written before they carried a history are bare numbers. Reading one
+// as belonging to no history is what makes the upgrade safe: a replay costs
+// time, a wrong skip costs data.
+func TestAMarkerWithNoHistoryIsNotTrusted(t *testing.T) {
+	if _, ok := markerOffset("12345", "some-history"); ok {
+		t.Error("a bare number was accepted as this history's marker")
+	}
+	if _, ok := markerOffset(markerValue("a", 5), "b"); ok {
+		t.Error("another history's marker was accepted")
+	}
+	if _, ok := markerOffset(markerValue("a", 5), ""); ok {
+		t.Error("a marker was accepted against no history at all")
+	}
+	if _, ok := markerOffset("a:not-a-number", "a"); ok {
+		t.Error("a marker whose offset is not a number was accepted")
+	}
+	offset, ok := markerOffset(markerValue("a", 5), "a")
+	if !ok || offset != 5 {
+		t.Errorf("markerOffset = %d, %v; want 5, true", offset, ok)
 	}
 }

@@ -32,10 +32,13 @@ func TestACommandThatFailsAtRunTimeStopsTheTask(t *testing.T) {
 	}
 	defer target.Del(ctx, key)
 
-	applier := &Applier{
-		Target:    target,
-		Positions: &Checkpoints{Target: target, TaskID: taskID, Shard: "0"},
+	positions := &Checkpoints{Target: target, TaskID: taskID, Shard: "0"}
+	// A position first, so the applier stamps its marker with a history the way
+	// it does in production -- the runner loads one before anything is applied.
+	if err := positions.Save(ctx, "", `{"replid":"h1","offset":0}`); err != nil {
+		t.Fatalf("seed a position: %v", err)
 	}
+	applier := &Applier{Target: target, Positions: positions}
 	defer applier.Positions.Purge(context.Background())
 
 	// RPUSH against a string is WRONGTYPE: the command fails, the transaction
@@ -64,7 +67,8 @@ func TestACommandThatFailsAtRunTimeStopsTheTask(t *testing.T) {
 	if markerErr != nil {
 		t.Fatalf("read the marker: %v", markerErr)
 	}
-	if marker != "100" {
+	offset, ours := markerOffset(marker, applier.Positions.ReplID())
+	if !ours || offset != 100 {
 		t.Errorf("the marker reads %q; the test's premise is that it moved", marker)
 	}
 }

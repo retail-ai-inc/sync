@@ -329,8 +329,13 @@ func (a *Applier) applySlot(ctx context.Context, job work, batchEnd int64) error
 	// Back to where the bookkeeping lives, both for the marker and so the
 	// connection is returned to the pool on the database its owner expects.
 	selectDB(a.BookkeepingDB)
+	// Stamped with the source history it belongs to. An offset means nothing
+	// outside one: after a reshard the slot is served by another master, which
+	// numbers its stream independently, and a bare number left by the old one
+	// could read as "already applied" about a command the new one has never
+	// sent.
 	marker := tx.Set(ctx, OffsetKey(job.slot, a.Positions.TaskID),
-		strconv.FormatInt(batchEnd, 10), 0)
+		markerValue(a.Positions.ReplID(), batchEnd), 0)
 
 	results, err := tx.Exec(ctx)
 
