@@ -111,15 +111,6 @@ func ParseUserToken(token string) (username, accessLevel string, ok bool) {
 	return claims.Username, claims.Access, true
 }
 
-func GenerateAdminToken() string {
-	return GenerateUserToken("admin", AccessAdmin)
-}
-
-func ValidateAdminToken(token string) bool {
-	username, access, ok := ParseUserToken(token)
-	return ok && username == "admin" && access == AccessAdmin
-}
-
 // ExtractTokenFromHeader extracts token from HTTP request header.
 //
 // The scheme is matched without regard to case and without depending on the

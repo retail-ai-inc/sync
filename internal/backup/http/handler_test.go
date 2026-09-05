@@ -46,12 +46,12 @@ func emptyTaskDB(t *testing.T) {
 	sqlitetest.Tableless(t)
 }
 
-func TestBackupRunHandlerRejectsAnUnknownTask(t *testing.T) {
+func TestBackupExecuteHandlerRejectsAnUnknownTask(t *testing.T) {
 	useTempTaskDB(t)
 
 	rec := httptest.NewRecorder()
 	serveWithURLParams(rec, httptest.NewRequest(http.MethodPost, "/backup/{id}/run", nil),
-		BackupRunHandler, map[string]string{"id": "999"})
+		BackupExecuteHandler, map[string]string{"id": "999"})
 
 	resp := decodeEnvelope(t, rec)
 	if resp["success"] != false {
@@ -62,20 +62,20 @@ func TestBackupRunHandlerRejectsAnUnknownTask(t *testing.T) {
 	}
 }
 
-func TestBackupRunHandlerReportsAMissingTable(t *testing.T) {
+func TestBackupExecuteHandlerReportsAMissingTable(t *testing.T) {
 	emptyTaskDB(t)
 
 	rec := httptest.NewRecorder()
 	serveWithURLParams(rec, httptest.NewRequest(http.MethodPost, "/backup/{id}/run", nil),
-		BackupRunHandler, map[string]string{"id": "1"})
+		BackupExecuteHandler, map[string]string{"id": "1"})
 
 	if resp := decodeEnvelope(t, rec); resp["success"] != false {
 		t.Errorf("success = %v, want false", resp["success"])
 	}
 }
 
-// TestBackupRunHandlerActuallyRunsTheJob covers "back this up now".
-func TestBackupRunHandlerActuallyRunsTheJob(t *testing.T) {
+// TestBackupExecuteHandlerActuallyRunsTheJob covers "back this up now".
+func TestBackupExecuteHandlerActuallyRunsTheJob(t *testing.T) {
 	conn := useTempTaskDB(t)
 	insertBackupTask(t, conn, 1, `{"name":"nightly","sourceType":"mongodb","schedule":"0 3 * * *"}`)
 	app.ForgetRuns()
@@ -83,7 +83,7 @@ func TestBackupRunHandlerActuallyRunsTheJob(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	serveWithURLParams(rec, httptest.NewRequest(http.MethodPost, "/backup/{id}/run", nil),
-		BackupRunHandler, map[string]string{"id": "1"})
+		BackupExecuteHandler, map[string]string{"id": "1"})
 
 	resp := decodeEnvelope(t, rec)
 	if resp["success"] != true {

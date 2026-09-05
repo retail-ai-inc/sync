@@ -193,41 +193,6 @@ func TestATokenVariesByIdentity(t *testing.T) {
 	}
 }
 
-// TestGenerateAdminTokenEqualsAdminUserToken records that the admin token is
-// not a distinct credential: it is the user token for the pair ("admin",
-// "admin").
-func TestGenerateAdminTokenEqualsAdminUserToken(t *testing.T) {
-	username, access, ok := ParseUserToken(GenerateAdminToken())
-	if !ok {
-		t.Fatal("the admin token does not parse")
-	}
-	if username != "admin" || access != AccessAdmin {
-		t.Errorf("the admin token proves %q/%q", username, access)
-	}
-}
-
-func TestValidateAdminToken(t *testing.T) {
-	valid := GenerateAdminToken()
-
-	if !ValidateAdminToken(valid) {
-		t.Error("ValidateAdminToken rejected the token it just generated")
-	}
-
-	for name, token := range map[string]string{
-		"empty":         "",
-		"truncated":     valid[:len(valid)-1],
-		"a user token":  GenerateUserToken("alice", "guest"),
-		"a named admin": GenerateUserToken("alice", AccessAdmin),
-		"expired":       generateUserTokenAt("admin", AccessAdmin, time.Now().Add(-time.Second)),
-	} {
-		t.Run(name, func(t *testing.T) {
-			if ValidateAdminToken(token) {
-				t.Errorf("ValidateAdminToken(%q) = true, want false", token)
-			}
-		})
-	}
-}
-
 func TestExtractTokenFromHeader(t *testing.T) {
 	tests := []struct {
 		name   string

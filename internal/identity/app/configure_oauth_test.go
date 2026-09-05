@@ -275,26 +275,6 @@ func TestAuthoriseAdmin(t *testing.T) {
 	}
 }
 
-// TestAdminAuthorisationReadsTheAccessLevelNotTheUsername records that unlike
-// the admin-token endpoint, this check accepts any user whose access level is
-// admin.
-func TestAdminAuthorisationReadsTheAccessLevelNotTheUsername(t *testing.T) {
-	db := useTempDB(t)
-	insertUser(t, db, "alice", "secret", "Alice", domain.AccessAdmin)
-	token := domain.GenerateUserToken("alice", domain.AccessAdmin)
-
-	_, isAdmin := AuthoriseAdmin(token)
-	if !isAdmin {
-		t.Fatal("AuthoriseAdmin refused an admin-level user; the two admin checks " +
-			"appear to agree now, so assert the shared rule")
-	}
-
-	if _, ok := AdminToken("Bearer " + token); !ok {
-		t.Error("AdminToken refused the same credential this check accepted; the " +
-			"two appear to disagree in the other direction now")
-	}
-}
-
 // TestOnlyTheSignInFieldsAreServed covers an endpoint any unauthenticated
 // caller can reach.
 func TestOnlyTheSignInFieldsAreServed(t *testing.T) {

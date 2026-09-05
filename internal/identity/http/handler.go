@@ -209,24 +209,6 @@ func UpdateAdminPasswordHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// GetAdminTokenHandler GET /api/getAdminToken
-func GetAdminTokenHandler(w http.ResponseWriter, r *http.Request) {
-	token, ok := app.AdminToken(r.Header.Get("Authorization"))
-	if !ok {
-		writeFailure(w, http.StatusUnauthorized, "401", "Admin privileges required")
-		return
-	}
-
-	resp := map[string]interface{}{
-		"success": true,
-		"data": map[string]interface{}{
-			"accessToken": token,
-		},
-	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(resp)
-}
-
 // AuthGoogleCallbackHandler POST /api/login/google/callback
 func AuthGoogleCallbackHandler(w http.ResponseWriter, r *http.Request) {
 	var req struct {

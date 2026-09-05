@@ -201,43 +201,6 @@ func TestCurrentUserOnAnUnknownUser(t *testing.T) {
 	}
 }
 
-// The use case used to consult the process-wide session, so once anybody had
-// signed in as admin it handed an admin token to any caller at all — including
-// one that had presented nothing.
-func TestAdminTokenRequiresAnAdminCredential(t *testing.T) {
-	db := useTempDB(t)
-	insertUser(t, db, "admin", "adminpw", "Admin", "admin")
-	insertUser(t, db, "alice", "secret", "Alice", "guest")
-
-	if _, ok := AdminToken(""); ok {
-		t.Error("AdminToken issued a token to a caller presenting nothing")
-	}
-	if _, ok := AdminToken("Bearer not-a-token"); ok {
-		t.Error("AdminToken issued a token for an unreadable credential")
-	}
-	if _, ok := AdminToken("Bearer " + domain.GenerateUserToken("alice", "guest")); ok {
-		t.Error("AdminToken issued a token to a guest")
-	}
-
-	// Somebody else being signed in as admin must not help.
-	if _, _, _, err := Login("admin", "adminpw"); err != nil {
-		t.Fatalf("Login: %v", err)
-	}
-	if _, ok := AdminToken(""); ok {
-		t.Error("AdminToken issued a token to a caller presenting nothing while an " +
-			"admin was signed in elsewhere")
-	}
-
-	adminToken := domain.GenerateUserToken("admin", domain.AccessAdmin)
-	token, ok := AdminToken("Bearer " + adminToken)
-	if !ok {
-		t.Fatal("AdminToken refused a valid admin credential")
-	}
-	if !domain.ValidateAdminToken(token) {
-		t.Error("the minted token does not validate")
-	}
-}
-
 func TestChangePassword(t *testing.T) {
 	db := useTempDB(t)
 	insertUser(t, db, "alice", "secret", "Alice", "admin")

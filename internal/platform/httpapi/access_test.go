@@ -72,7 +72,6 @@ var adminRoutes = []struct{ method, path string }{
 	{http.MethodPut, "/users/access"},
 	{http.MethodDelete, "/users"},
 	{http.MethodPut, "/updateAdminPassword"},
-	{http.MethodGet, "/getAdminToken"},
 	{http.MethodPut, "/oauth/google/config"},
 	{http.MethodPost, "/test-connection"},
 	{http.MethodPost, "/tables/schema"},
@@ -80,7 +79,6 @@ var adminRoutes = []struct{ method, path string }{
 	{http.MethodPut, "/backup/1"},
 	{http.MethodPut, "/backup/1/pause"},
 	{http.MethodPut, "/backup/1/resume"},
-	{http.MethodPost, "/backup/1/run"},
 	{http.MethodDelete, "/backup/1"},
 	{http.MethodPost, "/backup/execute/1"},
 }

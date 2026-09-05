@@ -71,23 +71,6 @@ func CurrentUser(username string) (map[string]interface{}, error) {
 	return infra.GetUserData(username)
 }
 
-// AdminToken mints an admin token for a caller who already proves the admin
-// identity.
-//
-// It used to consult the process-wide session instead, which handed an admin
-// token to anybody who asked for one once anybody at all had signed in as
-// admin — including a caller who had presented no credential (T-070).
-func AdminToken(authHeader string) (string, bool) {
-	if authHeader == "" {
-		return "", false
-	}
-	valid, _, access := ValidateUserToken(domain.ExtractTokenFromHeader(authHeader))
-	if !valid || access != domain.AccessAdmin {
-		return "", false
-	}
-	return domain.GenerateAdminToken(), true
-}
-
 // Errors a password change can end in. The handler maps each to a distinct
 // status code and message, so they have to stay distinguishable.
 var (

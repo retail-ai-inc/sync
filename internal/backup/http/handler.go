@@ -200,13 +200,25 @@ func BackupResumeHandler(w http.ResponseWriter, r *http.Request) {
 	// After successful resume, sync crontab
 }
 
-// BackupRunHandler POST /api/backup/{id}/run
+// BackupExecuteHandler POST /api/backup/execute/{id}
 //
-// It stamps the last backup time and answers that the job started. It does not
-// start one; BackupExecuteHandler does.
-func BackupRunHandler(w http.ResponseWriter, r *http.Request) {
+// It builds an executor and runs the job in the background, returning a task id
+// to poll.
+//
+// There used to be a second way in, POST /api/backup/{id}/run, which nothing
+// called. It was the more careful of the two: it checked the job existed and
+// said so when it did not, where this one submitted a run for any number that
+// parsed. The route is gone and the check it carried is here.
+func BackupExecuteHandler(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	logrus.Infof("[Backup] BackupRunHandler => taskID=%s", id)
+	logrus.Infof("[Backup] BackupExecuteHandler => taskID=%s", id)
+
+	// The shape of the id first: an id that is not a number is a bad request,
+	// where one that is a number and names nothing is a missing job.
+	if _, err := strconv.Atoi(id); err != nil {
+		http.Error(w, "Invalid ID", http.StatusBadRequest)
+		return
+	}
 
 	taskID, err := app.StartRun(id)
 	switch {
@@ -215,30 +227,9 @@ func BackupRunHandler(w http.ResponseWriter, r *http.Request) {
 		httpx.ErrorJSON(w, "backup task not found", errors.New("no such task"))
 		return
 	default:
-		fail(w, "update fail", err)
+		fail(w, "run the backup job", err)
 		return
 	}
-
-	httpx.WriteJSON(w, map[string]interface{}{
-		"success": true,
-		"taskId":  taskID,
-		"message": "Backup job started successfully",
-	})
-}
-
-// BackupExecuteHandler POST /api/backup/execute/{id}
-//
-// It builds an executor and runs the job in the background, returning a task id
-// to poll.
-func BackupExecuteHandler(w http.ResponseWriter, r *http.Request) {
-	idStr := chi.URLParam(r, "id")
-	id, err := strconv.Atoi(idStr)
-	if err != nil {
-		http.Error(w, "Invalid ID", http.StatusBadRequest)
-		return
-	}
-
-	taskID := app.SubmitRun(id)
 
 	httpx.WriteJSON(w, map[string]interface{}{
 		"success": true,

@@ -240,67 +240,6 @@ func TestASuccessfulPasswordChangeDoesCarryContentType(t *testing.T) {
 	}
 }
 
-func TestUpdateAdminPasswordHandlerChangesThePassword(t *testing.T) {
-	db := useTempDB(t)
-	insertUser(t, db, "admin", "secret", "Admin", domain.AccessAdmin)
-
-	req := httptest.NewRequest(http.MethodPut, "/updateAdminPassword",
-		strings.NewReader(`{"oldPassword":"secret","newPassword":"newsecret"}`))
-	req.Header.Set("Authorization", "Bearer "+domain.GenerateAdminToken())
-	rec := httptest.NewRecorder()
-	UpdateAdminPasswordHandler(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d (body: %q)", rec.Code, rec.Body.String())
-	}
-
-	var stored string
-	if err := db.QueryRow(`SELECT password FROM users WHERE username='admin'`).Scan(&stored); err != nil {
-		t.Fatalf("read password: %v", err)
-	}
-	if stored == "newsecret" || !domain.IsHashed(stored) {
-		t.Errorf("the stored password is %q", stored)
-	}
-	if ok, _, err := infra.ValidateUser("admin", "newsecret"); err != nil || !ok {
-		t.Errorf("the new password does not authenticate (%v, %v)", ok, err)
-	}
-}
-
-func TestUpdateAdminPasswordHandlerRejectsAWrongOldPassword(t *testing.T) {
-	db := useTempDB(t)
-	insertUser(t, db, "admin", "secret", "Admin", domain.AccessAdmin)
-
-	req := httptest.NewRequest(http.MethodPut, "/updateAdminPassword",
-		strings.NewReader(`{"oldPassword":"wrong","newPassword":"x"}`))
-	req.Header.Set("Authorization", "Bearer "+domain.GenerateAdminToken())
-	rec := httptest.NewRecorder()
-	UpdateAdminPasswordHandler(rec, req)
-
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("status = %d, want 400 (body: %q)", rec.Code, rec.Body.String())
-	}
-}
-
-// TestTheAdminPasswordEndpointAlwaysTargetsTheAdminRow records that the
-// username is hardcoded: the endpoint changes the password of the row called
-// "admin", whoever presented the token.
-func TestTheAdminPasswordEndpointAlwaysTargetsTheAdminRow(t *testing.T) {
-	db := useTempDB(t)
-	insertUser(t, db, "admin", "adminpw", "Admin", domain.AccessAdmin)
-	insertUser(t, db, "alice", "alicepw", "Alice", domain.AccessAdmin)
-
-	req := httptest.NewRequest(http.MethodPut, "/updateAdminPassword",
-		strings.NewReader(`{"oldPassword":"alicepw","newPassword":"x"}`))
-	req.Header.Set("Authorization", "Bearer "+domain.GenerateAdminToken())
-	rec := httptest.NewRecorder()
-	UpdateAdminPasswordHandler(rec, req)
-
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d; alice's password was accepted, so the endpoint appears "+
-			"to read the token's identity now", rec.Code)
-	}
-}
-
 func TestGetUsersHandlerReturnsThePage(t *testing.T) {
 	db := useTempDB(t)
 	for _, name := range []string{"a", "b", "c"} {

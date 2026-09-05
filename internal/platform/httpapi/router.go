@@ -89,13 +89,11 @@ func NewRouter() http.Handler {
 		r.Put("/users/access", identityhttp.UpdateUserAccessHandler)
 		r.Delete("/users", identityhttp.DeleteUserHandler)
 		r.Put("/updateAdminPassword", identityhttp.UpdateAdminPasswordHandler)
-		r.Get("/getAdminToken", identityhttp.GetAdminTokenHandler)
 
 		r.Post("/backup", backuphttp.BackupCreateHandler)
 		r.Delete("/backup/{id}", backuphttp.BackupDeleteHandler)
 		r.Put("/backup/{id}/pause", backuphttp.BackupPauseHandler)
 		r.Put("/backup/{id}/resume", backuphttp.BackupResumeHandler)
-		r.Post("/backup/{id}/run", backuphttp.BackupRunHandler)
 		r.Put("/backup/{id}", backuphttp.BackupUpdateHandler)
 		r.Post("/backup/execute/{id}", backuphttp.BackupExecuteHandler)
 	})
