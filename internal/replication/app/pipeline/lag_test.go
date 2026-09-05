@@ -19,18 +19,23 @@ func readLagOf(t *testing.T, labels metrics.Labels) (float64, bool) {
 	return 0, false
 }
 
-// The read lag used to be measured from whatever the last event carried,
-// heartbeats included. A heartbeat is the stream saying it had nothing, so the
-// gauge walked from zero up to the heartbeat interval and dropped back on a
-// link with no delay at all.
-func TestAHeartbeatMeansNothingIsWaitingToBeRead(t *testing.T) {
+// A heartbeat leaves the gauge alone. Measuring its own age made the gauge walk
+// up to the heartbeat interval and back on a link with no delay; writing zero
+// instead is no better, because heartbeats outnumber events on a quiet source
+// and every scrape would land on one.
+func TestAHeartbeatDoesNotDisturbTheReadLag(t *testing.T) {
 	ns := domain.Namespace{DB: "shop", Object: "orders"}
-	old := time.Now().Add(-30 * time.Second)
+	stale := time.Now().Add(-30 * time.Second)
 	reader := &fakeReader{events: []*domain.Event{
-		{NS: ns, Op: domain.OpInsert, Key: "1", Bytes: 1, SourceTime: old,
+		// A real event read with no delay at all.
+		{NS: ns, Op: domain.OpInsert, Key: "1", Bytes: 1, WallTime: time.Now(),
 			Pos: domain.Position{Payload: "p1"}, EndsTransaction: true},
-		{Heartbeat: true, SourceTime: old, EndsTransaction: true,
+		// Then heartbeats carrying a much older clock, which is what a quiet
+		// source produces once a second.
+		{Heartbeat: true, SourceTime: stale, WallTime: stale, EndsTransaction: true,
 			Pos: domain.Position{Payload: "p2"}},
+		{Heartbeat: true, SourceTime: stale, WallTime: stale, EndsTransaction: true,
+			Pos: domain.Position{Payload: "p3"}},
 	}}
 
 	r := newRunner(t, reader, &fakeApplier{}, newStore())
@@ -46,9 +51,9 @@ func TestAHeartbeatMeansNothingIsWaitingToBeRead(t *testing.T) {
 	if !ok {
 		t.Fatal("the read lag was never reported")
 	}
-	if lag != 0 {
-		t.Errorf("after a heartbeat the read lag is %v, want 0 -- the stream said "+
-			"it had nothing, so nothing is waiting", lag)
+	// The real event's reading survives the heartbeats that followed it.
+	if lag > 5 {
+		t.Errorf("the read lag is %v, so a heartbeat overwrote the measurement", lag)
 	}
 }
 

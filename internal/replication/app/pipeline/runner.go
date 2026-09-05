@@ -494,16 +494,20 @@ func (r *Runner) read(ctx context.Context, queue chan<- *domain.Event) error {
 		}
 		r.mu.Unlock()
 
-		// A heartbeat is the stream saying it had nothing to give, so there is
-		// nothing waiting to be read and the read lag is zero. Measuring its age
-		// instead made the gauge walk from zero up to the heartbeat interval and
-		// drop back, on a link with no delay at all.
+		// This gauge is how old an event was when it was read, so a heartbeat
+		// leaves it alone: there was no event. Measuring the heartbeat's own age
+		// made it walk from zero up to the heartbeat interval and drop back on a
+		// link with no delay at all, and writing zero instead is no better --
+		// heartbeats outnumber events on a quiet source by a hundred to one, so
+		// every scrape would land on one and the real measurement would never be
+		// seen. What is left standing is the last real reading, which does not
+		// grow on its own; a reader that has stopped shows up in
+		// sync_source_last_event_age_seconds, which is what that one is for.
 		//
-		// Otherwise the wall clock when the source reports one: an ordering clock
-		// that counts whole seconds cannot measure a delay shorter than one.
+		// The wall clock when the source reports one: an ordering clock that
+		// counts whole seconds cannot measure a delay shorter than one.
 		switch {
 		case event.Heartbeat:
-			metrics.SetReadLag(r.Opts.Labels, 0)
 		case !event.WallTime.IsZero():
 			metrics.SetReadLag(r.Opts.Labels, now.Sub(event.WallTime).Seconds())
 		case !event.SourceTime.IsZero():
