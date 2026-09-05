@@ -206,3 +206,49 @@ func TestTheSQLStoreSpellsPlaceholdersBothWays(t *testing.T) {
 		t.Errorf("arg(2) = %q, want $2", got)
 	}
 }
+
+// TestTheLockTableIsCreatedOncePerProcess covers a defect the checkpoint store
+// had first, in its sibling here.
+//
+// MySQL writes a CREATE TABLE to the binary log whether or not the table was
+// there to create, and a claim is refreshed on both endpoints every
+// HeartbeatInterval. Running the create on every claim therefore put a DDL
+// statement into the source's binary log every minute, for ever, from a tool
+// that is otherwise only a reader there -- and any task replicating that source
+// read its own lock table's DDL back and counted it as a schema change it had
+// refused to carry.
+func TestTheLockTableIsCreatedOncePerProcess(t *testing.T) {
+	store := sqlStore(t)
+	ctx := context.Background()
+
+	if err := store.Put(ctx, Claim{TaskID: 1, Role: "target", Peer: "tokyo", Owner: "a"}); err != nil {
+		t.Fatalf("first claim: %v", err)
+	}
+	if _, err := store.DB.ExecContext(ctx, "DROP TABLE "+tableName); err != nil {
+		t.Fatalf("drop: %v", err)
+	}
+
+	if err := store.Put(ctx, Claim{TaskID: 1, Role: "target", Peer: "tokyo", Owner: "a"}); err == nil {
+		t.Error("the second claim created the table again, so every heartbeat " +
+			"writes a CREATE TABLE into the endpoint's binary log")
+	}
+}
+
+// TestReadingClaimsDoesNotRecreateTheTableEither: Claims runs on the same
+// heartbeat as Put, so leaving the create on the read path would keep the DDL
+// flowing at the same rate.
+func TestReadingClaimsDoesNotRecreateTheTableEither(t *testing.T) {
+	store := sqlStore(t)
+	ctx := context.Background()
+
+	if _, err := store.Claims(ctx); err != nil {
+		t.Fatalf("first read: %v", err)
+	}
+	if _, err := store.DB.ExecContext(ctx, "DROP TABLE "+tableName); err != nil {
+		t.Fatalf("drop: %v", err)
+	}
+
+	if _, err := store.Claims(ctx); err == nil {
+		t.Error("reading the claims created the table again")
+	}
+}

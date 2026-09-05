@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"sync"
 	"time"
 
 	goredis "github.com/redis/go-redis/v9"
@@ -30,6 +31,11 @@ type SQLStore struct {
 	// NumberedPlaceholders spells parameters as $1, $2 rather than ?, which is
 	// what PostgreSQL takes. MySQL and SQLite take the question marks.
 	NumberedPlaceholders bool
+
+	// mu guards made, which records that the table has been created in this
+	// process.
+	mu   sync.Mutex
+	made bool
 }
 
 func (s *SQLStore) arg(n int) string {
@@ -53,7 +59,33 @@ func (s *SQLStore) qualified() string {
 // ensure creates the table if it is not there. The column types are spelled so
 // both MySQL and SQLite accept them, since the hermetic suite drives this
 // against SQLite.
+// ensure creates the table if absent.
+//
+// Once per process, not once per claim. MySQL writes a CREATE TABLE to the
+// binary log whether or not the table was there to create, and a claim is
+// refreshed on both endpoints every HeartbeatInterval -- so this put a DDL
+// statement into the source's binary log every minute, for ever, from a tool
+// that is otherwise a reader there. Any task replicating that source then read
+// its own lock table's DDL back and counted it as a schema change it had
+// refused to carry, which is what the refusal metric was showing.
+//
+// The checkpoint store had the same defect and the same fix; this is its
+// sibling.
 func (s *SQLStore) ensure(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.made {
+		return nil
+	}
+
+	if err := s.create(ctx); err != nil {
+		return err
+	}
+	s.made = true
+	return nil
+}
+
+func (s *SQLStore) create(ctx context.Context) error {
 	_, err := s.DB.ExecContext(ctx, fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
 		task_id INTEGER PRIMARY KEY,
 		role TEXT NOT NULL,
