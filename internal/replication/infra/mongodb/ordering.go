@@ -28,6 +28,25 @@ func idOf(doc interface{}) interface{} {
 
 // eventClusterTime reports when the source made the change a raw event
 // describes. Change stream documents carry it as clusterTime.
+// eventWallTime reads the primary's own clock at the moment of the change.
+//
+// MongoDB 6.0 and later put it on every change stream event. It is not an
+// ordering clock -- clusterTime is -- but it has millisecond resolution, and
+// clusterTime counts whole seconds: a delay measured from clusterTime carries
+// up to a second of error that is an artefact of the timestamp rather than
+// anything the replication did.
+func eventWallTime(raw bson.Raw) (time.Time, bool) {
+	value, err := raw.LookupErr("wallTime")
+	if err != nil {
+		return time.Time{}, false
+	}
+	milliseconds, ok := value.DateTimeOK()
+	if !ok || milliseconds == 0 {
+		return time.Time{}, false
+	}
+	return time.UnixMilli(milliseconds), true
+}
+
 func eventClusterTime(raw bson.Raw) (time.Time, bool) {
 	value, err := raw.LookupErr("clusterTime")
 	if err != nil {

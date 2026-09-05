@@ -2,6 +2,7 @@ package mongodb
 
 import (
 	"testing"
+	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
@@ -55,4 +56,57 @@ func indexOf(models []mongo.WriteModel, want mongo.WriteModel) int {
 		}
 	}
 	return -1
+}
+
+// clusterTime counts whole seconds, so a delay measured from it reports up to a
+// second that is not there. wallTime is the primary's own clock at the change.
+func TestTheWallTimeIsReadWhenTheServerSendsOne(t *testing.T) {
+	at := time.UnixMilli(1757000000123)
+	raw, err := bson.Marshal(bson.M{
+		"clusterTime": bson.Timestamp{T: uint32(at.Unix()), I: 1},
+		"wallTime":    bson.NewDateTimeFromTime(at),
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	wall, ok := eventWallTime(bson.Raw(raw))
+	if !ok {
+		t.Fatal("wallTime was not read")
+	}
+	if !wall.Equal(at) {
+		t.Errorf("wallTime = %v, want %v", wall, at)
+	}
+	// The millisecond is the whole point: the ordering clock has already lost it.
+	if wall.Nanosecond() == 0 {
+		t.Error("the sub-second part was discarded")
+	}
+
+	ordering, ok := eventClusterTime(bson.Raw(raw))
+	if !ok {
+		t.Fatal("clusterTime was not read")
+	}
+	if ordering.Nanosecond() != 0 {
+		t.Error("the ordering clock is expected to be whole seconds")
+	}
+}
+
+// A server too old to send one has to leave the field empty rather than report
+// a zero time, which would read as 1970 and a lag of fifty years.
+func TestNoWallTimeIsNotAZeroWallTime(t *testing.T) {
+	raw, err := bson.Marshal(bson.M{"clusterTime": bson.Timestamp{T: 1757000000, I: 1}})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if _, ok := eventWallTime(bson.Raw(raw)); ok {
+		t.Error("an event with no wallTime reported one")
+	}
+
+	zeroed, err := bson.Marshal(bson.M{"wallTime": bson.DateTime(0)})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if _, ok := eventWallTime(bson.Raw(zeroed)); ok {
+		t.Error("a zero wallTime was accepted")
+	}
 }

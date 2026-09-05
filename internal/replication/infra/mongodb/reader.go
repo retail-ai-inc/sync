@@ -316,9 +316,9 @@ func (r *Reader) take(raw bson.Raw) error {
 
 	if !at.IsZero() {
 		r.lastAt = at
-		metrics.SetReadLag(r.Labels, time.Since(at).Seconds())
 	}
 
+	wall, _ := eventWallTime(raw)
 	event := &domain.Event{
 		NS:         ns,
 		Op:         opOf(raw),
@@ -327,6 +327,7 @@ func (r *Reader) take(raw bson.Raw) error {
 		Bytes:      len(raw),
 		Pos:        domain.Position{Payload: token},
 		SourceTime: at,
+		WallTime:   wall,
 	}
 
 	txID := transactionOf(raw)
@@ -404,6 +405,7 @@ func (r *Reader) takeSchemaChange(raw bson.Raw, ns domain.Namespace) error {
 	// A schema change is its own boundary and gets its own batch: MongoDB's
 	// catalogue is not transactional, so it cannot share one with rows.
 	r.seal()
+	wall, _ := eventWallTime(raw)
 	r.ready = append(r.ready, &domain.Event{
 		NS:              ns,
 		Op:              domain.OpSchema,
@@ -411,6 +413,7 @@ func (r *Reader) takeSchemaChange(raw bson.Raw, ns domain.Namespace) error {
 		Bytes:           len(raw),
 		Pos:             domain.Position{Payload: token},
 		SourceTime:      at,
+		WallTime:        wall,
 		EndsTransaction: true,
 	})
 	return nil

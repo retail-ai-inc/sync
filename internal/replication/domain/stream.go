@@ -77,8 +77,20 @@ type Event struct {
 	Pos Position
 
 	// SourceTime is when the source made the change. The applied lag is
-	// measured from it.
+	// measured from it, and so is every ordering decision that compares the
+	// stream against something else -- a re-copy's chunk waits on it. It is the
+	// source's own ordering clock, which is not always a wall clock: MongoDB's
+	// cluster time counts whole seconds.
 	SourceTime time.Time
+
+	// WallTime is the source's wall clock at the change, for sources that report
+	// one alongside their ordering clock. Zero when there is none.
+	//
+	// Only the lag gauges read it. A wall clock can jump and two of them can
+	// disagree, so nothing may order by it -- but measuring a sub-second delay
+	// against a clock that counts whole seconds reports up to a second of delay
+	// that is not there, which is what this exists to avoid.
+	WallTime time.Time
 
 	// Landed, when set, is closed once the batch carrying this event has been
 	// applied to the target. It is nil for everything the stream produces.
