@@ -2,6 +2,7 @@
 package replicationhttp
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -318,6 +319,12 @@ func SyncPositionHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// countDeadline bounds the row count, and is what the write deadline is
+// extended to. Long enough for a sharded MongoDB source counted on both sides,
+// short enough that a wedged count releases the connection rather than holding
+// it for ever.
+const countDeadline = 15 * time.Minute
+
 // GET /api/sync/{id}/rowcounts
 //
 // What the "objects captured" figure is made of: every replicated table or
@@ -327,7 +334,24 @@ func SyncPositionHandler(w http.ResponseWriter, r *http.Request) {
 func SyncRowCountsHandler(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
-	counts, err := app.TaskRowCounts(r.Context(), id)
+	// The server writes with a sixty-second deadline, which every other
+	// endpoint here answers well inside. This one does not: an exact count of
+	// both sides of the sharded MongoDB source took about five minutes, so the
+	// connection was closed with nothing written and the caller saw an empty
+	// reply. The deadline is extended for this handler alone rather than raised
+	// on the server, which would take the guard off every other endpoint.
+	if controller := http.NewResponseController(w); controller != nil {
+		if err := controller.SetWriteDeadline(time.Now().Add(countDeadline)); err != nil {
+			// Not fatal: a connection that will not take a deadline still
+			// answers, and a short count still fits in the server's own.
+			logrus.Debugf("[SyncRowCounts] could not extend the write deadline: %v", err)
+		}
+	}
+
+	ctx, giveUp := context.WithTimeout(r.Context(), countDeadline)
+	defer giveUp()
+
+	counts, err := app.TaskRowCounts(ctx, id)
 	if err != nil {
 		fail(w, "count the task's objects", err)
 		return
