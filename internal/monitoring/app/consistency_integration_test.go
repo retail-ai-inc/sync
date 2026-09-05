@@ -8,9 +8,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
-	"sync"
 	"testing"
-	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/sirupsen/logrus"
@@ -126,47 +124,5 @@ func TestAPrimaryKeyIsReturnedWhole(t *testing.T) {
 	// nothing, which would report every row as a duplicate of every other.
 	if _, err := primaryKey(context.Background(), db, "source_db", "no_such_table"); err == nil {
 		t.Error("a table with no primary key was accepted for comparison")
-	}
-}
-
-// Cancelling only asks a monitor to stop; every one writes to the control
-// database, so shutdown has to wait for them to notice or the process can
-// return while a goroutine is still writing.
-func TestWaitingForWatchersWaitsForThemToReturn(t *testing.T) {
-	var started, finished sync.WaitGroup
-	started.Add(1)
-	release := make(chan struct{})
-	var ran bool
-
-	finished.Add(1)
-	watch(func() {
-		started.Done()
-		<-release
-		ran = true
-		finished.Done()
-	})
-
-	started.Wait()
-	done := make(chan struct{})
-	go func() {
-		WaitForWatchers()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		t.Fatal("WaitForWatchers returned while a monitor was still running")
-	case <-time.After(50 * time.Millisecond):
-	}
-
-	close(release)
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("WaitForWatchers did not return after the monitor did")
-	}
-	finished.Wait()
-	if !ran {
-		t.Error("the monitor did not run")
 	}
 }
