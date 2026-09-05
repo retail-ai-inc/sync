@@ -15,7 +15,7 @@ func schedulerFor(t *testing.T, at time.Time) (*scheduler, *[]int) {
 	var fired []int
 	s := &scheduler{
 		log: quietBackupLogger(),
-		due: map[int]time.Time{},
+		due: map[int]deadline{},
 		now: func() time.Time { return at },
 		submit: func(id int) string {
 			fired = append(fired, id)
@@ -57,8 +57,8 @@ func TestAJobSeenForTheFirstTimeIsNotRunImmediately(t *testing.T) {
 	if !ok {
 		t.Fatalf("the job was not scheduled: %v", s.due)
 	}
-	if !when.After(at(t, "2026-09-02 09:00:00")) {
-		t.Errorf("next run %s is not in the future", when)
+	if !when.at.After(at(t, "2026-09-02 09:00:00")) {
+		t.Errorf("next run %s is not in the future", when.at)
 	}
 }
 
@@ -153,8 +153,8 @@ func TestResumingAJobSchedulesItFromThen(t *testing.T) {
 	if !ok {
 		t.Fatal("the resumed job was not scheduled again")
 	}
-	if !when.After(at(t, "2026-09-02 09:05:00")) {
-		t.Errorf("next run %s is not in the future", when)
+	if !when.at.After(at(t, "2026-09-02 09:05:00")) {
+		t.Errorf("next run %s is not in the future", when.at)
 	}
 }
 
@@ -203,5 +203,55 @@ func TestTheSchedulerStopsWithItsContext(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("the scheduler did not stop when its context was cancelled")
+	}
+}
+
+// TestEditingAScheduleRecomputesTheDeadline covers a cached due time answering
+// a question nobody is asking any more.
+//
+// The deadline is computed once, when the job is first seen. Editing the
+// schedule left it standing: a nightly job switched to every minute at nine in
+// the morning went on waiting until midnight, and one moved later still ran at
+// the time it used to have.
+func TestEditingAScheduleRecomputesTheDeadline(t *testing.T) {
+	db := useTempJobDB(t)
+	id := insertJob(t, db, 1, `{"name":"nightly","schedule":"20 0 * * *","sourceType":"mysql"}`)
+
+	s, fired := schedulerFor(t, at(t, "2026-09-02 09:00:00"))
+	s.tick(context.Background()) // scheduled for 00:20 tomorrow
+
+	if _, err := db.Exec(`UPDATE backup_tasks SET config_json = ? WHERE id = ?`,
+		`{"name":"nightly","schedule":"* * * * *","sourceType":"mysql"}`, id); err != nil {
+		t.Fatalf("reschedule the job: %v", err)
+	}
+
+	// One minute later the new schedule is due; the old one is not.
+	s.now = func() time.Time { return at(t, "2026-09-02 09:01:30") }
+	s.tick(context.Background()) // notices the edit and schedules from now
+	s.now = func() time.Time { return at(t, "2026-09-02 09:02:30") }
+	s.tick(context.Background()) // the new occurrence fires
+
+	if len(*fired) != 1 || (*fired)[0] != int(id) {
+		t.Fatalf("fired = %v, want the rescheduled job to run once -- the cached "+
+			"midnight deadline was kept", *fired)
+	}
+}
+
+// TestAnUneditedScheduleKeepsItsDeadline: recomputing on every tick would push
+// the deadline forward for ever and the job would never fire.
+func TestAnUneditedScheduleKeepsItsDeadline(t *testing.T) {
+	db := useTempJobDB(t)
+	insertJob(t, db, 1, `{"name":"nightly","schedule":"20 0 * * *","sourceType":"mysql"}`)
+
+	s, _ := schedulerFor(t, at(t, "2026-09-02 09:00:00"))
+	s.tick(context.Background())
+	first := s.due[1]
+
+	s.now = func() time.Time { return at(t, "2026-09-02 09:00:30") }
+	s.tick(context.Background())
+
+	if !s.due[1].at.Equal(first.at) {
+		t.Errorf("the deadline moved from %s to %s without the schedule changing",
+			first.at, s.due[1].at)
 	}
 }

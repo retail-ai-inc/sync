@@ -24,9 +24,6 @@ const (
 	// configReloadInterval is how often the stored configuration is re-read, and
 	// how often a task that stopped by itself is considered for restart.
 	configReloadInterval = 10 * time.Second
-	// drainTimeout is how long a task is given to finish what it was applying
-	// after being asked to stop.
-	drainTimeout = 30 * time.Second
 	// restartBackoff is the wait before restarting a task that stopped on its own,
 	// doubling each time it stops again.
 	restartBackoff = 10 * time.Second
@@ -76,6 +73,12 @@ func fingerprint(sc config.SyncConfig) string {
 // globalFingerprint renders the settings belonging to the process rather than
 // one task. Comparing only the task list meant a changed monitor interval or
 // webhook took effect on the next restart and not before.
+// drainTimeout is how long a task is given to finish what it was applying after
+// being asked to stop. A variable rather than a constant so the shutdown test
+// does not have to wait the real thirty seconds to prove the deadline is
+// reached.
+var drainTimeout = 30 * time.Second
+
 func globalFingerprint(cfg *config.Config) string {
 	encoded, err := json.Marshal(struct {
 		Monitoring bool
@@ -255,11 +258,18 @@ func (s *supervisor) stopAll() {
 		task.cancel()
 	}
 
-	deadline := time.After(drainTimeout)
+	// A context rather than time.After: the timer channel carries one value, so
+	// the first task to time out consumed it and every task after that waited on
+	// a channel that would never fire again. Two stuck tasks therefore hung
+	// shutdown here, and the clean-up below -- clearing the running set and
+	// cancelling the monitors -- was never reached. A cancelled context's
+	// channel stays closed, so every remaining task sees the deadline.
+	drained, past := context.WithTimeout(context.Background(), drainTimeout)
+	defer past()
 	for id, task := range s.running {
 		select {
 		case <-task.done:
-		case <-deadline:
+		case <-drained.Done():
 			s.log.Warnf("Task %d did not finish within %v of being asked to stop; "+
 				"whatever it had buffered is lost", id, drainTimeout)
 		}

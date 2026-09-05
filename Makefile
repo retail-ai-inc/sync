@@ -9,7 +9,7 @@ download:
 	go vet .
 
 build:
-	go build -buildvcs=false -o sync cmd/sync/main.go
+	go build -buildvcs=false -o sync ./cmd/sync
 
 build-race: ## build with race detactor
 	go build -race -buildvcs=false

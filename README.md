@@ -108,7 +108,7 @@ cd sync
 go mod tidy
 
 # 3. Run the application
-go run cmd/sync/main.go
+go run ./cmd/sync
 
 # 4. Build the Docker image
 docker build -t sync .

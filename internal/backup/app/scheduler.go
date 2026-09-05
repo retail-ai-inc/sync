@@ -35,7 +35,7 @@ func StartBackupScheduler(ctx context.Context, log logrus.FieldLogger) (stop fun
 	if log == nil {
 		log = logrus.StandardLogger()
 	}
-	s := &scheduler{log: log, due: map[int]time.Time{}, now: time.Now}
+	s := &scheduler{log: log, due: map[int]deadline{}, now: time.Now}
 
 	var done sync.WaitGroup
 	done.Add(1)
@@ -46,13 +46,24 @@ func StartBackupScheduler(ctx context.Context, log logrus.FieldLogger) (stop fun
 	return done.Wait
 }
 
+// deadline is when a job fires next and the expression that produced it.
+type deadline struct {
+	at         time.Time
+	expression string
+}
+
 type scheduler struct {
 	log logrus.FieldLogger
 	// due is when each job fires next, keyed by job id. A job seen for the
 	// first time is given its next occurrence rather than being run at once:
 	// otherwise every restart would fire every overdue job, and seven backups
 	// would start together on every rolling update.
-	due map[int]time.Time
+	//
+	// The expression it was computed from is kept with it. Without that, editing
+	// a job's schedule changed nothing until it next fired: a nightly job
+	// switched to every minute at nine in the morning went on waiting until
+	// midnight, and one moved later still ran at the time it used to have.
+	due map[int]deadline
 	now func() time.Time
 	// submit runs a job. Replaced in tests.
 	submit func(int) string
@@ -109,24 +120,32 @@ func (s *scheduler) tick(ctx context.Context) {
 		}
 		enabled[job.ID()] = true
 
-		at, known := s.due[job.ID()]
+		held, known := s.due[job.ID()]
+		// A schedule that has been edited is as good as unseen: what was cached
+		// answers a question nobody is asking any more.
+		if known && held.expression != config.Schedule {
+			s.log.Infof("[Backup] Job %d (%s) was rescheduled from %q to %q",
+				job.ID(), config.Name, held.expression, config.Schedule)
+			known = false
+		}
 		if !known {
-			s.due[job.ID()] = schedule.Next(now)
+			next := deadline{at: schedule.Next(now), expression: config.Schedule}
+			s.due[job.ID()] = next
 			s.log.Infof("[Backup] Job %d (%s) is scheduled %q, next at %s",
-				job.ID(), config.Name, config.Schedule,
-				s.due[job.ID()].Format(time.RFC3339))
+				job.ID(), config.Name, config.Schedule, next.at.Format(time.RFC3339))
 			continue
 		}
-		if now.Before(at) {
+		if now.Before(held.at) {
 			continue
 		}
 
 		// Next from now, not from the time that was due: a process asleep for an
 		// hour must not work through the hour's occurrences one tick at a time.
-		s.due[job.ID()] = schedule.Next(now)
+		next := deadline{at: schedule.Next(now), expression: config.Schedule}
+		s.due[job.ID()] = next
 		taskID := s.run1(job.ID())
 		s.log.Infof("[Backup] Job %d started as %s; next at %s",
-			job.ID(), taskID, s.due[job.ID()].Format(time.RFC3339))
+			job.ID(), taskID, next.at.Format(time.RFC3339))
 	}
 
 	// A job that was paused or deleted stops being tracked, so re-enabling it
