@@ -62,11 +62,18 @@ func CountAndLogMySQLOrMariaDB(ctx context.Context, sc config.SyncConfig, log *l
 		return
 	}
 
+	// One open for the pass, not one per table.
+	record := openMonitoringLog()
+	defer record.close()
+
 	for _, pair := range pairs {
 		srcName, tgtName := pair.Source, pair.Target
 
-		srcCount, srcOK := countOrMark(ctx, db, fmt.Sprintf("%s.%s", srcDBName, srcName), log)
-		tgtCount, tgtOK := countOrMark(ctx, db2, fmt.Sprintf("%s.%s", tgtDBName, tgtName), log)
+		// The two ends are independent and both are exact counts over a whole
+		// table, so asking them together halves the wall time a pass takes.
+		srcCount, srcOK, tgtCount, tgtOK := countBothEnds(ctx,
+			db, fmt.Sprintf("%s.%s", srcDBName, srcName),
+			db2, fmt.Sprintf("%s.%s", tgtDBName, tgtName), log)
 		action := rowCountAction(srcOK, tgtOK)
 
 		log.WithFields(logrus.Fields{
@@ -80,6 +87,6 @@ func CountAndLogMySQLOrMariaDB(ctx context.Context, sc config.SyncConfig, log *l
 			"monitor_action": action,
 		}).Info(action)
 
-		storeMonitoringLog(sc.ID, dbType, srcDBName, srcName, srcCount, tgtDBName, tgtName, tgtCount, action)
+		record.write(sc.ID, dbType, srcDBName, srcName, srcCount, tgtDBName, tgtName, tgtCount, action)
 	}
 }

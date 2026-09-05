@@ -55,6 +55,10 @@ func CountAndLogPostgreSQL(ctx context.Context, sc config.SyncConfig, log *logru
 	srcDBName := dsn.GetDatabaseName(sc.Type, sc.SourceConnection)
 	tgtDBName := dsn.GetDatabaseName(sc.Type, sc.TargetConnection)
 
+	// One open for the pass, not one per table.
+	record := openMonitoringLog()
+	defer record.close()
+
 	// One pass per schema the task names, and the default schema when it names
 	// none -- a task that lists no tables replicates the whole of it.
 	schemas := sc.Mappings
@@ -85,8 +89,7 @@ func CountAndLogPostgreSQL(ctx context.Context, sc config.SyncConfig, log *logru
 			fullSrc := fmt.Sprintf("%s.%s", srcSchema, srcName)
 			fullTgt := fmt.Sprintf("%s.%s", tgtSchema, tgtName)
 
-			srcCount, srcOK := countOrMark(ctx, db, fullSrc, log)
-			tgtCount, tgtOK := countOrMark(ctx, db2, fullTgt, log)
+			srcCount, srcOK, tgtCount, tgtOK := countBothEnds(ctx, db, fullSrc, db2, fullTgt, log)
 			action := rowCountAction(srcOK, tgtOK)
 
 			log.WithFields(logrus.Fields{
@@ -103,7 +106,7 @@ func CountAndLogPostgreSQL(ctx context.Context, sc config.SyncConfig, log *logru
 			}).Info(action)
 
 			// Insert into database monitoring_log with sync_task_id
-			storeMonitoringLog(sc.ID, dbType, srcDBName, srcName, srcCount, tgtDBName, tgtName, tgtCount, action)
+			record.write(sc.ID, dbType, srcDBName, srcName, srcCount, tgtDBName, tgtName, tgtCount, action)
 		}
 	}
 }

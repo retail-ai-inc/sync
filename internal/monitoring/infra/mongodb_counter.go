@@ -36,6 +36,10 @@ func CountAndLogMongoDB(ctx context.Context, sc config.SyncConfig, log *logrus.L
 		return
 	}
 
+	// One open for the pass, not one per collection.
+	record := openMonitoringLog()
+	defer record.close()
+
 	for _, tblMap := range tables {
 		var srcCount int64
 		var tgtCount int64
@@ -96,8 +100,7 @@ func CountAndLogMongoDB(ctx context.Context, sc config.SyncConfig, log *logrus.L
 			"monitor_action": rowCountAction(srcOK, tgtOK),
 		}).Info(rowCountAction(srcOK, tgtOK))
 
-		// Insert into database monitoring_log with sync_task_id
-		storeMonitoringLog(sc.ID, dbType, srcDBName, tblMap.SourceTable, srcCount,
+		record.write(sc.ID, dbType, srcDBName, tblMap.SourceTable, srcCount,
 			tgtDBName, tblMap.TargetTable, tgtCount, rowCountAction(srcOK, tgtOK))
 	}
 

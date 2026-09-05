@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"regexp"
+	"sync"
 
 	"github.com/retail-ai-inc/sync/internal/monitoring/domain"
 
@@ -74,17 +75,56 @@ func rowCountAction(srcOK, tgtOK bool) string {
 	return actionCountFailed
 }
 
-// Added function: Insert monitoring results into the monitoring_log table
+// monitoringLog writes a pass's comparisons, holding the control database open
+// across them.
+//
+// One row used to mean one open: a task replicating a whole database compares
+// every table it holds, so a hundred-table task opened, wrote and closed the
+// control database a hundred times a minute.
+type monitoringLog struct {
+	db *sql.DB
+}
+
+// openMonitoringLog opens the control database for one pass. A nil writer is
+// usable and drops what it is given, so a counter that cannot record still
+// measures and still logs.
+func openMonitoringLog() *monitoringLog {
+	db, err := sqlite.OpenSQLiteDB()
+	if err != nil {
+		logrus.Errorf("Failed to open local DB for monitoring_log: %v", err)
+		return nil
+	}
+	return &monitoringLog{db: db}
+}
+
+func (m *monitoringLog) close() {
+	if m == nil {
+		return
+	}
+	_ = m.db.Close()
+}
+
+func (m *monitoringLog) write(syncTaskID int, dbType, srcDB, srcTable string, srcCount int64,
+	tgtDB, tgtTable string, tgtCount int64, action string) {
+
+	if m == nil {
+		return
+	}
+	insert(m.db, syncTaskID, dbType, srcDB, srcTable, srcCount, tgtDB, tgtTable, tgtCount, action)
+}
+
+// storeMonitoringLog writes one comparison and closes again, for the callers
+// that record a single row a pass.
 func storeMonitoringLog(syncTaskID int, dbType, srcDB, srcTable string, srcCount int64,
 	tgtDB, tgtTable string, tgtCount int64, action string) {
 
-	db, err := sqlite.OpenSQLiteDB()
-	if err != nil {
-		// If failed, just log the error
-		logrus.Errorf("Failed to open local DB for monitoring_log: %v", err)
-		return
-	}
-	defer db.Close()
+	log := openMonitoringLog()
+	defer log.close()
+	log.write(syncTaskID, dbType, srcDB, srcTable, srcCount, tgtDB, tgtTable, tgtCount, action)
+}
+
+func insert(db *sql.DB, syncTaskID int, dbType, srcDB, srcTable string, srcCount int64,
+	tgtDB, tgtTable string, tgtCount int64, action string) {
 
 	const insSQL = `
 INSERT INTO monitoring_log (
@@ -99,7 +139,7 @@ INSERT INTO monitoring_log (
 	monitor_action
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
 `
-	_, err = db.Exec(insSQL,
+	_, err := db.Exec(insSQL,
 		syncTaskID,
 		dbType,
 		srcDB,
@@ -209,4 +249,27 @@ ON CONFLICT(task_id, collection_name) DO UPDATE SET
 	logrus.Debugf("[MongoDB] Successfully stored ChangeStream statistics for task_id=%d (%d active streams)",
 		syncTaskID, len(activeStreams))
 	return nil
+}
+
+// countBothEnds counts a pair's two sides at the same time.
+//
+// They are independent -- different servers, different pools -- and each is an
+// exact count over a whole table, which is the expensive part of a pass. Asking
+// them one after the other doubled how long a pass took for no reason.
+func countBothEnds(ctx context.Context, source *sql.DB, sourceTable string,
+	target *sql.DB, targetTable string, log *logrus.Logger) (
+	sourceCount int64, sourceOK bool, targetCount int64, targetOK bool) {
+
+	var wait sync.WaitGroup
+	wait.Add(2)
+	go func() {
+		defer wait.Done()
+		sourceCount, sourceOK = countOrMark(ctx, source, sourceTable, log)
+	}()
+	go func() {
+		defer wait.Done()
+		targetCount, targetOK = countOrMark(ctx, target, targetTable, log)
+	}()
+	wait.Wait()
+	return sourceCount, sourceOK, targetCount, targetOK
 }

@@ -407,3 +407,61 @@ func TestPostgresPairsStayWithTheirOwnMapping(t *testing.T) {
 		t.Errorf("configured pairs came back as %+v", pairs)
 	}
 }
+
+// One open for a pass, not one per table. A task replicating a whole database
+// compares every table it holds, so this was a hundred opens a minute.
+func TestAPassOpensTheControlDatabaseOnce(t *testing.T) {
+	control := useMonitoringDB(t)
+	logger, _ := captureLog()
+
+	first := strings.ReplaceAll(harness.UniqueName("once_a"), "-", "_")
+	second := strings.ReplaceAll(harness.UniqueName("once_b"), "-", "_")
+	sourceDSN := fmt.Sprintf("root:root@tcp(%s)/source_db", harness.MySQLSource)
+	targetDSN := fmt.Sprintf("root:root@tcp(%s)/target_db", harness.MySQLTarget)
+	for _, table := range []string{first, second} {
+		seedSQLTable(t, "mysql", sourceDSN, table, 2)
+		seedSQLTable(t, "mysql", targetDSN, table, 2)
+	}
+
+	CountAndLogMySQLOrMariaDB(context.Background(), config.SyncConfig{
+		ID: 9209, Type: "mysql",
+		SourceConnection: sourceDSN, TargetConnection: targetDSN,
+		Mappings: []config.DatabaseMapping{{Tables: []config.TableMapping{
+			{SourceTable: first}, {SourceTable: second},
+		}}},
+	}, logger)
+
+	// Both rows land: holding the handle open must not lose any of them.
+	rows := loggedRows(t, control)
+	if len(rows) != 2 {
+		t.Fatalf("a two-table pass wrote %d rows, want 2", len(rows))
+	}
+	for _, row := range rows {
+		if row.Source != 2 || row.Target != 2 {
+			t.Errorf("counted %d/%d, want 2/2", row.Source, row.Target)
+		}
+	}
+}
+
+// A control database that cannot be opened must not stop the comparison: the
+// numbers still reach the log, they are simply not kept.
+func TestAPassStillMeasuresWhenItCannotRecord(t *testing.T) {
+	emptyDB(t)
+	logger, out := captureLog()
+
+	table := strings.ReplaceAll(harness.UniqueName("norecord"), "-", "_")
+	sourceDSN := fmt.Sprintf("root:root@tcp(%s)/source_db", harness.MySQLSource)
+	targetDSN := fmt.Sprintf("root:root@tcp(%s)/target_db", harness.MySQLTarget)
+	seedSQLTable(t, "mysql", sourceDSN, table, 3)
+	seedSQLTable(t, "mysql", targetDSN, table, 3)
+
+	CountAndLogMySQLOrMariaDB(context.Background(), config.SyncConfig{
+		ID: 9210, Type: "mysql",
+		SourceConnection: sourceDSN, TargetConnection: targetDSN,
+		Mappings: []config.DatabaseMapping{{Tables: []config.TableMapping{{SourceTable: table}}}},
+	}, logger)
+
+	if !strings.Contains(out.String(), "src_row_count=3") {
+		t.Errorf("the comparison was not logged: %s", out.String())
+	}
+}
