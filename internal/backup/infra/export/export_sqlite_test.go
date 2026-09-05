@@ -119,3 +119,63 @@ func TestAQuotedPathIsEscaped(t *testing.T) {
 		t.Errorf("quoted = %s, want the quote doubled", got)
 	}
 }
+
+// TestBaseNameTakesTheFileFromAPath covers the naming of the archive. It is
+// only ever the last segment, and a path separator left in would put the
+// upload under a directory nobody expects.
+func TestBaseNameTakesTheFileFromAPath(t *testing.T) {
+	for in, want := range map[string]string{
+		"/mnt/state/sync.db": "sync.db",
+		"sync.db":            "sync.db",
+		"./sync.db":          "sync.db",
+		`C:\data\sync.db`:    "sync.db",
+		"/mnt/state/":        "",
+		"":                   "",
+	} {
+		if got := baseName(in); got != want {
+			t.Errorf("baseName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestASnapshotRefusesToOverwrite: VACUUM INTO will not write to a file that
+// exists, and a half-written snapshot silently replaced by another is worse
+// than a failed backup. The destination is therefore cleared first, and a
+// destination that cannot be cleared has to be reported rather than left to
+// fail obscurely inside SQLite.
+func TestASnapshotIntoAnUnclearableDestinationIsReported(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "sync.db")
+	db, err := sql.Open("sqlite3", source)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if _, err := db.Exec(`CREATE TABLE t (a INTEGER)`); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	db.Close()
+
+	// A directory cannot be removed by os.Remove once it has something in it,
+	// and cannot be written to as a file either.
+	destination := filepath.Join(t.TempDir(), "occupied")
+	if err := os.MkdirAll(filepath.Join(destination, "child"), 0o755); err != nil {
+		t.Fatalf("prepare the destination: %v", err)
+	}
+
+	if err := vacuumInto(context.Background(), source, destination); err == nil {
+		t.Error("a destination that could not be cleared was reported as a success")
+	}
+}
+
+// TestASnapshotOfSomethingThatIsNotADatabaseIsReported: the path is operator
+// configured, so it may point at anything.
+func TestASnapshotOfSomethingThatIsNotADatabaseIsReported(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "not-a-database")
+	if err := os.WriteFile(source, []byte("hello"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	if err := vacuumInto(context.Background(), source, filepath.Join(dir, "out.db")); err == nil {
+		t.Error("a file that is not a database was snapshot successfully")
+	}
+}
