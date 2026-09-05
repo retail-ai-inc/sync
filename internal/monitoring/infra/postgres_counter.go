@@ -55,7 +55,14 @@ func CountAndLogPostgreSQL(ctx context.Context, sc config.SyncConfig, log *logru
 	srcDBName := dsn.GetDatabaseName(sc.Type, sc.SourceConnection)
 	tgtDBName := dsn.GetDatabaseName(sc.Type, sc.TargetConnection)
 
-	for _, mapping := range sc.Mappings {
+	// One pass per schema the task names, and the default schema when it names
+	// none -- a task that lists no tables replicates the whole of it.
+	schemas := sc.Mappings
+	if len(schemas) == 0 {
+		schemas = []config.DatabaseMapping{{}}
+	}
+
+	for _, mapping := range schemas {
 		srcSchema := mapping.SourceSchema
 		if srcSchema == "" {
 			srcSchema = "public"
@@ -65,9 +72,15 @@ func CountAndLogPostgreSQL(ctx context.Context, sc config.SyncConfig, log *logru
 			tgtSchema = "public"
 		}
 
-		for _, tblMap := range mapping.Tables {
-			srcName := tblMap.SourceTable
-			tgtName := tblMap.TargetTable
+		pairs, err := postgresPairs(ctx, mapping, db, srcSchema)
+		if err != nil {
+			log.WithError(err).WithField("db_type", dbType).
+				Error("[Monitor] Could not read the source's tables")
+			return
+		}
+
+		for _, pair := range pairs {
+			srcName, tgtName := pair.source, pair.target
 
 			fullSrc := fmt.Sprintf("%s.%s", srcSchema, srcName)
 			fullTgt := fmt.Sprintf("%s.%s", tgtSchema, tgtName)

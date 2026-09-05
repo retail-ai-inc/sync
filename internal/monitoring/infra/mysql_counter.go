@@ -55,29 +55,31 @@ func CountAndLogMySQLOrMariaDB(ctx context.Context, sc config.SyncConfig, log *l
 	srcDBName := dsn.GetDatabaseName(sc.Type, sc.SourceConnection)
 	tgtDBName := dsn.GetDatabaseName(sc.Type, sc.TargetConnection)
 
-	for _, mapping := range sc.Mappings {
-		for _, tblMap := range mapping.Tables {
-			srcName := tblMap.SourceTable
-			tgtName := tblMap.TargetTable
+	pairs, err := sqlPairs(ctx, sc, db, srcDBName)
+	if err != nil {
+		log.WithError(err).WithField("db_type", dbType).
+			Error("[Monitor] Could not read the source's tables")
+		return
+	}
 
-			srcCount, srcOK := countOrMark(ctx, db, fmt.Sprintf("%s.%s", srcDBName, srcName), log)
-			tgtCount, tgtOK := countOrMark(ctx, db2, fmt.Sprintf("%s.%s", tgtDBName, tgtName), log)
-			action := rowCountAction(srcOK, tgtOK)
+	for _, pair := range pairs {
+		srcName, tgtName := pair.source, pair.target
 
-			// 1) Log output
-			log.WithFields(logrus.Fields{
-				"db_type":        dbType,
-				"src_db":         srcDBName,
-				"src_table":      srcName,
-				"src_row_count":  srcCount,
-				"tgt_db":         tgtDBName,
-				"tgt_table":      tgtName,
-				"tgt_row_count":  tgtCount,
-				"monitor_action": action,
-			}).Info(action)
+		srcCount, srcOK := countOrMark(ctx, db, fmt.Sprintf("%s.%s", srcDBName, srcName), log)
+		tgtCount, tgtOK := countOrMark(ctx, db2, fmt.Sprintf("%s.%s", tgtDBName, tgtName), log)
+		action := rowCountAction(srcOK, tgtOK)
 
-			// 2) Insert into database monitoring_log with sync_task_id
-			storeMonitoringLog(sc.ID, dbType, srcDBName, srcName, srcCount, tgtDBName, tgtName, tgtCount, action)
-		}
+		log.WithFields(logrus.Fields{
+			"db_type":        dbType,
+			"src_db":         srcDBName,
+			"src_table":      srcName,
+			"src_row_count":  srcCount,
+			"tgt_db":         tgtDBName,
+			"tgt_table":      tgtName,
+			"tgt_row_count":  tgtCount,
+			"monitor_action": action,
+		}).Info(action)
+
+		storeMonitoringLog(sc.ID, dbType, srcDBName, srcName, srcCount, tgtDBName, tgtName, tgtCount, action)
 	}
 }

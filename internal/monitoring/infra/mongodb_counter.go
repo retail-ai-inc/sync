@@ -29,71 +29,76 @@ func CountAndLogMongoDB(ctx context.Context, sc config.SyncConfig, log *logrus.L
 	srcDBName := dsn.GetDatabaseName(sc.Type, sc.SourceConnection)
 	tgtDBName := dsn.GetDatabaseName(sc.Type, sc.TargetConnection)
 
-	for _, mapping := range sc.Mappings {
-		for _, tblMap := range mapping.Tables {
-			var srcCount int64
-			var tgtCount int64
-			var err error
+	tables, tablesErr := mongoTables(ctx, sc, srcClient.Database(srcDBName))
+	if tablesErr != nil {
+		log.WithError(tablesErr).WithField("db_type", dbType).
+			Error("[Monitor] Could not read the source's collections")
+		return
+	}
 
-			var countQuery *domain.CountQuery
-			if tblMap.CountQuery != nil && len(tblMap.CountQuery) > 0 {
-				if conditions, ok := tblMap.CountQuery["conditions"]; ok {
-					conditionBytes, err := json.Marshal(conditions)
-					if err == nil {
-						var conditionsList []domain.CountCondition
-						if err := json.Unmarshal(conditionBytes, &conditionsList); err == nil {
-							countQuery = &domain.CountQuery{
-								Conditions: conditionsList,
-							}
-							log.Debugf("[Monitor] Using conditions for %s: %+v",
-								tblMap.SourceTable, countQuery.Conditions)
+	for _, tblMap := range tables {
+		var srcCount int64
+		var tgtCount int64
+		var err error
+
+		var countQuery *domain.CountQuery
+		if tblMap.CountQuery != nil && len(tblMap.CountQuery) > 0 {
+			if conditions, ok := tblMap.CountQuery["conditions"]; ok {
+				conditionBytes, err := json.Marshal(conditions)
+				if err == nil {
+					var conditionsList []domain.CountCondition
+					if err := json.Unmarshal(conditionBytes, &conditionsList); err == nil {
+						countQuery = &domain.CountQuery{
+							Conditions: conditionsList,
 						}
+						log.Debugf("[Monitor] Using conditions for %s: %+v",
+							tblMap.SourceTable, countQuery.Conditions)
 					}
 				}
 			}
-
-			queryCounter := NewQueryCounter(log)
-			// -1 used to be stored under the ordinary action, so a failure to
-			// count and a measurement of minus one row were the same row.
-			srcOK, tgtOK := true, true
-
-			srcCount, err = queryCounter.CountMongoDBDocuments(ctx, srcClient, srcDBName, tblMap.SourceTable, countQuery)
-			if err != nil {
-				log.WithError(err).WithFields(logrus.Fields{
-					"db_type":   dbType,
-					"src_db":    srcDBName,
-					"src_coll":  tblMap.SourceTable,
-					"operation": "source_count",
-				}).Error("Failed to get source collection count")
-				srcCount, srcOK = -1, false
-			}
-
-			tgtCount, err = queryCounter.CountMongoDBDocuments(ctx, tgtClient, tgtDBName, tblMap.TargetTable, countQuery)
-			if err != nil {
-				log.WithError(err).WithFields(logrus.Fields{
-					"db_type":   dbType,
-					"tgt_db":    tgtDBName,
-					"tgt_coll":  tblMap.TargetTable,
-					"operation": "target_count",
-				}).Error("Failed to get target collection count")
-				tgtCount, tgtOK = -1, false
-			}
-
-			log.WithFields(logrus.Fields{
-				"db_type":        dbType,
-				"src_db":         srcDBName,
-				"src_coll":       tblMap.SourceTable,
-				"src_row_count":  srcCount,
-				"tgt_db":         tgtDBName,
-				"tgt_coll":       tblMap.TargetTable,
-				"tgt_row_count":  tgtCount,
-				"monitor_action": rowCountAction(srcOK, tgtOK),
-			}).Info(rowCountAction(srcOK, tgtOK))
-
-			// Insert into database monitoring_log with sync_task_id
-			storeMonitoringLog(sc.ID, dbType, srcDBName, tblMap.SourceTable, srcCount,
-				tgtDBName, tblMap.TargetTable, tgtCount, rowCountAction(srcOK, tgtOK))
 		}
+
+		queryCounter := NewQueryCounter(log)
+		// -1 used to be stored under the ordinary action, so a failure to
+		// count and a measurement of minus one row were the same row.
+		srcOK, tgtOK := true, true
+
+		srcCount, err = queryCounter.CountMongoDBDocuments(ctx, srcClient, srcDBName, tblMap.SourceTable, countQuery)
+		if err != nil {
+			log.WithError(err).WithFields(logrus.Fields{
+				"db_type":   dbType,
+				"src_db":    srcDBName,
+				"src_coll":  tblMap.SourceTable,
+				"operation": "source_count",
+			}).Error("Failed to get source collection count")
+			srcCount, srcOK = -1, false
+		}
+
+		tgtCount, err = queryCounter.CountMongoDBDocuments(ctx, tgtClient, tgtDBName, tblMap.TargetTable, countQuery)
+		if err != nil {
+			log.WithError(err).WithFields(logrus.Fields{
+				"db_type":   dbType,
+				"tgt_db":    tgtDBName,
+				"tgt_coll":  tblMap.TargetTable,
+				"operation": "target_count",
+			}).Error("Failed to get target collection count")
+			tgtCount, tgtOK = -1, false
+		}
+
+		log.WithFields(logrus.Fields{
+			"db_type":        dbType,
+			"src_db":         srcDBName,
+			"src_coll":       tblMap.SourceTable,
+			"src_row_count":  srcCount,
+			"tgt_db":         tgtDBName,
+			"tgt_coll":       tblMap.TargetTable,
+			"tgt_row_count":  tgtCount,
+			"monitor_action": rowCountAction(srcOK, tgtOK),
+		}).Info(rowCountAction(srcOK, tgtOK))
+
+		// Insert into database monitoring_log with sync_task_id
+		storeMonitoringLog(sc.ID, dbType, srcDBName, tblMap.SourceTable, srcCount,
+			tgtDBName, tblMap.TargetTable, tgtCount, rowCountAction(srcOK, tgtOK))
 	}
 
 	// Log comprehensive ChangeStream status for each sync task.
