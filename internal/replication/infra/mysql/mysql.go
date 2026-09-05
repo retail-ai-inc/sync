@@ -146,7 +146,10 @@ func (s *MySQLSyncer) doInitialSync(ctx context.Context, sourceDB *sql.Conn, tar
 	sourceDBName := dsn.GetDatabaseName(s.cfg.Type, s.cfg.SourceConnection)
 	targetDBName := dsn.GetDatabaseName(s.cfg.Type, s.cfg.TargetConnection)
 
-	mappings := s.resolveMappings(ctx, sourceDB, sourceDBName)
+	mappings, err := s.resolveMappings(ctx, sourceDB, sourceDBName)
+	if err != nil {
+		return err
+	}
 	remainingTables := 0
 	for _, mapping := range mappings {
 		remainingTables += len(mapping.Tables)
@@ -191,24 +194,16 @@ func (s *MySQLSyncer) doInitialSync(ctx context.Context, sourceDB *sql.Conn, tar
 					targetDBName, tableMap.TargetTable, sourceDBName, tableMap.SourceTable, createdCount)
 			}
 
-			// A target that already holds rows is not evidence the copy
-			// finished: an interrupted copy leaves exactly that. The copy is
-			// made of upserts, so re-reading rows it already wrote costs time
-			// and nothing else, and it is the only way to fill the gap an
-			// interrupted copy left. With no position path there is nothing to
-			// remember between runs, so the row count is all there is to go on.
-			if s.cfg.MySQLPositionPath == "" {
-				targetCountQuery := fmt.Sprintf("SELECT COUNT(1) FROM %s.%s", targetDBName, tableMap.TargetTable)
-				var count int
-				if errC := targetDB.QueryRow(targetCountQuery).Scan(&count); errC != nil {
-					fail("could not count the rows already in %s.%s: %v", targetDBName, tableMap.TargetTable, errC)
-					continue
-				}
-				if count > 0 {
-					s.logger.Infof("[MySQL] table %s.%s has %d rows and no position path is configured => skip initial sync", targetDBName, tableMap.TargetTable, count)
-					continue
-				}
-			}
+			// A target that already holds rows is not evidence the copy finished:
+			// an interrupted copy leaves exactly that, and skipping on it left the
+			// rows the copy had not reached missing for good -- the stream starts
+			// after them, so nothing fills the gap.
+			//
+			// Whether a copy is owed at all is decided once, from the position
+			// stored on the target, in Runner.startingPoint. By the time this runs
+			// that decision has been made; second-guessing it here could only
+			// overrule it wrongly. The copy is made of upserts, so re-reading rows
+			// it already wrote costs time and nothing else.
 
 			s.logger.Infof("[MySQL] Doing initial full sync from %s.%s => %s.%s", sourceDBName, tableMap.SourceTable, targetDBName, tableMap.TargetTable)
 
@@ -952,16 +947,18 @@ func (s *MySQLSyncer) hasConfiguredTables() bool {
 
 // resolveMappings reports the tables to copy, discovering them from the source
 // when the task lists none.
-func (s *MySQLSyncer) resolveMappings(ctx context.Context, conn *sql.Conn, sourceDBName string) []config.DatabaseMapping {
+func (s *MySQLSyncer) resolveMappings(ctx context.Context, conn *sql.Conn, sourceDBName string) ([]config.DatabaseMapping, error) {
 	if s.hasConfiguredTables() {
-		return s.cfg.Mappings
+		return s.cfg.Mappings, nil
 	}
 
+	// Reported rather than logged. An empty list here is indistinguishable from
+	// a database with no tables: the copy did nothing, said it had succeeded,
+	// and the position was stored -- so the stream started after data that had
+	// never been copied and nothing would ever fill it in.
 	tables, err := discovery.MySQLTables(ctx, conn, sourceDBName)
 	if err != nil {
-		s.logger.Errorf("[MySQL] Could not discover the tables in %s, so the initial "+
-			"copy has nothing to do: %v", sourceDBName, err)
-		return nil
+		return nil, fmt.Errorf("discover the tables in %s: %w", sourceDBName, err)
 	}
 
 	mapped := make([]config.TableMapping, 0, len(tables))
@@ -969,7 +966,7 @@ func (s *MySQLSyncer) resolveMappings(ctx context.Context, conn *sql.Conn, sourc
 		mapped = append(mapped, config.TableMapping{SourceTable: table, TargetTable: table})
 	}
 	s.logger.Infof("[MySQL] Discovered %d tables in %s", len(mapped), sourceDBName)
-	return []config.DatabaseMapping{{Tables: mapped}}
+	return []config.DatabaseMapping{{Tables: mapped}}, nil
 }
 
 // requireFullRowImage reports why a binlog row image cannot be replicated

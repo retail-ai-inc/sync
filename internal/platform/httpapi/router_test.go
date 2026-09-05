@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -185,4 +186,48 @@ func TestAPanickingHandlerIsNotRecovered(t *testing.T) {
 	}()
 
 	r.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/boom", nil))
+}
+
+// The readiness probe used to answer ready before anything had been checked.
+func TestReadinessReportsAControlPlaneThatCannotAnswer(t *testing.T) {
+	previous := ReadyCheck
+	t.Cleanup(func() { ReadyCheck = previous })
+
+	ReadyCheck = func() error { return errors.New("the control database is not there") }
+
+	recorder := httptest.NewRecorder()
+	Ready(recorder, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503 so the rollout stops", recorder.Code)
+	}
+	if !strings.Contains(recorder.Body.String(), "not there") {
+		t.Errorf("the body does not say why: %s", recorder.Body.String())
+	}
+}
+
+func TestReadinessAnswersReadyWhenTheCheckPasses(t *testing.T) {
+	previous := ReadyCheck
+	t.Cleanup(func() { ReadyCheck = previous })
+
+	ReadyCheck = func() error { return nil }
+	recorder := httptest.NewRecorder()
+	Ready(recorder, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if recorder.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", recorder.Code)
+	}
+}
+
+// Not wired is not the same as failing: a process that has not set a check
+// answers ready, which is what it did before there was one.
+func TestReadinessWithNoCheckWiredIsReady(t *testing.T) {
+	previous := ReadyCheck
+	t.Cleanup(func() { ReadyCheck = previous })
+
+	ReadyCheck = nil
+	recorder := httptest.NewRecorder()
+	Ready(recorder, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if recorder.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", recorder.Code)
+	}
 }

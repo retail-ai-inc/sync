@@ -42,19 +42,13 @@ func clusterTimeFrom(raw bson.Raw) (bson.Timestamp, error) {
 
 func (s *MongoDBSyncer) doInitialSync(ctx context.Context, sourceColl, targetColl *mongo.Collection, sourceDB, targetDB string) error {
 	// A target that already holds documents is not evidence the copy finished;
-	// it is what an interrupted copy leaves. The checkpoint is the authority,
-	// and with no checkpoint path there is nothing to remember between runs, so
-	// the document count is all there is to go on.
-	if s.cfg.MongoDBResumeTokenPath == "" {
-		count, err := targetColl.EstimatedDocumentCount(ctx)
-		if err != nil {
-			return fmt.Errorf("check target collection %s.%s fail: %v", targetDB, targetColl.Name(), err)
-		}
-		if count > 0 {
-			s.logger.Infof("[MongoDB] %s.%s has data and no checkpoint path is configured => skip initial sync", targetDB, targetColl.Name())
-			return nil
-		}
-	}
+	// it is what an interrupted copy leaves, and returning success on it left the
+	// documents the copy had not reached missing for good -- the stream starts
+	// after them, so nothing fills the gap.
+	//
+	// Whether a copy is owed at all is decided once, from the position stored on
+	// the target, in Runner.startingPoint. By the time this runs that decision
+	// has been made; second-guessing it here could only overrule it wrongly.
 
 	s.logger.Infof("[MongoDB] Starting initial sync for %s.%s -> %s.%s", sourceDB, sourceColl.Name(), targetDB, targetColl.Name())
 

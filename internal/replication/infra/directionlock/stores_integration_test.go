@@ -4,6 +4,7 @@ package directionlock
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -99,21 +100,24 @@ func TestEveryStoreHoldsAClaimTheSameWay(t *testing.T) {
 				t.Errorf("the claim's time read back as %v, want %v", got.UpdatedAt, at)
 			}
 
-			// Writing the same task again replaces rather than adds: two claims
-			// for one task is two answers to which end may be written.
-			mine.Owner = "host-b"
+			// The holder refreshing its own claim replaces rather than adds: two
+			// claims for one task is two answers to which end may be written.
+			// Another owner is refused, which is TestOnlyOneOfTwoStartersTakesTheClaim.
+			mine.Peer = "tokyo:3307"
+			mine.UpdatedAt = time.Now().UTC().Truncate(time.Second)
 			if err := s.Put(ctx, mine); err != nil {
-				t.Fatalf("Put again: %v", err)
+				t.Fatalf("the holder could not refresh its own claim: %v", err)
 			}
 			claims, _ = s.Claims(ctx)
 			if len(claims) != 1 {
-				t.Fatalf("writing the same task twice left %d claims", len(claims))
+				t.Fatalf("refreshing left %d claims", len(claims))
 			}
-			if claims[0].Owner != "host-b" {
-				t.Errorf("the second write did not replace the first: %+v", claims[0])
+			if claims[0].Peer != "tokyo:3307" {
+				t.Errorf("the refresh did not replace the first: %+v", claims[0])
 			}
 
-			// Another task's claim shares the store and must not be disturbed.
+			// Another task's claim shares the store and must not be disturbed. A
+			// different task is not a competing claim, whoever owns it.
 			if err := s.Put(ctx, Claim{TaskID: 42, Role: RoleSource,
 				Peer: "osaka:3306", Owner: "host-c", UpdatedAt: at}); err != nil {
 				t.Fatalf("Put another task: %v", err)
@@ -133,6 +137,106 @@ func TestEveryStoreHoldsAClaimTheSameWay(t *testing.T) {
 			// must not report one.
 			if err := s.Remove(ctx, 999); err != nil {
 				t.Errorf("removing a claim that is not there reported %v", err)
+			}
+		})
+	}
+}
+
+// Two processes starting together both read no claim. Whichever writes second
+// used to overwrite the first, leaving two writers on one target -- the single
+// thing this lock exists to prevent.
+func TestOnlyOneOfTwoStartersTakesTheClaim(t *testing.T) {
+	for name, build := range map[string]func(*testing.T) store{
+		"mongo": func(t *testing.T) store { return mongoStore(t) },
+		"redis": func(t *testing.T) store { return redisStore(t) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := build(t)
+			ctx := context.Background()
+			at := time.Now().UTC().Truncate(time.Second)
+
+			first := Claim{TaskID: 41, Role: RoleTarget, Peer: "tokyo:3306",
+				Owner: "host-a", UpdatedAt: at}
+			if err := s.Put(ctx, first); err != nil {
+				t.Fatalf("the first claim was refused: %v", err)
+			}
+
+			second := first
+			second.Owner = "host-b"
+			err := s.Put(ctx, second)
+			if err == nil {
+				t.Fatal("a second process took a claim another one holds")
+			}
+			if !errors.Is(err, ErrClaimHeld) {
+				t.Fatalf("the refusal is not ErrClaimHeld, so the caller cannot tell "+
+					"it apart from a failure to write: %v", err)
+			}
+
+			claims, err := s.Claims(ctx)
+			if err != nil {
+				t.Fatalf("Claims: %v", err)
+			}
+			if len(claims) != 1 {
+				t.Fatalf("the store holds %d claims for one task", len(claims))
+			}
+			if claims[0].Owner != "host-a" {
+				t.Errorf("the claim now reads %q, so the second write went through",
+					claims[0].Owner)
+			}
+		})
+	}
+}
+
+// The holder refreshing its own claim is not a competing claim.
+func TestTheHolderKeepsRefreshingItsOwnClaim(t *testing.T) {
+	for name, build := range map[string]func(*testing.T) store{
+		"mongo": func(t *testing.T) store { return mongoStore(t) },
+		"redis": func(t *testing.T) store { return redisStore(t) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := build(t)
+			ctx := context.Background()
+
+			mine := Claim{TaskID: 41, Role: RoleTarget, Peer: "tokyo:3306",
+				Owner: "host-a", UpdatedAt: time.Now().UTC()}
+			for i := 0; i < 3; i++ {
+				mine.UpdatedAt = time.Now().UTC()
+				if err := s.Put(ctx, mine); err != nil {
+					t.Fatalf("refresh %d was refused: %v", i, err)
+				}
+			}
+		})
+	}
+}
+
+// A claim nobody has refreshed for long enough is abandoned, and the next
+// process may take it -- otherwise a crashed syncer would block its own task
+// for ever.
+func TestAnAbandonedClaimCanBeTakenOver(t *testing.T) {
+	for name, build := range map[string]func(*testing.T) store{
+		"mongo": func(t *testing.T) store { return mongoStore(t) },
+		"redis": func(t *testing.T) store { return redisStore(t) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := build(t)
+			ctx := context.Background()
+
+			abandoned := Claim{TaskID: 41, Role: RoleTarget, Peer: "tokyo:3306",
+				Owner: "gone", UpdatedAt: time.Now().UTC().Add(-10 * ConcurrentAfter)}
+			if err := s.Put(ctx, abandoned); err != nil {
+				t.Fatalf("Put: %v", err)
+			}
+
+			taking := abandoned
+			taking.Owner = "host-b"
+			taking.UpdatedAt = time.Now().UTC()
+			if err := s.Put(ctx, taking); err != nil {
+				t.Fatalf("an abandoned claim was not taken over: %v", err)
+			}
+
+			claims, _ := s.Claims(ctx)
+			if len(claims) != 1 || claims[0].Owner != "host-b" {
+				t.Errorf("after the takeover the store holds %+v", claims)
 			}
 		})
 	}

@@ -237,17 +237,41 @@ func (s *MongoStore) Claims(ctx context.Context) ([]Claim, error) {
 	return claims, cursor.Err()
 }
 
+// Put takes the claim, or reports that somebody else holds it.
+//
+// Conditional, in one operation. It used to be an unconditional upsert: two
+// processes starting together both read no claim and both wrote one, and the
+// second overwrote the first -- leaving two writers on one target, which is the
+// single thing this lock exists to prevent.
+//
+// updated_unix is written beside updated_at because the string form cannot be
+// compared: RFC3339 with a fractional second sorts before one without.
 func (s *MongoStore) Put(ctx context.Context, c Claim) error {
-	_, err := s.Database.Collection(tableName).ReplaceOne(ctx,
-		bson.M{"_id": c.TaskID},
-		bson.M{
-			"_id":        c.TaskID,
-			"role":       string(c.Role),
-			"peer":       c.Peer,
-			"owner":      c.Owner,
-			"updated_at": c.UpdatedAt.Format(time.RFC3339),
-		},
-		options.Replace().SetUpsert(true))
+	stale := c.UpdatedAt.Add(-ConcurrentAfter).Unix()
+	document := bson.M{
+		"_id":          c.TaskID,
+		"role":         string(c.Role),
+		"peer":         c.Peer,
+		"owner":        c.Owner,
+		"updated_at":   c.UpdatedAt.Format(time.RFC3339),
+		"updated_unix": c.UpdatedAt.Unix(),
+	}
+
+	// Mine, or nobody's for long enough to count as abandoned. A live claim held
+	// by somebody else matches nothing, so the upsert tries to insert a document
+	// whose _id is already taken and the server refuses it -- which is the answer
+	// rather than an error to retry.
+	_, err := s.Database.Collection(tableName).UpdateOne(ctx,
+		bson.M{"_id": c.TaskID, "$or": []bson.M{
+			{"owner": c.Owner},
+			{"updated_unix": bson.M{"$lt": stale}},
+			{"updated_unix": bson.M{"$exists": false}},
+		}},
+		bson.M{"$set": document},
+		options.UpdateOne().SetUpsert(true))
+	if mongo.IsDuplicateKeyError(err) {
+		return fmt.Errorf("%w: task %d on %s", ErrClaimHeld, c.TaskID, s.Endpoint())
+	}
 	if err != nil {
 		return fmt.Errorf("write %s: %w", tableName, err)
 	}
@@ -295,19 +319,51 @@ func (s *RedisStore) Claims(ctx context.Context) ([]Claim, error) {
 	return claims, nil
 }
 
+// claimScript takes the claim only when nobody else holds a live one.
+//
+// A script because the read and the write have to be one step: two processes
+// starting together both read no claim and both wrote one, and the second
+// overwrote the first -- two writers on one target, which is the single thing
+// this lock exists to prevent.
+//
+// The time is kept in a field of its own, as seconds, because the claim's own
+// updated_at cannot be compared as a string: RFC3339 with a fractional second
+// sorts before one without.
+var claimScript = goredis.NewScript(`
+local held = redis.call('HGET', KEYS[1], ARGV[1])
+if held then
+  local ok, claim = pcall(cjson.decode, held)
+  local at = tonumber(redis.call('HGET', KEYS[1], ARGV[1] .. ':at')) or 0
+  if ok and claim.owner ~= ARGV[2] and at >= tonumber(ARGV[3]) then
+    return 0
+  end
+end
+redis.call('HSET', KEYS[1], ARGV[1], ARGV[4], ARGV[1] .. ':at', ARGV[5])
+return 1
+`)
+
 func (s *RedisStore) Put(ctx context.Context, c Claim) error {
 	encoded, err := json.Marshal(c)
 	if err != nil {
 		return err
 	}
-	if err := s.Client.HSet(ctx, RedisKey, strconv.Itoa(c.TaskID), string(encoded)).Err(); err != nil {
+
+	field := strconv.Itoa(c.TaskID)
+	taken, err := claimScript.Run(ctx, s.Client, []string{RedisKey},
+		field, c.Owner, c.UpdatedAt.Add(-ConcurrentAfter).Unix(),
+		string(encoded), c.UpdatedAt.Unix()).Int()
+	if err != nil {
 		return fmt.Errorf("write %s: %w", RedisKey, err)
+	}
+	if taken == 0 {
+		return fmt.Errorf("%w: task %d on %s", ErrClaimHeld, c.TaskID, s.Endpoint())
 	}
 	return nil
 }
 
 func (s *RedisStore) Remove(ctx context.Context, taskID int) error {
-	if err := s.Client.HDel(ctx, RedisKey, strconv.Itoa(taskID)).Err(); err != nil {
+	field := strconv.Itoa(taskID)
+	if err := s.Client.HDel(ctx, RedisKey, field, field+":at").Err(); err != nil {
 		return fmt.Errorf("write %s: %w", RedisKey, err)
 	}
 	return nil

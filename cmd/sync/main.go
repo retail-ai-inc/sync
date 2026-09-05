@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	replicationapp "github.com/retail-ai-inc/sync/internal/replication/app"
 	"net/http"
 	"os"
@@ -21,6 +22,7 @@ import (
 	"github.com/retail-ai-inc/sync/internal/platform/logging"
 	"github.com/retail-ai-inc/sync/internal/platform/metrics"
 	"github.com/retail-ai-inc/sync/internal/platform/secret"
+	"github.com/retail-ai-inc/sync/internal/platform/sqlite"
 	"github.com/retail-ai-inc/sync/internal/platform/webui"
 	"github.com/sirupsen/logrus"
 )
@@ -161,6 +163,12 @@ func newRouter() *chi.Mux {
 
 	// Probes, outside /api because they must answer before anything is
 	// configured and must never require a credential.
+	//
+	// Readiness is whether the control database can be read, not whether
+	// replication is caught up: a probe that failed because Tokyo was
+	// unreachable would restart the one process still able to answer what the
+	// tasks are and where their positions stand.
+	httpapi.ReadyCheck = controlPlaneReady
 	router.Get("/healthz", httpapi.Health)
 	router.Get("/readyz", httpapi.Ready)
 
@@ -189,4 +197,24 @@ func serveUI(w http.ResponseWriter, r *http.Request) {
 	}
 
 	http.ServeFile(w, r, "ui/dist/index.html")
+}
+
+// controlPlaneReady reports whether the control database answers.
+//
+// It is opened rather than kept, because the failure this is looking for is the
+// file being unreadable -- a volume that did not mount, a database replaced
+// while the process ran -- and a connection opened at start-up would not notice
+// either.
+func controlPlaneReady() error {
+	db, err := sqlite.OpenSQLiteDB()
+	if err != nil {
+		return fmt.Errorf("open the control database: %w", err)
+	}
+	defer db.Close()
+
+	var tasks int
+	if err := db.QueryRow("SELECT COUNT(*) FROM sync_tasks").Scan(&tasks); err != nil {
+		return fmt.Errorf("read the control database: %w", err)
+	}
+	return nil
 }

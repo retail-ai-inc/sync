@@ -2,6 +2,7 @@ package redis
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -332,27 +333,34 @@ func (a *Applier) applySlot(ctx context.Context, job work, batchEnd int64) error
 		strconv.FormatInt(batchEnd, 10), 0)
 
 	results, err := tx.Exec(ctx)
+
+	// The per-command results are read before Exec's own error, not after it.
+	//
+	// Redis does not roll a transaction back when one of its commands fails at
+	// run time — the rest still apply, and so does the marker. go-redis reports
+	// the first failing command as Exec's error, so returning on that error sent
+	// a run-time failure back as something a retry could fix, while the marker in
+	// the same transaction had already moved the position past it. The task
+	// restarted, the marker skipped the command that had failed, and the
+	// difference was permanent and invisible. The check below existed for exactly
+	// this and could not be reached.
+	for index, result := range results {
+		if failed := result.Err(); serverRefused(failed) {
+			return domain.Unrecoverable(
+				"%v failed on the target in slot %d: %v. The target's copy of that "+
+					"key has diverged from the source; a transaction that fails part way "+
+					"is not rolled back, so the position has already moved past it. "+
+					"Re-copy the key or the task", describeResult(results, index), job.slot, failed)
+		}
+	}
+
+	// No command reported a failure, so this is the transport rather than the
+	// data: the transaction did not run, nothing was applied, and nothing moved.
 	if err != nil && err != goredis.Nil {
 		return fmt.Errorf("write slot %d: %w", job.slot, err)
 	}
 	if err := marker.Err(); err != nil && err != goredis.Nil {
 		return fmt.Errorf("record the marker for slot %d: %w", job.slot, err)
-	}
-
-	// Redis does not roll a transaction back when one of its commands fails at
-	// run time — the rest still apply, and so does the marker. So a failure here
-	// is not something a retry can fix: the position has moved past it. It means
-	// the target's copy of that key has diverged from the source, and the honest
-	// answer is to stop and say which key, rather than to carry on with a
-	// difference nobody can see.
-	for index, result := range results {
-		if err := result.Err(); err != nil && err != goredis.Nil {
-			return domain.Unrecoverable(
-				"%v failed on the target in slot %d: %v. The target's copy of that "+
-					"key has diverged from the source; a transaction that fails part way "+
-					"is not rolled back, so the position has already moved past it. "+
-					"Re-copy the key or the task", describeResult(results, index), job.slot, err)
-		}
 	}
 	return nil
 }
@@ -585,6 +593,27 @@ func (a *Applier) flushOneServer(ctx context.Context, f *flush, position string)
 		}
 	}
 	return nil
+}
+
+// serverRefused reports whether the server executed a command and refused it,
+// as opposed to the answer never arriving.
+//
+// Only the first has moved the position: Redis does not roll a transaction back
+// when a command fails at run time, so the marker beside it applied. A context
+// that was cancelled, or a connection that dropped, leaves the outcome unknown
+// and the batch is replayed -- which is what a shutdown looks like, and
+// treating that as divergence would block a task every time it stopped.
+func serverRefused(err error) bool {
+	if err == nil || err == goredis.Nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	// go-redis gives a server's own error this type; everything raised on the
+	// client side -- dial failures, timeouts, cancellation -- has another.
+	var fromServer goredis.Error
+	return errors.As(err, &fromServer)
 }
 
 // slotRange reads the slots a shard owns out of its name. A single server is
