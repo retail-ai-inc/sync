@@ -208,7 +208,6 @@ func (s *Syncer) Start(ctx context.Context) error {
 	}
 
 	// Nothing is read or written until the direction is agreed.
-	inner.checkpoints = inner.checkpointStore(targetDBName)
 	stopGuard, guardErr := inner.claimDirection(ctx, sourceDBName, targetDBName)
 	if guardErr != nil {
 		if directionlock.IsBlocking(guardErr) {

@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/retail-ai-inc/sync/internal/platform/config"
+	"github.com/retail-ai-inc/sync/internal/platform/metrics"
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
 	"github.com/sirupsen/logrus"
 )
@@ -432,5 +434,82 @@ func TestARunningTaskIsNotDisturbed(t *testing.T) {
 	case <-starts:
 		t.Error("a running task was started a second time")
 	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// An unknown engine type used to be left out of the running map, so the next
+// reconcile started it again -- every ten seconds, for ever, burying whatever
+// else was being logged.
+func TestAnUnknownEngineIsReportedOnceAndBlocked(t *testing.T) {
+	attempts := 0
+	s := runWith(t, func(config.SyncConfig, *config.Config, *logrus.Logger) func(context.Context) error {
+		attempts++
+		return nil
+	})
+	ctx := context.Background()
+
+	broken := baseTask()
+	broken.Type = "sybase"
+
+	for i := 0; i < 5; i++ {
+		s.apply(ctx, cfgWith(broken))
+	}
+	if attempts != 1 {
+		t.Errorf("the unknown type was resolved %d times, want 1", attempts)
+	}
+
+	task, ok := s.running[broken.ID]
+	if !ok {
+		t.Fatal("the task is not in the running map, so the next reconcile starts it again")
+	}
+	if !task.blocked {
+		t.Error("the task is not marked blocked, so reconsider would restart it")
+	}
+
+	var blocked float64
+	var found bool
+	for _, sample := range metrics.Default.Snapshot(metrics.TaskBlocked) {
+		if sample.Labels["task"] == strconv.Itoa(broken.ID) {
+			blocked, found = sample.Value, true
+		}
+	}
+	if !found || blocked != 1 {
+		t.Errorf("sync_task_blocked = %v (found=%v), want 1", blocked, found)
+	}
+}
+
+// Correcting the type changes the fingerprint, which is what gets it tried
+// again -- otherwise a typo would need a process restart to recover from.
+func TestCorrectingAnUnknownEngineStartsTheTask(t *testing.T) {
+	started := make(chan int, 4)
+	resolved := 0
+	s := runWith(t, func(sc config.SyncConfig, _ *config.Config, _ *logrus.Logger) func(context.Context) error {
+		resolved++
+		if sc.Type == "sybase" {
+			return nil
+		}
+		return func(ctx context.Context) error {
+			started <- sc.ID
+			<-ctx.Done()
+			return nil
+		}
+	})
+	ctx := context.Background()
+
+	broken := baseTask()
+	broken.Type = "sybase"
+	s.apply(ctx, cfgWith(broken))
+
+	fixed := broken
+	fixed.Type = "mysql"
+	s.apply(ctx, cfgWith(fixed))
+
+	select {
+	case id := <-started:
+		if id != fixed.ID {
+			t.Errorf("task %d started, want %d", id, fixed.ID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("the corrected task never started (build called %d times)", resolved)
 	}
 }

@@ -234,7 +234,22 @@ func taskLabels(sc config.SyncConfig) metrics.Labels {
 func (s *supervisor) start(parentCtx context.Context, sc config.SyncConfig) {
 	syncer := s.build(sc, s.global, s.log)
 	if syncer == nil {
-		s.log.Errorf("Unknown sync type: %s", sc.Type)
+		// Recorded as blocked rather than left out of the map. A task that is not
+		// in it is one the next reconcile starts again, and reconcile runs every
+		// ten seconds -- so this used to log the same line for ever and bury
+		// whatever else was being reported. Editing the type changes the
+		// fingerprint, which is what gets it tried again.
+		s.log.Errorf("Task %d has an unknown sync type %q and will not be started",
+			sc.ID, sc.Type)
+		done := make(chan struct{})
+		close(done)
+		s.running[sc.ID] = &runningTask{
+			fingerprint: fingerprint(sc),
+			cancel:      func() {},
+			done:        done,
+			blocked:     true,
+		}
+		metrics.SetTaskBlocked(taskLabels(sc), true)
 		return
 	}
 

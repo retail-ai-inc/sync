@@ -11,7 +11,6 @@ import (
 	"github.com/retail-ai-inc/sync/internal/platform/config"
 	"github.com/retail-ai-inc/sync/internal/platform/dsn"
 	"github.com/retail-ai-inc/sync/internal/platform/resilience"
-	"github.com/retail-ai-inc/sync/internal/replication/infra/checkpoint"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/directionlock"
 	"github.com/sirupsen/logrus"
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -31,8 +30,6 @@ type MongoDBSyncer struct {
 	processorMutex   sync.RWMutex
 	// Global configuration for accessing Slack settings
 	globalConfig *config.Config
-	// checkpoints is where the resume tokens and start times are recorded.
-	checkpoints checkpoint.Store
 	// connectErr is why the constructor could not reach one side, kept so Start
 	// can report it rather than the caller having to notice a nil syncer.
 	connectErr error

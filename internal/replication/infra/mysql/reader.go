@@ -83,7 +83,6 @@ type Reader struct {
 	appliedSince map[string]bool
 
 	closeOnce sync.Once
-	stop      func()
 }
 
 // heartbeatEvery is how often a silent stream says so, built from the position
@@ -93,7 +92,11 @@ const heartbeatEvery = 10 * time.Second
 
 // Open starts the binlog stream at a position, or at the current end when there
 // is none.
-func (r *Reader) Open(ctx context.Context, from domain.Position) error {
+//
+// The context is not used: canal takes none, and the stream is stopped by
+// Close. A context here that looked as though it controlled the stream is what
+// this signature used to imply.
+func (r *Reader) Open(_ context.Context, from domain.Position) error {
 	cfg, err := r.canalConfig()
 	if err != nil {
 		return err
@@ -114,9 +117,6 @@ func (r *Reader) Open(ctx context.Context, from domain.Position) error {
 	r.fail = make(chan error, 1)
 	r.done = make(chan struct{})
 	c.SetEventHandler(r)
-
-	streamCtx, stop := context.WithCancel(ctx)
-	r.stop = stop
 
 	stored := &binlogCheckpoint{}
 	if _, err := checkpoint.Decode(from.Payload, stored); err != nil {
@@ -161,7 +161,6 @@ func (r *Reader) Open(ctx context.Context, from domain.Position) error {
 				"start by GTID reports none, so the position stays this way.")
 			r.fail <- c.RunFrom(stored.position())
 		}
-		_ = streamCtx
 	}()
 
 	return nil
@@ -190,9 +189,6 @@ func (r *Reader) Close() error {
 		// than pushed at a pipeline that has stopped reading.
 		if r.done != nil {
 			close(r.done)
-		}
-		if r.stop != nil {
-			r.stop()
 		}
 		if r.canal != nil {
 			r.canal.Close()
