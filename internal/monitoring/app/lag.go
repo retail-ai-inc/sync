@@ -29,12 +29,18 @@ const (
 )
 
 // lagThreshold reports the number of seconds a task may fall behind before it
-// is alerted on. It comes from the environment rather than the settings table
-// because the table has no column for it and adding one is a migration; the
-// default is the one a deployment gets without doing anything.
+// is alerted on.
+//
+// The stored setting is the value, and zero there means the built-in default.
+// SYNC_LAG_ALERT_SECONDS still overrules it: that is how this is deployed
+// today, and an upgrade that ignored it would move the threshold without
+// anyone asking.
 func lagThreshold() float64 {
 	raw := os.Getenv("SYNC_LAG_ALERT_SECONDS")
 	if raw == "" {
+		if stored, err := config.LoadSettings(); err == nil && stored.LagAlertSeconds > 0 {
+			return stored.LagAlertSeconds
+		}
 		return defaultLagAlertSeconds
 	}
 	seconds, err := strconv.ParseFloat(raw, 64)

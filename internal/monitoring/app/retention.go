@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"github.com/retail-ai-inc/sync/internal/platform/config"
 	"os"
 	"strconv"
 	"time"
@@ -36,6 +37,9 @@ const (
 func retentionDays() int {
 	raw := os.Getenv("SYNC_MONITORING_RETENTION_DAYS")
 	if raw == "" {
+		if stored, err := config.LoadSettings(); err == nil && stored.MonitoringRetentionDays > 0 {
+			return stored.MonitoringRetentionDays
+		}
 		return defaultRetentionDays
 	}
 	days, err := strconv.Atoi(raw)

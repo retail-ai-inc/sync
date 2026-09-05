@@ -204,6 +204,12 @@ func (r *Runner) tag(format string) string {
 // Run replicates until the context is cancelled or the stream cannot continue.
 // nil or a transient error means try again; Unrecoverable means stop.
 func (r *Runner) Run(ctx context.Context) error {
+	// Once, here, rather than per batch: the bounds are read from the control
+	// database and a batch is a hot path. A change to them takes effect when
+	// the task next starts, which is the same as every other setting a task
+	// reads at start-up.
+	r.Opts.Limits = limitsNow(r.Opts.Limits)
+
 	start, owed, err := r.startingPoint(ctx)
 	if err != nil {
 		return err

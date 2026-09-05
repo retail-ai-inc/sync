@@ -35,16 +35,25 @@ const (
 // replicated table twice, which on a payment ledger is a real cost and a real
 // load on the source; when to pay it is an operational decision rather than
 // something to decide on somebody's behalf.
+// The stored setting is the value. SYNC_VERIFY_INTERVAL still overrules it,
+// because that is how this is deployed today and an upgrade that ignored it
+// would change behaviour without anyone asking.
 func verifyInterval() time.Duration {
-	raw := os.Getenv("SYNC_VERIFY_INTERVAL")
-	if raw == "" {
+	if raw := os.Getenv("SYNC_VERIFY_INTERVAL"); raw != "" {
+		interval, err := time.ParseDuration(raw)
+		if err != nil || interval <= 0 {
+			return 0
+		}
+		return interval
+	}
+
+	stored, err := config.LoadSettings()
+	if err != nil {
+		// Reported by the caller: off because the settings could not be read is
+		// a different thing from off because nobody turned it on.
 		return 0
 	}
-	interval, err := time.ParseDuration(raw)
-	if err != nil || interval <= 0 {
-		return 0
-	}
-	return interval
+	return stored.VerifyInterval
 }
 
 // repairEnabled reports whether a difference should be corrected as well as
@@ -54,7 +63,14 @@ func verifyInterval() time.Duration {
 // replication does anyway — but doing it automatically after a divergence
 // nobody has looked at yet is a decision an operator has to make deliberately.
 func repairEnabled() bool {
-	return strings.EqualFold(os.Getenv("SYNC_VERIFY_REPAIR"), "true")
+	if raw := os.Getenv("SYNC_VERIFY_REPAIR"); raw != "" {
+		return strings.EqualFold(raw, "true")
+	}
+	stored, err := config.LoadSettings()
+	if err != nil {
+		return false
+	}
+	return stored.VerifyRepair
 }
 
 // StartConsistencyChecks compares each replicated table against its source on a

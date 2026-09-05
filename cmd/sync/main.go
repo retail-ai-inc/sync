@@ -24,6 +24,7 @@ import (
 	"github.com/retail-ai-inc/sync/internal/platform/secret"
 	"github.com/retail-ai-inc/sync/internal/platform/sqlite"
 	"github.com/retail-ai-inc/sync/internal/platform/webui"
+	"github.com/retail-ai-inc/sync/internal/replication/app/pipeline"
 	"github.com/sirupsen/logrus"
 )
 
@@ -126,6 +127,11 @@ func main() {
 		// and this is where the engines are known.
 		replicationapp.PurgeCheckpoints = purgeCheckpointsFor
 
+		// A batch's bounds come from the settings, so an operator can cap the
+		// memory a batch of large rows takes without a rebuild. The pipeline
+		// asks rather than importing the control database.
+		pipeline.StoredLimits = storedBatchLimits
+
 		runSyncTasks(ctx, log, cfg)
 	}()
 
@@ -176,6 +182,11 @@ func newRouter() *chi.Mux {
 	// public network is the requirement that replaces the token.
 	router.Get("/metrics", metrics.Handler)
 
+	// A page of its own rather than one inside the bundle: the application is
+	// shipped built, its source is not here, and a page added to ui/dist would
+	// go the next time it is rebuilt.
+	router.Get("/settings.html", webui.SettingsPage)
+
 	router.Get("/*", serveUI)
 	return router
 }
@@ -219,4 +230,17 @@ func controlPlaneReady() error {
 		return fmt.Errorf("read the control database: %w", err)
 	}
 	return nil
+}
+
+// storedBatchLimits reports the batch bounds a deployment has set, or zeroes,
+// which leave the built-in defaults in place.
+func storedBatchLimits() pipeline.Limits {
+	stored, err := config.LoadSettings()
+	if err != nil {
+		return pipeline.Limits{}
+	}
+	return pipeline.Limits{
+		MaxEvents: stored.BatchMaxEvents,
+		MaxBytes:  stored.BatchMaxBytes,
+	}
 }

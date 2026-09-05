@@ -20,7 +20,18 @@ CREATE TABLE IF NOT EXISTS config_global (
     log_level                         TEXT    NOT NULL DEFAULT 'info',
     monitor_interval                  INTEGER DEFAULT 60,
     slackWebhookURL                   TEXT,
-    slackChannel                      TEXT
+    slackChannel                      TEXT,
+    -- Everything below was a constant in the code or an environment variable,
+    -- which meant a rebuild or a redeploy to change. Zero means "use the
+    -- built-in default", so a database from before these columns behaves as it
+    -- did.
+    verify_interval_seconds           INTEGER NOT NULL DEFAULT 0,
+    verify_repair                     INTEGER NOT NULL DEFAULT 0,
+    lag_alert_seconds                 INTEGER NOT NULL DEFAULT 0,
+    monitoring_retention_days         INTEGER NOT NULL DEFAULT 0,
+    batch_max_events                  INTEGER NOT NULL DEFAULT 0,
+    batch_max_bytes                   INTEGER NOT NULL DEFAULT 0,
+    mongo_no_transaction              INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS sync_tasks (
@@ -163,6 +174,16 @@ var addedColumns = []struct{ table, column, definition string }{
 	{"backup_tasks", "last_run_time", "DATETIME"},
 	{"backup_tasks", "last_run_status", "TEXT"},
 	{"backup_tasks", "last_run_message", "TEXT"},
+	// The settings that used to be constants or environment variables. Zero is
+	// "use the built-in default", so adding them to an existing database
+	// changes nothing until somebody sets one.
+	{"config_global", "verify_interval_seconds", "INTEGER NOT NULL DEFAULT 0"},
+	{"config_global", "verify_repair", "INTEGER NOT NULL DEFAULT 0"},
+	{"config_global", "lag_alert_seconds", "INTEGER NOT NULL DEFAULT 0"},
+	{"config_global", "monitoring_retention_days", "INTEGER NOT NULL DEFAULT 0"},
+	{"config_global", "batch_max_events", "INTEGER NOT NULL DEFAULT 0"},
+	{"config_global", "batch_max_bytes", "INTEGER NOT NULL DEFAULT 0"},
+	{"config_global", "mongo_no_transaction", "INTEGER NOT NULL DEFAULT 0"},
 }
 
 // addColumns adds each of those columns if it is missing. SQLite has no ADD

@@ -248,11 +248,19 @@ func (a *Applier) targetFor(source string) string {
 // bare bulk writes; it exists because a batch spanning shards is a two-phase
 // commit, and that cost is a measurement rather than an opinion.
 func noTransaction() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("SYNC_MONGO_NO_TRANSACTION"))) {
-	case "1", "true", "yes":
-		return true
+	raw := strings.ToLower(strings.TrimSpace(os.Getenv("SYNC_MONGO_NO_TRANSACTION")))
+	if raw != "" {
+		switch raw {
+		case "1", "true", "yes":
+			return true
+		}
+		return false
 	}
-	return false
+	stored, err := config.LoadSettings()
+	if err != nil {
+		return false
+	}
+	return stored.MongoNoTransaction
 }
 
 // describeNoTransaction reports what the escape hatch costs, or "" when unset.

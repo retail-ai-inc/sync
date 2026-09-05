@@ -56,6 +56,7 @@ func NewRouter() http.Handler {
 		r.Get("/sync/{id}/position", replicationhttp.SyncPositionHandler)
 		r.Get("/sync/{id}/rowcounts", replicationhttp.SyncRowCountsHandler)
 		r.Get("/changestreams/status", monitoringhttp.ChangeStreamsStatusHandler)
+		r.Get("/settings", SettingsHandler)
 
 		r.Get("/backup", backuphttp.BackupListHandler)
 		r.Get("/backup/status/{taskId}", backuphttp.BackupStatusHandler)
@@ -77,6 +78,7 @@ func NewRouter() http.Handler {
 		r.Post("/test-connection", dbinspect.TestConnectionHandler)
 		r.Post("/tables/schema", dbinspect.GetTableSchemaHandler)
 
+		r.Put("/settings", UpdateSettingsHandler)
 		r.Put("/oauth/{provider}/config", identityhttp.UpdateOAuthConfigHandler)
 
 		r.Post("/sync", replicationhttp.SyncCreateHandler)
