@@ -114,3 +114,36 @@ func applySkipVerify(cfg **tls.Config, skip bool) {
 	}
 	(*cfg).InsecureSkipVerify = true
 }
+
+// TLSFor reports the TLS settings a DSN asks for, or nil for a plain
+// connection.
+//
+// It exists for the Redis replication link, which is not a go-redis client: it
+// speaks PSYNC over its own socket, so it cannot take the *goredis.Options this
+// package builds and has to be told separately. Without it a rediss:// source
+// passed the connection check made here and then could not be replicated from,
+// because the link dialled plain TCP.
+func TLSFor(dsn string) (*tls.Config, error) {
+	cleaned, skipVerify, err := splitSkipVerify(dsn)
+	if err != nil {
+		return nil, err
+	}
+
+	var config *tls.Config
+	if isClusterDSN(cleaned) {
+		opt, err := goredis.ParseClusterURL(cleaned)
+		if err != nil {
+			return nil, fmt.Errorf("read the redis DSN: %w", err)
+		}
+		config = opt.TLSConfig
+	} else {
+		opt, err := goredis.ParseURL(cleaned)
+		if err != nil {
+			return nil, fmt.Errorf("read the redis DSN: %w", err)
+		}
+		config = opt.TLSConfig
+	}
+
+	applySkipVerify(&config, skipVerify)
+	return config, nil
+}

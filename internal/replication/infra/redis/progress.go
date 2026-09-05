@@ -8,6 +8,7 @@ import (
 	goredis "github.com/redis/go-redis/v9"
 
 	"github.com/retail-ai-inc/sync/internal/platform/config"
+	intRedis "github.com/retail-ai-inc/sync/internal/platform/dbconn/redis"
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
 )
 
@@ -34,15 +35,23 @@ func Progress(ctx context.Context, cfg config.SyncConfig) (domain.Progress, erro
 	}
 
 	username, password := credentials(cfg.SourceConnection)
+	// The same TLS settings the replication link uses: a rediss:// source needs
+	// them here too, or the switch-over report cannot reach the shard it is
+	// reporting on.
+	sourceTLS, err := intRedis.TLSFor(cfg.SourceConnection)
+	if err != nil {
+		return domain.Progress{}, fmt.Errorf("read the source's TLS settings: %w", err)
+	}
 
 	report := domain.Progress{Engine: "redis"}
 	for _, sh := range shards {
 		// A plain connection to the shard's master. The task's own connection to
 		// it is a replica link, which takes no ordinary commands.
 		node := goredis.NewClient(&goredis.Options{
-			Addr:     sh.addr,
-			Username: username,
-			Password: password,
+			Addr:      sh.addr,
+			Username:  username,
+			Password:  password,
+			TLSConfig: sourceTLS,
 		})
 		report.Shards = append(report.Shards,
 			shardProgress(ctx, sh, node, target, cfg.ID))

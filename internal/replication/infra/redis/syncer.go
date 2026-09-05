@@ -228,11 +228,20 @@ func (s *Syncer) runShard(ctx context.Context, sh shard, source, target goredis.
 	defer buffer.Close()
 
 	username, password := credentials(s.cfg.SourceConnection)
+	// A rediss:// source is reached over TLS by every other client this program
+	// opens. The replication link and the node client below are not go-redis
+	// clients built from the DSN, so they have to be told: without this such a
+	// source passed the connection check and then could not be replicated from.
+	sourceTLS, tlsErr := intRedis.TLSFor(s.cfg.SourceConnection)
+	if tlsErr != nil {
+		return fmt.Errorf("read the source's TLS settings: %w", tlsErr)
+	}
 	connection := &link{
 		opts: StreamOptions{
 			Addr:     sh.addr,
 			Username: username,
 			Password: password,
+			TLS:      sourceTLS,
 		},
 		buffer: buffer,
 		shard:  sh.id,
@@ -245,9 +254,10 @@ func (s *Syncer) runShard(ctx context.Context, sh shard, source, target goredis.
 	// history it keeps. The replication connection cannot answer: once it is a
 	// replica link it takes no ordinary commands.
 	node := goredis.NewClient(&goredis.Options{
-		Addr:     sh.addr,
-		Username: username,
-		Password: password,
+		Addr:      sh.addr,
+		Username:  username,
+		Password:  password,
+		TLSConfig: sourceTLS,
 	})
 	defer node.Close()
 

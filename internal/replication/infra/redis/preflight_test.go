@@ -1,6 +1,17 @@
 package redis
 
-import "testing"
+import (
+	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"math/big"
+	"net"
+	"testing"
+	"time"
+)
 
 func TestInfoFieldReadsOneValue(t *testing.T) {
 	const info = "# Memory\r\nused_memory:545259520\r\nmaxmemory:1073741824\r\n" +
@@ -67,4 +78,119 @@ func TestModuleNameOfSomethingElse(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestTheStreamDialsTLSWhenAsked drives Dial against a real TLS listener,
+// because whether the socket is wrapped is a property of the dial and not
+// something the options can be inspected for.
+//
+// Before this, StreamOptions had no TLS field: a rediss:// source was reached
+// over TLS by every other client this program opens, the replication link
+// dialled plain TCP regardless, and the source passed its connection check and
+// then could not be replicated from.
+func TestTheStreamDialsTLSWhenAsked(t *testing.T) {
+	certificate, pool := selfSignedFor(t, "127.0.0.1")
+	listener, err := tls.Listen("tcp", "127.0.0.1:0",
+		&tls.Config{Certificates: []tls.Certificate{certificate}})
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer listener.Close()
+
+	handshaken := make(chan error, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			handshaken <- err
+			return
+		}
+		defer conn.Close()
+		handshaken <- conn.(*tls.Conn).Handshake()
+		// Enough of a reply that authenticate() does not hang the dial.
+		_, _ = conn.Write([]byte("+OK\r\n"))
+		time.Sleep(50 * time.Millisecond)
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	// The dial may still fail further in -- this is not a Redis server -- but
+	// the handshake is what is being asserted.
+	_, _ = Dial(ctx, StreamOptions{
+		Addr: listener.Addr().String(),
+		TLS:  &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12},
+	})
+
+	select {
+	case err := <-handshaken:
+		if err != nil {
+			t.Errorf("the TLS handshake failed: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("no connection reached the TLS listener")
+	}
+}
+
+// TestTheStreamDialsPlainWithoutTLS: an ordinary redis:// source must not have
+// a handshake forced on it.
+func TestTheStreamDialsPlainWithoutTLS(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer listener.Close()
+
+	accepted := make(chan struct{}, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		accepted <- struct{}{}
+		_, _ = conn.Write([]byte("+OK\r\n"))
+		time.Sleep(50 * time.Millisecond)
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, _ = Dial(ctx, StreamOptions{Addr: listener.Addr().String()})
+
+	select {
+	case <-accepted:
+	case <-time.After(5 * time.Second):
+		t.Error("a plain dial never reached the listener")
+	}
+}
+
+// selfSignedFor builds a certificate for one host and a pool that trusts it.
+func selfSignedFor(t *testing.T, host string) (tls.Certificate, *x509.CertPool) {
+	t.Helper()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate a key: %v", err)
+	}
+	template := x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: host},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses:  []net.IP{net.ParseIP(host)},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, &template, &template,
+		&key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("create a certificate: %v", err)
+	}
+
+	pool := x509.NewCertPool()
+	parsed, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatalf("parse the certificate: %v", err)
+	}
+	pool.AddCert(parsed)
+
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}, pool
 }

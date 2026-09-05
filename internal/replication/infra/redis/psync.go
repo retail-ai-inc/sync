@@ -3,6 +3,7 @@ package redis
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -71,6 +72,13 @@ type StreamOptions struct {
 	// ListeningPort is reported to the master so it appears in INFO replication;
 	// zero means this replica serves nothing.
 	ListeningPort int
+	// TLS, when set, wraps the connection. A rediss:// source is reached over TLS
+	// by every other client this program opens, and the replication link dialled
+	// plain TCP regardless -- so such a source passed the connection check and
+	// then could not be replicated from at all.
+	//
+	// Nil means plain TCP, which is what an ordinary redis:// source wants.
+	TLS *tls.Config
 }
 
 const (
@@ -121,7 +129,23 @@ func Dial(ctx context.Context, opts StreamOptions) (*Stream, error) {
 		return nil, fmt.Errorf("no address to replicate from")
 	}
 	dialer := net.Dialer{Timeout: opts.dialTimeout()}
-	conn, err := dialer.DialContext(ctx, "tcp", opts.Addr)
+	var conn net.Conn
+	var err error
+	if opts.TLS != nil {
+		// The server name is the host the caller asked for, so certificate
+		// verification checks what was dialled rather than whatever the
+		// configuration happened to carry.
+		config := opts.TLS.Clone()
+		if config.ServerName == "" {
+			if host, _, splitErr := net.SplitHostPort(opts.Addr); splitErr == nil {
+				config.ServerName = host
+			}
+		}
+		conn, err = (&tls.Dialer{NetDialer: &dialer, Config: config}).
+			DialContext(ctx, "tcp", opts.Addr)
+	} else {
+		conn, err = dialer.DialContext(ctx, "tcp", opts.Addr)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("connect to %s: %w", opts.Addr, err)
 	}
