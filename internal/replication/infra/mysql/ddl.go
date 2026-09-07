@@ -46,6 +46,10 @@ type ddlDecision struct {
 	// reason explains a skip or a block, for the log and for the error an
 	// operator will read.
 	reason string
+	// kind is the same thing in one of a fixed set of words, for a metric
+	// label. reason carries a database name, and a label whose values are
+	// unbounded is a series count nobody planned for.
+	kind string
 }
 
 // notASchemaChange reports whether a statement changes no schema at all.
@@ -192,6 +196,7 @@ func (h *MyEventHandler) planDDL(defaultSchema, query string) ([]ddlDecision, er
 			decisions = append(decisions, ddlDecision{
 				action: ddlSkip,
 				reason: "names no table",
+				kind:   "no_table",
 			})
 			continue
 		}
@@ -217,11 +222,12 @@ func (h *MyEventHandler) planDDL(defaultSchema, query string) ([]ddlDecision, er
 			}
 		}
 		if !replicated {
-			reason := "names no replicated table"
+			reason, kind := "names no replicated table", "not_replicated"
 			if elsewhere != "" {
 				reason = fmt.Sprintf("names a table in %s, which this task does not read", elsewhere)
+				kind = "another_database"
 			}
-			decisions = append(decisions, ddlDecision{action: ddlSkip, reason: reason})
+			decisions = append(decisions, ddlDecision{action: ddlSkip, reason: reason, kind: kind})
 			continue
 		}
 

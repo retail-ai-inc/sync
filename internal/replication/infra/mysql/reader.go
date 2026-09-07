@@ -411,7 +411,10 @@ func (r *Reader) OnDDL(header *replication.EventHeader, pos mysql.Position, e *r
 			// Dropped without being counted; see notASchemaChange.
 			r.Logger.Debugf("[MySQL][DDL] Not a schema change, dropping %q", e.Query)
 		case ddlSkip:
-			metrics.CountSchemaRefused(r.Labels, "skipped")
+			// Not a refusal: the statement is none of this task's business, and
+			// nothing stopped. Counting it as one buried the number that means
+			// replication has halted under one that means nothing happened.
+			metrics.CountDDLSkipped(r.Labels, decision.kind)
 			r.Logger.Debugf("[MySQL][DDL] Skipping %q: %s", e.Query, decision.reason)
 		case ddlBlock:
 			// A refusal nobody can see is a decision nobody can audit. Debezium has no

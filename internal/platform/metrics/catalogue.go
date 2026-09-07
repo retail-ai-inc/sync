@@ -341,12 +341,21 @@ const (
 	SchemaChangeAgeSeconds = "sync_schema_last_change_age_seconds"
 	// SchemaChangesRefusedTotal counts schema changes deliberately not carried — a
 	// DROP that would empty the target. A decision nobody can see cannot be
-	// audited.
+	// audited. Replication stops when one is counted here.
 	SchemaChangesRefusedTotal = "sync_schema_changes_refused_total"
+	// DDLSkippedTotal counts statements that touch nothing this task replicates.
+	//
+	// Its own counter because it is not a refusal and nothing stopped: a source
+	// and target on one server put this task's own bookkeeping DDL into the
+	// binlog it reads, so this counts up by one every time the process starts.
+	// Added to the refusals it buried the number that means replication has
+	// halted under one that means nothing happened.
+	DDLSkippedTotal = "sync_source_ddl_skipped_total"
 
 	helpSchemaChanges = "Schema changes carried through to the target"
 	helpSchemaAge     = "Seconds since the last schema change was carried through"
-	helpSchemaRefused = "Schema changes deliberately not carried through, by reason"
+	helpSchemaRefused = "Schema changes deliberately not carried through, which stops replication"
+	helpDDLSkipped    = "Statements passed over because they touch nothing this task replicates"
 )
 
 func CountSchemaChange(labels Labels, n int) {
@@ -361,6 +370,13 @@ func SetSchemaChangeAge(labels Labels, seconds float64) {
 
 func CountSchemaRefused(labels Labels, reason string) {
 	Default.AddCounter(SchemaChangesRefusedTotal, helpSchemaRefused,
+		withLabel(labels, "reason", reason), 1)
+}
+
+// CountDDLSkipped records a statement passed over as none of this task's
+// business.
+func CountDDLSkipped(labels Labels, reason string) {
+	Default.AddCounter(DDLSkippedTotal, helpDDLSkipped,
 		withLabel(labels, "reason", reason), 1)
 }
 

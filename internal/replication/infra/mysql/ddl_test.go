@@ -517,3 +517,30 @@ func TestATransactionBoundaryIsNotARefusedSchemaChange(t *testing.T) {
 		t.Errorf("an unreplicated ALTER is %v, want a counted skip", decisions)
 	}
 }
+
+// The metric label has to come from a fixed set. reason carries a database
+// name, and a label whose values are unbounded is a series count nobody
+// planned for.
+func TestEverySkipCarriesABoundedKind(t *testing.T) {
+	h := newHandler(t, nil, mapTable("orders", "orders"))
+	allowed := map[string]bool{"no_table": true, "not_replicated": true, "another_database": true}
+
+	for name, sql := range map[string]string{
+		"another database": "ALTER TABLE somewhere_else.customers ADD COLUMN n INT",
+		"not replicated":   "ALTER TABLE not_listed ADD COLUMN n INT",
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := plan(t, h, sql)
+			if got.action != ddlSkip {
+				t.Fatalf("action = %v, want skip (%s)", got.action, got.reason)
+			}
+			if !allowed[got.kind] {
+				t.Errorf("kind = %q, which is not one of the fixed set", got.kind)
+			}
+			// The sentence is still what an operator reads in the log.
+			if got.reason == "" {
+				t.Error("a skip with no reason")
+			}
+		})
+	}
+}

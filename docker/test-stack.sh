@@ -11,9 +11,12 @@ compose="$sudo docker compose -f $here/docker-compose.yml"
 test_compose="$sudo docker compose -f $here/docker-compose.test.yml"
 
 # Only the services the harness addresses. The rest of the development stack
-# binds ports these tests never use, and one of them collides with a local
-# mongod often enough to stop this script before it starts anything.
-$compose up -d mysql_source mysql_target postgresql_source postgresql_target
+# binds ports these tests never use, and mongodb_source wants 27017, which a
+# local mongod often already has -- that stopped this script before it started
+# anything. mongodb_target is on 27018 and is the one harness.MongoDiscoverable
+# names: the test-stack replica sets advertise an address only reachable inside
+# their own container, so a client that discovers a topology needs a standalone.
+$compose up -d mysql_source mysql_target postgresql_source postgresql_target mongodb_target
 $test_compose up -d
 
 # Slots are assigned once. Re-forming a live cluster fails, so only form one
