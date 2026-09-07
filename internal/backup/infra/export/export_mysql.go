@@ -401,15 +401,11 @@ func (e *BackupExecutor) exportMySQLMergedTables(ctx context.Context, connection
 			return fmt.Errorf("failed to export table %s: %w", table, exportErr)
 		}
 
-		content, err := os.ReadFile(tempTablePath)
-		if err != nil {
-			return fmt.Errorf("failed to read temp file for table %s: %w", table, err)
-		}
-
-		if len(content) > 0 {
-			if _, err := mergedFile.Write(content); err != nil {
-				return fmt.Errorf("failed to write data for table %s: %w", table, err)
-			}
+		// Copied through, not read in. This was os.ReadFile followed by a write
+		// of the whole thing: a dump of a large table was held in memory in one
+		// piece for no reason, since nothing here looks at it.
+		if err := appendFile(tempTablePath, mergedFile); err != nil {
+			return fmt.Errorf("merge table %s: %w", table, err)
 		}
 
 		if err := os.Remove(tempTablePath); err != nil {

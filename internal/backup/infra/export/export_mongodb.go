@@ -175,6 +175,10 @@ func (e *BackupExecutor) exportMongoDBMergedTables(ctx context.Context, connStr,
 	}
 	defer mergedFile.Close()
 
+	// Buffered, because the merge writes a line at a time: unbuffered that is
+	// one write syscall per document.
+	merged := bufio.NewWriterSize(mergedFile, 1<<20)
+
 	// No JSON array wrapper for JSONL format - each line is a separate JSON object
 
 	for i, table := range tables {
@@ -187,39 +191,18 @@ func (e *BackupExecutor) exportMongoDBMergedTables(ctx context.Context, connStr,
 			return fmt.Errorf("failed to export table %s: %w", table, err)
 		}
 
-		tempFile, err := os.Open(tempTablePath)
-		if err != nil {
-			return fmt.Errorf("failed to open temp file for table %s: %w", table, err)
+		// A line at a time, not the file at once.
+		//
+		// This used to be os.ReadFile, then string(content), then a Split on
+		// newlines: two copies of the whole export plus a string header for
+		// every line -- around 160MB of headers alone at ten million documents.
+		// A collection large enough to be worth backing up was the one that
+		// could not be, and the process died on GOMEMLIMIT rather than on
+		// anything it could report.
+		if err := appendJSONLines(tempTablePath, merged); err != nil {
+			return fmt.Errorf("merge table %s: %w", table, err)
 		}
 
-		// Read JSONL format file content (mongoexport default output format)
-		content, err := os.ReadFile(tempTablePath)
-		if err != nil {
-			tempFile.Close()
-			return fmt.Errorf("failed to read temp file for table %s: %w", table, err)
-		}
-
-		// mongoexport outputs JSONL format (one JSON object per line)
-		// Write directly in JSONL format, maintaining original format
-		contentStr := strings.TrimSpace(string(content))
-
-		if len(contentStr) > 0 {
-			// Directly append JSONL content to merged file
-			lines := strings.Split(contentStr, "\n")
-
-			for _, line := range lines {
-				line = strings.TrimSpace(line)
-				if line != "" && strings.HasPrefix(line, "{") {
-					// Write each JSON object line directly, separated by newlines (JSONL format)
-					if _, err := mergedFile.WriteString(line + "\n"); err != nil {
-						tempFile.Close()
-						return fmt.Errorf("failed to write line data for %s: %w", table, err)
-					}
-				}
-			}
-		}
-
-		tempFile.Close()
 		if err := os.Remove(tempTablePath); err != nil {
 			logrus.Warnf("[BackupExecutor] Failed to remove temp file %s: %v", tempTablePath, err)
 		} else {
@@ -229,8 +212,15 @@ func (e *BackupExecutor) exportMongoDBMergedTables(ctx context.Context, connStr,
 		logrus.Infof("[BackupExecutor] ✅ Table %s merged successfully", table)
 	}
 
-	// No JSON array end needed for JSONL format
-	mergedFile.Close()
+	// Flushed before the file is closed and before anything reads it back: the
+	// record count and the zip both read this path, and whatever is still in
+	// the buffer is not in the file yet.
+	if err := merged.Flush(); err != nil {
+		return fmt.Errorf("write the merged file: %w", err)
+	}
+	if err := mergedFile.Close(); err != nil {
+		return fmt.Errorf("close the merged file: %w", err)
+	}
 
 	if stat, err := os.Stat(mergedJsonPath); err == nil {
 		logrus.Infof("[BackupExecutor] ✅ Merge completed: %.2f MB", float64(stat.Size())/1024/1024)
