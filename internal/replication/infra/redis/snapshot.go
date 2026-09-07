@@ -16,6 +16,7 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/retail-ai-inc/sync/internal/platform/metrics"
+	"github.com/retail-ai-inc/sync/internal/replication/app/pipeline"
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
 )
 
@@ -56,7 +57,7 @@ func (s *Snapshotter) batch() int {
 	if s.Batch > 0 {
 		return s.Batch
 	}
-	return defaultCopyBatch
+	return pipeline.CopyBatch(defaultCopyBatch)
 }
 
 func (s *Snapshotter) logger() logrus.FieldLogger { return orDefault(s.Logger) }

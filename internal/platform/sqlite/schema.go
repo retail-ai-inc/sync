@@ -31,7 +31,15 @@ CREATE TABLE IF NOT EXISTS config_global (
     monitoring_retention_days         INTEGER NOT NULL DEFAULT 0,
     batch_max_events                  INTEGER NOT NULL DEFAULT 0,
     batch_max_bytes                   INTEGER NOT NULL DEFAULT 0,
-    mongo_no_transaction              INTEGER NOT NULL DEFAULT 0
+    mongo_no_transaction              INTEGER NOT NULL DEFAULT 0,
+    -- What a running task holds and how long it waits. Zero is the built-in
+    -- default here too.
+    queue_max_events                  INTEGER NOT NULL DEFAULT 0,
+    queue_max_bytes                   INTEGER NOT NULL DEFAULT 0,
+    snapshot_queue_max_events         INTEGER NOT NULL DEFAULT 0,
+    flush_interval_ms                 INTEGER NOT NULL DEFAULT 0,
+    copy_batch_rows                   INTEGER NOT NULL DEFAULT 0,
+    mongo_stream_await_ms             INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS sync_tasks (
@@ -184,6 +192,12 @@ var addedColumns = []struct{ table, column, definition string }{
 	{"config_global", "batch_max_events", "INTEGER NOT NULL DEFAULT 0"},
 	{"config_global", "batch_max_bytes", "INTEGER NOT NULL DEFAULT 0"},
 	{"config_global", "mongo_no_transaction", "INTEGER NOT NULL DEFAULT 0"},
+	{"config_global", "queue_max_events", "INTEGER NOT NULL DEFAULT 0"},
+	{"config_global", "queue_max_bytes", "INTEGER NOT NULL DEFAULT 0"},
+	{"config_global", "snapshot_queue_max_events", "INTEGER NOT NULL DEFAULT 0"},
+	{"config_global", "flush_interval_ms", "INTEGER NOT NULL DEFAULT 0"},
+	{"config_global", "copy_batch_rows", "INTEGER NOT NULL DEFAULT 0"},
+	{"config_global", "mongo_stream_await_ms", "INTEGER NOT NULL DEFAULT 0"},
 }
 
 // addColumns adds each of those columns if it is missing. SQLite has no ADD

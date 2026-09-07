@@ -63,9 +63,17 @@ type Options struct {
 const (
 	defaultFlushInterval = 500 * time.Millisecond
 	defaultQueueCapacity = 2000
-	// Enough to hold a batch of the largest events several times over, and far
-	// short of what two hundred thousand of them would be.
-	defaultQueueBytes = 512 << 20
+	// Enough to hold a batch of the largest events several times over.
+	//
+	// It was 512MB, which is a worst case of two gigabytes across the four
+	// tasks a deployment runs -- against a process given three and a half. The
+	// queue is a budget rather than a reservation, so the difference only shows
+	// when the target stalls; but that is exactly when the process would be
+	// closest to its limit, and the observed queue depth is zero. A hundred and
+	// twenty-eight megabytes still holds two batches of the largest events, and
+	// what it changes is that the reader pushes back sooner -- which is what
+	// the source's own log is for.
+	defaultQueueBytes = 128 << 20
 	// Slots are a pointer each, so a deep queue costs almost nothing until the
 	// changes actually arrive; what it buys is a copy that survives a source
 	// still being written to.
@@ -204,11 +212,11 @@ func (r *Runner) tag(format string) string {
 // Run replicates until the context is cancelled or the stream cannot continue.
 // nil or a transient error means try again; Unrecoverable means stop.
 func (r *Runner) Run(ctx context.Context) error {
-	// Once, here, rather than per batch: the bounds are read from the control
-	// database and a batch is a hot path. A change to them takes effect when
-	// the task next starts, which is the same as every other setting a task
-	// reads at start-up.
-	r.Opts.Limits = limitsNow(r.Opts.Limits)
+	// Once, here, rather than per batch: this is read from the control database
+	// and a batch is a hot path. A change takes effect when the task next
+	// starts, which is the same as every other setting a task reads at
+	// start-up.
+	r.Opts = tuned(r.Opts)
 
 	start, owed, err := r.startingPoint(ctx)
 	if err != nil {

@@ -22,6 +22,13 @@ type settingsBody struct {
 	BatchMaxEvents          int     `json:"batchMaxEvents"`
 	BatchMaxBytes           int     `json:"batchMaxBytes"`
 	MongoNoTransaction      bool    `json:"mongoNoTransaction"`
+
+	QueueMaxEvents         int   `json:"queueMaxEvents"`
+	QueueMaxBytes          int   `json:"queueMaxBytes"`
+	SnapshotQueueMaxEvents int   `json:"snapshotQueueMaxEvents"`
+	FlushIntervalMs        int64 `json:"flushIntervalMs"`
+	CopyBatchRows          int   `json:"copyBatchRows"`
+	MongoStreamAwaitMs     int64 `json:"mongoStreamAwaitMs"`
 }
 
 func bodyOf(s config.Settings) settingsBody {
@@ -33,6 +40,12 @@ func bodyOf(s config.Settings) settingsBody {
 		BatchMaxEvents:          s.BatchMaxEvents,
 		BatchMaxBytes:           s.BatchMaxBytes,
 		MongoNoTransaction:      s.MongoNoTransaction,
+		QueueMaxEvents:          s.QueueMaxEvents,
+		QueueMaxBytes:           s.QueueMaxBytes,
+		SnapshotQueueMaxEvents:  s.SnapshotQueueMaxEvents,
+		FlushIntervalMs:         int64(s.FlushInterval / time.Millisecond),
+		CopyBatchRows:           s.CopyBatchRows,
+		MongoStreamAwaitMs:      int64(s.MongoStreamAwait / time.Millisecond),
 	}
 }
 
@@ -45,6 +58,12 @@ func settingsOf(b settingsBody) config.Settings {
 		BatchMaxEvents:          b.BatchMaxEvents,
 		BatchMaxBytes:           b.BatchMaxBytes,
 		MongoNoTransaction:      b.MongoNoTransaction,
+		QueueMaxEvents:          b.QueueMaxEvents,
+		QueueMaxBytes:           b.QueueMaxBytes,
+		SnapshotQueueMaxEvents:  b.SnapshotQueueMaxEvents,
+		FlushInterval:           time.Duration(b.FlushIntervalMs) * time.Millisecond,
+		CopyBatchRows:           b.CopyBatchRows,
+		MongoStreamAwait:        time.Duration(b.MongoStreamAwaitMs) * time.Millisecond,
 	}
 }
 
@@ -115,6 +134,18 @@ func refuse(b settingsBody) string {
 		return "batchMaxEvents cannot be negative; 0 keeps the default"
 	case b.BatchMaxBytes < 0:
 		return "batchMaxBytes cannot be negative; 0 keeps the default"
+	case b.QueueMaxEvents < 0:
+		return "queueMaxEvents cannot be negative; 0 keeps the default"
+	case b.QueueMaxBytes < 0:
+		return "queueMaxBytes cannot be negative; 0 keeps the default"
+	case b.SnapshotQueueMaxEvents < 0:
+		return "snapshotQueueMaxEvents cannot be negative; 0 keeps the default"
+	case b.FlushIntervalMs < 0:
+		return "flushIntervalMs cannot be negative; 0 keeps the default"
+	case b.CopyBatchRows < 0:
+		return "copyBatchRows cannot be negative; 0 keeps the default"
+	case b.MongoStreamAwaitMs < 0:
+		return "mongoStreamAwaitMs cannot be negative; 0 keeps the default"
 	}
 	return ""
 }

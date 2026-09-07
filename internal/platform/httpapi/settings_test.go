@@ -85,6 +85,12 @@ func TestSettingsSurviveTheRoundTrip(t *testing.T) {
 		"batchMaxEvents":          250,
 		"batchMaxBytes":           1 << 20,
 		"mongoNoTransaction":      false,
+		"queueMaxEvents":          4096,
+		"queueMaxBytes":           128 << 20,
+		"snapshotQueueMaxEvents":  1024,
+		"flushIntervalMs":         250,
+		"copyBatchRows":           750,
+		"mongoStreamAwaitMs":      150,
 	})
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("PUT /settings = %d: %s", recorder.Code, recorder.Body.String())
@@ -100,6 +106,21 @@ func TestSettingsSurviveTheRoundTrip(t *testing.T) {
 	if data["batchMaxBytes"].(float64) != float64(1<<20) {
 		t.Errorf("batchMaxBytes = %v", data["batchMaxBytes"])
 	}
+	// The tuning settings are stored as milliseconds and read back as
+	// milliseconds: a duration that went in as 250 and came back as 250
+	// nanoseconds would be a setting that silently did nothing.
+	for field, want := range map[string]float64{
+		"queueMaxEvents":         4096,
+		"queueMaxBytes":          128 << 20,
+		"snapshotQueueMaxEvents": 1024,
+		"flushIntervalMs":        250,
+		"copyBatchRows":          750,
+		"mongoStreamAwaitMs":     150,
+	} {
+		if data[field].(float64) != want {
+			t.Errorf("%s = %v, want %v", field, data[field], want)
+		}
+	}
 }
 
 // Zero already means "the built-in default", so a negative number is somebody
@@ -114,6 +135,12 @@ func TestANegativeSettingIsRefused(t *testing.T) {
 		"monitoringRetentionDays": -1,
 		"batchMaxEvents":          -1,
 		"batchMaxBytes":           -1,
+		"queueMaxEvents":          -1,
+		"queueMaxBytes":           -1,
+		"snapshotQueueMaxEvents":  -1,
+		"flushIntervalMs":         -1,
+		"copyBatchRows":           -1,
+		"mongoStreamAwaitMs":      -1,
 	} {
 		recorder := writeSettings(t, map[string]interface{}{field: value})
 		if recorder.Code != http.StatusBadRequest {

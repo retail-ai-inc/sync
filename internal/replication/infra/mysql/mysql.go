@@ -15,6 +15,7 @@ import (
 	"github.com/retail-ai-inc/sync/internal/platform/config"
 	"github.com/retail-ai-inc/sync/internal/platform/dsn"
 	"github.com/retail-ai-inc/sync/internal/platform/metrics"
+	"github.com/retail-ai-inc/sync/internal/replication/app/pipeline"
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/directionlock"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/discovery"
@@ -132,13 +133,17 @@ func readBinlogStatus(ctx context.Context, conn *sql.Conn, stmt string) (*binlog
 	return &cp, nil
 }
 
+// defaultCopyBatch is how many rows move per round trip when a deployment has
+// not said otherwise.
+const defaultCopyBatch = 100
+
 // doInitialSync copies every mapped table, reporting what it could not copy.
 // Every failure here used to be logged and stepped over, and the caller then
 // recorded the position as though the copy had finished.
 func (s *MySQLSyncer) doInitialSync(ctx context.Context, sourceDB *sql.Conn, targetDB *sql.DB) error {
 	s.logger.Info("[MySQL] Starting the initial full sync...")
 
-	const batchSize = 100
+	batchSize := pipeline.CopyBatch(defaultCopyBatch)
 	var failures []string
 	fail := func(format string, args ...interface{}) {
 		failures = append(failures, fmt.Sprintf(format, args...))

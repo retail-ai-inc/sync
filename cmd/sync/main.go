@@ -127,10 +127,11 @@ func main() {
 		// and this is where the engines are known.
 		replicationapp.PurgeCheckpoints = purgeCheckpointsFor
 
-		// A batch's bounds come from the settings, so an operator can cap the
-		// memory a batch of large rows takes without a rebuild. The pipeline
-		// asks rather than importing the control database.
-		pipeline.StoredLimits = storedBatchLimits
+		// The pipeline's tuning comes from the settings, so an operator can cap
+		// the memory a task holds and change how long a batch waits without a
+		// rebuild. The pipeline asks rather than importing the control
+		// database.
+		pipeline.StoredTuning = storedTuning
 
 		runSyncTasks(ctx, log, cfg)
 	}()
@@ -227,15 +228,23 @@ func controlPlaneReady() error {
 	return nil
 }
 
-// storedBatchLimits reports the batch bounds a deployment has set, or zeroes,
+// storedTuning reports the pipeline settings a deployment has set, or zeroes,
 // which leave the built-in defaults in place.
-func storedBatchLimits() pipeline.Limits {
+func storedTuning() pipeline.Tuning {
 	stored, err := config.LoadSettings()
 	if err != nil {
-		return pipeline.Limits{}
+		return pipeline.Tuning{}
 	}
-	return pipeline.Limits{
-		MaxEvents: stored.BatchMaxEvents,
-		MaxBytes:  stored.BatchMaxBytes,
+	return pipeline.Tuning{
+		Limits: pipeline.Limits{
+			MaxEvents: stored.BatchMaxEvents,
+			MaxBytes:  stored.BatchMaxBytes,
+		},
+		FlushInterval:         stored.FlushInterval,
+		QueueCapacity:         stored.QueueMaxEvents,
+		QueueBytes:            int64(stored.QueueMaxBytes),
+		SnapshotQueueCapacity: stored.SnapshotQueueMaxEvents,
+		CopyBatchRows:         stored.CopyBatchRows,
+		StreamAwait:           stored.MongoStreamAwait,
 	}
 }

@@ -17,6 +17,7 @@ import (
 	"github.com/retail-ai-inc/sync/internal/platform/config"
 	"github.com/retail-ai-inc/sync/internal/platform/dsn"
 	"github.com/retail-ai-inc/sync/internal/platform/metrics"
+	"github.com/retail-ai-inc/sync/internal/replication/app/pipeline"
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/checkpoint"
 )
@@ -116,7 +117,7 @@ func (r *Reader) Open(ctx context.Context, from domain.Position) error {
 		// one.
 		match = append(match, bson.E{Key: "ns.db", Value: bson.M{"$in": dbs}})
 	}
-	pipeline := mongo.Pipeline{{{Key: "$match", Value: match}}}
+	stages := mongo.Pipeline{{{Key: "$match", Value: match}}}
 
 	opts := options.ChangeStream().
 		SetFullDocument(options.UpdateLookup).
@@ -124,7 +125,7 @@ func (r *Reader) Open(ctx context.Context, from domain.Position) error {
 		SetShowExpandedEvents(true).
 		// Without this the stream blocks for as long as the server likes, and a
 		// reader that never returns cannot report that it is alive.
-		SetMaxAwaitTime(streamAwait)
+		SetMaxAwaitTime(pipeline.Await(streamAwait))
 
 	if !from.IsZero() {
 		stored, err := decodePosition(from)
@@ -154,7 +155,7 @@ func (r *Reader) Open(ctx context.Context, from domain.Position) error {
 		}
 	}
 
-	stream, err := r.Client.Watch(ctx, pipeline, opts)
+	stream, err := r.Client.Watch(ctx, stages, opts)
 	if err != nil {
 		if positionLost(err) {
 			return domain.Unrecoverable(

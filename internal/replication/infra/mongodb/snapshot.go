@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/retail-ai-inc/sync/internal/platform/resilience"
+	"github.com/retail-ai-inc/sync/internal/replication/app/pipeline"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
@@ -69,13 +70,13 @@ func (s *MongoDBSyncer) doInitialSync(ctx context.Context, sourceColl, targetCol
 		return fmt.Errorf("check whether %s.%s is empty: %w", targetDB, targetColl.Name(), err)
 	}
 
-	cursor, err := sourceColl.Find(ctx, bson.M{}, options.Find().SetBatchSize(int32(snapshotBatch)))
+	batchSize := pipeline.CopyBatch(snapshotBatch)
+	cursor, err := sourceColl.Find(ctx, bson.M{}, options.Find().SetBatchSize(int32(batchSize)))
 	if err != nil {
 		return fmt.Errorf("source find fail => %v", err)
 	}
 	defer cursor.Close(ctx)
 
-	batchSize := snapshotBatch
 	var batch []bson.M
 	inserted := 0
 

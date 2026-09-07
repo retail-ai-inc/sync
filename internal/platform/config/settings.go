@@ -43,11 +43,33 @@ type Settings struct {
 	// gives up the atomicity of a batch and is here to be visible, not to be
 	// used: a half-applied batch and its position are no longer one thing.
 	MongoNoTransaction bool `json:"mongoNoTransaction"`
+
+	// QueueMaxEvents and QueueMaxBytes bound what a running task holds between
+	// reading a change and applying it. The byte bound decides how much memory
+	// a task can take: four tasks at half a gigabyte each is two gigabytes
+	// against a process given three and a half.
+	QueueMaxEvents int `json:"queueMaxEvents"`
+	QueueMaxBytes  int `json:"queueMaxBytes"`
+	// SnapshotQueueMaxEvents is the same bound for the queue a first copy fills.
+	SnapshotQueueMaxEvents int `json:"snapshotQueueMaxEvents"`
+	// FlushInterval is how long a batch waits to fill before it is applied.
+	// Shorter is less delay and more, smaller batches.
+	FlushInterval time.Duration `json:"flushIntervalMs"`
+	// CopyBatchRows is how many rows or documents a first copy reads per round
+	// trip, which is the load that copy puts on the source.
+	CopyBatchRows int `json:"copyBatchRows"`
+	// MongoStreamAwait is how long MongoDB may hold a change stream read that
+	// has nothing to return. On a sharded source it is a floor under every
+	// change's latency: mongos answers when the window ends rather than when
+	// the event arrives.
+	MongoStreamAwait time.Duration `json:"mongoStreamAwaitMs"`
 }
 
 // settingColumns is the order the columns are read and written in.
 const settingColumns = `verify_interval_seconds, verify_repair, lag_alert_seconds,
-	monitoring_retention_days, batch_max_events, batch_max_bytes, mongo_no_transaction`
+	monitoring_retention_days, batch_max_events, batch_max_bytes, mongo_no_transaction,
+	queue_max_events, queue_max_bytes, snapshot_queue_max_events, flush_interval_ms,
+	copy_batch_rows, mongo_stream_await_ms`
 
 // LoadSettings reads the settings from the control database.
 //
@@ -68,9 +90,14 @@ func LoadSettings() (Settings, error) {
 		repair, noTx  int
 		retention     int
 		events, bytes int
+
+		queueEvents, queueBytes int
+		snapshotEvents, flushMS int
+		copyRows, awaitMS       int
 	)
 	err = db.QueryRow(`SELECT `+settingColumns+` FROM config_global WHERE id = 1`).
-		Scan(&interval, &repair, &lag, &retention, &events, &bytes, &noTx)
+		Scan(&interval, &repair, &lag, &retention, &events, &bytes, &noTx,
+			&queueEvents, &queueBytes, &snapshotEvents, &flushMS, &copyRows, &awaitMS)
 	if err != nil {
 		return Settings{}, fmt.Errorf("read the settings: %w", err)
 	}
@@ -82,6 +109,12 @@ func LoadSettings() (Settings, error) {
 	s.BatchMaxEvents = events
 	s.BatchMaxBytes = bytes
 	s.MongoNoTransaction = noTx != 0
+	s.QueueMaxEvents = queueEvents
+	s.QueueMaxBytes = queueBytes
+	s.SnapshotQueueMaxEvents = snapshotEvents
+	s.FlushInterval = time.Duration(flushMS) * time.Millisecond
+	s.CopyBatchRows = copyRows
+	s.MongoStreamAwait = time.Duration(awaitMS) * time.Millisecond
 	return s, nil
 }
 
@@ -96,11 +129,16 @@ func SaveSettings(s Settings) error {
 	_, err = db.Exec(`UPDATE config_global SET
 		verify_interval_seconds = ?, verify_repair = ?, lag_alert_seconds = ?,
 		monitoring_retention_days = ?, batch_max_events = ?, batch_max_bytes = ?,
-		mongo_no_transaction = ?
+		mongo_no_transaction = ?, queue_max_events = ?, queue_max_bytes = ?,
+		snapshot_queue_max_events = ?, flush_interval_ms = ?, copy_batch_rows = ?,
+		mongo_stream_await_ms = ?
 		WHERE id = 1`,
 		int64(s.VerifyInterval/time.Second), boolToInt(s.VerifyRepair),
 		int64(s.LagAlertSeconds), s.MonitoringRetentionDays,
-		s.BatchMaxEvents, s.BatchMaxBytes, boolToInt(s.MongoNoTransaction))
+		s.BatchMaxEvents, s.BatchMaxBytes, boolToInt(s.MongoNoTransaction),
+		s.QueueMaxEvents, s.QueueMaxBytes, s.SnapshotQueueMaxEvents,
+		int64(s.FlushInterval/time.Millisecond), s.CopyBatchRows,
+		int64(s.MongoStreamAwait/time.Millisecond))
 	if err != nil {
 		return fmt.Errorf("write the settings: %w", err)
 	}

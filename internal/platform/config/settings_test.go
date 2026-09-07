@@ -31,6 +31,12 @@ func TestSettingsRoundTripThroughTheControlDatabase(t *testing.T) {
 		BatchMaxEvents:          321,
 		BatchMaxBytes:           4 << 20,
 		MongoNoTransaction:      true,
+		QueueMaxEvents:          2048,
+		QueueMaxBytes:           64 << 20,
+		SnapshotQueueMaxEvents:  512,
+		FlushInterval:           250 * time.Millisecond,
+		CopyBatchRows:           750,
+		MongoStreamAwait:        150 * time.Millisecond,
 	}
 	if err := SaveSettings(want); err != nil {
 		t.Fatalf("SaveSettings: %v", err)
