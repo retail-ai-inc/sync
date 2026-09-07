@@ -5,6 +5,8 @@ import (
 	"fmt"
 
 	goredis "github.com/redis/go-redis/v9"
+
+	"github.com/retail-ai-inc/sync/internal/replication/domain"
 )
 
 // Removing what the target holds and the source does not.
@@ -29,10 +31,87 @@ const sweepBatch = 200
 // It leaves this task's own bookkeeping alone: the position markers are on the
 // target by design and the source has never heard of them.
 func (s *Snapshotter) SweepStale(ctx context.Context) error {
+	if err := s.sourceHoldsSomething(ctx); err != nil {
+		return err
+	}
 	if start, end, ranged := slotRange(s.Link.shard); ranged {
 		return s.sweepSlots(ctx, start, end)
 	}
 	return s.sweepDatabases(ctx)
+}
+
+// sourceHoldsSomething refuses to sweep against a source that reports nothing
+// at all.
+//
+// An empty source and a connection pointing somewhere else look exactly the
+// same from here, and the difference is the whole of the standby: one means
+// "remove everything", the other means "remove everything for no reason". The
+// second is not recoverable, so a source with nothing in it stops the task and
+// says what it found instead. A source with keys in it has proved the
+// connection, and a part of it that is empty is then a real state to
+// replicate.
+func (s *Snapshotter) sourceHoldsSomething(ctx context.Context) error {
+	keys, err := s.sourceKeys(ctx)
+	if err != nil {
+		return fmt.Errorf("ask the source how many keys it holds before removing "+
+			"anything from the target: %w", err)
+	}
+	if keys > 0 {
+		return nil
+	}
+
+	held, err := s.Target.DBSize(ctx).Result()
+	if err != nil {
+		held = -1
+	}
+	return domain.Unrecoverable(
+		"the source holds no keys for shard %s while the target holds %d, so the "+
+			"target is not being swept. A source that reports nothing is as likely to "+
+			"be a connection pointing somewhere else as a source that was emptied, "+
+			"and emptying the standby on that basis cannot be undone. Check what the "+
+			"source is pointed at; if it really was emptied, remove the target's copy "+
+			"deliberately",
+		s.Link.shard, held)
+}
+
+// sourceKeys counts what the whole source holds, not what this shard or this
+// database holds.
+//
+// The question being asked is whether the connection reaches the data, and the
+// whole source is what answers it. A shard or a database that is empty while
+// the rest of the source is not has been emptied, which is a state to
+// replicate; a source that is empty everywhere is the case that is
+// indistinguishable from a connection pointing elsewhere.
+func (s *Snapshotter) sourceKeys(ctx context.Context) (int64, error) {
+	if cluster, ok := s.Source.(*goredis.ClusterClient); ok {
+		var total int64
+		err := cluster.ForEachMaster(ctx, func(ctx context.Context, node *goredis.Client) error {
+			keys, err := node.DBSize(ctx).Result()
+			if err != nil {
+				return err
+			}
+			total += keys
+			return nil
+		})
+		return total, err
+	}
+
+	source := s.Node
+	if source == nil {
+		source = s.Source
+	}
+	keys, err := source.DBSize(ctx).Result()
+	if err != nil || keys > 0 {
+		return keys, err
+	}
+
+	// A standalone source keeps up to sixteen databases and the connection is
+	// on one of them, so an empty one says nothing about the rest.
+	databases, err := populatedDatabases(ctx, source)
+	if err != nil {
+		return 0, err
+	}
+	return int64(len(databases)), nil
 }
 
 // sweepSlots handles a cluster, where one shard owns a range of slots and the

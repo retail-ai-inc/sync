@@ -5,10 +5,13 @@ package redis
 import (
 	"context"
 	"fmt"
+	"slices"
 	"testing"
 
 	goredis "github.com/redis/go-redis/v9"
 	"github.com/sirupsen/logrus"
+
+	"github.com/retail-ai-inc/sync/internal/replication/domain"
 )
 
 // Removing what the target holds and the source does not.
@@ -108,12 +111,17 @@ func TestTheSweepOnAClusterLeavesTheOtherShardsAlone(t *testing.T) {
 	ctx := context.Background()
 
 	// Two keys the source does not have, in different halves of the slot
-	// space, and a shard name that covers only the first.
+	// space, and a shard name that covers only the first. Plus one the source
+	// does have, because a source holding nothing is refused outright.
 	mine, theirs := keyInSlots(t, 0, 8191), keyInSlots(t, 8192, 16383)
-	for _, key := range []string{mine, theirs} {
+	kept := keyInSlots(t, 0, 8191, mine)
+	for _, key := range []string{mine, theirs, kept} {
 		if err := target.Set(ctx, key, "x", 0).Err(); err != nil {
 			t.Fatalf("seed the target: %v", err)
 		}
+	}
+	if err := source.Set(ctx, kept, "x", 0).Err(); err != nil {
+		t.Fatalf("seed the source: %v", err)
 	}
 
 	if err := sweeper(t, source, target, "0-8191").SweepStale(ctx); err != nil {
@@ -127,6 +135,40 @@ func TestTheSweepOnAClusterLeavesTheOtherShardsAlone(t *testing.T) {
 	if n, err := target.Exists(ctx, theirs).Result(); err != nil || n != 1 {
 		t.Errorf("%s belongs to another shard and was removed anyway; that shard's "+
 			"source still has it", theirs)
+	}
+	if n, err := target.Exists(ctx, kept).Result(); err != nil || n != 1 {
+		t.Errorf("%s was removed from the target and the source still has it", kept)
+	}
+}
+
+// A source that reports nothing is as likely to be a connection pointing
+// somewhere else as a source that was emptied, and the standby is what is at
+// stake: staging has a task whose source reads as empty while its target holds
+// five thousand keys, and sweeping that would have destroyed the copy.
+func TestTheSweepRefusesASourceThatHoldsNothing(t *testing.T) {
+	source := redisAt(t, addrsFrom(t, "SYNC_REDIS_SOURCE"))
+	target := redisAt(t, addrsFrom(t, "SYNC_REDIS_TARGET"))
+	defer source.Close()
+	defer target.Close()
+	emptyBoth(t, source, target)
+
+	ctx := context.Background()
+	for i := 0; i < 10; i++ {
+		if err := target.Set(ctx, fmt.Sprintf("standby:%d", i), i, 0).Err(); err != nil {
+			t.Fatalf("seed the target: %v", err)
+		}
+	}
+
+	err := sweeper(t, source, target, "0-16383").SweepStale(ctx)
+	if err == nil {
+		t.Fatal("the sweep emptied the standby against a source holding nothing")
+	}
+	if !domain.IsUnrecoverable(err) {
+		t.Errorf("the sweep failed with %v, want it reported as needing intervention", err)
+	}
+
+	if n, err := target.DBSize(ctx).Result(); err != nil || n != 10 {
+		t.Errorf("the target holds %d keys, want the 10 it started with", n)
 	}
 }
 
@@ -189,16 +231,20 @@ func TestTheSweepReachesEveryDatabaseOfAStandaloneTarget(t *testing.T) {
 	}
 }
 
-// keyInSlots finds a key whose slot falls in a range, so a test can put one on
-// each side of a shard boundary.
-func keyInSlots(t *testing.T, start, end int) string {
+// keyInSlots finds a key whose slot falls in a range and is none of taken, so
+// a test can put one on each side of a shard boundary.
+func keyInSlots(t *testing.T, start, end int, taken ...string) string {
 	t.Helper()
 
 	for i := 0; i < 100000; i++ {
 		key := fmt.Sprintf("sweep:%d", i)
-		if slot := SlotOf([]byte(key)); slot >= start && slot <= end {
-			return key
+		if slot := SlotOf([]byte(key)); slot < start || slot > end {
+			continue
 		}
+		if slices.Contains(taken, key) {
+			continue
+		}
+		return key
 	}
 	t.Fatalf("no key found in slots %d-%d", start, end)
 	return ""
