@@ -176,13 +176,14 @@ func (e *BackupExecutor) executeExternalMySQLDump(ctx context.Context, host, por
 	defer outFile.Close()
 
 	cmd.Stdout = outFile
-	cmd.Stderr = os.Stderr
+	var complained complaint
+	cmd.Stderr = &complained
 
 	// Display command line arguments with password masked
 	logrus.Infof("[BackupExecutor] Executing: %s", e.maskMySQLPassword(append([]string{"mysqldump"}, args...)))
 
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("mysqldump failed: %w", err)
+		return fmt.Errorf("mysqldump failed: %w%s", err, complained.said())
 	}
 
 	if stat, err := os.Stat(outputPath); err == nil {
@@ -287,8 +288,9 @@ except Exception as e:
 	}
 
 	pythonCmd.Stdout = outFile
-	mysqlCmd.Stderr = os.Stderr
-	pythonCmd.Stderr = os.Stderr
+	var mysqlComplained, pythonComplained complaint
+	mysqlCmd.Stderr = &mysqlComplained
+	pythonCmd.Stderr = &pythonComplained
 
 	// Display command line arguments with password masked
 	logrus.Infof("[BackupExecutor] Executing: %s | python3 -c '<csv conversion>' > %s",
@@ -304,11 +306,11 @@ except Exception as e:
 	}
 
 	if err := mysqlCmd.Wait(); err != nil {
-		return fmt.Errorf("mysql command failed: %w", err)
+		return fmt.Errorf("mysql command failed: %w%s", err, mysqlComplained.said())
 	}
 
 	if err := pythonCmd.Wait(); err != nil {
-		return fmt.Errorf("python csv conversion failed: %w", err)
+		return fmt.Errorf("python csv conversion failed: %w%s", err, pythonComplained.said())
 	}
 
 	stat, err := os.Stat(outputPath)
