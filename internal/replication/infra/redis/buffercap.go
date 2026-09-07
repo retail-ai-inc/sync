@@ -41,25 +41,32 @@ const (
 func bufferCapacity(dir string, shards int, configured int64,
 	log logrus.FieldLogger, labels metrics.Labels) int64 {
 
+	if shards < 1 {
+		shards = 1
+	}
+
+	// Measured whatever decides the size, because what the buffers are allowed
+	// to take is only meaningful against the disk they are written to, and a
+	// dashboard that carries its own copy of the volume's size is wrong the day
+	// the volume is resized.
+	volume, err := volumeBytes(dir)
+	if err != nil && log != nil {
+		log.Warnf("[Redis] Could not measure the volume holding %s: %v", dir, err)
+	}
+	if volume > 0 {
+		metrics.SetBufferVolume(labels, volume)
+	}
+
 	if configured > 0 {
 		return configured
 	}
 	if stored := storedBufferBytes(); stored > 0 {
 		return stored
 	}
-	if shards < 1 {
-		shards = 1
-	}
-
-	volume, err := volumeBytes(dir)
-	if err != nil || volume <= 0 {
-		if log != nil && err != nil {
-			log.Warnf("[Redis] Could not measure the volume holding %s (%v), so the "+
-				"buffer keeps its built-in limit", dir, err)
-		}
+	if volume <= 0 {
+		// Nothing to divide, so the buffer keeps its own default.
 		return 0
 	}
-	metrics.SetBufferVolume(labels, volume)
 
 	share := int64(float64(volume) * bufferVolumeShare / float64(shards))
 	switch {

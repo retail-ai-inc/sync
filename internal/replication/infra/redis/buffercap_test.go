@@ -16,6 +16,33 @@ func TestWhatTheTaskSaysWins(t *testing.T) {
 	}
 }
 
+// The volume is measured and published whatever decides the size, because a
+// task that names its own figure still shares the disk with the others -- and
+// the panel that shows how much of the disk is used has nowhere else to get
+// the disk's size from.
+func TestTheVolumeIsPublishedEvenWhenTheTaskNamesItsOwnSize(t *testing.T) {
+	dir := t.TempDir()
+	volume, err := volumeBytes(dir)
+	if err != nil || volume <= 0 {
+		t.Skipf("the volume holding %s cannot be measured here", dir)
+	}
+
+	labels := metrics.Labels{"task": "buffercap", "shard": "0"}
+	t.Cleanup(func() { metrics.Default.Forget(labels) })
+
+	bufferCapacity(dir, 4, 1<<30, nil, labels)
+
+	var published float64
+	for _, sample := range metrics.Default.Snapshot(metrics.BufferVolumeBytes) {
+		if sample.Labels.Key() == labels.Key() {
+			published = sample.Value
+		}
+	}
+	if published != float64(volume) {
+		t.Errorf("%s = %v, want the volume's %d", metrics.BufferVolumeBytes, published, volume)
+	}
+}
+
 func TestTheDeploymentsSettingComesNext(t *testing.T) {
 	previous := storedBufferBytes
 	t.Cleanup(func() { storedBufferBytes = previous })
