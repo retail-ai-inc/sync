@@ -301,17 +301,19 @@ func TestCountAndLogRedisRecordsDatabaseSizes(t *testing.T) {
 
 	src := openRedis(t, harness.RedisSource, monitorRedisDB)
 	tgt := openRedis(t, harness.RedisTarget, monitorRedisDB)
-	if err := src.FlushDB(t.Context()).Err(); err != nil {
-		t.Fatalf("flush source: %v", err)
-	}
-	if err := tgt.FlushDB(t.Context()).Err(); err != nil {
-		t.Fatalf("flush target: %v", err)
-	}
+	emptyServers(t, src, tgt)
 
-	for i := 0; i < 5; i++ {
+	// Four keys in the database the connection names and one in another, because
+	// what is counted is the server: the replication copies every database that
+	// holds keys, so a comparison of one of them says nothing.
+	for i := 0; i < 4; i++ {
 		if err := src.Set(t.Context(), fmt.Sprintf("k%d", i), i, 0).Err(); err != nil {
 			t.Fatalf("seed source: %v", err)
 		}
+	}
+	elsewhere := openRedis(t, harness.RedisSource, monitorRedisDB+1)
+	if err := elsewhere.Set(t.Context(), "k4", 4, 0).Err(); err != nil {
+		t.Fatalf("seed another database of the source: %v", err)
 	}
 	if err := tgt.Set(t.Context(), "k0", 0, 0).Err(); err != nil {
 		t.Fatalf("seed target: %v", err)
@@ -335,10 +337,26 @@ func TestCountAndLogRedisRecordsDatabaseSizes(t *testing.T) {
 		t.Fatalf("monitoring_log holds %d rows, want 1: %+v", len(got), got)
 	}
 	if got[0].SrcCount != 5 || got[0].TgtCount != 1 {
-		t.Errorf("counts = %d -> %d, want 5 -> 1", got[0].SrcCount, got[0].TgtCount)
+		t.Errorf("counts = %d -> %d, want 5 -> 1: four keys in the database the "+
+			"connection names and one in another, all of which the replication "+
+			"copies", got[0].SrcCount, got[0].TgtCount)
+	}
+	if got[0].SrcDB != fmt.Sprintf("%d,%d", monitorRedisDB, monitorRedisDB+1) {
+		t.Errorf("src_db = %q, want it to name the databases counted", got[0].SrcDB)
 	}
 	if got[0].DBType != "REDIS" {
 		t.Errorf("db_type = %q, want REDIS", got[0].DBType)
+	}
+}
+
+// emptyServers clears every database of both ends, because what the comparison
+// counts is the server rather than one database of it.
+func emptyServers(t *testing.T, ends ...*goredis.Client) {
+	t.Helper()
+	for _, end := range ends {
+		if err := end.FlushAll(t.Context()).Err(); err != nil {
+			t.Fatalf("empty a test server: %v", err)
+		}
 	}
 }
 
@@ -351,12 +369,7 @@ func TestRedisMonitoringDuplicatesRowsPerMapping(t *testing.T) {
 
 	src := openRedis(t, harness.RedisSource, monitorRedisDB)
 	tgt := openRedis(t, harness.RedisTarget, monitorRedisDB)
-	if err := src.FlushDB(t.Context()).Err(); err != nil {
-		t.Fatalf("flush source: %v", err)
-	}
-	if err := tgt.FlushDB(t.Context()).Err(); err != nil {
-		t.Fatalf("flush target: %v", err)
-	}
+	emptyServers(t, src, tgt)
 	if err := src.Set(t.Context(), "only", 1, 0).Err(); err != nil {
 		t.Fatalf("seed: %v", err)
 	}

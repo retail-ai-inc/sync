@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -75,6 +76,15 @@ func seedMongoCollection(t *testing.T, endpoint, database, collection string, do
 			t.Fatalf("seed %s.%s: %v", database, collection, err)
 		}
 	}
+}
+
+func standaloneAddr(t *testing.T, variable string) string {
+	t.Helper()
+	value := os.Getenv(variable)
+	if value == "" {
+		t.Skipf("set %s to the address of a Redis server", variable)
+	}
+	return strings.Split(value, ",")[0]
 }
 
 func clusterAddrs(t *testing.T, variable string) []string {
@@ -266,7 +276,7 @@ func TestKeyCountAddsUpEveryMasterOfACluster(t *testing.T) {
 	defer cluster.Close()
 	ctx := context.Background()
 
-	before, err := keyCount(ctx, cluster)
+	before, _, err := keyCount(ctx, cluster)
 	if err != nil {
 		t.Fatalf("keyCount: %v", err)
 	}
@@ -285,13 +295,59 @@ func TestKeyCountAddsUpEveryMasterOfACluster(t *testing.T) {
 		}
 	}()
 
-	after, err := keyCount(ctx, cluster)
+	after, _, err := keyCount(ctx, cluster)
 	if err != nil {
 		t.Fatalf("keyCount: %v", err)
 	}
 	if after-before != written {
 		t.Errorf("the cluster counted %d more keys after %d were written, which is "+
 			"one node's share rather than the whole cluster", after-before, written)
+	}
+}
+
+// The bug this had for as long as it existed: DBSize answers for the database
+// the connection is on, so a source keeping its data anywhere else read as
+// empty. Staging has one, and for a fortnight the comparison reported a source
+// of one key against a target of five thousand and called it a difference.
+func TestKeyCountAddsUpEveryDatabaseOfAStandaloneServer(t *testing.T) {
+	addr := standaloneAddr(t, "SYNC_REDIS_SOURCE")
+
+	zero := goredis.NewClient(&goredis.Options{Addr: addr, DB: 0})
+	defer zero.Close()
+	third := goredis.NewClient(&goredis.Options{Addr: addr, DB: 3})
+	defer third.Close()
+	ctx := context.Background()
+
+	before, _, err := keyCount(ctx, zero)
+	if err != nil {
+		t.Fatalf("keyCount: %v", err)
+	}
+
+	// Written to database 3, which the connection is not on.
+	const written = 7
+	for i := 0; i < written; i++ {
+		if err := third.Set(ctx, fmt.Sprintf("elsewhere:%d", i), i, 0).Err(); err != nil {
+			t.Fatalf("seed database 3: %v", err)
+		}
+	}
+	defer func() {
+		for i := 0; i < written; i++ {
+			third.Del(ctx, fmt.Sprintf("elsewhere:%d", i))
+		}
+	}()
+
+	after, databases, err := keyCount(ctx, zero)
+	if err != nil {
+		t.Fatalf("keyCount: %v", err)
+	}
+	if after-before != written {
+		t.Errorf("counted %d more keys after %d were written to another database, "+
+			"which is the connection's own database rather than the server",
+			after-before, written)
+	}
+	if !slices.Contains(databases, 3) {
+		t.Errorf("the databases counted are %v, want database 3 named among them so "+
+			"the row says what it counted", databases)
 	}
 }
 

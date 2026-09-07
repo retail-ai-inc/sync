@@ -311,3 +311,36 @@ CREATE TABLE sync_tasks (
 		t.Fatalf("insert settings: %v", err)
 	}
 }
+
+// INFO keyspace is what says which databases hold keys and how many. Reading
+// it wrong is how a source with data in databases 1 and 2 read as empty.
+func TestKeyspaceIsReadAcrossEveryDatabase(t *testing.T) {
+	info := "# Keyspace\r\ndb0:keys=1,expires=0,avg_ttl=0\r\n" +
+		"db1:keys=10252,expires=10252,avg_ttl=1000\r\ndb2:keys=4314,expires=0,avg_ttl=0\r\n"
+
+	total, databases := parseKeyspace(info)
+	if total != 1+10252+4314 {
+		t.Errorf("counted %d keys, want every database's", total)
+	}
+	if len(databases) != 3 || databases[0] != 0 || databases[2] != 2 {
+		t.Errorf("databases = %v, want 0, 1 and 2 in order", databases)
+	}
+}
+
+// A server with nothing in it reports no database line at all, which is a
+// count of zero rather than a failure to read.
+func TestAnEmptyKeyspaceCountsZero(t *testing.T) {
+	for name, info := range map[string]string{
+		"nothing at all":                "",
+		"the header alone":              "# Keyspace\r\n",
+		"a line without keys":           "# Keyspace\r\ndb0:expires=0\r\n",
+		"a line that is not a database": "# Keyspace\r\ndbx:keys=5\r\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			total, databases := parseKeyspace(info)
+			if total != 0 || len(databases) != 0 {
+				t.Errorf("counted %d keys in %v, want nothing", total, databases)
+			}
+		})
+	}
+}
