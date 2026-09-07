@@ -20,6 +20,11 @@ type Tuning struct {
 	// this is the one place a deployment's tuning is assembled.
 	CopyBatchRows int
 	StreamAwait   time.Duration
+	// WholeDocuments keeps MongoDB attaching the whole document to every
+	// update, which is how this replicated before an update could be applied as
+	// the fields it touched. It is the way back if a delta ever turns out to be
+	// wrong for a collection.
+	WholeDocuments bool
 }
 
 // StoredTuning reports it. Nil, or a function returning zeroes, leaves every
@@ -84,4 +89,13 @@ func Await(fallback time.Duration) time.Duration {
 		return await
 	}
 	return fallback
+}
+
+// MongoWholeDocuments reports whether MongoDB updates must be replicated as
+// whole documents rather than as the fields they touch.
+func MongoWholeDocuments() bool {
+	if StoredTuning == nil {
+		return false
+	}
+	return StoredTuning().WholeDocuments
 }

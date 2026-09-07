@@ -29,6 +29,7 @@ type settingsBody struct {
 	FlushIntervalMs        int64 `json:"flushIntervalMs"`
 	CopyBatchRows          int   `json:"copyBatchRows"`
 	MongoStreamAwaitMs     int64 `json:"mongoStreamAwaitMs"`
+	MongoWholeDocuments    bool  `json:"mongoWholeDocuments"`
 }
 
 func bodyOf(s config.Settings) settingsBody {
@@ -46,6 +47,7 @@ func bodyOf(s config.Settings) settingsBody {
 		FlushIntervalMs:         int64(s.FlushInterval / time.Millisecond),
 		CopyBatchRows:           s.CopyBatchRows,
 		MongoStreamAwaitMs:      int64(s.MongoStreamAwait / time.Millisecond),
+		MongoWholeDocuments:     s.MongoWholeDocuments,
 	}
 }
 
@@ -64,6 +66,7 @@ func settingsOf(b settingsBody) config.Settings {
 		FlushInterval:           time.Duration(b.FlushIntervalMs) * time.Millisecond,
 		CopyBatchRows:           b.CopyBatchRows,
 		MongoStreamAwait:        time.Duration(b.MongoStreamAwaitMs) * time.Millisecond,
+		MongoWholeDocuments:     b.MongoWholeDocuments,
 	}
 }
 

@@ -451,7 +451,7 @@ func TestAnUnshardedChangeIsStillFilteredByItsIDAlone(t *testing.T) {
 	}
 }
 
-func filterIn(t *testing.T, model mongo.WriteModel) bson.M {
+func filterIn(t *testing.T, model interface{}) bson.M {
 	t.Helper()
 
 	var filter interface{}
@@ -462,6 +462,8 @@ func filterIn(t *testing.T, model mongo.WriteModel) bson.M {
 		filter = m.Filter
 	case *mongo.DeleteOneModel:
 		filter = m.Filter
+	case *fullDocumentRead:
+		filter = m.filter
 	default:
 		t.Fatalf("model is a %T, which carries no filter", model)
 	}

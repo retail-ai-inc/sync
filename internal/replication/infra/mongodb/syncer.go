@@ -252,7 +252,11 @@ func (s *Syncer) Start(ctx context.Context) error {
 	runner := &pipeline.Runner{
 		Reader: reader,
 		Applier: &Applier{
-			Client:         inner.targetClient,
+			Client: inner.targetClient,
+			// The source, for the changes that cannot be written as the fields
+			// they touched and have to be read back whole.
+			Source:         inner.sourceClient,
+			Mask:           inner.maskValue,
 			TargetDatabase: targetDBName,
 			Mappings:       s.cfg.Mappings,
 			Checkpoints:    store,

@@ -29,6 +29,13 @@ import (
 // can only get it from a transaction.
 type Applier struct {
 	Client *mongo.Client
+	// Source reads back a whole document when a change cannot be applied as the
+	// fields it touched. Nil means it cannot, and such a change stops the task
+	// rather than being passed over.
+	Source *mongo.Client
+	// Mask applies the task's field security to a document read that way, so it
+	// is treated exactly as one that arrived on the stream. Nil masks nothing.
+	Mask func(collection string, value interface{}) interface{}
 	// TargetDatabase is the database the events are written to.
 	TargetDatabase string
 	// Mappings resolve a source collection to its target name.
@@ -165,42 +172,69 @@ func onlySchemaChange(runs [][]*domain.Event) (*domain.Event, bool) {
 // its operations may go out together; between runs they may not.
 func (a *Applier) write(ctx context.Context, runs [][]*domain.Event) (roundTrips int, err error) {
 	for _, run := range runs {
-		// One request for the whole run, whatever collections it touches. A
-		// batch spanning two collections cost two requests before, against a
-		// 7 ms round trip and a 30 ms batch — two thirds of the time a batch
-		// took was waiting for the network.
-		if !a.bulk.unsupported.Load() {
-			trips, err := a.writeRunAsOne(ctx, run)
-			if err == nil {
-				roundTrips += trips
-				continue
-			}
-			if !lacksClientBulkWrite(err) {
-				return roundTrips + trips, err
-			}
-			// The target has no bulkWrite command, which means it is older than
-			// 8.0. Noted once, and written per collection from here on.
-			a.bulk.unsupported.Store(true)
-			if a.Logger != nil {
-				a.Logger.Warnf("[MongoDB] The target has no bulkWrite command, so each "+
-					"collection in a batch takes its own request: %v", err)
-			}
+		// A change that could not be turned into a write from the event alone
+		// needs its document first.
+		if err := a.resolveFullDocuments(ctx, run); err != nil {
+			return roundTrips, err
 		}
 
-		for _, group := range groupByCollection(run) {
-			target := a.targetFor(group.collection)
-			collection := a.Client.Database(a.TargetDatabase).Collection(target)
+		trips, landed, err := a.writeRun(ctx, run)
+		roundTrips += trips
+		if err != nil {
+			return roundTrips, err
+		}
 
-			// Ordered, for the reason writeRunAsOne is: two documents are not
-			// independent when a unique index relates them.
-			roundTrips++
-			if _, err := collection.BulkWrite(ctx, group.models, options.BulkWrite().SetOrdered(true)); err != nil {
-				return roundTrips, fmt.Errorf("write %d changes to %s.%s: %w",
-					len(group.models), a.TargetDatabase, target, err)
-			}
+		// An update written as a delta cannot create the document it addresses,
+		// so one that matched nothing means the target is missing data. That is
+		// repaired here rather than left as a divergence nothing reports.
+		repaired, err := a.repairMissing(ctx, run, landed)
+		roundTrips += repaired
+		if err != nil {
+			return roundTrips, err
 		}
 	}
 	return roundTrips, nil
+}
+
+// writeRun sends one run and reports the round trips it took and how many of
+// the documents its updates addressed were there to be written.
+func (a *Applier) writeRun(ctx context.Context, run []*domain.Event) (roundTrips int, landed int64, err error) {
+	// One request for the whole run, whatever collections it touches. A batch
+	// spanning two collections cost two requests before, against a 7 ms round
+	// trip and a 30 ms batch — two thirds of the time a batch took was waiting
+	// for the network.
+	if !a.bulk.unsupported.Load() {
+		trips, landed, err := a.writeRunAsOne(ctx, run)
+		if err == nil {
+			return trips, landed, nil
+		}
+		if !lacksClientBulkWrite(err) {
+			return trips, 0, err
+		}
+		// The target has no bulkWrite command, which means it is older than
+		// 8.0. Noted once, and written per collection from here on.
+		a.bulk.unsupported.Store(true)
+		if a.Logger != nil {
+			a.Logger.Warnf("[MongoDB] The target has no bulkWrite command, so each "+
+				"collection in a batch takes its own request: %v", err)
+		}
+	}
+
+	for _, group := range groupByCollection(run) {
+		target := a.targetFor(group.collection)
+		collection := a.Client.Database(a.TargetDatabase).Collection(target)
+
+		// Ordered, for the reason writeRunAsOne is: two documents are not
+		// independent when a unique index relates them.
+		roundTrips++
+		result, err := collection.BulkWrite(ctx, group.models, options.BulkWrite().SetOrdered(true))
+		if err != nil {
+			return roundTrips, landed, fmt.Errorf("write %d changes to %s.%s: %w",
+				len(group.models), a.TargetDatabase, target, err)
+		}
+		landed += result.MatchedCount + result.UpsertedCount
+	}
+	return roundTrips, landed, nil
 }
 
 type collectionGroup struct {

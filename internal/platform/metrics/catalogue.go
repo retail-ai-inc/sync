@@ -380,6 +380,40 @@ func CountDDLSkipped(labels Labels, reason string) {
 		withLabel(labels, "reason", reason), 1)
 }
 
+// WholeDocumentReadsTotal counts changes applied by reading the document back
+// from the source instead of writing the fields the change touched.
+//
+// In a steady state this does not move. A rate that does means either that the
+// source is describing its changes in a way that cannot be written as one
+// update, or that the target is missing documents the updates address -- and
+// the reason label says which.
+const WholeDocumentReadsTotal = "sync_whole_document_reads_total"
+
+const helpWholeDocumentReads = "Changes applied by reading the whole document from the source"
+
+// WholeDocumentMode is 1 while a task's updates are replicated as whole
+// documents rather than as the fields they change.
+//
+// It is 1 for as long as a MongoDB task is catching up, because a delta may
+// only be applied to a document the target holds at the point the change was
+// made from, and drops to 0 when the stream has been read to its end. A task
+// that stays at 1 is paying a lookup on the source and the whole document over
+// the link for every update.
+const WholeDocumentMode = "sync_mongo_whole_documents"
+
+const helpWholeDocumentMode = "1 while updates are replicated as whole documents rather than as the fields they change"
+
+func SetWholeDocumentMode(labels Labels, whole bool) {
+	setBool(WholeDocumentMode, helpWholeDocumentMode, labels, whole)
+}
+
+func CountWholeDocumentReads(labels Labels, reason string, n int) {
+	if n > 0 {
+		Default.AddCounter(WholeDocumentReadsTotal, helpWholeDocumentReads,
+			withLabel(labels, "reason", reason), float64(n))
+	}
+}
+
 // How long a stopped task has before its position is unusable. On Memorystore
 // the backlog measured five to twenty kilobytes, a fraction of a second at
 // load.

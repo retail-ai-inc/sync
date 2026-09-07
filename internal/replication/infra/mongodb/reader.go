@@ -61,6 +61,11 @@ type Reader struct {
 	// would produce one.
 	lastBeat time.Time
 
+	// deltas reports that this reader has read the stream to its end at least
+	// once, after which an update may be applied as the fields it touched. See
+	// dropTheLookup for why that is the condition.
+	deltas bool
+
 	closeOnce sync.Once
 }
 
@@ -120,12 +125,20 @@ func (r *Reader) Open(ctx context.Context, from domain.Position) error {
 	stages := mongo.Pipeline{{{Key: "$match", Value: match}}}
 
 	opts := options.ChangeStream().
-		SetFullDocument(options.UpdateLookup).
 		// MongoDB 6.0 and later report DDL on a stream that asks for it.
 		SetShowExpandedEvents(true).
 		// Without this the stream blocks for as long as the server likes, and a
 		// reader that never returns cannot report that it is alive.
 		SetMaxAwaitTime(pipeline.Await(streamAwait))
+
+	if !r.deltas {
+		// Every update carries the document it produced, at the cost of a lookup
+		// per update on the source and the whole document over the link. It is
+		// what the stream is opened with until the reader has caught up, because
+		// until then the target may hold a document newer than the change being
+		// replayed -- see dropTheLookup.
+		opts.SetFullDocument(options.UpdateLookup)
+	}
 
 	if !from.IsZero() {
 		stored, err := decodePosition(from)
@@ -171,6 +184,9 @@ func (r *Reader) Open(ctx context.Context, from domain.Position) error {
 		r.nudge = startNudging(ctx, r.Client, r.Logger)
 	}
 	metrics.SetConnected(r.Labels, true)
+	// Whether this stream is paying for a lookup per update, which is worth
+	// seeing rather than inferring from the throughput.
+	metrics.SetWholeDocumentMode(r.Labels, !r.deltas)
 	// Only when the task lists its collections. One that lists none replicates
 	// the database as a whole, and this counts the task's list, so it would
 	// report nothing captured while every collection was being replicated. The
@@ -241,6 +257,16 @@ func (r *Reader) fill(ctx context.Context) error {
 			return nil
 		}
 
+		// Nothing left to deliver is also the one moment it is known that the
+		// target is not ahead of the stream, which is what an update written as
+		// a delta needs.
+		if !r.deltas && !pipeline.MongoWholeDocuments() {
+			if err := r.dropTheLookup(ctx); err != nil {
+				return err
+			}
+			continue
+		}
+
 		// The await window is short so that an event is not held, but a heartbeat
 		// is a different thing: it writes a position to the target and asks the
 		// source for its clock, and doing that five times a second buys nothing.
@@ -273,6 +299,51 @@ func (r *Reader) fill(ctx context.Context) error {
 		})
 		return nil
 	}
+}
+
+// dropTheLookup reopens the stream without asking the server to attach the
+// whole document to every update, so that an update is replicated as the
+// fields it touched. A megabyte document whose status flipped was a megabyte
+// read on the source, a megabyte over the link and a megabyte written to the
+// target for the sake of one field.
+//
+// It waits for the stream to run out because a delta may only be applied to a
+// document the target holds at the same point the change was made from. That
+// is true of everything the stream delivers from here on, and it is not true
+// of the catch-up: the first copy reads each document as it reaches it and the
+// stream then restarts from before the copy began, so a document on the target
+// can be newer than the change being replayed. A whole document written twice
+// is the same document; a delta replayed over a newer one silently puts old
+// values back, and nothing later in the stream mentions those fields again.
+//
+// Reopening costs one request. The alternative -- deciding per event by its
+// cluster time -- would need the document read back for every event of the
+// catch-up, one round trip each, and would lose the bound the batch's byte
+// limit puts on how much a batch holds.
+func (r *Reader) dropTheLookup(ctx context.Context) error {
+	token := r.stream.ResumeToken()
+	if token == nil {
+		// Nothing delivered yet, so there is nothing to resume after. The next
+		// quiet moment will have one.
+		return nil
+	}
+	payload, err := encodeTokenAt(token, r.lastAt)
+	if err != nil {
+		return err
+	}
+	if err := r.stream.Close(ctx); err != nil {
+		r.Logger.Warnf("[MongoDB] Could not close the change stream before reopening "+
+			"it to stop asking for whole documents: %v", err)
+	}
+
+	r.deltas = true
+	if err := r.Open(ctx, domain.Position{Payload: payload}); err != nil {
+		return fmt.Errorf("reopen the change stream to replicate updates as the "+
+			"fields they touch: %w", err)
+	}
+	r.Logger.Info("[MongoDB] Caught up, so updates are replicated as the fields " +
+		"they change rather than as whole documents")
+	return nil
 }
 
 // capturedCollections counts the objects this task watches (Debezium:

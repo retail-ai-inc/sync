@@ -21,17 +21,26 @@ import (
 type clientBulkSupport struct{ unsupported atomic.Bool }
 
 // writeRunAsOne writes one run in a single request, whatever collections it
-// touches, and reports how many requests it took.
-func (a *Applier) writeRunAsOne(ctx context.Context, run []*domain.Event) (int, error) {
+// touches, and reports how many requests it took and how many of the documents
+// its updates addressed were there to be written.
+func (a *Applier) writeRunAsOne(ctx context.Context, run []*domain.Event) (int, int64, error) {
 	writes := make([]mongo.ClientBulkWrite, 0, len(run))
 	for _, event := range run {
+		if pending, ok := event.Payload.(*fullDocumentRead); ok {
+			// The applier resolves these before writing, so one here means the
+			// resolution was skipped. Sending the rest of the batch would record
+			// a position past a change the target never received.
+			return 0, 0, domain.Unrecoverable(
+				"a change to %s still needs its document read from the source (%s) "+
+					"when the batch is being written", event.NS, pending.reason)
+		}
 		model, ok := event.Payload.(mongo.WriteModel)
 		if !ok || model == nil {
 			continue
 		}
 		clientModel, err := clientModelOf(model)
 		if err != nil {
-			return 0, err
+			return 0, 0, err
 		}
 		writes = append(writes, mongo.ClientBulkWrite{
 			Database:   a.TargetDatabase,
@@ -40,17 +49,17 @@ func (a *Applier) writeRunAsOne(ctx context.Context, run []*domain.Event) (int, 
 		})
 	}
 	if len(writes) == 0 {
-		return 0, nil
+		return 0, 0, nil
 	}
 
 	// Ordered, because the order is the only one known to be correct. It used to
 	// be unordered, on the grounds that no document appears twice in a run so the
 	// server could apply them in any order.
-	_, err := a.Client.BulkWrite(ctx, writes, options.ClientBulkWrite().SetOrdered(true))
+	result, err := a.Client.BulkWrite(ctx, writes, options.ClientBulkWrite().SetOrdered(true))
 	if err != nil {
-		return 1, err
+		return 1, 0, err
 	}
-	return 1, nil
+	return 1, result.MatchedCount + result.UpsertedCount, nil
 }
 
 // clientModelOf turns a collection-level write model into the client-level one

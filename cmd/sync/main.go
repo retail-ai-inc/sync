@@ -246,5 +246,6 @@ func storedTuning() pipeline.Tuning {
 		SnapshotQueueCapacity: stored.SnapshotQueueMaxEvents,
 		CopyBatchRows:         stored.CopyBatchRows,
 		StreamAwait:           stored.MongoStreamAwait,
+		WholeDocuments:        stored.MongoWholeDocuments,
 	}
 }
