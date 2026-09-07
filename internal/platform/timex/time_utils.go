@@ -55,8 +55,25 @@ func replaceBareDateWords(pattern string, targetDate time.Time) string {
 	})
 }
 
+// ParseDatabaseTimestamp reads a time out of the control database.
+//
+// Two formats are in there. The Go code writes "2006-01-02 15:04:05" in UTC
+// and always has; rows written by an earlier version carry RFC 3339, and a
+// reader that knew only the first called them "not a timestamp" and treated
+// what they recorded as never having happened -- twenty-one warnings for every
+// pass over seven backup jobs, and a last-run time the interface could not
+// show. Both are read, and both come back as UTC.
 func ParseDatabaseTimestamp(timestamp string) (time.Time, error) {
-	return time.Parse("2006-01-02 15:04:05", timestamp)
+	stored, err := time.Parse("2006-01-02 15:04:05", timestamp)
+	if err == nil {
+		return stored, nil
+	}
+	if rfc, rfcErr := time.Parse(time.RFC3339, timestamp); rfcErr == nil {
+		return rfc.UTC(), nil
+	}
+	// The first error is the one worth reporting: it names the format this
+	// writes, which is the format a new row will be in.
+	return time.Time{}, err
 }
 
 // jst is the zone every backup window is expressed in. The offsets in a task's

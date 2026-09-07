@@ -17,6 +17,8 @@ import (
 
 type BackupExecutor struct {
 	db *sql.DB
+	// tally is what this run has backed up so far, read once it is over.
+	tally tally
 }
 
 type ExecutorBackupConfig struct {

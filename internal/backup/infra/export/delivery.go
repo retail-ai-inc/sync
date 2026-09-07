@@ -49,6 +49,7 @@ func (e *BackupExecutor) compressAndUpload(
 	if config.Destination.GCSPath == "" {
 		logrus.Infof("[BackupExecutor] ⏭️  Step 3: No destination configured, keeping %s locally",
 			filepath.Base(uploadPath))
+		e.countUpload(uploadPath)
 		return uploadPath, nil
 	}
 
@@ -57,5 +58,8 @@ func (e *BackupExecutor) compressAndUpload(
 	if err := transfer.UploadGCS(ctx, uploadPath, gcsPath); err != nil {
 		return "", fmt.Errorf("external GCS upload failed: %w", err)
 	}
+	// Measured before the temporary directory goes, which is the last moment
+	// the file exists anywhere this can see.
+	e.countUpload(uploadPath)
 	return uploadPath, nil
 }

@@ -661,6 +661,13 @@ const (
 	BackupLastRunTimestamp     = "sync_backup_last_run_timestamp_seconds"
 	BackupLastSuccessTimestamp = "sync_backup_last_success_timestamp_seconds"
 	BackupLastDurationSeconds  = "sync_backup_last_duration_seconds"
+	// BackupLastRecords, BackupLastBytes and BackupLastFiles are what the last
+	// run actually backed up. "Completed" alone made a backup of two hundred
+	// thousand records and a backup of nothing look the same, and one job in
+	// staging was uploading an empty file every night.
+	BackupLastRecords = "sync_backup_last_records"
+	BackupLastBytes   = "sync_backup_last_bytes"
+	BackupLastFiles   = "sync_backup_last_files"
 	// BackupInfo carries the job's name and what it backs up, so the numbers
 	// above can stay labelled by id and a renamed job does not become a new
 	// series in every one of them.
@@ -672,6 +679,9 @@ const (
 	helpBackupLastOK     = "When a backup job last finished successfully, seconds since the epoch"
 	helpBackupDuration   = "How long a backup job's last run took"
 	helpBackupInfo       = "A backup job's name and what it backs up"
+	helpBackupRecords    = "Records a backup job's last run wrote out"
+	helpBackupBytes      = "Bytes a backup job's last run wrote out"
+	helpBackupFiles      = "Files a backup job's last run wrote out"
 )
 
 // CountBackupRun records a finished run. result is "completed" or "failed",
@@ -693,6 +703,15 @@ func SetBackupOutcome(labels Labels, ok bool, at time.Time, took time.Duration) 
 	if ok {
 		Default.SetGauge(BackupLastSuccessTimestamp, helpBackupLastOK, labels, float64(at.Unix()))
 	}
+}
+
+// SetBackupContents records what a run wrote out. Only a run that finished
+// sets these: a failed run's counts are whatever it got through before it
+// stopped, and reporting those as the backup's size would say a backup exists.
+func SetBackupContents(labels Labels, records, bytes int64, files int) {
+	Default.SetGauge(BackupLastRecords, helpBackupRecords, labels, float64(records))
+	Default.SetGauge(BackupLastBytes, helpBackupBytes, labels, float64(bytes))
+	Default.SetGauge(BackupLastFiles, helpBackupFiles, labels, float64(files))
 }
 
 // SetBackupInfo names a job.

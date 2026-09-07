@@ -156,9 +156,11 @@ func execute(taskID string, id int) {
 		// Continue execution, don't interrupt response
 	}
 
-	recordOutcome(id, domain.RunCompleted, "")
+	wrote := executor.Uploaded()
+	recordOutcome(id, domain.RunCompleted, describeContents(wrote))
 	AdvanceRun(taskID, domain.RunCompleted, "Backup executed successfully", nil)
 	reportOutcome(id, true, time.Now(), time.Since(started))
+	reportContents(id, wrote)
 	logrus.Debugf("[BackupExecutor] Background backup task %s completed successfully", taskID)
 }
 

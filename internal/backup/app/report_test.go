@@ -1,9 +1,11 @@
 package app
 
 import (
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/retail-ai-inc/sync/internal/backup/infra/export"
 	"github.com/retail-ai-inc/sync/internal/platform/metrics"
 )
 
@@ -102,5 +104,39 @@ func TestAStoredTimeIsReadAsUTC(t *testing.T) {
 	}
 	if _, err := parseStoredTime(""); err == nil {
 		t.Error("an empty time read as a time")
+	}
+}
+
+// "Completed" alone made a backup of two hundred thousand records and a backup
+// of nothing look the same. One job in staging was uploading an empty file
+// every night and its outcome said the same word as every other job's.
+func TestWhatARunWroteOutIsReported(t *testing.T) {
+	labels := backupLabels(9104)
+	t.Cleanup(func() { metrics.Default.Forget(labels) })
+
+	reportContents(9104, export.Tally{Files: 3, Bytes: 19471297, Records: 289652})
+
+	for name, want := range map[string]float64{
+		metrics.BackupLastFiles:   3,
+		metrics.BackupLastBytes:   19471297,
+		metrics.BackupLastRecords: 289652,
+	} {
+		if got, ok := sampleFor(t, name, labels); !ok || got != want {
+			t.Errorf("%s = %v, want %v", name, got, want)
+		}
+	}
+}
+
+func TestAnEmptyRunSaysSoInItsOutcome(t *testing.T) {
+	empty := describeContents(export.Tally{Files: 1})
+	if !strings.Contains(empty, "nothing in them") {
+		t.Errorf("an empty backup is described as %q", empty)
+	}
+
+	full := describeContents(export.Tally{Files: 2, Bytes: 2 << 20, Records: 1000})
+	for _, want := range []string{"2 file(s)", "1000 record(s)", "2.00 MB"} {
+		if !strings.Contains(full, want) {
+			t.Errorf("the description %q does not carry %q", full, want)
+		}
 	}
 }

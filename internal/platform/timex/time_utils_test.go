@@ -1,6 +1,7 @@
 package timex
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -199,5 +200,40 @@ func TestGetUTCTimeRangeMatchesJST(t *testing.T) {
 	// JST midnight is 15:00 UTC on the previous day.
 	if startUTC.UTC().Hour() != 15 {
 		t.Errorf("start in UTC = %v, want 15:00", startUTC.UTC())
+	}
+}
+
+// Two formats are in the control database: what this writes, and RFC 3339 from
+// an earlier version. A reader that knew only the first reported every one of
+// the older rows as never having happened.
+func TestBothStoredTimestampFormatsAreRead(t *testing.T) {
+	want := time.Date(2026, 9, 4, 15, 20, 34, 0, time.UTC)
+
+	for name, stored := range map[string]string{
+		"what this writes":            "2026-09-04 15:20:34",
+		"what an earlier version did": "2026-09-04T15:20:34Z",
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := ParseDatabaseTimestamp(stored)
+			if err != nil {
+				t.Fatalf("ParseDatabaseTimestamp(%q): %v", stored, err)
+			}
+			if !got.Equal(want) {
+				t.Errorf("read %v, want %v", got, want)
+			}
+			if got.Location() != time.UTC {
+				t.Errorf("read in %v, want UTC", got.Location())
+			}
+		})
+	}
+
+	// And something that is neither is still an error, naming the format a new
+	// row will be in.
+	_, err := ParseDatabaseTimestamp("last Tuesday")
+	if err == nil {
+		t.Fatal("\"last Tuesday\" read as a time")
+	}
+	if !strings.Contains(err.Error(), "2006-01-02 15:04:05") {
+		t.Errorf("the error does not name the format this writes: %v", err)
 	}
 }

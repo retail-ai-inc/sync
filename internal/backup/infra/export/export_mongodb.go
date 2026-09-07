@@ -135,6 +135,7 @@ func (e *BackupExecutor) executeExternalMongoExportWithOptions(ctx context.Conte
 	} else {
 		logrus.Infof("[BackupExecutor] ✅ Mongoexport completed: %d records, %.2f MB", recordCount, fileSize)
 		reportIfEmpty("MongoDB", collection, int64(recordCount), queryDescription)
+		e.countRecords(int64(recordCount))
 	}
 
 	return nil
@@ -228,6 +229,7 @@ func (e *BackupExecutor) exportMongoDBMergedTables(ctx context.Context, connStr,
 		if recordCount, fileSize, countErr := e.countRecordsInFile(mergedJsonPath); countErr == nil {
 			logrus.Infof("[BackupExecutor] 🔍 Merged file contains %d records, %.2f MB", recordCount, fileSize)
 			reportIfEmpty("MongoDB", baseCollectionName, int64(recordCount), "the merged tables' own filters")
+			e.countRecords(int64(recordCount))
 		} else {
 			logrus.Warnf("[BackupExecutor] ⚠️  Failed to count records: %v", countErr)
 		}

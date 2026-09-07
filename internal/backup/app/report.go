@@ -8,7 +8,9 @@ import (
 
 	"github.com/retail-ai-inc/sync/internal/backup/domain"
 	"github.com/retail-ai-inc/sync/internal/backup/infra"
+	"github.com/retail-ai-inc/sync/internal/backup/infra/export"
 	"github.com/retail-ai-inc/sync/internal/platform/metrics"
+	"github.com/retail-ai-inc/sync/internal/platform/timex"
 )
 
 // Publishing how the backup jobs went.
@@ -34,6 +36,22 @@ func reportOutcome(id int, ok bool, at time.Time, took time.Duration) {
 	}
 	metrics.CountBackupRun(labels, result)
 	metrics.SetBackupOutcome(labels, ok, at, took)
+}
+
+// reportContents publishes what a finished run wrote out.
+func reportContents(id int, wrote export.Tally) {
+	metrics.SetBackupContents(backupLabels(id), wrote.Records, wrote.Bytes, wrote.Files)
+}
+
+// describeContents is what the job's stored outcome says about a run that
+// finished, so the interface shows the same thing the dashboard does.
+func describeContents(wrote export.Tally) string {
+	if wrote.Empty() {
+		return fmt.Sprintf("%d file(s), nothing in them: no record was written in the "+
+			"window this job asks for", wrote.Files)
+	}
+	return fmt.Sprintf("%d file(s), %d record(s), %.2f MB", wrote.Files, wrote.Records,
+		float64(wrote.Bytes)/1024/1024)
 }
 
 // PublishStoredOutcomes reports what the control database already knows, so a
@@ -78,8 +96,8 @@ func PublishStoredOutcomes(log logrus.FieldLogger) {
 	}
 }
 
-// parseStoredTime reads the format the control database keeps times in, which
-// is UTC without a zone.
+// parseStoredTime reads a time out of the control database, in either of the
+// two formats that are in there.
 func parseStoredTime(stored string) (time.Time, error) {
-	return time.ParseInLocation("2006-01-02 15:04:05", stored, time.UTC)
+	return timex.ParseDatabaseTimestamp(stored)
 }

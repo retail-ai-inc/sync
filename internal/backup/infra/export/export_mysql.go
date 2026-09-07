@@ -324,6 +324,7 @@ except Exception as e:
 		logrus.Warnf("[BackupExecutor] Could not count the rows of %s: %v", outputPath, err)
 	} else {
 		reportIfEmpty("MySQL", table, rows, selectQuery)
+		e.countRecords(rows)
 	}
 
 	return nil
