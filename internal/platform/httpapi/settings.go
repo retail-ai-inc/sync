@@ -35,6 +35,8 @@ type settingsBody struct {
 	// leaves it out means "leave it as it is", where a plain bool would decode
 	// to false and quietly turn a safety net off.
 	RecopyOnUnusablePosition *bool `json:"recopyOnUnusablePosition"`
+
+	RedisBufferMaxBytes int64 `json:"redisBufferMaxBytes"`
 }
 
 func bodyOf(s config.Settings) settingsBody {
@@ -55,6 +57,7 @@ func bodyOf(s config.Settings) settingsBody {
 		MongoStreamAwaitMs:       int64(s.MongoStreamAwait / time.Millisecond),
 		MongoWholeDocuments:      s.MongoWholeDocuments,
 		RecopyOnUnusablePosition: &recopy,
+		RedisBufferMaxBytes:      s.RedisBufferMaxBytes,
 	}
 }
 
@@ -75,6 +78,7 @@ func settingsOf(b settingsBody) config.Settings {
 		MongoStreamAwait:         time.Duration(b.MongoStreamAwaitMs) * time.Millisecond,
 		MongoWholeDocuments:      b.MongoWholeDocuments,
 		RecopyOnUnusablePosition: b.RecopyOnUnusablePosition != nil && *b.RecopyOnUnusablePosition,
+		RedisBufferMaxBytes:      b.RedisBufferMaxBytes,
 	}
 }
 
@@ -169,6 +173,8 @@ func refuse(b settingsBody) string {
 		return "copyBatchRows cannot be negative; 0 keeps the default"
 	case b.MongoStreamAwaitMs < 0:
 		return "mongoStreamAwaitMs cannot be negative; 0 keeps the default"
+	case b.RedisBufferMaxBytes < 0:
+		return "redisBufferMaxBytes cannot be negative; 0 divides the volume between the shards"
 	}
 	return ""
 }

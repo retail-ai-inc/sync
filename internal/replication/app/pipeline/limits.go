@@ -30,6 +30,9 @@ type Tuning struct {
 	// else here it is on unless a deployment turns it off, so it is read
 	// through RecopyOnUnusablePosition rather than filled in from a zero.
 	RecopyOnUnusablePosition bool
+	// RedisBufferBytes bounds one shard's on-disk replication buffer. Zero
+	// leaves it to the volume the buffer is written to.
+	RedisBufferBytes int64
 }
 
 // StoredTuning reports it. Nil, or a function returning zeroes, leaves every
@@ -122,4 +125,13 @@ func RecopyOnUnusablePosition() bool {
 		return true
 	}
 	return StoredTuning().RecopyOnUnusablePosition
+}
+
+// RedisBufferBytes reports the bound a deployment has set on one shard's
+// on-disk replication buffer, or zero to work it out from the volume.
+func RedisBufferBytes() int64 {
+	if StoredTuning == nil {
+		return 0
+	}
+	return StoredTuning().RedisBufferBytes
 }

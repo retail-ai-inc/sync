@@ -41,7 +41,8 @@ CREATE TABLE IF NOT EXISTS config_global (
     copy_batch_rows                   INTEGER NOT NULL DEFAULT 0,
     mongo_stream_await_ms             INTEGER NOT NULL DEFAULT 0,
     mongo_whole_documents             INTEGER NOT NULL DEFAULT 0,
-    recopy_on_unusable_position       INTEGER NOT NULL DEFAULT 1
+    recopy_on_unusable_position       INTEGER NOT NULL DEFAULT 1,
+    redis_buffer_max_bytes            INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS sync_tasks (
@@ -204,6 +205,7 @@ var addedColumns = []struct{ table, column, definition string }{
 	// On unless turned off, so an existing database gets it on as well: a
 	// column added with a default fills every row with it.
 	{"config_global", "recopy_on_unusable_position", "INTEGER NOT NULL DEFAULT 1"},
+	{"config_global", "redis_buffer_max_bytes", "INTEGER NOT NULL DEFAULT 0"},
 }
 
 // addColumns adds each of those columns if it is missing. SQLite has no ADD

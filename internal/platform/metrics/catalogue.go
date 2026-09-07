@@ -547,7 +547,33 @@ const (
 func SetStreamOffset(labels Labels, offset, held int64) {
 	Default.SetGauge(StreamOffsetBytes, helpStreamOffset, labels, float64(offset))
 	Default.SetGauge(BufferHeldBytes, helpBufferHeld, labels, float64(held))
-	Default.SetGauge(BufferBytes, HelpBufferBytes, labels, float64(held))
+}
+
+// SetUnappliedBytes records what is on disk and not yet on the target.
+//
+// This used to be given the whole of the buffer, which is not the same thing:
+// the buffer keeps history deliberately, applied or not, because the source
+// keeps a megabyte and this keeps gigabytes -- that is what makes a stopped
+// task resumable. Reporting the retained size as "waiting to be applied" made
+// a healthy task look like one falling behind, growing without bound, while
+// nothing at all was waiting.
+func SetUnappliedBytes(labels Labels, bytes int64) {
+	if bytes < 0 {
+		bytes = 0
+	}
+	Default.SetGauge(BufferBytes, HelpBufferBytes, labels, float64(bytes))
+}
+
+// BufferVolumeBytes is how big the disk holding the buffer is, so a dashboard
+// can say what share of it is used without the size being written into the
+// dashboard. It was, and a volume resized on either side of that number would
+// have left the panel quietly wrong.
+const BufferVolumeBytes = "sync_buffer_volume_bytes"
+
+const helpBufferVolume = "Bytes the volume holding the on-disk buffer can hold"
+
+func SetBufferVolume(labels Labels, bytes int64) {
+	Default.SetGauge(BufferVolumeBytes, helpBufferVolume, labels, float64(bytes))
 }
 
 func SetSourceLag(labels Labels, lag int64) {

@@ -253,18 +253,34 @@ func TestTheRedisOffsetSettersPublishTwice(t *testing.T) {
 
 	SetStreamOffset(labels, 1276319, 8192)
 	SetAppliedOffset(labels, 1276000)
+	SetUnappliedBytes(labels, 1276319-1276000)
 
 	for name, want := range map[string]float64{
 		StreamOffsetBytes: 1276319,
-		// Engine-specific and generic, from the same call.
+		// What the buffer keeps and what is waiting to be applied are different
+		// numbers: the buffer holds history on purpose, so reporting its size as
+		// the backlog made an idle task look like one falling behind.
 		BufferHeldBytes:      8192,
-		BufferBytes:          8192,
+		BufferBytes:          319,
 		AppliedOffsetBytes:   1276000,
 		AppliedPositionBytes: 1276000,
 	} {
 		if got := sampleValue(t, name, labels); got != want {
 			t.Errorf("%s = %v, want %v", name, got, want)
 		}
+	}
+}
+
+// An applied offset ahead of what has been received -- a position restored
+// from the target after a restart, before the stream has caught up with it --
+// is nothing waiting, not a negative backlog.
+func TestNothingWaitingIsReportedAsZero(t *testing.T) {
+	labels := labelsFor(t)
+	t.Cleanup(func() { Default.Forget(labels) })
+
+	SetUnappliedBytes(labels, -512)
+	if got := sampleValue(t, BufferBytes, labels); got != 0 {
+		t.Errorf("%s = %v, want 0", BufferBytes, got)
 	}
 }
 

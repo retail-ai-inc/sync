@@ -226,12 +226,14 @@ func (l *link) acknowledge(ctx context.Context, stream *Stream) {
 		case <-ticker.C:
 			// Both numbers from one place at one instant, so subtracting them means
 			// something.
-			metrics.SetStreamOffset(l.labels, l.received.Load(), l.buffer.Held())
-			metrics.SetAppliedOffset(l.labels, l.applied.Load())
+			received, applied := l.received.Load(), l.applied.Load()
+			metrics.SetStreamOffset(l.labels, received, l.buffer.Held())
+			metrics.SetAppliedOffset(l.labels, applied)
 			// The same numbers under engine-neutral names, so one dashboard panel covers
-			// every engine.
-			metrics.SetSourcePosition(l.labels, l.received.Load())
-			metrics.SetQueueBytes(l.labels, l.buffer.Held())
+			// every engine. What is waiting is the distance between the two offsets,
+			// not the size of the buffer: the buffer keeps history on purpose.
+			metrics.SetSourcePosition(l.labels, received)
+			metrics.SetUnappliedBytes(l.labels, received-applied)
 			l.publishSourceLag(ctx)
 
 			if err := stream.Ack(l.durable.Load()); err != nil {

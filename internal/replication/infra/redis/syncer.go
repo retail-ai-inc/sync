@@ -131,7 +131,7 @@ func (s *Syncer) Start(ctx context.Context) error {
 			// errgroup does not recover a panic, so a shard's panic would end the
 			// process rather than the shard.
 			return resilience.Guard(func() error {
-				return s.runShard(groupCtx, shard, source, target, commands, trigger, guard)
+				return s.runShard(groupCtx, shard, len(shards), source, target, commands, trigger, guard)
 			})
 		})
 	}
@@ -208,8 +208,9 @@ func shardsOf(ctx context.Context, source goredis.UniversalClient, single string
 	return found, nil
 }
 
-func (s *Syncer) runShard(ctx context.Context, sh shard, source, target goredis.UniversalClient,
-	commands *commandTable, compareNow <-chan string, guard *directionlock.Guard) error {
+func (s *Syncer) runShard(ctx context.Context, sh shard, shards int,
+	source, target goredis.UniversalClient, commands *commandTable,
+	compareNow <-chan string, guard *directionlock.Guard) error {
 
 	labels := s.labels()
 	labels["shard"] = sh.id
@@ -219,8 +220,10 @@ func (s *Syncer) runShard(ctx context.Context, sh shard, source, target goredis.
 		return err
 	}
 	buffer, err := OpenBuffer(BufferOptions{
-		Dir:      dir,
-		MaxBytes: s.cfg.RedisBufferBytes,
+		Dir: dir,
+		// What one shard's history may take of the disk the shards share. The
+		// built-in limit is per shard and knows nothing of the volume.
+		MaxBytes: bufferCapacity(dir, shards, s.cfg.RedisBufferBytes, s.logger, labels),
 	})
 	if err != nil {
 		return err

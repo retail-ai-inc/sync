@@ -250,5 +250,6 @@ func storedTuning() pipeline.Tuning {
 		// On by default, and off when the settings cannot be read: rebuilding a
 		// target is not something to do on a guess.
 		RecopyOnUnusablePosition: stored.RecopyOnUnusablePosition,
+		RedisBufferBytes:         stored.RedisBufferMaxBytes,
 	}
 }
