@@ -182,11 +182,6 @@ func newRouter() *chi.Mux {
 	// public network is the requirement that replaces the token.
 	router.Get("/metrics", metrics.Handler)
 
-	// A page of its own rather than one inside the bundle: the application is
-	// shipped built, its source is not here, and a page added to ui/dist would
-	// go the next time it is rebuilt.
-	router.Get("/settings.html", webui.SettingsPage)
-
 	router.Get("/*", serveUI)
 	return router
 }
