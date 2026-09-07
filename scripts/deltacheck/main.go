@@ -4,6 +4,14 @@
 //
 // It never drops the source collection: a drop is a schema change the task
 // refuses on purpose, and refusing stops replication. It empties it instead.
+//
+// It is its own module, because it is a tool rather than part of the syncer
+// and counting it as uncovered code says nothing about the syncer's tests:
+//
+//	cd scripts/deltacheck && go run . -uri "$DELTACHECK_URI" -documents 3000
+//
+// The connection string goes in the environment and not into a file: it holds
+// the cluster's password.
 package main
 
 import (
