@@ -40,7 +40,8 @@ CREATE TABLE IF NOT EXISTS config_global (
     flush_interval_ms                 INTEGER NOT NULL DEFAULT 0,
     copy_batch_rows                   INTEGER NOT NULL DEFAULT 0,
     mongo_stream_await_ms             INTEGER NOT NULL DEFAULT 0,
-    mongo_whole_documents             INTEGER NOT NULL DEFAULT 0
+    mongo_whole_documents             INTEGER NOT NULL DEFAULT 0,
+    recopy_on_unusable_position       INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE TABLE IF NOT EXISTS sync_tasks (
@@ -200,6 +201,9 @@ var addedColumns = []struct{ table, column, definition string }{
 	{"config_global", "copy_batch_rows", "INTEGER NOT NULL DEFAULT 0"},
 	{"config_global", "mongo_stream_await_ms", "INTEGER NOT NULL DEFAULT 0"},
 	{"config_global", "mongo_whole_documents", "INTEGER NOT NULL DEFAULT 0"},
+	// On unless turned off, so an existing database gets it on as well: a
+	// column added with a default fills every row with it.
+	{"config_global", "recopy_on_unusable_position", "INTEGER NOT NULL DEFAULT 1"},
 }
 
 // addColumns adds each of those columns if it is missing. SQLite has no ADD

@@ -37,6 +37,10 @@ func TestSettingsRoundTripThroughTheControlDatabase(t *testing.T) {
 		FlushInterval:           250 * time.Millisecond,
 		CopyBatchRows:           750,
 		MongoStreamAwait:        150 * time.Millisecond,
+		MongoWholeDocuments:     true,
+		// The one that is on unless it is turned off, written here as off so
+		// that the round trip is carrying a value and not a default.
+		RecopyOnUnusablePosition: false,
 	}
 	if err := SaveSettings(want); err != nil {
 		t.Fatalf("SaveSettings: %v", err)

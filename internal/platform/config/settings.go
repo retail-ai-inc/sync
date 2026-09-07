@@ -68,13 +68,20 @@ type Settings struct {
 	// costs a lookup on the source and the whole document over the link for
 	// every update.
 	MongoWholeDocuments bool `json:"mongoWholeDocuments"`
+	// RecopyOnUnusablePosition rebuilds the target by copying when the source
+	// cannot continue from the position a task holds -- a Redis source that
+	// restarted, which ends the replication history every stored offset belongs
+	// to. It is the one setting here that is on unless it is turned off: the
+	// alternative is a standby that stands still until somebody notices.
+	RecopyOnUnusablePosition bool `json:"recopyOnUnusablePosition"`
 }
 
 // settingColumns is the order the columns are read and written in.
 const settingColumns = `verify_interval_seconds, verify_repair, lag_alert_seconds,
 	monitoring_retention_days, batch_max_events, batch_max_bytes, mongo_no_transaction,
 	queue_max_events, queue_max_bytes, snapshot_queue_max_events, flush_interval_ms,
-	copy_batch_rows, mongo_stream_await_ms, mongo_whole_documents`
+	copy_batch_rows, mongo_stream_await_ms, mongo_whole_documents,
+	recopy_on_unusable_position`
 
 // LoadSettings reads the settings from the control database.
 //
@@ -100,11 +107,12 @@ func LoadSettings() (Settings, error) {
 		snapshotEvents, flushMS int
 		copyRows, awaitMS       int
 		wholeDocuments          int
+		recopy                  int
 	)
 	err = db.QueryRow(`SELECT `+settingColumns+` FROM config_global WHERE id = 1`).
 		Scan(&interval, &repair, &lag, &retention, &events, &bytes, &noTx,
 			&queueEvents, &queueBytes, &snapshotEvents, &flushMS, &copyRows, &awaitMS,
-			&wholeDocuments)
+			&wholeDocuments, &recopy)
 	if err != nil {
 		return Settings{}, fmt.Errorf("read the settings: %w", err)
 	}
@@ -123,6 +131,7 @@ func LoadSettings() (Settings, error) {
 	s.CopyBatchRows = copyRows
 	s.MongoStreamAwait = time.Duration(awaitMS) * time.Millisecond
 	s.MongoWholeDocuments = wholeDocuments != 0
+	s.RecopyOnUnusablePosition = recopy != 0
 	return s, nil
 }
 
@@ -139,14 +148,16 @@ func SaveSettings(s Settings) error {
 		monitoring_retention_days = ?, batch_max_events = ?, batch_max_bytes = ?,
 		mongo_no_transaction = ?, queue_max_events = ?, queue_max_bytes = ?,
 		snapshot_queue_max_events = ?, flush_interval_ms = ?, copy_batch_rows = ?,
-		mongo_stream_await_ms = ?, mongo_whole_documents = ?
+		mongo_stream_await_ms = ?, mongo_whole_documents = ?,
+		recopy_on_unusable_position = ?
 		WHERE id = 1`,
 		int64(s.VerifyInterval/time.Second), boolToInt(s.VerifyRepair),
 		int64(s.LagAlertSeconds), s.MonitoringRetentionDays,
 		s.BatchMaxEvents, s.BatchMaxBytes, boolToInt(s.MongoNoTransaction),
 		s.QueueMaxEvents, s.QueueMaxBytes, s.SnapshotQueueMaxEvents,
 		int64(s.FlushInterval/time.Millisecond), s.CopyBatchRows,
-		int64(s.MongoStreamAwait/time.Millisecond), boolToInt(s.MongoWholeDocuments))
+		int64(s.MongoStreamAwait/time.Millisecond), boolToInt(s.MongoWholeDocuments),
+		boolToInt(s.RecopyOnUnusablePosition))
 	if err != nil {
 		return fmt.Errorf("write the settings: %w", err)
 	}

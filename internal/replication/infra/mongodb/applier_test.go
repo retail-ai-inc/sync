@@ -234,3 +234,30 @@ func TestTheEscapeHatchIsOffUnlessItIsAskedFor(t *testing.T) {
 		}
 	}
 }
+
+// A document read back from the source the long way is masked exactly as one
+// that arrived on the stream. Without this a task with field security would
+// write the value in the clear whenever a change could not be applied as a
+// delta.
+func TestADocumentReadBackIsMaskedLikeOneFromTheStream(t *testing.T) {
+	a := &Applier{Mask: func(collection string, value interface{}) interface{} {
+		document, ok := value.(bson.M)
+		if !ok {
+			return value
+		}
+		document["card"] = "****"
+		return document
+	}}
+
+	masked := a.mask("payments", bson.M{"card": "4111111111111111"})
+	if masked["card"] != "****" {
+		t.Errorf("card = %v, want it masked", masked["card"])
+	}
+
+	// No masking configured leaves the document as it is, rather than as
+	// nothing.
+	plain := (&Applier{}).mask("payments", bson.M{"card": "4111"})
+	if plain["card"] != "4111" {
+		t.Errorf("card = %v, want it untouched", plain["card"])
+	}
+}

@@ -78,7 +78,7 @@ func decodePosition(payload string) (streamPosition, error) {
 }
 
 func metaKey(taskID int, shard string) string {
-	return "__sync:pos:" + strconv.Itoa(taskID) + ":" + shard
+	return positionKeyPrefix + strconv.Itoa(taskID) + ":" + shard
 }
 
 // Checkpoints is the position store for one shard's stream. Two things are

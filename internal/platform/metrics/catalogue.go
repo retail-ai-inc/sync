@@ -391,6 +391,21 @@ const WholeDocumentReadsTotal = "sync_whole_document_reads_total"
 
 const helpWholeDocumentReads = "Changes applied by reading the whole document from the source"
 
+// RecopiesTotal counts the times a task rebuilt the target by copying because
+// the source could not continue from the position the task held.
+//
+// One is an event worth knowing about: it means the source's history ended --
+// a Redis restart, say -- and the target was rebuilt rather than left standing
+// still. A rate means it is happening repeatedly, which is a source that keeps
+// restarting or a copy that never finishes.
+const RecopiesTotal = "sync_recopies_total"
+
+const helpRecopies = "Times the target was rebuilt because the stored position could not be used"
+
+func CountRecopy(labels Labels) {
+	Default.AddCounter(RecopiesTotal, helpRecopies, labels, 1)
+}
+
 // WholeDocumentMode is 1 while a task's updates are replicated as whole
 // documents rather than as the fields they change.
 //

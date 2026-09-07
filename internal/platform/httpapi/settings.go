@@ -30,43 +30,51 @@ type settingsBody struct {
 	CopyBatchRows          int   `json:"copyBatchRows"`
 	MongoStreamAwaitMs     int64 `json:"mongoStreamAwaitMs"`
 	MongoWholeDocuments    bool  `json:"mongoWholeDocuments"`
+
+	// A pointer, because this one is on unless it is turned off: a body that
+	// leaves it out means "leave it as it is", where a plain bool would decode
+	// to false and quietly turn a safety net off.
+	RecopyOnUnusablePosition *bool `json:"recopyOnUnusablePosition"`
 }
 
 func bodyOf(s config.Settings) settingsBody {
+	recopy := s.RecopyOnUnusablePosition
 	return settingsBody{
-		VerifyIntervalSeconds:   int64(s.VerifyInterval / time.Second),
-		VerifyRepair:            s.VerifyRepair,
-		LagAlertSeconds:         s.LagAlertSeconds,
-		MonitoringRetentionDays: s.MonitoringRetentionDays,
-		BatchMaxEvents:          s.BatchMaxEvents,
-		BatchMaxBytes:           s.BatchMaxBytes,
-		MongoNoTransaction:      s.MongoNoTransaction,
-		QueueMaxEvents:          s.QueueMaxEvents,
-		QueueMaxBytes:           s.QueueMaxBytes,
-		SnapshotQueueMaxEvents:  s.SnapshotQueueMaxEvents,
-		FlushIntervalMs:         int64(s.FlushInterval / time.Millisecond),
-		CopyBatchRows:           s.CopyBatchRows,
-		MongoStreamAwaitMs:      int64(s.MongoStreamAwait / time.Millisecond),
-		MongoWholeDocuments:     s.MongoWholeDocuments,
+		VerifyIntervalSeconds:    int64(s.VerifyInterval / time.Second),
+		VerifyRepair:             s.VerifyRepair,
+		LagAlertSeconds:          s.LagAlertSeconds,
+		MonitoringRetentionDays:  s.MonitoringRetentionDays,
+		BatchMaxEvents:           s.BatchMaxEvents,
+		BatchMaxBytes:            s.BatchMaxBytes,
+		MongoNoTransaction:       s.MongoNoTransaction,
+		QueueMaxEvents:           s.QueueMaxEvents,
+		QueueMaxBytes:            s.QueueMaxBytes,
+		SnapshotQueueMaxEvents:   s.SnapshotQueueMaxEvents,
+		FlushIntervalMs:          int64(s.FlushInterval / time.Millisecond),
+		CopyBatchRows:            s.CopyBatchRows,
+		MongoStreamAwaitMs:       int64(s.MongoStreamAwait / time.Millisecond),
+		MongoWholeDocuments:      s.MongoWholeDocuments,
+		RecopyOnUnusablePosition: &recopy,
 	}
 }
 
 func settingsOf(b settingsBody) config.Settings {
 	return config.Settings{
-		VerifyInterval:          time.Duration(b.VerifyIntervalSeconds) * time.Second,
-		VerifyRepair:            b.VerifyRepair,
-		LagAlertSeconds:         b.LagAlertSeconds,
-		MonitoringRetentionDays: b.MonitoringRetentionDays,
-		BatchMaxEvents:          b.BatchMaxEvents,
-		BatchMaxBytes:           b.BatchMaxBytes,
-		MongoNoTransaction:      b.MongoNoTransaction,
-		QueueMaxEvents:          b.QueueMaxEvents,
-		QueueMaxBytes:           b.QueueMaxBytes,
-		SnapshotQueueMaxEvents:  b.SnapshotQueueMaxEvents,
-		FlushInterval:           time.Duration(b.FlushIntervalMs) * time.Millisecond,
-		CopyBatchRows:           b.CopyBatchRows,
-		MongoStreamAwait:        time.Duration(b.MongoStreamAwaitMs) * time.Millisecond,
-		MongoWholeDocuments:     b.MongoWholeDocuments,
+		VerifyInterval:           time.Duration(b.VerifyIntervalSeconds) * time.Second,
+		VerifyRepair:             b.VerifyRepair,
+		LagAlertSeconds:          b.LagAlertSeconds,
+		MonitoringRetentionDays:  b.MonitoringRetentionDays,
+		BatchMaxEvents:           b.BatchMaxEvents,
+		BatchMaxBytes:            b.BatchMaxBytes,
+		MongoNoTransaction:       b.MongoNoTransaction,
+		QueueMaxEvents:           b.QueueMaxEvents,
+		QueueMaxBytes:            b.QueueMaxBytes,
+		SnapshotQueueMaxEvents:   b.SnapshotQueueMaxEvents,
+		FlushInterval:            time.Duration(b.FlushIntervalMs) * time.Millisecond,
+		CopyBatchRows:            b.CopyBatchRows,
+		MongoStreamAwait:         time.Duration(b.MongoStreamAwaitMs) * time.Millisecond,
+		MongoWholeDocuments:      b.MongoWholeDocuments,
+		RecopyOnUnusablePosition: b.RecopyOnUnusablePosition != nil && *b.RecopyOnUnusablePosition,
 	}
 }
 
@@ -98,6 +106,18 @@ func UpdateSettingsHandler(w http.ResponseWriter, r *http.Request) {
 			"success": false, "message": "the body is not a settings object",
 		})
 		return
+	}
+	// Left out means left alone, which is only knowable by reading what is
+	// stored.
+	if body.RecopyOnUnusablePosition == nil {
+		stored, err := config.LoadSettings()
+		if err != nil {
+			writeStatus(w, http.StatusInternalServerError, map[string]interface{}{
+				"success": false, "message": err.Error(),
+			})
+			return
+		}
+		body.RecopyOnUnusablePosition = &stored.RecopyOnUnusablePosition
 	}
 	if reason := refuse(body); reason != "" {
 		writeStatus(w, http.StatusBadRequest, map[string]interface{}{

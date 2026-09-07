@@ -72,6 +72,40 @@ func TestSettingsStartAtTheBuiltInDefaults(t *testing.T) {
 	if data["verifyRepair"].(bool) || data["mongoNoTransaction"].(bool) {
 		t.Error("a switch defaults to on")
 	}
+	// Except this one, which is on unless it is turned off: a standby that
+	// cannot resume is rebuilt rather than left standing still.
+	if !data["recopyOnUnusablePosition"].(bool) {
+		t.Error("re-copying after a position that cannot be used defaults to off")
+	}
+}
+
+// A body that leaves the switch out means "leave it as it is". A plain bool
+// would decode to false, so a script that sent any other setting would quietly
+// turn this one off.
+func TestASettingLeftOutOfTheBodyIsLeftAlone(t *testing.T) {
+	useSettingsDB(t)
+
+	off := writeSettings(t, map[string]interface{}{"recopyOnUnusablePosition": false})
+	if off.Code != http.StatusOK {
+		t.Fatalf("PUT = %d: %s", off.Code, off.Body.String())
+	}
+	if readSettings(t)["data"].(map[string]interface{})["recopyOnUnusablePosition"].(bool) {
+		t.Fatal("turning it off did not take")
+	}
+
+	if got := writeSettings(t, map[string]interface{}{"batchMaxEvents": 10}); got.Code != http.StatusOK {
+		t.Fatalf("PUT = %d: %s", got.Code, got.Body.String())
+	}
+	if readSettings(t)["data"].(map[string]interface{})["recopyOnUnusablePosition"].(bool) {
+		t.Error("a body that left the switch out turned it back on")
+	}
+
+	if got := writeSettings(t, map[string]interface{}{"recopyOnUnusablePosition": true}); got.Code != http.StatusOK {
+		t.Fatalf("PUT = %d: %s", got.Code, got.Body.String())
+	}
+	if !readSettings(t)["data"].(map[string]interface{})["recopyOnUnusablePosition"].(bool) {
+		t.Error("turning it back on did not take")
+	}
 }
 
 func TestSettingsSurviveTheRoundTrip(t *testing.T) {

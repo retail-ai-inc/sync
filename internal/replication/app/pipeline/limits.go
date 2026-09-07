@@ -25,6 +25,11 @@ type Tuning struct {
 	// the fields it touched. It is the way back if a delta ever turns out to be
 	// wrong for a collection.
 	WholeDocuments bool
+	// RecopyOnUnusablePosition lets a task rebuild the target by copying when
+	// the source cannot continue from the position it holds. Unlike everything
+	// else here it is on unless a deployment turns it off, so it is read
+	// through RecopyOnUnusablePosition rather than filled in from a zero.
+	RecopyOnUnusablePosition bool
 }
 
 // StoredTuning reports it. Nil, or a function returning zeroes, leaves every
@@ -98,4 +103,23 @@ func MongoWholeDocuments() bool {
 		return false
 	}
 	return StoredTuning().WholeDocuments
+}
+
+// RecopyOnUnusablePosition reports whether a task whose stored position the
+// source cannot continue from should copy the source again rather than stop.
+//
+// It is on by default, because the alternative for a disaster-recovery copy is
+// standing still: a Redis source that restarts ends the replication history
+// every stored offset belongs to, and a replica frozen for days is worse than
+// one rebuilt in minutes. What it costs is a copy, and the target holding two
+// versions of the truth while that copy runs.
+//
+// Off is the older behaviour: the task stops and says what happened. That is
+// also what a deployment gets when the settings cannot be read -- rebuilding a
+// target is not something to do on a guess.
+func RecopyOnUnusablePosition() bool {
+	if StoredTuning == nil {
+		return true
+	}
+	return StoredTuning().RecopyOnUnusablePosition
 }

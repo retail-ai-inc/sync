@@ -115,11 +115,13 @@ func (l *link) start(ctx context.Context, from streamPosition) (streamPosition, 
 		// longer covers the gap. Emptying the target and copying everything again is
 		// the one thing not to do here.
 		stream.Close()
-		return streamPosition{}, domain.Unrecoverable(
+		return streamPosition{}, domain.PositionUnusable(
 			"the source will not resume shard %s from offset %d and offered to send "+
-				"everything again: its replication backlog no longer reaches back that "+
-				"far. Raise repl-backlog-size on the source, or re-copy this shard "+
-				"deliberately — this will not empty the target on its own",
+				"everything again: the history that offset belongs to is not the one "+
+				"the source is running. Its replication history lives in memory, so a "+
+				"restart of the source ends it, and a bigger repl-backlog-size does not "+
+				"help across one. Copying the shard again is the way back, and the "+
+				"setting decides whether this task does that on its own",
 			l.shard, resume.Offset)
 
 	default:

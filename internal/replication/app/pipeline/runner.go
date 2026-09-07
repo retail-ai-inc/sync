@@ -130,6 +130,9 @@ type Runner struct {
 	Reader      domain.Reader
 	Applier     domain.Applier
 	Snapshotter domain.Snapshotter
+	// sweepStale is set when this run's copy is recovering a position rather
+	// than making a first copy, and the target therefore already holds data.
+	sweepStale  bool
 	Checkpoints Checkpoints
 	// CheckpointKey names this task's position; empty is the single-stream case.
 	CheckpointKey string
@@ -233,7 +236,17 @@ func (r *Runner) Run(ctx context.Context) error {
 	// since the pinned point is where the stream starts either way, and it keeps
 	// the cursor ahead of the truncation for as long as the copy runs.
 	if err := r.Reader.Open(ctx, start); err != nil {
-		return fmt.Errorf("open the source stream: %w", err)
+		pinned, recopy, recoverErr := r.recoverPosition(ctx, err)
+		if recoverErr != nil {
+			return recoverErr
+		}
+		if !recopy {
+			return fmt.Errorf("open the source stream: %w", err)
+		}
+		start, owed = pinned, true
+		if err := r.Reader.Open(ctx, start); err != nil {
+			return fmt.Errorf("open the source stream to copy it again: %w", err)
+		}
 	}
 	defer func() { _ = r.Reader.Close() }()
 
@@ -387,6 +400,45 @@ func (r *Runner) startResyncs(ctx context.Context, queue chan<- *domain.Event, p
 	return failed
 }
 
+// recoverPosition decides what to do about a stored position the source cannot
+// continue from, and reports the point a fresh copy would start at.
+//
+// The stored position is deliberately left where it is. Recovering is
+// idempotent -- the same thing happens on the next start -- and clearing it
+// would turn a crash half way through into an ordinary first copy, which does
+// not remove what the target holds and the source has deleted.
+func (r *Runner) recoverPosition(ctx context.Context, cause error) (domain.Position, bool, error) {
+	if !domain.IsPositionUnusable(cause) || r.Snapshotter == nil {
+		return domain.Position{}, false, nil
+	}
+	if !RecopyOnUnusablePosition() {
+		return domain.Position{}, false, nil
+	}
+	if _, ok := r.Snapshotter.(domain.StaleSweeper); !ok {
+		// A copy writes what the source has and says nothing about what it has
+		// deleted, so for this engine the copy would leave a divergence nothing
+		// reports. Stopping says so instead.
+		r.log().Warnf(r.tag("The stored position cannot be used (%v), and copying "+
+			"again would leave the target holding whatever the source has deleted "+
+			"since, so this task stops instead"), cause)
+		return domain.Position{}, false, nil
+	}
+
+	r.log().Warnf(r.tag("The stored position cannot be used (%v), so the source is "+
+		"being copied again. The target holds the previous copy until this one "+
+		"finishes, and anything the source has deleted since is removed at the end "+
+		"of it"), cause)
+	metrics.CountRecopy(r.Opts.Labels)
+
+	pinned, err := r.Snapshotter.Pin(ctx)
+	if err != nil {
+		return domain.Position{}, false, fmt.Errorf("pin a starting point to copy the "+
+			"source again after the stored position could not be used (%v): %w", cause, err)
+	}
+	r.sweepStale = true
+	return pinned, true, nil
+}
+
 // startingPoint reports where the stream starts and whether the target still
 // owes an initial copy. It pins but does not copy: the copy runs once the
 // stream is open, which is the whole point of the split.
@@ -431,6 +483,20 @@ func (r *Runner) copy(ctx context.Context, pinned domain.Position, queue chan *d
 	stopWatching()
 	if err != nil {
 		return failed(fmt.Errorf("copy the source: %w", err))
+	}
+
+	// What the source has deleted since the position this copy replaces. It
+	// runs here, before the queue is drained: everything the stream carries
+	// from the pinned point onwards is still waiting, so a key this removes and
+	// the stream re-creates is re-created afterwards rather than lost.
+	if r.sweepStale {
+		if sweeper, ok := r.Snapshotter.(domain.StaleSweeper); ok {
+			r.log().Infof(r.tag("Removing what the target holds and the source does not"))
+			if err := sweeper.SweepStale(ctx); err != nil {
+				return failed(fmt.Errorf("remove what the source no longer has: %w", err))
+			}
+		}
+		r.sweepStale = false
 	}
 
 	if err := r.Checkpoints.Save(ctx, r.CheckpointKey, pinned.Payload); err != nil {

@@ -71,6 +71,30 @@ func TestNothingStoredLeavesTheOptionsAlone(t *testing.T) {
 	}
 }
 
+// Two switches rather than sizes: one off unless asked for, one on unless
+// turned off. The second is why they are read through functions instead of
+// being filled in from a zero.
+func TestTheSwitchesReadTheirWayRound(t *testing.T) {
+	previous := StoredTuning
+	StoredTuning = nil
+	t.Cleanup(func() { StoredTuning = previous })
+
+	if MongoWholeDocuments() {
+		t.Error("with nothing stored, updates are replicated as whole documents")
+	}
+	if !RecopyOnUnusablePosition() {
+		t.Error("with nothing stored, a position that cannot be used stops the task")
+	}
+
+	withStored(t, Tuning{WholeDocuments: true, RecopyOnUnusablePosition: false})
+	if !MongoWholeDocuments() {
+		t.Error("the stored setting for whole documents was not read")
+	}
+	if RecopyOnUnusablePosition() {
+		t.Error("the stored setting for re-copying was not read")
+	}
+}
+
 // The engines each keep their own default, so a deployment that has set
 // nothing gets the fallback and one that has set something gets that.
 func TestCopyBatchAndAwaitPreferWhatWasStored(t *testing.T) {

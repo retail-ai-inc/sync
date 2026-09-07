@@ -164,3 +164,18 @@ type Snapshotter interface {
 	Pin(ctx context.Context) (Position, error)
 	Copy(ctx context.Context) error
 }
+
+// StaleSweeper removes what the target holds and the source does not.
+//
+// A copy writes what the source has; it says nothing about what the source no
+// longer has. That is nothing to worry about for a first copy, where the
+// target starts empty, and it is the whole problem for a copy made to recover
+// a position: everything deleted at the source while the task was away is
+// still on the target, and no copy will mention it.
+//
+// A Snapshotter may implement this. One that does not cannot recover a
+// position by copying, because the result would be a target holding data the
+// source has deleted.
+type StaleSweeper interface {
+	SweepStale(ctx context.Context) error
+}

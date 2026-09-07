@@ -247,5 +247,8 @@ func storedTuning() pipeline.Tuning {
 		CopyBatchRows:         stored.CopyBatchRows,
 		StreamAwait:           stored.MongoStreamAwait,
 		WholeDocuments:        stored.MongoWholeDocuments,
+		// On by default, and off when the settings cannot be read: rebuilding a
+		// target is not something to do on a guess.
+		RecopyOnUnusablePosition: stored.RecopyOnUnusablePosition,
 	}
 }
