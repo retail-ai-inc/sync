@@ -639,3 +639,65 @@ var keptOnStop = map[string]bool{
 	SnapshotAborted:         true,
 	SnapshotDurationSeconds: true,
 }
+
+// How the backup jobs went.
+//
+// A backup that did not run is silent: the job is a row in the control
+// database, its outcome another column of that row, and nothing looked at
+// either until somebody needed the backup. These say when each job last ran,
+// how it went, and how long ago that was -- the last of which is the one that
+// answers "did last night's backup happen".
+//
+// The label is `backup` rather than `task`, because a backup job and a
+// replication task are different things that happen to be numbered
+// separately, and one dashboard variable filtering both would mix them.
+const (
+	BackupRunsTotal = "sync_backup_runs_total"
+	// BackupLastStatus is 1 when the last run finished and 0 when it failed.
+	BackupLastStatus = "sync_backup_last_status"
+	// BackupLastRunTimestamp and BackupLastSuccessTimestamp are seconds since
+	// the epoch. Kept apart because a job failing every night still has a last
+	// run: what matters is how long ago it last worked.
+	BackupLastRunTimestamp     = "sync_backup_last_run_timestamp_seconds"
+	BackupLastSuccessTimestamp = "sync_backup_last_success_timestamp_seconds"
+	BackupLastDurationSeconds  = "sync_backup_last_duration_seconds"
+	// BackupInfo carries the job's name and what it backs up, so the numbers
+	// above can stay labelled by id and a renamed job does not become a new
+	// series in every one of them.
+	BackupInfo = "sync_backup_info"
+
+	helpBackupRuns       = "Backup runs that finished, by result"
+	helpBackupLastStatus = "1 when a backup job's last run finished, 0 when it failed"
+	helpBackupLastRun    = "When a backup job last ran, seconds since the epoch"
+	helpBackupLastOK     = "When a backup job last finished successfully, seconds since the epoch"
+	helpBackupDuration   = "How long a backup job's last run took"
+	helpBackupInfo       = "A backup job's name and what it backs up"
+)
+
+// CountBackupRun records a finished run. result is "completed" or "failed",
+// which is what the job's stored outcome says.
+func CountBackupRun(labels Labels, result string) {
+	Default.AddCounter(BackupRunsTotal, helpBackupRuns,
+		withLabel(labels, "result", result), 1)
+}
+
+// SetBackupOutcome publishes how a job's last run went. A run that failed
+// leaves the last success where it was: that gauge is the age of the newest
+// backup that exists, not of the newest attempt.
+func SetBackupOutcome(labels Labels, ok bool, at time.Time, took time.Duration) {
+	setBool(BackupLastStatus, helpBackupLastStatus, labels, ok)
+	Default.SetGauge(BackupLastRunTimestamp, helpBackupLastRun, labels, float64(at.Unix()))
+	if took > 0 {
+		Default.SetGauge(BackupLastDurationSeconds, helpBackupDuration, labels, took.Seconds())
+	}
+	if ok {
+		Default.SetGauge(BackupLastSuccessTimestamp, helpBackupLastOK, labels, float64(at.Unix()))
+	}
+}
+
+// SetBackupInfo names a job.
+func SetBackupInfo(labels Labels, name, source, schedule string) {
+	with := withLabel(labels, "name", name)
+	with = withLabel(with, "source", source)
+	Default.SetGauge(BackupInfo, helpBackupInfo, withLabel(with, "schedule", schedule), 1)
+}

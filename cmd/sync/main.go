@@ -119,6 +119,10 @@ func main() {
 	// edited through the API — so a new container had none, and every backup
 	// stopped until somebody happened to touch a job.
 	stopBackups := backupapp.StartBackupScheduler(ctx, log)
+	// What the control database already knows about the last run of each job.
+	// Nothing survives a restart in this process, so without this every job
+	// would read as never having run until its next one.
+	backupapp.PublishStoredOutcomes(log)
 
 	syncDone := make(chan struct{})
 	go func() {

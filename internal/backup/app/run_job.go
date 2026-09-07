@@ -118,13 +118,16 @@ func randomSuffix() string {
 
 func execute(taskID string, id int) {
 	AdvanceRun(taskID, domain.RunRunning, "Backup execution started", nil)
+	started := time.Now()
 
 	db, err := sqlite.OpenSQLiteDB()
 	if err != nil {
 		logrus.Errorf("[BackupExecutor] Failed to open database for task %s: %v", taskID, err)
 		AdvanceRun(taskID, domain.RunFailed, "Failed to open database", err)
 		// Nowhere to record the outcome: the place it would be recorded is the
-		// database that could not be opened.
+		// database that could not be opened. The metric is not in that database,
+		// so it still says what happened.
+		reportOutcome(id, false, time.Now(), time.Since(started))
 		return
 	}
 	defer db.Close()
@@ -143,6 +146,7 @@ func execute(taskID string, id int) {
 		// process went down in that window, nothing ever would.
 		recordOutcome(id, domain.RunFailed, err.Error())
 		AdvanceRun(taskID, domain.RunFailed, "Backup execution failed", err)
+		reportOutcome(id, false, time.Now(), time.Since(started))
 		return
 	}
 
@@ -154,6 +158,7 @@ func execute(taskID string, id int) {
 
 	recordOutcome(id, domain.RunCompleted, "")
 	AdvanceRun(taskID, domain.RunCompleted, "Backup executed successfully", nil)
+	reportOutcome(id, true, time.Now(), time.Since(started))
 	logrus.Debugf("[BackupExecutor] Background backup task %s completed successfully", taskID)
 }
 
