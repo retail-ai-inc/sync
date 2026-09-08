@@ -28,7 +28,6 @@ CREATE TABLE IF NOT EXISTS config_global (
     verify_interval_seconds           INTEGER NOT NULL DEFAULT 0,
     verify_repair                     INTEGER NOT NULL DEFAULT 0,
     lag_alert_seconds                 INTEGER NOT NULL DEFAULT 0,
-    monitoring_retention_days         INTEGER NOT NULL DEFAULT 0,
     batch_max_events                  INTEGER NOT NULL DEFAULT 0,
     batch_max_bytes                   INTEGER NOT NULL DEFAULT 0,
     mongo_no_transaction              INTEGER NOT NULL DEFAULT 0,
@@ -88,20 +87,6 @@ CREATE TABLE IF NOT EXISTS auth_configs (
     enabled     BOOLEAN DEFAULT false
 );
 
-CREATE TABLE IF NOT EXISTS monitoring_log (
-    id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    logged_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
-    db_type        TEXT NOT NULL,
-    src_db         TEXT,
-    src_table      TEXT,
-    src_row_count  INTEGER,
-    tgt_db         TEXT,
-    tgt_table      TEXT,
-    tgt_row_count  INTEGER,
-    monitor_action TEXT,
-    sync_task_id   INTEGER
-);
-
 CREATE TABLE IF NOT EXISTS changestream_statistics (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     task_id         INTEGER NOT NULL,
@@ -130,8 +115,6 @@ CREATE TABLE IF NOT EXISTS audit_log (
 );
 
 CREATE INDEX IF NOT EXISTS idx_last_updated ON changestream_statistics(last_updated);
-CREATE INDEX IF NOT EXISTS idx_monitoring_log_logged_at ON monitoring_log(logged_at);
-CREATE INDEX IF NOT EXISTS idx_monitoring_log_task ON monitoring_log(sync_task_id);
 CREATE INDEX IF NOT EXISTS idx_audit_log_at ON audit_log(at);
 `
 
@@ -184,7 +167,6 @@ var addedColumns = []struct{ table, column, definition string }{
 	{"config_global", "verify_interval_seconds", "INTEGER NOT NULL DEFAULT 0"},
 	{"config_global", "verify_repair", "INTEGER NOT NULL DEFAULT 0"},
 	{"config_global", "lag_alert_seconds", "INTEGER NOT NULL DEFAULT 0"},
-	{"config_global", "monitoring_retention_days", "INTEGER NOT NULL DEFAULT 0"},
 	{"config_global", "batch_max_events", "INTEGER NOT NULL DEFAULT 0"},
 	{"config_global", "batch_max_bytes", "INTEGER NOT NULL DEFAULT 0"},
 	{"config_global", "mongo_no_transaction", "INTEGER NOT NULL DEFAULT 0"},

@@ -36,10 +36,6 @@ func CountAndLogMongoDB(ctx context.Context, sc config.SyncConfig, log *logrus.L
 		return
 	}
 
-	// One open for the pass, not one per collection.
-	record := openMonitoringLog()
-	defer record.close()
-
 	for _, tblMap := range tables {
 		var srcCount int64
 		var tgtCount int64
@@ -100,8 +96,8 @@ func CountAndLogMongoDB(ctx context.Context, sc config.SyncConfig, log *logrus.L
 			"monitor_action": rowCountAction(srcOK, tgtOK),
 		}).Info(rowCountAction(srcOK, tgtOK))
 
-		record.write(sc.ID, dbType, srcDBName, tblMap.SourceTable, srcCount,
-			tgtDBName, tblMap.TargetTable, tgtCount, rowCountAction(srcOK, tgtOK))
+		publishRowCounts(sc.ID, dbType, srcDBName, tblMap.SourceTable, srcCount, tgtCount,
+			rowCountAction(srcOK, tgtOK))
 	}
 
 	// Log comprehensive ChangeStream status for each sync task.
@@ -370,10 +366,6 @@ func LogYesterdayMongoDBVolume(ctx context.Context, sc config.SyncConfig, log *l
 				"yesterday_date":      yesterdayStart.Format("2006-01-02"),
 				"monitor_action":      "daily_sync_summary",
 			}).Info("daily_sync_summary")
-
-			// Store to database for historical tracking
-			storeMonitoringLog(sc.ID, dbType, srcDBName, tblMap.SourceTable, srcCount,
-				tgtDBName, tblMap.TargetTable, tgtCount, "daily_sync_summary")
 
 			log.Infof("[Monitor] Daily summary: Task %d, Table %s.%s -> %s.%s, "+
 				"Yesterday (%s): Source=%d, Target=%d, Synced=%d (field: %s)",

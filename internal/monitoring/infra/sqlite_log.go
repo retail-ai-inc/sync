@@ -77,51 +77,11 @@ func rowCountAction(srcOK, tgtOK bool) string {
 	return actionCountFailed
 }
 
-// monitoringLog writes a pass's comparisons, holding the control database open
-// across them.
+// publishRowCounts reports a comparison to the scraper.
 //
-// One row used to mean one open: a task replicating a whole database compares
-// every table it holds, so a hundred-table task opened, wrote and closed the
-// control database a hundred times a minute.
-type monitoringLog struct {
-	db *sql.DB
-}
-
-// openMonitoringLog opens the control database for one pass. A nil writer is
-// usable and drops what it is given, so a counter that cannot record still
-// measures and still logs.
-func openMonitoringLog() *monitoringLog {
-	db, err := sqlite.OpenSQLiteDB()
-	if err != nil {
-		logrus.Errorf("Failed to open local DB for monitoring_log: %v", err)
-		return nil
-	}
-	return &monitoringLog{db: db}
-}
-
-func (m *monitoringLog) close() {
-	if m == nil {
-		return
-	}
-	_ = m.db.Close()
-}
-
-func (m *monitoringLog) write(syncTaskID int, dbType, srcDB, srcTable string, srcCount int64,
-	tgtDB, tgtTable string, tgtCount int64, action string) {
-
-	publishRowCounts(syncTaskID, dbType, srcDB, srcTable, srcCount, tgtCount, action)
-	if m == nil {
-		return
-	}
-	insert(m.db, syncTaskID, dbType, srcDB, srcTable, srcCount, tgtDB, tgtTable, tgtCount, action)
-}
-
-// publishRowCounts reports a comparison to the scraper as well as to the
-// control database.
-//
-// Only the full comparison: the daily summary writes rows of its own for a
-// window of one day, and publishing those under the same name would report a
-// day's rows as the size of the object.
+// Only the full comparison: the daily summary measures a window of one day,
+// and publishing that under the same name would report a day's rows as the
+// size of the object.
 //
 // The label is `object` rather than `table` because the four engines compare
 // tables, collections and whole databases, and one name for the thing being
@@ -142,48 +102,6 @@ func publishRowCounts(syncTaskID int, dbType, srcDB, object string,
 		"engine": strings.ToLower(dbType),
 		"object": object,
 	}, source, target, time.Now())
-}
-
-// storeMonitoringLog writes one comparison and closes again, for the callers
-// that record a single row a pass.
-func storeMonitoringLog(syncTaskID int, dbType, srcDB, srcTable string, srcCount int64,
-	tgtDB, tgtTable string, tgtCount int64, action string) {
-
-	log := openMonitoringLog()
-	defer log.close()
-	log.write(syncTaskID, dbType, srcDB, srcTable, srcCount, tgtDB, tgtTable, tgtCount, action)
-}
-
-func insert(db *sql.DB, syncTaskID int, dbType, srcDB, srcTable string, srcCount int64,
-	tgtDB, tgtTable string, tgtCount int64, action string) {
-
-	const insSQL = `
-INSERT INTO monitoring_log (
-	sync_task_id,
-	db_type,
-	src_db,
-	src_table,
-	src_row_count,
-	tgt_db,
-	tgt_table,
-	tgt_row_count,
-	monitor_action
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
-`
-	_, err := db.Exec(insSQL,
-		syncTaskID,
-		dbType,
-		srcDB,
-		srcTable,
-		srcCount,
-		tgtDB,
-		tgtTable,
-		tgtCount,
-		action,
-	)
-	if err != nil {
-		logrus.Errorf("Failed to insert into monitoring_log: %v", err)
-	}
 }
 
 func StoreChangeStreamStatistics(syncTaskID int, activeStreams map[string]*domain.ChangeStreamInfo) error {

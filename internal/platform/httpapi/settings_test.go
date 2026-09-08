@@ -59,11 +59,10 @@ func TestSettingsStartAtTheBuiltInDefaults(t *testing.T) {
 
 	data := readSettings(t)["data"].(map[string]interface{})
 	for field, want := range map[string]float64{
-		"verifyIntervalSeconds":   0,
-		"lagAlertSeconds":         0,
-		"monitoringRetentionDays": 0,
-		"batchMaxEvents":          0,
-		"batchMaxBytes":           0,
+		"verifyIntervalSeconds": 0,
+		"lagAlertSeconds":       0,
+		"batchMaxEvents":        0,
+		"batchMaxBytes":         0,
 	} {
 		if got := data[field].(float64); got != want {
 			t.Errorf("%s = %v, want %v", field, got, want)
@@ -112,19 +111,18 @@ func TestSettingsSurviveTheRoundTrip(t *testing.T) {
 	useSettingsDB(t)
 
 	recorder := writeSettings(t, map[string]interface{}{
-		"verifyIntervalSeconds":   3600,
-		"verifyRepair":            true,
-		"lagAlertSeconds":         120,
-		"monitoringRetentionDays": 30,
-		"batchMaxEvents":          250,
-		"batchMaxBytes":           1 << 20,
-		"mongoNoTransaction":      false,
-		"queueMaxEvents":          4096,
-		"queueMaxBytes":           128 << 20,
-		"snapshotQueueMaxEvents":  1024,
-		"flushIntervalMs":         250,
-		"copyBatchRows":           750,
-		"mongoStreamAwaitMs":      150,
+		"verifyIntervalSeconds":  3600,
+		"verifyRepair":           true,
+		"lagAlertSeconds":        120,
+		"batchMaxEvents":         250,
+		"batchMaxBytes":          1 << 20,
+		"mongoNoTransaction":     false,
+		"queueMaxEvents":         4096,
+		"queueMaxBytes":          128 << 20,
+		"snapshotQueueMaxEvents": 1024,
+		"flushIntervalMs":        250,
+		"copyBatchRows":          750,
+		"mongoStreamAwaitMs":     150,
 	})
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("PUT /settings = %d: %s", recorder.Code, recorder.Body.String())
@@ -164,17 +162,16 @@ func TestANegativeSettingIsRefused(t *testing.T) {
 	useSettingsDB(t)
 
 	for field, value := range map[string]interface{}{
-		"verifyIntervalSeconds":   -1,
-		"lagAlertSeconds":         -1,
-		"monitoringRetentionDays": -1,
-		"batchMaxEvents":          -1,
-		"batchMaxBytes":           -1,
-		"queueMaxEvents":          -1,
-		"queueMaxBytes":           -1,
-		"snapshotQueueMaxEvents":  -1,
-		"flushIntervalMs":         -1,
-		"copyBatchRows":           -1,
-		"mongoStreamAwaitMs":      -1,
+		"verifyIntervalSeconds":  -1,
+		"lagAlertSeconds":        -1,
+		"batchMaxEvents":         -1,
+		"batchMaxBytes":          -1,
+		"queueMaxEvents":         -1,
+		"queueMaxBytes":          -1,
+		"snapshotQueueMaxEvents": -1,
+		"flushIntervalMs":        -1,
+		"copyBatchRows":          -1,
+		"mongoStreamAwaitMs":     -1,
 	} {
 		recorder := writeSettings(t, map[string]interface{}{field: value})
 		if recorder.Code != http.StatusBadRequest {

@@ -7,6 +7,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -87,44 +89,65 @@ func openRedis(t *testing.T, endpoint string, dbIndex int) *goredis.Client {
 }
 
 type monitoringRow struct {
-	TaskID          int
-	DBType          string
-	SrcDB, SrcTable string
-	SrcCount        int64
-	TgtDB, TgtTable string
-	TgtCount        int64
-	Action          string
+	TaskID   int
+	Engine   string
+	Object   string
+	SrcCount int64
+	TgtCount int64
 }
 
-func readMonitoringLog(t *testing.T, conn *sql.DB) []monitoringRow {
+// publishedCounts reads back what one task published. The registry is
+// process-wide and every one of these tests uses a task id of its own, which
+// is what keeps them from reading each other's.
+func publishedCounts(t *testing.T, taskID int) []monitoringRow {
 	t.Helper()
 
-	rows, err := conn.Query(`
-		SELECT sync_task_id, db_type, src_db, src_table, src_row_count,
-		       tgt_db, tgt_table, tgt_row_count, monitor_action
-		FROM monitoring_log ORDER BY id`)
-	if err != nil {
-		t.Fatalf("query monitoring_log: %v", err)
+	task := strconv.Itoa(taskID)
+	targets := map[string]int64{}
+	for _, sample := range metrics.RowCounts.Snapshot(metrics.TargetRows) {
+		if sample.Labels["task"] == task {
+			targets[sample.Labels["object"]] = int64(sample.Value)
+		}
 	}
-	defer rows.Close()
 
 	var out []monitoringRow
-	for rows.Next() {
-		var r monitoringRow
-		if err := rows.Scan(&r.TaskID, &r.DBType, &r.SrcDB, &r.SrcTable, &r.SrcCount,
-			&r.TgtDB, &r.TgtTable, &r.TgtCount, &r.Action); err != nil {
-			t.Fatalf("scan: %v", err)
+	for _, sample := range metrics.RowCounts.Snapshot(metrics.SourceRows) {
+		if sample.Labels["task"] != task {
+			continue
 		}
-		out = append(out, r)
+		labels := sample.Labels
+		t.Cleanup(func() { metrics.ForgetRowCounts(labels) })
+		object := sample.Labels["object"]
+		out = append(out, monitoringRow{
+			TaskID:   taskID,
+			Engine:   sample.Labels["engine"],
+			Object:   object,
+			SrcCount: int64(sample.Value),
+			TgtCount: targets[object],
+		})
 	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("iterate: %v", err)
-	}
+	slices.SortFunc(out, func(a, b monitoringRow) int { return strings.Compare(a.Object, b.Object) })
 	return out
 }
 
+// measuredAt reports when a task's counts were last published, zero when it
+// has published nothing. A gauge is overwritten on each pass, so this is what
+// says a pass happened rather than a number of rows.
+func measuredAt(t *testing.T, taskID int) float64 {
+	t.Helper()
+
+	task := strconv.Itoa(taskID)
+	var latest float64
+	for _, sample := range metrics.RowCounts.Snapshot(metrics.RowCountMeasuredAt) {
+		if sample.Labels["task"] == task && sample.Value > latest {
+			latest = sample.Value
+		}
+	}
+	return latest
+}
+
 func TestCountAndLogMySQLRecordsBothSides(t *testing.T) {
-	conn := useMonitoringDB(t)
+	useMonitoringDB(t)
 
 	table := harness.UniqueName("mon")
 	src := openMySQL(t, harness.MySQLSource, sourceDB)
@@ -163,19 +186,16 @@ func TestCountAndLogMySQLRecordsBothSides(t *testing.T) {
 
 	countAndLogTables(t.Context(), sc, quietLogger())
 
-	got := readMonitoringLog(t, conn)
+	got := publishedCounts(t, 101)
 	if len(got) != 1 {
 		t.Fatalf("monitoring_log holds %d rows, want 1: %+v", len(got), got)
 	}
 	r := got[0]
-	if r.TaskID != 101 || r.DBType != "MYSQL" || r.Action != "row_count_minutely" {
+	if r.TaskID != 101 || r.Engine != "mysql" {
 		t.Errorf("row = %+v", r)
 	}
-	if r.SrcDB != sourceDB || r.TgtDB != targetDB {
-		t.Errorf("databases = %q -> %q, want %q -> %q", r.SrcDB, r.TgtDB, sourceDB, targetDB)
-	}
-	if r.SrcTable != table || r.TgtTable != table {
-		t.Errorf("tables = %q -> %q, want %q", r.SrcTable, r.TgtTable, table)
+	if r.Object != table {
+		t.Errorf("object = %q, want %q", r.Object, table)
 	}
 	if r.SrcCount != 3 || r.TgtCount != 2 {
 		t.Errorf("counts = %d -> %d, want 3 -> 2", r.SrcCount, r.TgtCount)
@@ -185,7 +205,7 @@ func TestCountAndLogMySQLRecordsBothSides(t *testing.T) {
 // A table named in the configuration but absent from the database yields the
 // -1 sentinel, which is stored as though it were a row count.
 func TestAMissingTableIsRecordedAsMinusOne(t *testing.T) {
-	conn := useMonitoringDB(t)
+	useMonitoringDB(t)
 
 	sc := config.SyncConfig{
 		ID:               102,
@@ -203,7 +223,7 @@ func TestAMissingTableIsRecordedAsMinusOne(t *testing.T) {
 
 	countAndLogTables(t.Context(), sc, quietLogger())
 
-	got := readMonitoringLog(t, conn)
+	got := publishedCounts(t, 102)
 	if len(got) != 1 {
 		t.Fatalf("monitoring_log holds %d rows, want 1", len(got))
 	}
@@ -217,7 +237,7 @@ func TestAMissingTableIsRecordedAsMinusOne(t *testing.T) {
 // a monitoring gap during an outage is indistinguishable from the monitor not
 // running at all: no row, no marker, only a log line.
 func TestAnUnreachableSourceWritesNothing(t *testing.T) {
-	conn := useMonitoringDB(t)
+	useMonitoringDB(t)
 
 	sc := config.SyncConfig{
 		ID:               103,
@@ -232,13 +252,13 @@ func TestAnUnreachableSourceWritesNothing(t *testing.T) {
 
 	countAndLogTables(t.Context(), sc, quietLogger())
 
-	if got := readMonitoringLog(t, conn); len(got) != 0 {
+	if got := publishedCounts(t, 103); len(got) != 0 {
 		t.Fatalf("%d rows were written despite an unreachable source — an outage marker appears to have been added; assert it instead", len(got))
 	}
 }
 
 func TestCountAndLogMongoDBRecordsBothSides(t *testing.T) {
-	conn := useMonitoringDB(t)
+	useMonitoringDB(t)
 
 	collection := harness.UniqueName("mon")
 	src := openMongo(t, harness.MongoSource)
@@ -275,13 +295,13 @@ func TestCountAndLogMongoDBRecordsBothSides(t *testing.T) {
 
 	countAndLogTables(t.Context(), sc, quietLogger())
 
-	got := readMonitoringLog(t, conn)
+	got := publishedCounts(t, 201)
 	if len(got) == 0 {
 		t.Fatal("monitoring_log is empty")
 	}
 	var found *monitoringRow
 	for i := range got {
-		if got[i].SrcTable == collection {
+		if got[i].Object == collection {
 			found = &got[i]
 		}
 	}
@@ -291,13 +311,13 @@ func TestCountAndLogMongoDBRecordsBothSides(t *testing.T) {
 	if found.SrcCount != 4 || found.TgtCount != 1 {
 		t.Errorf("counts = %d -> %d, want 4 -> 1", found.SrcCount, found.TgtCount)
 	}
-	if found.DBType != "MONGODB" {
-		t.Errorf("db_type = %q, want MONGODB", found.DBType)
+	if found.Engine != "mongodb" {
+		t.Errorf("engine = %q, want mongodb", found.Engine)
 	}
 }
 
 func TestCountAndLogRedisRecordsDatabaseSizes(t *testing.T) {
-	conn := useMonitoringDB(t)
+	useMonitoringDB(t)
 
 	src := openRedis(t, harness.RedisSource, monitorRedisDB)
 	tgt := openRedis(t, harness.RedisTarget, monitorRedisDB)
@@ -332,7 +352,7 @@ func TestCountAndLogRedisRecordsDatabaseSizes(t *testing.T) {
 
 	countAndLogTables(t.Context(), sc, quietLogger())
 
-	got := readMonitoringLog(t, conn)
+	got := publishedCounts(t, 301)
 	if len(got) != 1 {
 		t.Fatalf("monitoring_log holds %d rows, want 1: %+v", len(got), got)
 	}
@@ -341,11 +361,13 @@ func TestCountAndLogRedisRecordsDatabaseSizes(t *testing.T) {
 			"connection names and one in another, all of which the replication "+
 			"copies", got[0].SrcCount, got[0].TgtCount)
 	}
-	if got[0].SrcDB != fmt.Sprintf("%d,%d", monitorRedisDB, monitorRedisDB+1) {
-		t.Errorf("src_db = %q, want it to name the databases counted", got[0].SrcDB)
+	// A Redis task compares whole databases and has no object of its own, so
+	// the databases it counted are what it is published under.
+	if want := fmt.Sprintf("db%d,%d", monitorRedisDB, monitorRedisDB+1); got[0].Object != want {
+		t.Errorf("object = %q, want %q", got[0].Object, want)
 	}
-	if got[0].DBType != "REDIS" {
-		t.Errorf("db_type = %q, want REDIS", got[0].DBType)
+	if got[0].Engine != "redis" {
+		t.Errorf("engine = %q, want redis", got[0].Engine)
 	}
 }
 
@@ -365,7 +387,7 @@ func emptyServers(t *testing.T, ends ...*goredis.Client) {
 // tgt_table are always empty, so the row cannot say which keys were compared,
 // and a task with two mappings produces two duplicate rows every cycle.
 func TestRedisMonitoringDuplicatesRowsPerMapping(t *testing.T) {
-	conn := useMonitoringDB(t)
+	useMonitoringDB(t)
 
 	src := openRedis(t, harness.RedisSource, monitorRedisDB)
 	tgt := openRedis(t, harness.RedisTarget, monitorRedisDB)
@@ -389,14 +411,15 @@ func TestRedisMonitoringDuplicatesRowsPerMapping(t *testing.T) {
 
 	countAndLogTables(t.Context(), sc, quietLogger())
 
-	got := readMonitoringLog(t, conn)
+	got := publishedCounts(t, 302)
 	if len(got) != 1 {
-		t.Fatalf("monitoring_log holds %d rows, want one measurement of the two "+
+		t.Fatalf("%d objects were published, want one measurement of the two "+
 			"databases: %v", len(got), got)
 	}
-	if got[0].SrcTable != "" || got[0].TgtTable != "" {
-		t.Errorf("the row names tables (%q -> %q); what is measured is each "+
-			"database's size", got[0].SrcTable, got[0].TgtTable)
+	// Not one series per mapping and not one per named key pattern: what is
+	// measured is each database's size, published under the databases counted.
+	if want := fmt.Sprintf("db%d", monitorRedisDB); got[0].Object != want {
+		t.Errorf("object = %q, want %q", got[0].Object, want)
 	}
 }
 
@@ -404,7 +427,7 @@ func TestRedisMonitoringDuplicatesRowsPerMapping(t *testing.T) {
 // write sat inside a loop over the mappings — and a mapping means nothing to a
 // Redis task, which replicates the whole keyspace.
 func TestARedisTaskWithoutMappingsIsStillMonitored(t *testing.T) {
-	conn := useMonitoringDB(t)
+	useMonitoringDB(t)
 
 	sc := config.SyncConfig{
 		ID:               303,
@@ -416,20 +439,20 @@ func TestARedisTaskWithoutMappingsIsStillMonitored(t *testing.T) {
 
 	countAndLogTables(t.Context(), sc, quietLogger())
 
-	if got := readMonitoringLog(t, conn); len(got) != 1 {
+	if got := publishedCounts(t, 303); len(got) != 1 {
 		t.Errorf("%d rows were written for a task with no mappings, want one", len(got))
 	}
 }
 
 func TestCountAndLogTablesIgnoresUnknownTypes(t *testing.T) {
-	conn := useMonitoringDB(t)
+	useMonitoringDB(t)
 
 	for _, typ := range []string{"cassandra", "", "sqlite"} {
 		sc := config.SyncConfig{ID: 401, Enable: true, Type: typ}
 		countAndLogTables(t.Context(), sc, quietLogger())
 	}
 
-	if got := readMonitoringLog(t, conn); len(got) != 0 {
+	if got := publishedCounts(t, 401); len(got) != 0 {
 		t.Errorf("%d rows were written for unknown types", len(got))
 	}
 }
@@ -437,7 +460,7 @@ func TestCountAndLogTablesIgnoresUnknownTypes(t *testing.T) {
 // T-094: countAndLogTables lower-cases the type before dispatching, unlike
 // startSyncTasks in cmd/sync, which matches case-sensitively.
 func TestTheMonitorAcceptsCasingTheSyncerRejects(t *testing.T) {
-	conn := useMonitoringDB(t)
+	useMonitoringDB(t)
 
 	table := harness.UniqueName("case")
 	src := openMySQL(t, harness.MySQLSource, sourceDB)
@@ -467,17 +490,17 @@ func TestTheMonitorAcceptsCasingTheSyncerRejects(t *testing.T) {
 
 	countAndLogTables(t.Context(), sc, quietLogger())
 
-	got := readMonitoringLog(t, conn)
+	got := publishedCounts(t, 402)
 	if len(got) != 1 {
 		t.Fatalf("the monitor wrote %d rows for type %q — the two dispatchers appear to agree now", len(got), sc.Type)
 	}
-	if got[0].DBType != "MYSQL" {
-		t.Errorf("db_type = %q, want MYSQL", got[0].DBType)
+	if got[0].Engine != "mysql" {
+		t.Errorf("engine = %q, want mysql", got[0].Engine)
 	}
 }
 
-func TestStartRowCountMonitoringWritesOnEachTick(t *testing.T) {
-	conn := useMonitoringDB(t)
+func TestStartRowCountMonitoringMeasuresOnEachTick(t *testing.T) {
+	useMonitoringDB(t)
 
 	table := harness.UniqueName("loop")
 	src := openMySQL(t, harness.MySQLSource, sourceDB)
@@ -514,15 +537,28 @@ func TestStartRowCountMonitoringWritesOnEachTick(t *testing.T) {
 	StartRowCountMonitoring(ctx, cfg, quietLogger(), 300*time.Millisecond,
 		func() []config.SyncConfig { return cfg.SyncConfigs })
 
+	// The second pass is what is being tested, and a gauge does not accumulate:
+	// what moves between passes is the time the measurement was taken.
+	var first float64
 	harness.Eventually(t, 5*time.Second, func() error {
-		if n := len(readMonitoringLog(t, conn)); n < 2 {
-			return fmt.Errorf("only %d rows so far", n)
+		first = measuredAt(t, 501)
+		if first == 0 {
+			return fmt.Errorf("no measurement yet")
+		}
+		return nil
+	})
+	harness.Eventually(t, 5*time.Second, func() error {
+		if measuredAt(t, 501) <= first {
+			return fmt.Errorf("still the measurement taken at %v", first)
 		}
 		return nil
 	})
 	cancel()
 
-	for _, r := range readMonitoringLog(t, conn) {
+	if len(publishedCounts(t, 502)) != 0 {
+		t.Fatal("a disabled task was monitored")
+	}
+	for _, r := range publishedCounts(t, 501) {
 		if r.TaskID != 501 {
 			t.Fatalf("a disabled task was monitored: %+v", r)
 		}
@@ -530,7 +566,7 @@ func TestStartRowCountMonitoringWritesOnEachTick(t *testing.T) {
 }
 
 func TestStartRowCountMonitoringStopsOnCancel(t *testing.T) {
-	conn := useMonitoringDB(t)
+	useMonitoringDB(t)
 
 	sc := config.SyncConfig{
 		ID:               601,
@@ -549,7 +585,7 @@ func TestStartRowCountMonitoringStopsOnCancel(t *testing.T) {
 		func() []config.SyncConfig { return []config.SyncConfig{sc} })
 
 	harness.Eventually(t, 5*time.Second, func() error {
-		if len(readMonitoringLog(t, conn)) == 0 {
+		if len(publishedCounts(t, 601)) == 0 {
 			return fmt.Errorf("nothing written yet")
 		}
 		return nil
@@ -557,11 +593,11 @@ func TestStartRowCountMonitoringStopsOnCancel(t *testing.T) {
 
 	cancel()
 	time.Sleep(600 * time.Millisecond) // two tick intervals
-	before := len(readMonitoringLog(t, conn))
+	before := measuredAt(t, 601)
 	time.Sleep(600 * time.Millisecond)
 
-	if after := len(readMonitoringLog(t, conn)); after != before {
-		t.Errorf("rows grew from %d to %d after cancellation", before, after)
+	if after := measuredAt(t, 601); after != before {
+		t.Errorf("a measurement was taken at %v, after cancellation at %v", after, before)
 	}
 }
 
@@ -569,7 +605,7 @@ func TestStartRowCountMonitoringStopsOnCancel(t *testing.T) {
 // recorded before it, so with the production interval such a process produced
 // no measurement at all — and a restart is exactly when somebody wants one.
 func TestAMeasurementIsTakenAtStartup(t *testing.T) {
-	conn := useMonitoringDB(t)
+	useMonitoringDB(t)
 
 	sc := config.SyncConfig{
 		ID:               701,
@@ -589,7 +625,7 @@ func TestAMeasurementIsTakenAtStartup(t *testing.T) {
 		func() []config.SyncConfig { return []config.SyncConfig{sc} })
 
 	harness.Eventually(t, 5*time.Second, func() error {
-		if n := len(readMonitoringLog(t, conn)); n == 0 {
+		if n := len(publishedCounts(t, 701)); n == 0 {
 			return fmt.Errorf("no measurement was taken before the first tick, an hour away")
 		}
 		return nil
@@ -629,7 +665,7 @@ func openPostgres(t *testing.T, endpoint, database string) *sql.DB {
 // had no test against a server at all — it is the number an operator reads to
 // decide whether the copy is complete, and a wrong one reads as a healthy match.
 func TestCountAndLogPostgreSQLRecordsBothSides(t *testing.T) {
-	conn := useMonitoringDB(t)
+	useMonitoringDB(t)
 
 	table := harness.UniqueName("pgmon")
 	src := openPostgres(t, harness.PostgresSource, sourceDB)
@@ -655,7 +691,7 @@ func TestCountAndLogPostgreSQLRecordsBothSides(t *testing.T) {
 	}
 
 	sc := config.SyncConfig{
-		ID:               401,
+		ID:               411,
 		Enable:           true,
 		Type:             "postgresql",
 		SourceConnection: postgresDSN(harness.PostgresSource, sourceDB),
@@ -667,12 +703,12 @@ func TestCountAndLogPostgreSQLRecordsBothSides(t *testing.T) {
 
 	countAndLogTables(t.Context(), sc, quietLogger())
 
-	got := readMonitoringLog(t, conn)
+	got := publishedCounts(t, 411)
 	if len(got) != 1 {
-		t.Fatalf("monitoring_log holds %d rows, want 1: %+v", len(got), got)
+		t.Fatalf("%d objects were published, want 1: %+v", len(got), got)
 	}
 	r := got[0]
-	if r.TaskID != 401 || r.DBType != "POSTGRESQL" {
+	if r.TaskID != 411 || r.Engine != "postgresql" {
 		t.Errorf("row = %+v", r)
 	}
 	if r.SrcCount != 3 || r.TgtCount != 2 {
@@ -684,10 +720,10 @@ func TestCountAndLogPostgreSQLRecordsBothSides(t *testing.T) {
 // the configuration but absent from the database is stored as the -1 sentinel
 // rather than as zero, which would read as an empty table that is in sync.
 func TestAMissingPostgreSQLTableIsRecordedAsMinusOne(t *testing.T) {
-	conn := useMonitoringDB(t)
+	useMonitoringDB(t)
 
 	sc := config.SyncConfig{
-		ID:               402,
+		ID:               412,
 		Enable:           true,
 		Type:             "postgresql",
 		SourceConnection: postgresDSN(harness.PostgresSource, sourceDB),
@@ -702,9 +738,9 @@ func TestAMissingPostgreSQLTableIsRecordedAsMinusOne(t *testing.T) {
 
 	countAndLogTables(t.Context(), sc, quietLogger())
 
-	got := readMonitoringLog(t, conn)
+	got := publishedCounts(t, 412)
 	if len(got) != 1 {
-		t.Fatalf("monitoring_log holds %d rows, want 1: %+v", len(got), got)
+		t.Fatalf("%d objects were published, want 1: %+v", len(got), got)
 	}
 	if got[0].SrcCount != -1 || got[0].TgtCount != -1 {
 		t.Errorf("counts = %d -> %d, want -1 -> -1", got[0].SrcCount, got[0].TgtCount)
@@ -714,10 +750,10 @@ func TestAMissingPostgreSQLTableIsRecordedAsMinusOne(t *testing.T) {
 // TestAnUnreachablePostgreSQLSourceIsReported records that a source that cannot
 // be reached writes nothing rather than a row of zeroes.
 func TestAnUnreachablePostgreSQLSourceIsReported(t *testing.T) {
-	conn := useMonitoringDB(t)
+	useMonitoringDB(t)
 
 	sc := config.SyncConfig{
-		ID:               403,
+		ID:               413,
 		Enable:           true,
 		Type:             "postgresql",
 		SourceConnection: postgresDSN("127.0.0.1:1", sourceDB),
@@ -729,8 +765,8 @@ func TestAnUnreachablePostgreSQLSourceIsReported(t *testing.T) {
 
 	countAndLogTables(t.Context(), sc, quietLogger())
 
-	if got := readMonitoringLog(t, conn); len(got) != 0 {
-		t.Errorf("monitoring_log holds %d rows for a source that was never reached: %+v", len(got), got)
+	if got := publishedCounts(t, 413); len(got) != 0 {
+		t.Errorf("%d objects were published for a source that was never reached: %+v", len(got), got)
 	}
 }
 

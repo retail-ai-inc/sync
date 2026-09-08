@@ -62,10 +62,6 @@ func CountAndLogMySQLOrMariaDB(ctx context.Context, sc config.SyncConfig, log *l
 		return
 	}
 
-	// One open for the pass, not one per table.
-	record := openMonitoringLog()
-	defer record.close()
-
 	for _, pair := range pairs {
 		srcName, tgtName := pair.Source, pair.Target
 
@@ -87,6 +83,6 @@ func CountAndLogMySQLOrMariaDB(ctx context.Context, sc config.SyncConfig, log *l
 			"monitor_action": action,
 		}).Info(action)
 
-		record.write(sc.ID, dbType, srcDBName, srcName, srcCount, tgtDBName, tgtName, tgtCount, action)
+		publishRowCounts(sc.ID, dbType, srcDBName, srcName, srcCount, tgtCount, action)
 	}
 }

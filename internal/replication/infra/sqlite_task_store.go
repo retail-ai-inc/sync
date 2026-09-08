@@ -165,14 +165,6 @@ func DeleteTask(id string) error {
 	if ra, _ := res.RowsAffected(); ra == 0 {
 		return ErrNoSuchTask
 	}
-
-	// The task's monitoring history goes with it. There is no foreign key and no
-	// cascade, so those rows used to stay for good, pointing at an id that names
-	// nothing — and monitoring_log is the table that grows without bound.
-	if _, err := db.Exec(`DELETE FROM monitoring_log WHERE sync_task_id=?`, id); err != nil {
-		logrus.Warnf("[Store] Task %s was deleted but its monitoring history could "+
-			"not be: %v", id, err)
-	}
 	return nil
 }
 

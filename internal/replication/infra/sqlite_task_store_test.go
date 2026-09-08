@@ -272,26 +272,6 @@ func TestDeleteTaskReportsAMissingTable(t *testing.T) {
 	}
 }
 
-// There is no foreign key and no cascade, so the monitoring log kept entries
-// for task ids nothing could resolve — in the table that grows without bound.
-func TestDeletingATaskRemovesItsMonitoringLog(t *testing.T) {
-	db := useTempTaskDB(t)
-	id := insertTask(t, db, 1, `{}`)
-	insertMonitoringRow(t, db, int(id), "2026-08-21 01:00:00", "orders", 10, 10)
-
-	if err := DeleteTask(itoa(id)); err != nil {
-		t.Fatalf("DeleteTask: %v", err)
-	}
-
-	var count int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM monitoring_log WHERE sync_task_id=?`, id).Scan(&count); err != nil {
-		t.Fatalf("count: %v", err)
-	}
-	if count != 0 {
-		t.Errorf("%d monitoring rows are left for a task that no longer exists", count)
-	}
-}
-
 func TestSetEnableFlipsBothTheColumnAndTheDocument(t *testing.T) {
 	db := useTempTaskDB(t)
 	id := insertTask(t, db, 0, `{"taskName":"orders","status":"Stopped"}`)

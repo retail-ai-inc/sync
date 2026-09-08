@@ -14,9 +14,6 @@ import (
 // control database themselves. Reading is this layer's job, and having it here
 // is what lets the endpoints be about the request and the shape of the answer.
 
-// The stored time format, which has no zone.
-const storedTimeFormat = "2006-01-02 15:04:05"
-
 // ErrNoTask reports that a task id names no row, which the monitor endpoint
 // answers differently from a failure to read.
 var ErrNoTask = errors.New("no such task")

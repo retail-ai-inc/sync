@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -17,6 +18,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/retail-ai-inc/sync/internal/platform/config"
+	"github.com/retail-ai-inc/sync/internal/platform/metrics"
 	"github.com/retail-ai-inc/sync/test/harness"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -96,37 +98,47 @@ func clusterAddrs(t *testing.T, variable string) []string {
 	return strings.Split(value, ",")
 }
 
-// The counters report by logging and by writing a monitoring_log row, so both
-// are checked: a counter that logged the comparison and stored nothing left
-// the dashboard empty while the log said it had run.
+// The counters report by logging and by publishing the pair to the scraper, so
+// both are checked: a counter that logged the comparison and published nothing
+// left the dashboard empty while the log said it had run.
 
 type countedRow struct {
+	Object         string
 	Source, Target int64
-	Action         string
 }
 
-func loggedRows(t *testing.T, db *sql.DB) []countedRow {
+// publishedRows reads back what one task published, one row per object. The
+// registry is process-wide and each of these tests uses a task id of its own,
+// which is what keeps them from reading each other's.
+func publishedRows(t *testing.T, taskID int) []countedRow {
 	t.Helper()
-	rows, err := db.Query(
-		`SELECT src_row_count, tgt_row_count, monitor_action FROM monitoring_log ORDER BY id`)
-	if err != nil {
-		t.Fatalf("read monitoring_log: %v", err)
+
+	task := strconv.Itoa(taskID)
+	targets := map[string]int64{}
+	for _, sample := range metrics.RowCounts.Snapshot(metrics.TargetRows) {
+		if sample.Labels["task"] == task {
+			targets[sample.Labels["object"]] = int64(sample.Value)
+		}
 	}
-	defer rows.Close()
 
 	var out []countedRow
-	for rows.Next() {
-		var row countedRow
-		if err := rows.Scan(&row.Source, &row.Target, &row.Action); err != nil {
-			t.Fatalf("scan: %v", err)
+	for _, sample := range metrics.RowCounts.Snapshot(metrics.SourceRows) {
+		if sample.Labels["task"] != task {
+			continue
 		}
-		out = append(out, row)
+		object := sample.Labels["object"]
+		out = append(out, countedRow{
+			Object: object,
+			Source: int64(sample.Value),
+			Target: targets[object],
+		})
 	}
+	slices.SortFunc(out, func(a, b countedRow) int { return strings.Compare(a.Object, b.Object) })
 	return out
 }
 
 func TestTheRedisCounterComparesTheTwoDatabaseSizes(t *testing.T) {
-	control := useMonitoringDB(t)
+	useMonitoringDB(t)
 	logger, out := captureLog()
 
 	source := goredis.NewClient(&goredis.Options{Addr: harness.RedisSource})
@@ -143,7 +155,7 @@ func TestTheRedisCounterComparesTheTwoDatabaseSizes(t *testing.T) {
 		TargetConnection: "redis://" + harness.RedisTarget + "/0",
 	}, logger)
 
-	rows := loggedRows(t, control)
+	rows := publishedRows(t, 9201)
 	// One row whatever the mappings say, because what is measured is the size
 	// of each database rather than any one mapping.
 	if len(rows) != 1 {
@@ -164,7 +176,7 @@ func TestTheRedisCounterComparesTheTwoDatabaseSizes(t *testing.T) {
 // all. Writing no row left the dashboard showing the last successful
 // comparison, so an unreachable target looked the same as a matching one.
 func TestAnUnreachableTargetIsRecordedAsMinusOne(t *testing.T) {
-	control := useMonitoringDB(t)
+	useMonitoringDB(t)
 	logger, out := captureLog()
 
 	CountAndLogRedis(briefCtx(t), config.SyncConfig{
@@ -173,7 +185,7 @@ func TestAnUnreachableTargetIsRecordedAsMinusOne(t *testing.T) {
 		TargetConnection: "redis://127.0.0.1:1/0",
 	}, logger)
 
-	rows := loggedRows(t, control)
+	rows := publishedRows(t, 9202)
 	if len(rows) != 1 {
 		t.Fatalf("an unreachable target wrote %d rows, want 1", len(rows))
 	}
@@ -185,8 +197,8 @@ func TestAnUnreachableTargetIsRecordedAsMinusOne(t *testing.T) {
 	if rows[0].Source < 0 {
 		t.Errorf("the reachable source was recorded as %d", rows[0].Source)
 	}
-	if rows[0].Action != actionCountFailed {
-		t.Errorf("the row is marked %q, want %q", rows[0].Action, actionCountFailed)
+	if !strings.Contains(out.String(), actionCountFailed) {
+		t.Errorf("the comparison is not logged as %q: %s", actionCountFailed, out.String())
 	}
 	if !strings.Contains(out.String(), "Fail to connect to target Redis") {
 		t.Error("nothing in the log says the target could not be reached")
@@ -196,7 +208,7 @@ func TestAnUnreachableTargetIsRecordedAsMinusOne(t *testing.T) {
 // Both ends gone is still one row, so a task whose whole comparison stopped
 // working is visible rather than absent.
 func TestBothEndsUnreachableStillWritesARow(t *testing.T) {
-	control := useMonitoringDB(t)
+	useMonitoringDB(t)
 	logger, _ := captureLog()
 
 	CountAndLogRedis(briefCtx(t), config.SyncConfig{
@@ -205,7 +217,7 @@ func TestBothEndsUnreachableStillWritesARow(t *testing.T) {
 		TargetConnection: "redis://127.0.0.1:2/0",
 	}, logger)
 
-	rows := loggedRows(t, control)
+	rows := publishedRows(t, 9205)
 	if len(rows) != 1 {
 		t.Fatalf("two unreachable ends wrote %d rows, want 1", len(rows))
 	}
@@ -215,7 +227,7 @@ func TestBothEndsUnreachableStillWritesARow(t *testing.T) {
 }
 
 func TestTheMySQLCounterComparesRealTables(t *testing.T) {
-	control := useMonitoringDB(t)
+	useMonitoringDB(t)
 	logger, _ := captureLog()
 
 	table := strings.ReplaceAll(harness.UniqueName("counted"), "-", "_")
@@ -233,7 +245,7 @@ func TestTheMySQLCounterComparesRealTables(t *testing.T) {
 		}},
 	}, logger)
 
-	rows := loggedRows(t, control)
+	rows := publishedRows(t, 9203)
 	if len(rows) != 1 {
 		t.Fatalf("the counter wrote %d rows, want 1", len(rows))
 	}
@@ -243,7 +255,7 @@ func TestTheMySQLCounterComparesRealTables(t *testing.T) {
 }
 
 func TestThePostgresCounterComparesRealTables(t *testing.T) {
-	control := useMonitoringDB(t)
+	useMonitoringDB(t)
 	logger, _ := captureLog()
 
 	table := strings.ReplaceAll(harness.UniqueName("counted"), "-", "_")
@@ -261,7 +273,7 @@ func TestThePostgresCounterComparesRealTables(t *testing.T) {
 		}},
 	}, logger)
 
-	rows := loggedRows(t, control)
+	rows := publishedRows(t, 9204)
 	if len(rows) != 1 {
 		t.Fatalf("the counter wrote %d rows, want 1", len(rows))
 	}
@@ -355,7 +367,7 @@ func TestKeyCountAddsUpEveryDatabaseOfAStandaloneServer(t *testing.T) {
 // over the configured mappings -- so they compared nothing and wrote no row at
 // all. The row-count panel was empty for those tasks since they were created.
 func TestAWholeDatabaseMySQLTaskIsStillCounted(t *testing.T) {
-	control := useMonitoringDB(t)
+	useMonitoringDB(t)
 	logger, _ := captureLog()
 
 	first := strings.ReplaceAll(harness.UniqueName("whole_a"), "-", "_")
@@ -373,7 +385,7 @@ func TestAWholeDatabaseMySQLTaskIsStillCounted(t *testing.T) {
 		SourceConnection: sourceDSN, TargetConnection: targetDSN,
 	}, logger)
 
-	rows := loggedRows(t, control)
+	rows := publishedRows(t, 9206)
 	if len(rows) == 0 {
 		t.Fatal("a whole-database task wrote no rows at all")
 	}
@@ -392,7 +404,7 @@ func TestAWholeDatabaseMySQLTaskIsStillCounted(t *testing.T) {
 }
 
 func TestAWholeDatabaseMongoTaskIsStillCounted(t *testing.T) {
-	control := useMonitoringDB(t)
+	useMonitoringDB(t)
 	logger, _ := captureLog()
 
 	database := harness.UniqueName("wholedb")
@@ -407,7 +419,7 @@ func TestAWholeDatabaseMongoTaskIsStillCounted(t *testing.T) {
 		TargetConnection: mongoTestURI(t, harness.MongoTarget, database),
 	}, logger)
 
-	rows := loggedRows(t, control)
+	rows := publishedRows(t, 9207)
 	if len(rows) < 2 {
 		t.Fatalf("a whole-database task wrote %d rows, want one per collection", len(rows))
 	}
@@ -419,7 +431,7 @@ func TestAWholeDatabaseMongoTaskIsStillCounted(t *testing.T) {
 }
 
 func TestAWholeSchemaPostgresTaskIsStillCounted(t *testing.T) {
-	control := useMonitoringDB(t)
+	useMonitoringDB(t)
 	logger, _ := captureLog()
 
 	table := strings.ReplaceAll(harness.UniqueName("whole_pg"), "-", "_")
@@ -433,7 +445,7 @@ func TestAWholeSchemaPostgresTaskIsStillCounted(t *testing.T) {
 		SourceConnection: sourceDSN, TargetConnection: targetDSN,
 	}, logger)
 
-	rows := loggedRows(t, control)
+	rows := publishedRows(t, 9208)
 	if len(rows) == 0 {
 		t.Fatal("a whole-schema task wrote no rows at all")
 	}
@@ -464,10 +476,10 @@ func TestPostgresPairsStayWithTheirOwnMapping(t *testing.T) {
 	}
 }
 
-// One open for a pass, not one per table. A task replicating a whole database
-// compares every table it holds, so this was a hundred opens a minute.
-func TestAPassOpensTheControlDatabaseOnce(t *testing.T) {
-	control := useMonitoringDB(t)
+// Every table in a pass is reported, not just the first: a task replicating a
+// whole database compares every table it holds.
+func TestEveryTableOfAPassIsReported(t *testing.T) {
+	useMonitoringDB(t)
 	logger, _ := captureLog()
 
 	first := strings.ReplaceAll(harness.UniqueName("once_a"), "-", "_")
@@ -487,8 +499,7 @@ func TestAPassOpensTheControlDatabaseOnce(t *testing.T) {
 		}}},
 	}, logger)
 
-	// Both rows land: holding the handle open must not lose any of them.
-	rows := loggedRows(t, control)
+	rows := publishedRows(t, 9209)
 	if len(rows) != 2 {
 		t.Fatalf("a two-table pass wrote %d rows, want 2", len(rows))
 	}

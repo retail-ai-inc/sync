@@ -87,8 +87,7 @@ func CountAndLogRedis(ctx context.Context, sc config.SyncConfig, log *logrus.Log
 		"monitor_action": action,
 	}).Info(action)
 
-	// Insert into database monitoring_log with sync_task_id
-	storeMonitoringLog(sc.ID, dbType, srcDBName, "", srcCount, tgtDBName, "", tgtCount, action)
+	publishRowCounts(sc.ID, dbType, srcDBName, "", srcCount, tgtCount, action)
 }
 
 // keyCount reports how many keys an instance holds, and which databases they

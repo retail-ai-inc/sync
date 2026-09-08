@@ -15,13 +15,12 @@ import (
 // what says who changed them.
 
 type settingsBody struct {
-	VerifyIntervalSeconds   int64   `json:"verifyIntervalSeconds"`
-	VerifyRepair            bool    `json:"verifyRepair"`
-	LagAlertSeconds         float64 `json:"lagAlertSeconds"`
-	MonitoringRetentionDays int     `json:"monitoringRetentionDays"`
-	BatchMaxEvents          int     `json:"batchMaxEvents"`
-	BatchMaxBytes           int     `json:"batchMaxBytes"`
-	MongoNoTransaction      bool    `json:"mongoNoTransaction"`
+	VerifyIntervalSeconds int64   `json:"verifyIntervalSeconds"`
+	VerifyRepair          bool    `json:"verifyRepair"`
+	LagAlertSeconds       float64 `json:"lagAlertSeconds"`
+	BatchMaxEvents        int     `json:"batchMaxEvents"`
+	BatchMaxBytes         int     `json:"batchMaxBytes"`
+	MongoNoTransaction    bool    `json:"mongoNoTransaction"`
 
 	QueueMaxEvents         int   `json:"queueMaxEvents"`
 	QueueMaxBytes          int   `json:"queueMaxBytes"`
@@ -45,7 +44,6 @@ func bodyOf(s config.Settings) settingsBody {
 		VerifyIntervalSeconds:    int64(s.VerifyInterval / time.Second),
 		VerifyRepair:             s.VerifyRepair,
 		LagAlertSeconds:          s.LagAlertSeconds,
-		MonitoringRetentionDays:  s.MonitoringRetentionDays,
 		BatchMaxEvents:           s.BatchMaxEvents,
 		BatchMaxBytes:            s.BatchMaxBytes,
 		MongoNoTransaction:       s.MongoNoTransaction,
@@ -66,7 +64,6 @@ func settingsOf(b settingsBody) config.Settings {
 		VerifyInterval:           time.Duration(b.VerifyIntervalSeconds) * time.Second,
 		VerifyRepair:             b.VerifyRepair,
 		LagAlertSeconds:          b.LagAlertSeconds,
-		MonitoringRetentionDays:  b.MonitoringRetentionDays,
 		BatchMaxEvents:           b.BatchMaxEvents,
 		BatchMaxBytes:            b.BatchMaxBytes,
 		MongoNoTransaction:       b.MongoNoTransaction,
@@ -155,8 +152,6 @@ func refuse(b settingsBody) string {
 		return "verifyIntervalSeconds cannot be negative; 0 turns the check off"
 	case b.LagAlertSeconds < 0:
 		return "lagAlertSeconds cannot be negative; 0 turns the alert off"
-	case b.MonitoringRetentionDays < 0:
-		return "monitoringRetentionDays cannot be negative; 0 keeps the default"
 	case b.BatchMaxEvents < 0:
 		return "batchMaxEvents cannot be negative; 0 keeps the default"
 	case b.BatchMaxBytes < 0:

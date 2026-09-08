@@ -17,8 +17,8 @@ import (
 )
 
 // useMonitoringDB points the package at a throwaway SQLite file carrying the
-// monitoring_log and changestream_statistics schemas, so the writers can be
-// exercised without touching the database tracked in this repository.
+// changestream_statistics schema, so the writers can be exercised without
+// touching the database tracked in this repository.
 func useMonitoringDB(t *testing.T) *sql.DB {
 	t.Helper()
 
@@ -80,11 +80,12 @@ func countRows(t *testing.T, conn *sql.DB, table string) int {
 
 func TestGetRowCountWithContext(t *testing.T) {
 	conn := useMonitoringDB(t)
-	if _, err := conn.Exec(`INSERT INTO monitoring_log (db_type) VALUES ('mysql'), ('mongodb')`); err != nil {
+	if _, err := conn.Exec(`INSERT INTO changestream_statistics (task_id, collection_name)
+		VALUES (1, 'db.orders'), (1, 'db.items')`); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
-	got, err := getRowCountWithContext(t.Context(), conn, "monitoring_log")
+	got, err := getRowCountWithContext(t.Context(), conn, "changestream_statistics")
 	if err != nil {
 		t.Fatalf("getRowCountWithContext: %v", err)
 	}
@@ -92,7 +93,7 @@ func TestGetRowCountWithContext(t *testing.T) {
 		t.Errorf("getRowCountWithContext = %d, want 2", got)
 	}
 
-	got, err = getRowCountWithContext(t.Context(), conn, "changestream_statistics")
+	got, err = getRowCountWithContext(t.Context(), conn, "audit_log")
 	if err != nil {
 		t.Fatalf("getRowCountWithContext: %v", err)
 	}
@@ -114,17 +115,16 @@ func TestAFailureToCountIsNotACount(t *testing.T) {
 
 	cancelled, cancelNow := context.WithCancel(t.Context())
 	cancelNow()
-	if _, err := getRowCountWithContext(cancelled, conn, "monitoring_log"); err == nil {
+	if _, err := getRowCountWithContext(cancelled, conn, "changestream_statistics"); err == nil {
 		t.Error("counting with a cancelled context reported no error")
 	}
 }
 
-// A row is still written — writing nothing would leave the last good numbers
-// looking current — but under an action that says the counts were not taken,
-// so -1 is no longer something a reader has to guess about.
-func TestAFailedMeasurementIsRecordedAsOne(t *testing.T) {
-	conn := useMonitoringDB(t)
-
+// A failed measurement is reported under an action of its own — the counts are
+// still published, so the dashboard does not go on showing the last good
+// figures as though they were current, but -1 is no longer something a reader
+// has to guess about.
+func TestAFailedMeasurementIsMarkedAsOne(t *testing.T) {
 	if got := rowCountAction(true, true); got != actionRowCount {
 		t.Errorf("action for two good counts = %q, want %q", got, actionRowCount)
 	}
@@ -138,16 +138,13 @@ func TestAFailedMeasurementIsRecordedAsOne(t *testing.T) {
 		}
 	}
 
-	storeMonitoringLog(7, "mysql", "src", "orders", -1, "tgt", "orders", -1, actionCountFailed)
+	labels := metrics.Labels{"task": "7", "engine": "mysql", "object": "orders"}
+	t.Cleanup(func() { metrics.ForgetRowCounts(labels) })
+	publishRowCounts(7, "mysql", "src", "orders", -1, -1, actionCountFailed)
 
-	var action string
-	if err := conn.QueryRow(
-		`SELECT monitor_action FROM monitoring_log WHERE sync_task_id = 7`,
-	).Scan(&action); err != nil {
-		t.Fatalf("read back: %v", err)
-	}
-	if action != actionCountFailed {
-		t.Errorf("stored action = %q, want %q", action, actionCountFailed)
+	if !published(t, labels) {
+		t.Error("a failed measurement was not published, so the last good figures " +
+			"stay on the dashboard looking current")
 	}
 }
 
@@ -155,14 +152,15 @@ func TestAFailedMeasurementIsRecordedAsOne(t *testing.T) {
 // unchecked, and it runs against both the source and the target.
 func TestATableNameThatIsNotOneIsRefused(t *testing.T) {
 	conn := useMonitoringDB(t)
-	if _, err := conn.Exec(`INSERT INTO monitoring_log (db_type) VALUES ('a'), ('b'), ('c')`); err != nil {
+	if _, err := conn.Exec(`INSERT INTO changestream_statistics (task_id, collection_name)
+		VALUES (1, 'a'), (1, 'b'), (1, 'c')`); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
 	for _, name := range []string{
-		"monitoring_log WHERE db_type = 'a'",
-		"monitoring_log; DROP TABLE monitoring_log",
-		`monitoring_log"`,
+		"changestream_statistics WHERE task_id = 1",
+		"changestream_statistics; DROP TABLE changestream_statistics",
+		`changestream_statistics"`,
 		"",
 		"a.b.c",
 	} {
@@ -172,65 +170,9 @@ func TestATableNameThatIsNotOneIsRefused(t *testing.T) {
 	}
 
 	// A qualified name is still a name.
-	if _, err := getRowCountWithContext(t.Context(), conn, "main.monitoring_log"); err != nil {
+	if _, err := getRowCountWithContext(t.Context(), conn, "main.changestream_statistics"); err != nil {
 		t.Errorf("a schema-qualified name was refused: %v", err)
 	}
-}
-
-func TestStoreMonitoringLogWritesEveryColumn(t *testing.T) {
-	conn := useMonitoringDB(t)
-
-	storeMonitoringLog(42, "mysql", "source_db", "orders", 1200, "target_db", "orders", 1199, "row_count_minutely")
-
-	var (
-		taskID                int
-		dbType, srcDB, srcTbl string
-		srcCount              int64
-		tgtDB, tgtTbl, action string
-		tgtCount              int64
-		loggedAt              time.Time
-	)
-	err := conn.QueryRow(`
-		SELECT sync_task_id, db_type, src_db, src_table, src_row_count,
-		       tgt_db, tgt_table, tgt_row_count, monitor_action, logged_at
-		FROM monitoring_log`).Scan(&taskID, &dbType, &srcDB, &srcTbl, &srcCount,
-		&tgtDB, &tgtTbl, &tgtCount, &action, &loggedAt)
-	if err != nil {
-		t.Fatalf("read back: %v", err)
-	}
-
-	if taskID != 42 || dbType != "mysql" || srcDB != "source_db" || srcTbl != "orders" ||
-		srcCount != 1200 || tgtDB != "target_db" || tgtTbl != "orders" || tgtCount != 1199 ||
-		action != "row_count_minutely" {
-		t.Errorf("row = %d %q %q.%q(%d) -> %q.%q(%d) %q",
-			taskID, dbType, srcDB, srcTbl, srcCount, tgtDB, tgtTbl, tgtCount, action)
-	}
-	// The driver converts DATETIME columns to time.Time, so this is what a
-	// reader actually gets back.
-	if d := time.Since(loggedAt); d < -2*time.Second || d > 2*time.Second {
-		t.Errorf("logged_at = %v, %v away from now", loggedAt, d)
-	}
-}
-
-func TestStoreMonitoringLogAppends(t *testing.T) {
-	conn := useMonitoringDB(t)
-
-	for i := 0; i < 3; i++ {
-		storeMonitoringLog(1, "mongodb", "s", "c", int64(i), "t", "c", int64(i), "row_count_minutely")
-	}
-
-	if got := countRows(t, conn, "monitoring_log"); got != 3 {
-		t.Errorf("monitoring_log holds %d rows, want 3", got)
-	}
-}
-
-// storeMonitoringLog returns nothing and swallows every failure into a log line,
-// so a missing table is invisible to the caller.
-func TestStoreMonitoringLogSwallowsAMissingTable(t *testing.T) {
-	emptyDB(t)
-
-	// No panic, no error, no way for the caller to notice.
-	storeMonitoringLog(1, "mysql", "s", "orders", 10, "t", "orders", 10, "row_count_minutely")
 }
 
 func TestStoreChangeStreamStatisticsUpserts(t *testing.T) {

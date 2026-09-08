@@ -24,20 +24,19 @@ func TestSettingsRoundTripThroughTheControlDatabase(t *testing.T) {
 	useSettingsDB(t)
 
 	want := Settings{
-		VerifyInterval:          90 * time.Minute,
-		VerifyRepair:            true,
-		LagAlertSeconds:         45,
-		MonitoringRetentionDays: 14,
-		BatchMaxEvents:          321,
-		BatchMaxBytes:           4 << 20,
-		MongoNoTransaction:      true,
-		QueueMaxEvents:          2048,
-		QueueMaxBytes:           64 << 20,
-		SnapshotQueueMaxEvents:  512,
-		FlushInterval:           250 * time.Millisecond,
-		CopyBatchRows:           750,
-		MongoStreamAwait:        150 * time.Millisecond,
-		MongoWholeDocuments:     true,
+		VerifyInterval:         90 * time.Minute,
+		VerifyRepair:           true,
+		LagAlertSeconds:        45,
+		BatchMaxEvents:         321,
+		BatchMaxBytes:          4 << 20,
+		MongoNoTransaction:     true,
+		QueueMaxEvents:         2048,
+		QueueMaxBytes:          64 << 20,
+		SnapshotQueueMaxEvents: 512,
+		FlushInterval:          250 * time.Millisecond,
+		CopyBatchRows:          750,
+		MongoStreamAwait:       150 * time.Millisecond,
+		MongoWholeDocuments:    true,
 		// The one that is on unless it is turned off, written here as off so
 		// that the round trip is carrying a value and not a default.
 		RecopyOnUnusablePosition: false,

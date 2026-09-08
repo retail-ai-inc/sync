@@ -33,8 +33,6 @@ type Settings struct {
 	// LagAlertSeconds is how far behind a task may be before it is reported.
 	// Zero leaves the alert off.
 	LagAlertSeconds float64 `json:"lagAlertSeconds"`
-	// MonitoringRetentionDays is how long monitoring_log rows are kept.
-	MonitoringRetentionDays int `json:"monitoringRetentionDays"`
 	// BatchMaxEvents and BatchMaxBytes bound one batch. The byte bound is what
 	// keeps a batch of large rows from being unbounded memory.
 	BatchMaxEvents int `json:"batchMaxEvents"`
@@ -83,7 +81,7 @@ type Settings struct {
 
 // settingColumns is the order the columns are read and written in.
 const settingColumns = `verify_interval_seconds, verify_repair, lag_alert_seconds,
-	monitoring_retention_days, batch_max_events, batch_max_bytes, mongo_no_transaction,
+	batch_max_events, batch_max_bytes, mongo_no_transaction,
 	queue_max_events, queue_max_bytes, snapshot_queue_max_events, flush_interval_ms,
 	copy_batch_rows, mongo_stream_await_ms, mongo_whole_documents,
 	recopy_on_unusable_position, redis_buffer_max_bytes`
@@ -105,7 +103,6 @@ func LoadSettings() (Settings, error) {
 		s             Settings
 		interval, lag int64
 		repair, noTx  int
-		retention     int
 		events, bytes int
 
 		queueEvents, queueBytes int
@@ -116,7 +113,7 @@ func LoadSettings() (Settings, error) {
 		redisBuffer             int64
 	)
 	err = db.QueryRow(`SELECT `+settingColumns+` FROM config_global WHERE id = 1`).
-		Scan(&interval, &repair, &lag, &retention, &events, &bytes, &noTx,
+		Scan(&interval, &repair, &lag, &events, &bytes, &noTx,
 			&queueEvents, &queueBytes, &snapshotEvents, &flushMS, &copyRows, &awaitMS,
 			&wholeDocuments, &recopy, &redisBuffer)
 	if err != nil {
@@ -126,7 +123,6 @@ func LoadSettings() (Settings, error) {
 	s.VerifyInterval = time.Duration(interval) * time.Second
 	s.VerifyRepair = repair != 0
 	s.LagAlertSeconds = float64(lag)
-	s.MonitoringRetentionDays = retention
 	s.BatchMaxEvents = events
 	s.BatchMaxBytes = bytes
 	s.MongoNoTransaction = noTx != 0
@@ -152,15 +148,15 @@ func SaveSettings(s Settings) error {
 
 	_, err = db.Exec(`UPDATE config_global SET
 		verify_interval_seconds = ?, verify_repair = ?, lag_alert_seconds = ?,
-		monitoring_retention_days = ?, batch_max_events = ?, batch_max_bytes = ?,
+		batch_max_events = ?, batch_max_bytes = ?,
 		mongo_no_transaction = ?, queue_max_events = ?, queue_max_bytes = ?,
 		snapshot_queue_max_events = ?, flush_interval_ms = ?, copy_batch_rows = ?,
 		mongo_stream_await_ms = ?, mongo_whole_documents = ?,
 		recopy_on_unusable_position = ?, redis_buffer_max_bytes = ?
 		WHERE id = 1`,
 		int64(s.VerifyInterval/time.Second), boolToInt(s.VerifyRepair),
-		int64(s.LagAlertSeconds), s.MonitoringRetentionDays,
-		s.BatchMaxEvents, s.BatchMaxBytes, boolToInt(s.MongoNoTransaction),
+		int64(s.LagAlertSeconds), s.BatchMaxEvents, s.BatchMaxBytes,
+		boolToInt(s.MongoNoTransaction),
 		s.QueueMaxEvents, s.QueueMaxBytes, s.SnapshotQueueMaxEvents,
 		int64(s.FlushInterval/time.Millisecond), s.CopyBatchRows,
 		int64(s.MongoStreamAwait/time.Millisecond), boolToInt(s.MongoWholeDocuments),
@@ -189,11 +185,10 @@ func boolToInt(b bool) int {
 func Overridden() map[string]string {
 	over := map[string]string{}
 	for field, name := range map[string]string{
-		"verifyIntervalSeconds":   "SYNC_VERIFY_INTERVAL",
-		"verifyRepair":            "SYNC_VERIFY_REPAIR",
-		"lagAlertSeconds":         "SYNC_LAG_ALERT_SECONDS",
-		"monitoringRetentionDays": "SYNC_MONITORING_RETENTION_DAYS",
-		"mongoNoTransaction":      "SYNC_MONGO_NO_TRANSACTION",
+		"verifyIntervalSeconds": "SYNC_VERIFY_INTERVAL",
+		"verifyRepair":          "SYNC_VERIFY_REPAIR",
+		"lagAlertSeconds":       "SYNC_LAG_ALERT_SECONDS",
+		"mongoNoTransaction":    "SYNC_MONGO_NO_TRANSACTION",
 	} {
 		if value := strings.TrimSpace(os.Getenv(name)); value != "" {
 			over[field] = name + "=" + value

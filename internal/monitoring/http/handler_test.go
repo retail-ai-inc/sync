@@ -39,18 +39,6 @@ func useMonitorDB(t *testing.T) *sql.DB {
 	return conn
 }
 
-func insertMonitoringRow(t *testing.T, conn *sql.DB, taskID int, loggedAt, table string, src, tgt int64) {
-	t.Helper()
-
-	if _, err := conn.Exec(`
-		INSERT INTO monitoring_log
-			(logged_at, db_type, src_db, src_table, src_row_count, tgt_db, tgt_table, tgt_row_count, monitor_action, sync_task_id)
-		VALUES (?, 'mysql', 'source_db', ?, ?, 'target_db', ?, ?, 'row_count_minutely', ?)`,
-		loggedAt, table, src, table, tgt, taskID); err != nil {
-		t.Fatalf("insert monitoring_log: %v", err)
-	}
-}
-
 func sqlNow(offset time.Duration) string {
 	return time.Now().UTC().Add(offset).Format("2006-01-02 15:04:05")
 }

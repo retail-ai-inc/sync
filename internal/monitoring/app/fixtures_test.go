@@ -12,8 +12,8 @@ import (
 )
 
 // useMonitoringDB points the package at a throwaway SQLite file carrying the
-// monitoring_log and changestream_statistics schemas, so the writers can be
-// exercised without touching the database tracked in this repository.
+// changestream_statistics schema, so the writers can be exercised without
+// touching the database tracked in this repository.
 func useMonitoringDB(t *testing.T) *sql.DB {
 	t.Helper()
 

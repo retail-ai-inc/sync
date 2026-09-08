@@ -14,8 +14,8 @@ import (
 //
 // The counters looped over the configured mappings, so a task replicating a
 // whole database -- which is every task in production -- compared nothing and
-// wrote no monitoring_log row at all. The row-count panel was empty for them
-// and had been since they were created. The rule itself lives in discovery,
+// reported nothing at all. The row-count panel was empty for them and had been
+// since they were created. The rule itself lives in discovery,
 // with the row-count endpoint and the consistency check; only the listing
 // differs per engine.
 

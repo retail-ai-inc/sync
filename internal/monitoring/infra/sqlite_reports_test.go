@@ -1,10 +1,8 @@
 package infra
 
 import (
-	"database/sql"
 	"errors"
 	"testing"
-	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -41,19 +39,6 @@ func TestTaskEnabledCannotReadATablelessDatabase(t *testing.T) {
 	emptyDB(t)
 	if _, err := TaskEnabled("1"); err == nil {
 		t.Error("a database with no tables reported a task's state")
-	}
-}
-
-func insertSample(t *testing.T, db *sql.DB, taskID int, table string,
-	at time.Time, source, target int) {
-
-	t.Helper()
-	if _, err := db.Exec(
-		`INSERT INTO monitoring_log
-		   (sync_task_id, db_type, tgt_table, src_row_count, tgt_row_count, logged_at)
-		 VALUES (?, 'mysql', ?, ?, ?, ?)`,
-		taskID, table, source, target, at.UTC().Format(storedTimeFormat)); err != nil {
-		t.Fatalf("seed monitoring_log: %v", err)
 	}
 }
 

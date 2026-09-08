@@ -43,8 +43,8 @@ func oneMapping() []config.DatabaseMapping {
 	}}
 }
 
-// Nothing is written to monitoring_log, so the dashboard keeps showing the
-// last figures it had with no indication that they are stale.
+// Nothing is published, so the dashboard keeps showing the last figures it had
+// with no indication that they are stale.
 func TestTheMySQLCounterReportsAnUnreachableSource(t *testing.T) {
 	useMonitoringDB(t)
 	logger, out := captureLog()
@@ -208,12 +208,15 @@ func TestTheMongoDBCounterReportsAnInvalidURI(t *testing.T) {
 	}
 }
 
-// TestTheMongoDBCounterRecordsMinusOneForAFailedCount records what the MongoDB
-// counter does that the other three do not: it writes a monitoring_log row
-// even when the count failed, carrying -1 as the row count.
-func TestTheMongoDBCounterRecordsMinusOneForAFailedCount(t *testing.T) {
-	conn := useMonitoringDB(t)
+// TestTheMongoDBCounterPublishesMinusOneForAFailedCount records what the
+// MongoDB counter does that the other three do not: it reports the comparison
+// even when the count failed, carrying -1 as the count.
+func TestTheMongoDBCounterPublishesMinusOneForAFailedCount(t *testing.T) {
+	useMonitoringDB(t)
 	logger, out := captureLog()
+
+	labels := metrics.Labels{"task": "42", "engine": "mongodb", "object": "orders"}
+	t.Cleanup(func() { metrics.ForgetRowCounts(labels) })
 
 	CountAndLogMongoDB(briefCtx(t), config.SyncConfig{
 		ID:               42,
@@ -228,14 +231,12 @@ func TestTheMongoDBCounterRecordsMinusOneForAFailedCount(t *testing.T) {
 			"so assert that instead", out.String())
 	}
 
-	var src, tgt int64
-	err := conn.QueryRow(`SELECT src_row_count, tgt_row_count FROM monitoring_log
-		WHERE sync_task_id = 42`).Scan(&src, &tgt)
-	if err != nil {
-		t.Fatalf("no row was written for a failed count: %v", err)
+	src, tgt, ok := rowCountsOf(t, labels)
+	if !ok {
+		t.Fatal("nothing was published for a failed count")
 	}
 	if src != -1 || tgt != -1 {
-		t.Errorf("counts = %d/%d, want -1/-1", src, tgt)
+		t.Errorf("counts = %v/%v, want -1/-1", src, tgt)
 	}
 }
 
@@ -380,6 +381,23 @@ func TestADatabaseWithNoObjectNameIsPublishedUnderItsNumber(t *testing.T) {
 	if !published(t, labels) {
 		t.Error("a database compared without an object name was not published as db0")
 	}
+}
+
+// rowCountsOf reads back the pair published for one object.
+func rowCountsOf(t *testing.T, labels metrics.Labels) (source, target float64, ok bool) {
+	t.Helper()
+
+	for _, sample := range metrics.RowCounts.Snapshot(metrics.SourceRows) {
+		if sample.Labels.Key() == labels.Key() {
+			source, ok = sample.Value, true
+		}
+	}
+	for _, sample := range metrics.RowCounts.Snapshot(metrics.TargetRows) {
+		if sample.Labels.Key() == labels.Key() {
+			target = sample.Value
+		}
+	}
+	return source, target, ok
 }
 
 func published(t *testing.T, labels metrics.Labels) bool {
