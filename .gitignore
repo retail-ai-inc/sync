@@ -93,3 +93,4 @@ docs/
 /mint
 coverage.out
 .test-stack.env
+vendor/
