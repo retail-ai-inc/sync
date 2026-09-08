@@ -2,6 +2,7 @@ package infra
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -45,6 +46,28 @@ func CountAndLogRedis(ctx context.Context, sc config.SyncConfig, log *logrus.Log
 
 	srcCount, srcNames, srcErr := sizeOrMark(ctx, srcClient, srcConnErr, "source", dbType, log)
 	tgtCount, tgtNames, tgtErr := sizeOrMark(ctx, tgtClient, tgtConnErr, "target", dbType, log)
+
+	// What this tool keeps on the target is not replicated data: a slot marker
+	// per slot the task has written -- up to sixteen thousand of them -- and a
+	// position key per shard. Counted as data they were reported as a
+	// difference for ever: fifteen thousand keys on a task whose two ends held
+	// exactly the same 20,390.
+	if tgtErr == nil {
+		own, err := countOwnKeys(ctx, tgtClient)
+		switch {
+		case err != nil:
+			log.WithError(err).WithField("db_type", dbType).
+				Warn("[Monitor] Could not count this tool's own keys on the target, " +
+					"so they are included in its total")
+		case own > 0:
+			tgtCount -= own
+			if tgtCount < 0 {
+				tgtCount = 0
+			}
+			log.WithFields(logrus.Fields{"db_type": dbType, "own_keys": own}).
+				Debug("[Monitor] Left this tool's own keys out of the target's count")
+		}
+	}
 
 	srcDBName := orConnectionDB(srcNames, sc.Type, sc.SourceConnection)
 	tgtDBName := orConnectionDB(tgtNames, sc.Type, sc.TargetConnection)
@@ -198,4 +221,57 @@ func sizeOrMark(ctx context.Context, client goredis.UniversalClient, connectErr 
 		return -1, nil, err
 	}
 	return count, databases, nil
+}
+
+// ownKeyPatterns match the keys this tool writes to a target of its own
+// accord. Neither comes from the source, so neither is data: the slot markers
+// carry each slot's applied offset, and the position key carries the stream's.
+var ownKeyPatterns = []string{"*:__off:*", "__sync:pos:*"}
+
+// countOwnKeys counts them.
+//
+// By pattern rather than by name: the marker names are derivable -- one per
+// slot per task -- but the position keys are named after shards this does not
+// know, and a SCAN with a MATCH returns only what matches. It costs a pass
+// over the keyspace per pattern, on the interval the comparison runs at, which
+// for a target of twenty thousand keys is a few dozen round trips an hour.
+func countOwnKeys(ctx context.Context, client goredis.UniversalClient) (int64, error) {
+	if cluster, ok := client.(*goredis.ClusterClient); ok {
+		var (
+			mu    sync.Mutex
+			total int64
+		)
+		err := cluster.ForEachMaster(ctx, func(ctx context.Context, node *goredis.Client) error {
+			n, err := countMatching(ctx, node)
+			if err != nil {
+				return err
+			}
+			mu.Lock()
+			total += n
+			mu.Unlock()
+			return nil
+		})
+		return total, err
+	}
+	return countMatching(ctx, client)
+}
+
+// countMatching walks one server once per pattern.
+func countMatching(ctx context.Context, client goredis.UniversalClient) (int64, error) {
+	var total int64
+	for _, pattern := range ownKeyPatterns {
+		var cursor uint64
+		for {
+			keys, next, err := client.Scan(ctx, cursor, pattern, 1000).Result()
+			if err != nil {
+				return total, fmt.Errorf("scan the target for %s: %w", pattern, err)
+			}
+			total += int64(len(keys))
+			if next == 0 {
+				break
+			}
+			cursor = next
+		}
+	}
+	return total, nil
 }

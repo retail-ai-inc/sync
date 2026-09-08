@@ -521,3 +521,51 @@ func TestAPassStillMeasuresWhenItCannotRecord(t *testing.T) {
 		t.Errorf("the comparison was not logged: %s", out.String())
 	}
 }
+
+// What sync keeps on a target is not replicated data: a slot marker per slot
+// the task has written and a position key per shard. Counted as data they
+// showed as a difference for ever -- fifteen thousand keys on a task whose two
+// ends held exactly the same twenty thousand.
+func TestTheToolsOwnKeysAreNotCountedAsData(t *testing.T) {
+	addr := standaloneAddr(t, "SYNC_REDIS_TARGET")
+	client := goredis.NewClient(&goredis.Options{Addr: addr, DB: 11})
+	defer client.Close()
+	ctx := context.Background()
+
+	// The whole server: keyCount counts every database that holds keys, which
+	// is what the comparison compares, so one database's worth is not the
+	// number under test.
+	if err := client.FlushAll(ctx).Err(); err != nil {
+		t.Fatalf("empty the test server: %v", err)
+	}
+	t.Cleanup(func() { _ = client.FlushAll(context.Background()).Err() })
+
+	for i := 0; i < 5; i++ {
+		if err := client.Set(ctx, fmt.Sprintf("data:%d", i), i, 0).Err(); err != nil {
+			t.Fatalf("seed data: %v", err)
+		}
+	}
+	// A marker and a position key, named as the replication side names them.
+	for _, own := range []string{"{aaa}:__off:42", "__sync:pos:42:0-5460"} {
+		if err := client.Set(ctx, own, "x", 0).Err(); err != nil {
+			t.Fatalf("seed bookkeeping: %v", err)
+		}
+	}
+
+	own, err := countOwnKeys(ctx, client)
+	if err != nil {
+		t.Fatalf("countOwnKeys: %v", err)
+	}
+	if own != 2 {
+		t.Errorf("counted %d of this tool's own keys, want 2", own)
+	}
+
+	total, _, err := keyCount(ctx, client)
+	if err != nil {
+		t.Fatalf("keyCount: %v", err)
+	}
+	if total-own != 5 {
+		t.Errorf("the target holds %d keys of which %d are this tool's, leaving %d; "+
+			"want the 5 that were replicated", total, own, total-own)
+	}
+}
