@@ -108,57 +108,6 @@ func TestRowCountHistoryCannotReadATablelessDatabase(t *testing.T) {
 	}
 }
 
-func TestTaskLogsComeBackNewestFirstAndWindowed(t *testing.T) {
-	db := useMonitoringDB(t)
-
-	now := time.Now().UTC().Truncate(time.Second)
-	for _, entry := range []struct {
-		at      time.Time
-		level   string
-		message string
-	}{
-		{now.Add(-3 * time.Hour), "info", "older"},
-		{now.Add(-1 * time.Hour), "error", "newer"},
-	} {
-		if _, err := db.Exec(
-			`INSERT INTO sync_log (sync_task_id, log_time, level, message) VALUES (?, ?, ?, ?)`,
-			7, entry.at.Format(storedTimeFormat), entry.level, entry.message); err != nil {
-			t.Fatalf("seed sync_log: %v", err)
-		}
-	}
-	if _, err := db.Exec(
-		`INSERT INTO sync_log (sync_task_id, log_time, level, message) VALUES (?, ?, ?, ?)`,
-		8, now.Format(storedTimeFormat), "info", "another task"); err != nil {
-		t.Fatalf("seed sync_log: %v", err)
-	}
-
-	entries, err := TaskLogs("7", time.Time{})
-	if err != nil {
-		t.Fatalf("TaskLogs: %v", err)
-	}
-	if len(entries) != 2 {
-		t.Fatalf("task 7 read %d lines, want 2", len(entries))
-	}
-	if entries[0].Message != "newer" {
-		t.Errorf("the first line is %q, want the newest", entries[0].Message)
-	}
-
-	windowed, err := TaskLogs("7", now.Add(-2*time.Hour))
-	if err != nil {
-		t.Fatalf("TaskLogs: %v", err)
-	}
-	if len(windowed) != 1 || windowed[0].Level != "error" {
-		t.Errorf("a two-hour window read %+v, want the one error line", windowed)
-	}
-}
-
-func TestTaskLogsCannotReadATablelessDatabase(t *testing.T) {
-	emptyDB(t)
-	if _, err := TaskLogs("1", time.Time{}); err == nil {
-		t.Error("a database with no tables reported log lines")
-	}
-}
-
 func TestChangeStreamStatisticsReadsEveryCounter(t *testing.T) {
 	db := useMonitoringDB(t)
 

@@ -110,10 +110,6 @@ func TestCustomTextFormatterSortsFields(t *testing.T) {
 }
 
 func TestInitLoggerAppliesLevel(t *testing.T) {
-	// SQLite logging stays off unless the environment opts in, so this does not
-	// touch the database.
-	t.Setenv("ENABLE_SQLITE_LOGGING", "")
-
 	log := InitLogger("error")
 	if log == nil {
 		t.Fatal("InitLogger returned nil")
@@ -121,19 +117,8 @@ func TestInitLoggerAppliesLevel(t *testing.T) {
 	if got := log.GetLevel(); got != logrus.ErrorLevel {
 		t.Errorf("level = %v, want error", got)
 	}
-	if len(log.Hooks) != 0 {
-		t.Errorf("hooks were installed with SQLite logging disabled: %v", log.Hooks)
-	}
 	// The package-level logger is repointed as a side effect.
 	if Log != log {
 		t.Error("InitLogger did not update the package-level Log")
-	}
-}
-
-func TestSQLiteHookLevels(t *testing.T) {
-	// The hook subscribes to every level, so enabling it writes a database row
-	// for each debug line as well.
-	if got, want := len(NewSQLiteHook().Levels()), len(logrus.AllLevels); got != want {
-		t.Errorf("the hook covers %d levels, want %d", got, want)
 	}
 }

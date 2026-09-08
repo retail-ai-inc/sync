@@ -51,7 +51,6 @@ func NewRouter() http.Handler {
 		r.Get("/sync", replicationhttp.SyncListHandler)
 		r.Get("/sync/{id}/monitor", monitoringhttp.SyncMonitorHandler)
 		r.Get("/sync/{id}/metrics", monitoringhttp.SyncMetricsHandler)
-		r.Get("/sync/{id}/logs", monitoringhttp.SyncLogsHandler)
 		r.Get("/sync/{id}/tables", replicationhttp.SyncTablesHandler)
 		r.Get("/sync/{id}/position", replicationhttp.SyncPositionHandler)
 		r.Get("/sync/{id}/rowcounts", replicationhttp.SyncRowCountsHandler)

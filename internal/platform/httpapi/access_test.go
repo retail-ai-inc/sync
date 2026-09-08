@@ -52,7 +52,6 @@ var readRoutes = []struct{ method, path string }{
 	{http.MethodGet, "/sync"},
 	{http.MethodGet, "/sync/1/monitor"},
 	{http.MethodGet, "/sync/1/metrics"},
-	{http.MethodGet, "/sync/1/logs"},
 	{http.MethodGet, "/sync/1/tables"},
 	{http.MethodGet, "/sync/1/position"},
 	{http.MethodGet, "/sync/1/rowcounts"},

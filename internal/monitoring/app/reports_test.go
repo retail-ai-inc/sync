@@ -64,47 +64,6 @@ func TestTaskActivityAddsUpAndTakesTheWorstLag(t *testing.T) {
 	}
 }
 
-func TestTaskLogsAreFilteredAfterTheyAreRead(t *testing.T) {
-	db := useMonitoringDB(t)
-	now := time.Now().UTC().Truncate(time.Second)
-
-	for _, entry := range []struct{ level, message string }{
-		{"info", "started"},
-		{"error", "connection refused"},
-		{"error", "table missing"},
-	} {
-		if _, err := db.Exec(
-			`INSERT INTO sync_log (sync_task_id, log_time, level, message) VALUES (?, ?, ?, ?)`,
-			3, now.Format("2006-01-02 15:04:05"), entry.level, entry.message); err != nil {
-			t.Fatalf("seed: %v", err)
-		}
-	}
-
-	all, err := TaskLogs("3", time.Time{}, "", "")
-	if err != nil {
-		t.Fatalf("TaskLogs: %v", err)
-	}
-	if len(all) != 3 {
-		t.Fatalf("read %d lines, want 3", len(all))
-	}
-
-	errorsOnly, err := TaskLogs("3", time.Time{}, "error", "")
-	if err != nil {
-		t.Fatalf("TaskLogs: %v", err)
-	}
-	if len(errorsOnly) != 2 {
-		t.Errorf("the level filter left %d lines, want 2", len(errorsOnly))
-	}
-
-	searched, err := TaskLogs("3", time.Time{}, "", "refused")
-	if err != nil {
-		t.Fatalf("TaskLogs: %v", err)
-	}
-	if len(searched) != 1 {
-		t.Errorf("the search left %d lines, want 1", len(searched))
-	}
-}
-
 func TestTheReportsCannotReadATablelessDatabase(t *testing.T) {
 	sqlitetest.Tableless(t)
 
@@ -113,9 +72,6 @@ func TestTheReportsCannotReadATablelessDatabase(t *testing.T) {
 	}
 	if _, err := RowCountTrend("0", time.Time{}); err == nil {
 		t.Error("a database with no tables reported a row count trend")
-	}
-	if _, err := TaskLogs("1", time.Time{}, "", ""); err == nil {
-		t.Error("a database with no tables reported log lines")
 	}
 	if _, err := ChangeStreamStatus(); err == nil {
 		t.Error("a database with no tables reported change stream counters")

@@ -1,7 +1,5 @@
 package domain
 
-import "strings"
-
 // What the monitoring endpoints report, and the rules for turning stored rows
 // into it.
 //
@@ -39,37 +37,6 @@ func (s RowCountSample) Difference() int64 {
 // series.
 func (s RowCountSample) QualifiedTable() string {
 	return "taskID:" + s.TaskID + "_" + s.Table
-}
-
-// LogEntry is one line of a task's log.
-type LogEntry struct {
-	LoggedAt string
-	Level    string
-	Message  string
-}
-
-// Matches reports whether an entry passes a level and a substring filter.
-// Both are optional and an empty one matches everything. The level is compared
-// case-insensitively because the UI sends "error" and the column holds "ERROR".
-func (e LogEntry) Matches(level, search string) bool {
-	if level != "" && !strings.EqualFold(e.Level, level) {
-		return false
-	}
-	if search == "" {
-		return true
-	}
-	return strings.Contains(strings.ToLower(e.Message), strings.ToLower(search))
-}
-
-// MatchingLogs keeps the entries that pass both filters, in order.
-func MatchingLogs(entries []LogEntry, level, search string) []LogEntry {
-	kept := make([]LogEntry, 0, len(entries))
-	for _, entry := range entries {
-		if entry.Matches(level, search) {
-			kept = append(kept, entry)
-		}
-	}
-	return kept
 }
 
 // ChangeStreamStat is one collection's change stream counters.

@@ -30,48 +30,6 @@ func TestQualifiedTableNamesTheTask(t *testing.T) {
 	}
 }
 
-func TestLogEntryMatchesIsCaseInsensitiveOnTheLevel(t *testing.T) {
-	entry := LogEntry{Level: "ERROR", Message: "connection refused"}
-	if !entry.Matches("error", "") {
-		t.Error(`Matches("error") = false; the UI sends lower case and the column holds upper`)
-	}
-	if entry.Matches("warn", "") {
-		t.Error(`Matches("warn") = true on an ERROR line`)
-	}
-}
-
-func TestLogEntrySearchIsCaseInsensitiveSubstring(t *testing.T) {
-	entry := LogEntry{Level: "INFO", Message: "Copied 17218 keys"}
-	if !entry.Matches("", "COPIED") {
-		t.Error(`Matches(search "COPIED") = false`)
-	}
-	if entry.Matches("", "flushed") {
-		t.Error(`Matches(search "flushed") = true on a line without it`)
-	}
-}
-
-func TestAnEmptyFilterMatchesEverything(t *testing.T) {
-	entry := LogEntry{Level: "DEBUG", Message: "anything"}
-	if !entry.Matches("", "") {
-		t.Error("Matches with no filters = false")
-	}
-}
-
-func TestMatchingLogsKeepsOrderAndNeverReturnsNil(t *testing.T) {
-	kept := MatchingLogs([]LogEntry{
-		{Level: "INFO", Message: "first"},
-		{Level: "ERROR", Message: "second"},
-		{Level: "ERROR", Message: "third"},
-	}, "error", "")
-
-	if len(kept) != 2 || kept[0].Message != "second" || kept[1].Message != "third" {
-		t.Fatalf("MatchingLogs kept %v", kept)
-	}
-	if MatchingLogs(nil, "", "") == nil {
-		t.Error("MatchingLogs(nil) = nil; the endpoint renders an empty list, not null")
-	}
-}
-
 // TestSummariseLeavesOutRowsWithNoTask covers the rule that statistics are
 // stored per task, so a zero there is a row written before the task was known.
 // Counting it inflates every total on the status page.

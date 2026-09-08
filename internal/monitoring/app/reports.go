@@ -66,16 +66,6 @@ func RowCountTrend(taskID string, since time.Time) ([]domain.RowCountSample, err
 	return infra.RowCountHistory(taskID, since)
 }
 
-// TaskLogs reports a task's recent log lines, newest first, keeping only those
-// that pass the level and search filters.
-func TaskLogs(taskID string, since time.Time, level, search string) ([]domain.LogEntry, error) {
-	entries, err := infra.TaskLogs(taskID, since)
-	if err != nil {
-		return nil, err
-	}
-	return domain.MatchingLogs(entries, level, search), nil
-}
-
 // ChangeStreamStatus reports every change stream's counters and their totals.
 func ChangeStreamStatus() (domain.ChangeStreamReport, error) {
 	stats, err := infra.ChangeStreamStatistics()

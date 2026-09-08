@@ -46,7 +46,6 @@ func TestRouterRegistersEveryEndpoint(t *testing.T) {
 		"GET /currentUser",
 		"GET /oauth/{provider}/config",
 		"GET /sync",
-		"GET /sync/{id}/logs",
 		"GET /sync/{id}/metrics",
 		"GET /sync/{id}/monitor",
 		"GET /sync/{id}/tables",

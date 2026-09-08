@@ -97,40 +97,8 @@ func SyncMetricsHandler(w http.ResponseWriter, r *http.Request) {
 
 	httpx.WriteJSON(w, map[string]interface{}{
 		"success": true,
-		"data": map[string]interface{}{
-			"rowCountTrend":  rowCountTrend,
-			"syncEventStats": []interface{}{},
-		},
+		"data":    map[string]interface{}{"rowCountTrend": rowCountTrend},
 	})
-}
-
-// GET /api/sync/{id}/logs
-func SyncLogsHandler(w http.ResponseWriter, r *http.Request) {
-	taskID := chi.URLParam(r, "id")
-
-	sinceTime, err := parseRangeToSince(r.URL.Query().Get("range"))
-	if err != nil {
-		httpx.ErrorJSONStatus(w, http.StatusBadRequest, "unknown range", err)
-		return
-	}
-
-	entries, err := app.TaskLogs(taskID, sinceTime,
-		r.URL.Query().Get("level"), r.URL.Query().Get("search"))
-	if err != nil {
-		httpx.ErrorJSON(w, "query sync_log fail", err)
-		return
-	}
-
-	logs := make([]map[string]interface{}, 0, len(entries))
-	for _, entry := range entries {
-		logs = append(logs, map[string]interface{}{
-			"time":    convertToJST(entry.LoggedAt),
-			"level":   entry.Level,
-			"message": entry.Message,
-		})
-	}
-
-	httpx.WriteJSON(w, map[string]interface{}{"success": true, "data": logs})
 }
 
 // parseRangeToSince resolves a window like "1h", "12h" or "7d" to the instant

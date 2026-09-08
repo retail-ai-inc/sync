@@ -95,48 +95,6 @@ FROM monitoring_log
 	return samples, rows.Err()
 }
 
-// TaskLogs reads a task's most recent log lines, newest first.
-//
-// The level and search filters are not applied here. They are applied to what
-// this returns, which is the behaviour the endpoint has always had: the limit
-// counts stored lines, so filtering narrows the window rather than reaching
-// further back for more matches.
-func TaskLogs(taskID string, since time.Time) ([]domain.LogEntry, error) {
-	db, err := sqlite.OpenSQLiteDB()
-	if err != nil {
-		return nil, err
-	}
-	defer db.Close()
-
-	query := `
-SELECT log_time, level, message
-FROM sync_log
-WHERE sync_task_id=?
-`
-	params := []interface{}{taskID}
-	if !since.IsZero() {
-		query += "  AND log_time >= ?\n"
-		params = append(params, since.UTC().Format(storedTimeFormat))
-	}
-	query += "ORDER BY log_time DESC\nLIMIT 500\n"
-
-	rows, err := db.Query(query, params...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var entries []domain.LogEntry
-	for rows.Next() {
-		var entry domain.LogEntry
-		if err := rows.Scan(&entry.LoggedAt, &entry.Level, &entry.Message); err != nil {
-			return nil, err
-		}
-		entries = append(entries, entry)
-	}
-	return entries, rows.Err()
-}
-
 // ChangeStreamStatistics reads every stored change stream counter.
 //
 // A row that cannot be scanned is skipped rather than failing the read: the

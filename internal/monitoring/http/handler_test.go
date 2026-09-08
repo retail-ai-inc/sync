@@ -174,9 +174,6 @@ func TestSyncMetricsBuildsThreeSeriesPerRow(t *testing.T) {
 	if types["source"] != 100 || types["target"] != 90 || types["diff"] != 10 {
 		t.Errorf("source/target/diff = %v/%v/%v, want 100/90/10", types["source"], types["target"], types["diff"])
 	}
-	if data["syncEventStats"] == nil {
-		t.Error("syncEventStats is missing")
-	}
 }
 
 func TestSyncMetricsDiffIsAbsolute(t *testing.T) {
@@ -245,90 +242,6 @@ func TestAnEmptyWindowIsAnEmptyAnswer(t *testing.T) {
 
 	if len(trend) != 0 {
 		t.Errorf("a one-hour window returned %d points from outside it: %v", len(trend), trend)
-	}
-}
-
-func TestSyncLogsHandlerReturnsRows(t *testing.T) {
-	conn := useMonitorDB(t)
-	for i, lvl := range []string{"info", "warn", "error"} {
-		if _, err := conn.Exec(
-			`INSERT INTO sync_log (log_time, level, message, sync_task_id) VALUES (?, ?, ?, 1)`,
-			sqlNow(-time.Duration(i+1)*time.Minute), lvl, "message "+lvl); err != nil {
-			t.Fatalf("seed: %v", err)
-		}
-	}
-
-	rec := httptest.NewRecorder()
-	serveWithURLParams(rec, httptest.NewRequest(http.MethodGet, "/sync/{id}/logs?range=1h", nil),
-		SyncLogsHandler, map[string]string{"id": "1"})
-
-	resp := decodeEnvelope(t, rec)
-	if resp["success"] != true {
-		t.Fatalf("success = %v (body: %s)", resp["success"], rec.Body.String())
-	}
-	if resp["data"] == nil {
-		t.Fatal("data is nil")
-	}
-	if n := len(resp["data"].([]interface{})); n != 3 {
-		t.Errorf("data has %d entries, want 3", n)
-	}
-}
-
-func TestSyncLogsHandlerFiltersByLevel(t *testing.T) {
-	conn := useMonitorDB(t)
-	for _, lvl := range []string{"info", "warn", "error", "error"} {
-		if _, err := conn.Exec(
-			`INSERT INTO sync_log (log_time, level, message, sync_task_id) VALUES (?, ?, 'm', 1)`,
-			sqlNow(-time.Minute), lvl); err != nil {
-			t.Fatalf("seed: %v", err)
-		}
-	}
-
-	rec := httptest.NewRecorder()
-	serveWithURLParams(rec, httptest.NewRequest(http.MethodGet, "/sync/{id}/logs?level=error&range=1h", nil),
-		SyncLogsHandler, map[string]string{"id": "1"})
-
-	resp := decodeEnvelope(t, rec)
-	data, _ := resp["data"].([]interface{})
-	for _, e := range data {
-		if lvl := e.(map[string]interface{})["level"]; lvl != "error" {
-			t.Errorf("level filter returned %v", lvl)
-		}
-	}
-	if len(data) != 2 {
-		t.Errorf("data has %d entries, want 2", len(data))
-	}
-}
-
-func TestSyncLogsHandlerSearches(t *testing.T) {
-	conn := useMonitorDB(t)
-	for _, msg := range []string{"connection refused", "sync completed", "connection reset"} {
-		if _, err := conn.Exec(
-			`INSERT INTO sync_log (log_time, level, message, sync_task_id) VALUES (?, 'info', ?, 1)`,
-			sqlNow(-time.Minute), msg); err != nil {
-			t.Fatalf("seed: %v", err)
-		}
-	}
-
-	rec := httptest.NewRecorder()
-	serveWithURLParams(rec, httptest.NewRequest(http.MethodGet, "/sync/{id}/logs?search=connection&range=1h", nil),
-		SyncLogsHandler, map[string]string{"id": "1"})
-
-	data, _ := decodeEnvelope(t, rec)["data"].([]interface{})
-	if len(data) != 2 {
-		t.Errorf("search returned %d entries, want 2", len(data))
-	}
-}
-
-func TestSyncLogsHandlerReportsAMissingTable(t *testing.T) {
-	sqlitetest.Tableless(t)
-
-	rec := httptest.NewRecorder()
-	serveWithURLParams(rec, httptest.NewRequest(http.MethodGet, "/sync/{id}/logs", nil),
-		SyncLogsHandler, map[string]string{"id": "1"})
-
-	if resp := decodeEnvelope(t, rec); resp["success"] != false {
-		t.Errorf("success = %v, want false", resp["success"])
 	}
 }
 

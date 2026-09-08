@@ -101,14 +101,6 @@ CREATE TABLE IF NOT EXISTS monitoring_log (
     sync_task_id   INTEGER
 );
 
-CREATE TABLE IF NOT EXISTS sync_log (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    log_time     DATETIME DEFAULT CURRENT_TIMESTAMP,
-    level        TEXT,
-    message      TEXT,
-    sync_task_id INTEGER
-);
-
 CREATE TABLE IF NOT EXISTS changestream_statistics (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     task_id         INTEGER NOT NULL,
