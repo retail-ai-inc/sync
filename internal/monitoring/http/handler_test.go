@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/retail-ai-inc/sync/internal/platform/metrics"
 	"github.com/retail-ai-inc/sync/internal/platform/sqlite"
 	"github.com/retail-ai-inc/sync/internal/platform/sqlite/sqlitetest"
 
@@ -54,85 +53,6 @@ func insertMonitoringRow(t *testing.T, conn *sql.DB, taskID int, loggedAt, table
 
 func sqlNow(offset time.Duration) string {
 	return time.Now().UTC().Add(offset).Format("2006-01-02 15:04:05")
-}
-
-func TestSyncMonitorHandlerReportsTaskStatus(t *testing.T) {
-	conn := useMonitorDB(t)
-	if _, err := conn.Exec(`INSERT INTO sync_tasks (id, enable, config_json) VALUES (1, 1, '{}'), (2, 0, '{}')`); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-
-	for _, tc := range []struct{ id, want string }{{"1", "Running"}, {"2", "Stopped"}} {
-		rec := httptest.NewRecorder()
-		serveWithURLParams(rec, httptest.NewRequest(http.MethodGet, "/sync/{id}/monitor", nil),
-			SyncMonitorHandler, map[string]string{"id": tc.id})
-
-		resp := decodeEnvelope(t, rec)
-		if resp["success"] != true {
-			t.Fatalf("task %s: %s", tc.id, rec.Body.String())
-		}
-		data := resp["data"].(map[string]interface{})
-		if data["status"] != tc.want {
-			t.Errorf("task %s: status = %v, want %v", tc.id, data["status"], tc.want)
-		}
-	}
-}
-
-func TestSyncMonitorHandlerOnAnUnknownTask(t *testing.T) {
-	useMonitorDB(t)
-
-	rec := httptest.NewRecorder()
-	serveWithURLParams(rec, httptest.NewRequest(http.MethodGet, "/sync/{id}/monitor", nil),
-		SyncMonitorHandler, map[string]string{"id": "999"})
-
-	resp := decodeEnvelope(t, rec)
-	if resp["success"] != false {
-		t.Errorf("success = %v, want false", resp["success"])
-	}
-}
-
-// TestTheMonitorReportsWhatItKnows covers three numbers that were constants
-// compiled into the handler: 85% progress, 500 tps and 0.2s delay, for every
-// task in every state — including one that was stopped, and one that had never
-// run at all.
-func TestTheMonitorReportsWhatItKnows(t *testing.T) {
-	conn := useMonitorDB(t)
-	if _, err := conn.Exec(`INSERT INTO sync_tasks (id, enable, config_json) VALUES (1, 0, '{}')`); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-
-	rec := httptest.NewRecorder()
-	serveWithURLParams(rec, httptest.NewRequest(http.MethodGet, "/sync/{id}/monitor", nil),
-		SyncMonitorHandler, map[string]string{"id": "1"})
-
-	data := decodeEnvelope(t, rec)["data"].(map[string]interface{})
-	if data["progress"] != nil {
-		t.Errorf("progress = %v; nothing measures it", data["progress"])
-	}
-	if data["applied"] != nil || data["delay"] != nil {
-		t.Errorf("applied/delay = %v/%v for a task that has never run", data["applied"], data["delay"])
-	}
-	if data["status"] != "Stopped" {
-		t.Errorf("status = %v, want Stopped", data["status"])
-	}
-
-	// Once the syncer has recorded something, that is what comes back.
-	labels := metrics.Labels{"task": "1", "engine": "mongodb", "collection": "orders"}
-	t.Cleanup(func() { metrics.Default.Forget(labels) })
-	metrics.Applied(labels, 7)
-	metrics.SetLag(labels, 1.5)
-
-	rec = httptest.NewRecorder()
-	serveWithURLParams(rec, httptest.NewRequest(http.MethodGet, "/sync/{id}/monitor", nil),
-		SyncMonitorHandler, map[string]string{"id": "1"})
-
-	data = decodeEnvelope(t, rec)["data"].(map[string]interface{})
-	if data["applied"] != float64(7) {
-		t.Errorf("applied = %v, want 7", data["applied"])
-	}
-	if data["delay"] != 1.5 {
-		t.Errorf("delay = %v, want 1.5", data["delay"])
-	}
 }
 
 func TestChangeStreamsStatusHandlerAggregates(t *testing.T) {

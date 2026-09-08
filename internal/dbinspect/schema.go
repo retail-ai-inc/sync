@@ -32,6 +32,9 @@ type SchemaRequest struct {
 	// masked password it carries can be resolved. See TestConnectionHandler.
 	TaskID string `json:"taskId"`
 	Role   string `json:"role"`
+	// BackupID names a saved backup job, whose edit form lists a table's
+	// fields the same way.
+	BackupID string `json:"backupId"`
 }
 
 type Field struct {
@@ -58,15 +61,12 @@ func GetTableSchemaHandler(w http.ResponseWriter, r *http.Request) {
 	// edit form, to list a table's fields, and would otherwise authenticate with
 	// "********".
 	if req.Connection.Password == httpx.RedactedPassword {
-		stored, ok := "", false
-		if StoredPassword != nil && req.TaskID != "" {
-			stored, ok = StoredPassword(req.TaskID, req.Role)
-		}
+		stored, ok := resolveMask(req.TaskID, req.Role, req.BackupID)
 		if !ok {
 			httpx.ErrorJSONStatus(w, http.StatusBadRequest,
 				"the password field holds the mask the task list answers with, and "+
-					"there is no saved task to resolve it against. Type the password "+
-					"to read this table", nil)
+					"there is no saved task or backup job to resolve it against. Type "+
+					"the password to read this table", nil)
 			return
 		}
 		req.Connection.Password = stored

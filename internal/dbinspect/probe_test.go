@@ -280,3 +280,56 @@ func TestAMaskForAnUnknownTaskIsRefused(t *testing.T) {
 		t.Errorf("status = %d, want 400", rec.Code)
 	}
 }
+
+// A backup job's edit form carries the same mask a task's does, and the
+// backend had no way to resolve it against a job: testing the connection or
+// listing a table meant retyping a password nobody had changed.
+func TestAMaskIsResolvedAgainstABackupJobToo(t *testing.T) {
+	previousTask, previousJob := StoredPassword, StoredBackupPassword
+	t.Cleanup(func() { StoredPassword, StoredBackupPassword = previousTask, previousJob })
+
+	StoredPassword = func(taskID, role string) (string, bool) {
+		if taskID == "7" && role == "source" {
+			return "from the task", true
+		}
+		return "", false
+	}
+	StoredBackupPassword = func(jobID string) (string, bool) {
+		if jobID == "12" {
+			return "from the job", true
+		}
+		return "", false
+	}
+
+	for name, c := range map[string]struct {
+		taskID, role, backupID, want string
+		found                        bool
+	}{
+		"a saved task":                      {"7", "source", "", "from the task", true},
+		"a saved backup job":                {"", "", "12", "from the job", true},
+		"neither":                           {"", "", "", "", false},
+		"a task that is gone":               {"99", "source", "", "", false},
+		"a job that is gone":                {"", "", "99", "", false},
+		"the task wins when both are named": {"7", "source", "12", "from the task", true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, ok := resolveMask(c.taskID, c.role, c.backupID)
+			if ok != c.found || got != c.want {
+				t.Errorf("resolveMask(%q, %q, %q) = %q, %v; want %q, %v",
+					c.taskID, c.role, c.backupID, got, ok, c.want, c.found)
+			}
+		})
+	}
+}
+
+// Nothing wired means a mask is refused rather than resolved to an empty
+// password, which would authenticate as nobody.
+func TestWithNothingWiredAMaskIsRefused(t *testing.T) {
+	previousTask, previousJob := StoredPassword, StoredBackupPassword
+	t.Cleanup(func() { StoredPassword, StoredBackupPassword = previousTask, previousJob })
+	StoredPassword, StoredBackupPassword = nil, nil
+
+	if _, ok := resolveMask("7", "source", "12"); ok {
+		t.Error("a mask resolved with no resolver wired")
+	}
+}

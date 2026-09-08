@@ -44,6 +44,27 @@ const teardownTimeout = 500 * time.Millisecond
 // it. Left nil, a masked password is refused rather than resolved.
 var StoredPassword func(taskID, role string) (string, bool)
 
+// StoredBackupPassword is the same for a backup job, whose edit form probes
+// the connection and lists the tables exactly as a replication task's does and
+// carries the same mask. A backup job has one endpoint, so there is no role.
+var StoredBackupPassword func(jobID string) (string, bool)
+
+// resolveMask reports the password a saved task or job holds, for a form that
+// sent the mask back.
+func resolveMask(taskID, role, backupID string) (string, bool) {
+	if taskID != "" && StoredPassword != nil {
+		if stored, ok := StoredPassword(taskID, role); ok {
+			return stored, true
+		}
+	}
+	if backupID != "" && StoredBackupPassword != nil {
+		if stored, ok := StoredBackupPassword(backupID); ok {
+			return stored, true
+		}
+	}
+	return "", false
+}
+
 // TestConnectionHandler POST /api/test-connection
 func TestConnectionHandler(w http.ResponseWriter, r *http.Request) {
 	var req struct {
@@ -57,6 +78,9 @@ func TestConnectionHandler(w http.ResponseWriter, r *http.Request) {
 		// the mask it carries can be resolved to what that task stores.
 		TaskID string `json:"taskId"`
 		Role   string `json:"role"`
+		// BackupID names a saved backup job, for the other edit form that
+		// probes a connection.
+		BackupID string `json:"backupId"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		httpx.ErrorJSONStatus(w, http.StatusBadRequest, "the request body could not be read", err)
@@ -72,15 +96,12 @@ func TestConnectionHandler(w http.ResponseWriter, r *http.Request) {
 	// open to list the source's tables, and that must keep working without
 	// making somebody retype a password to see them.
 	if req.Password == httpx.RedactedPassword {
-		stored, ok := "", false
-		if StoredPassword != nil && req.TaskID != "" {
-			stored, ok = StoredPassword(req.TaskID, req.Role)
-		}
+		stored, ok := resolveMask(req.TaskID, req.Role, req.BackupID)
 		if !ok {
 			httpx.ErrorJSONStatus(w, http.StatusBadRequest,
 				"the password field holds the mask the task list answers with, and "+
-					"there is no saved task to resolve it against. Type the password "+
-					"to test this connection", nil)
+					"there is no saved task or backup job to resolve it against. Type "+
+					"the password to test this connection", nil)
 			return
 		}
 		req.Password = stored

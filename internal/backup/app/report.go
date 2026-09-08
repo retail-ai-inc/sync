@@ -101,3 +101,22 @@ func PublishStoredOutcomes(log logrus.FieldLogger) {
 func parseStoredTime(stored string) (time.Time, error) {
 	return timex.ParseDatabaseTimestamp(stored)
 }
+
+// StoredJobPassword resolves the password a saved backup job holds for its
+// source, so a probe from its edit form can test the connection the job
+// actually uses.
+//
+// The job list masks passwords on the way out, so the form carries
+// "********". A mask means "the one already stored", which is what saving an
+// untouched field does; without this, testing the connection or listing the
+// tables from an edit form made somebody retype a password to see either.
+func StoredJobPassword(jobID string) (string, bool) {
+	configJSON, _, err := infra.ReadJobRow(jobID)
+	if err != nil {
+		return "", false
+	}
+	stored := domain.ParseStoredConfig(configJSON)
+	database, _ := stored["database"].(map[string]interface{})
+	password, _ := database["password"].(string)
+	return password, password != "" && password != domain.RedactedPassword
+}

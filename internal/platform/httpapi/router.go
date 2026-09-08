@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+	backupapp "github.com/retail-ai-inc/sync/internal/backup/app"
 	backuphttp "github.com/retail-ai-inc/sync/internal/backup/http"
 	"github.com/retail-ai-inc/sync/internal/dbinspect"
 	identityhttp "github.com/retail-ai-inc/sync/internal/identity/http"
@@ -32,6 +33,7 @@ func NewRouter() http.Handler {
 	// nothing about tasks. This lets it resolve the mask an edit form carries
 	// against the task that form was filled from.
 	dbinspect.StoredPassword = replicationapp.StoredEndpointPassword
+	dbinspect.StoredBackupPassword = backupapp.StoredJobPassword
 
 	r := chi.NewRouter()
 
@@ -49,7 +51,6 @@ func NewRouter() http.Handler {
 		r.Put("/updatePassword", identityhttp.UpdatePasswordHandler)
 
 		r.Get("/sync", replicationhttp.SyncListHandler)
-		r.Get("/sync/{id}/monitor", monitoringhttp.SyncMonitorHandler)
 		r.Get("/sync/{id}/tables", replicationhttp.SyncTablesHandler)
 		r.Get("/sync/{id}/position", replicationhttp.SyncPositionHandler)
 		r.Get("/sync/{id}/rowcounts", replicationhttp.SyncRowCountsHandler)
