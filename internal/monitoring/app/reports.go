@@ -1,8 +1,6 @@
 package app
 
 import (
-	"time"
-
 	"github.com/retail-ai-inc/sync/internal/monitoring/domain"
 	"github.com/retail-ai-inc/sync/internal/monitoring/infra"
 	"github.com/retail-ai-inc/sync/internal/platform/metrics"
@@ -58,12 +56,6 @@ func TaskActivity(taskID string) (applied, lag interface{}) {
 		}
 	}
 	return applied, lag
-}
-
-// RowCountTrend reports the stored source/target comparisons for one task, or
-// for every task when taskID is "0".
-func RowCountTrend(taskID string, since time.Time) ([]domain.RowCountSample, error) {
-	return infra.RowCountHistory(taskID, since)
 }
 
 // ChangeStreamStatus reports every change stream's counters and their totals.

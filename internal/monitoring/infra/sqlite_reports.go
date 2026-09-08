@@ -3,7 +3,6 @@ package infra
 import (
 	"database/sql"
 	"errors"
-	"time"
 
 	"github.com/retail-ai-inc/sync/internal/monitoring/domain"
 	"github.com/retail-ai-inc/sync/internal/platform/sqlite"
@@ -39,60 +38,6 @@ func TaskEnabled(taskID string) (bool, error) {
 		return false, err
 	}
 	return enable.Int32 == 1, nil
-}
-
-// RowCountHistory reads the stored source/target comparisons for one task, or
-// for every task when taskID is "0".
-//
-// A zero since means no window. The limit is the one the chart draws and is
-// applied in the database rather than after: a task logged every minute for a
-// month is forty thousand rows.
-func RowCountHistory(taskID string, since time.Time) ([]domain.RowCountSample, error) {
-	db, err := sqlite.OpenSQLiteDB()
-	if err != nil {
-		return nil, err
-	}
-	defer db.Close()
-
-	query := `
-SELECT logged_at, tgt_table, src_row_count, tgt_row_count, sync_task_id
-FROM monitoring_log
-`
-	var params []interface{}
-	var clauses []string
-	if taskID != "0" {
-		clauses = append(clauses, "sync_task_id=?")
-		params = append(params, taskID)
-	}
-	if !since.IsZero() {
-		clauses = append(clauses, "logged_at >= ?")
-		params = append(params, since.UTC().Format(storedTimeFormat))
-	}
-	for i, clause := range clauses {
-		if i == 0 {
-			query += "WHERE " + clause + "\n"
-			continue
-		}
-		query += "  AND " + clause + "\n"
-	}
-	query += "ORDER BY logged_at ASC\nLIMIT 1000\n"
-
-	rows, err := db.Query(query, params...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var samples []domain.RowCountSample
-	for rows.Next() {
-		var sample domain.RowCountSample
-		if err := rows.Scan(&sample.LoggedAt, &sample.Table,
-			&sample.Source, &sample.Target, &sample.TaskID); err != nil {
-			return nil, err
-		}
-		samples = append(samples, sample)
-	}
-	return samples, rows.Err()
 }
 
 // ChangeStreamStatistics reads every stored change stream counter.

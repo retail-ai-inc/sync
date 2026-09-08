@@ -2,34 +2,6 @@ package domain
 
 import "testing"
 
-func TestDifferenceIsAbsolute(t *testing.T) {
-	for _, c := range []struct {
-		name           string
-		source, target int64
-		want           int64
-	}{
-		{"target behind", 100, 60, 40},
-		{"target ahead", 60, 100, 40},
-		{"equal", 100, 100, 0},
-		{"both empty", 0, 0, 0},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			s := RowCountSample{Source: c.source, Target: c.target}
-			if got := s.Difference(); got != c.want {
-				t.Errorf("Difference(src=%d, tgt=%d) = %d, want %d",
-					c.source, c.target, got, c.want)
-			}
-		})
-	}
-}
-
-func TestQualifiedTableNamesTheTask(t *testing.T) {
-	s := RowCountSample{Table: "orders", TaskID: "7"}
-	if got, want := s.QualifiedTable(), "taskID:7_orders"; got != want {
-		t.Errorf("QualifiedTable() = %q, want %q", got, want)
-	}
-}
-
 // TestSummariseLeavesOutRowsWithNoTask covers the rule that statistics are
 // stored per task, so a zero there is a row written before the task was known.
 // Counting it inflates every total on the status page.

@@ -56,24 +56,6 @@ func sqlNow(offset time.Duration) string {
 	return time.Now().UTC().Add(offset).Format("2006-01-02 15:04:05")
 }
 
-func metricsFor(t *testing.T, id, rangeStr string) map[string]interface{} {
-	t.Helper()
-
-	url := "/sync/{id}/metrics"
-	if rangeStr != "" {
-		url += "?range=" + rangeStr
-	}
-	rec := httptest.NewRecorder()
-	serveWithURLParams(rec, httptest.NewRequest(http.MethodGet, url, nil),
-		SyncMetricsHandler, map[string]string{"id": id})
-
-	resp := decodeEnvelope(t, rec)
-	if resp["success"] != true {
-		t.Fatalf("success = %v (body: %s)", resp["success"], rec.Body.String())
-	}
-	return resp["data"].(map[string]interface{})
-}
-
 func TestSyncMonitorHandlerReportsTaskStatus(t *testing.T) {
 	conn := useMonitorDB(t)
 	if _, err := conn.Exec(`INSERT INTO sync_tasks (id, enable, config_json) VALUES (1, 1, '{}'), (2, 0, '{}')`); err != nil {
@@ -150,98 +132,6 @@ func TestTheMonitorReportsWhatItKnows(t *testing.T) {
 	}
 	if data["delay"] != 1.5 {
 		t.Errorf("delay = %v, want 1.5", data["delay"])
-	}
-}
-
-func TestSyncMetricsBuildsThreeSeriesPerRow(t *testing.T) {
-	conn := useMonitorDB(t)
-	insertMonitoringRow(t, conn, 1, sqlNow(-30*time.Minute), "orders", 100, 90)
-
-	data := metricsFor(t, "1", "1h")
-	trend := data["rowCountTrend"].([]interface{})
-
-	if len(trend) != 3 {
-		t.Fatalf("rowCountTrend has %d points, want 3 (source/target/diff)", len(trend))
-	}
-	types := map[string]float64{}
-	for _, p := range trend {
-		m := p.(map[string]interface{})
-		types[m["type"].(string)] = m["value"].(float64)
-		if m["table"] != "orders" {
-			t.Errorf("table = %v, want orders", m["table"])
-		}
-	}
-	if types["source"] != 100 || types["target"] != 90 || types["diff"] != 10 {
-		t.Errorf("source/target/diff = %v/%v/%v, want 100/90/10", types["source"], types["target"], types["diff"])
-	}
-}
-
-func TestSyncMetricsDiffIsAbsolute(t *testing.T) {
-	conn := useMonitorDB(t)
-	// Target ahead of source, which happens when the target holds extra rows.
-	insertMonitoringRow(t, conn, 1, sqlNow(-10*time.Minute), "orders", 50, 80)
-
-	for _, p := range metricsFor(t, "1", "1h")["rowCountTrend"].([]interface{}) {
-		m := p.(map[string]interface{})
-		if m["type"] == "diff" && m["value"] != float64(30) {
-			t.Errorf("diff = %v, want the absolute value 30", m["value"])
-		}
-	}
-}
-
-func TestSyncMetricsFiltersByTask(t *testing.T) {
-	conn := useMonitorDB(t)
-	insertMonitoringRow(t, conn, 1, sqlNow(-10*time.Minute), "orders", 10, 10)
-	insertMonitoringRow(t, conn, 2, sqlNow(-10*time.Minute), "users", 20, 20)
-
-	for _, p := range metricsFor(t, "1", "1h")["rowCountTrend"].([]interface{}) {
-		if tbl := p.(map[string]interface{})["table"]; tbl != "orders" {
-			t.Errorf("task 1 returned a row for %v", tbl)
-		}
-	}
-}
-
-// Task id 0 is the "all tasks" view and prefixes the table with its task id.
-func TestSyncMetricsTaskZeroAggregatesEveryTask(t *testing.T) {
-	conn := useMonitorDB(t)
-	insertMonitoringRow(t, conn, 1, sqlNow(-10*time.Minute), "orders", 10, 10)
-	insertMonitoringRow(t, conn, 2, sqlNow(-10*time.Minute), "users", 20, 20)
-
-	seen := map[string]bool{}
-	for _, p := range metricsFor(t, "0", "1h")["rowCountTrend"].([]interface{}) {
-		seen[p.(map[string]interface{})["table"].(string)] = true
-	}
-	for _, want := range []string{"taskID:1_orders", "taskID:2_users"} {
-		if !seen[want] {
-			t.Errorf("%q is missing from the aggregate view: %v", want, seen)
-		}
-	}
-}
-
-func TestSyncMetricsWithNoRange(t *testing.T) {
-	conn := useMonitorDB(t)
-	insertMonitoringRow(t, conn, 1, sqlNow(-40*24*time.Hour), "orders", 1, 1)
-
-	// An empty range means no lower bound, so even a 40-day-old row is returned.
-	if n := len(metricsFor(t, "1", "")["rowCountTrend"].([]interface{})); n != 3 {
-		t.Errorf("rowCountTrend has %d points, want 3", n)
-	}
-}
-
-// The handler used to re-run the query with the time filter removed and return
-// the entire history — up to a thousand rows — with nothing in the response to
-// say the window had been abandoned, so a client asking what happened in the
-// last hour got last month and could not tell.
-func TestAnEmptyWindowIsAnEmptyAnswer(t *testing.T) {
-	conn := useMonitorDB(t)
-	// Nothing recent; one row far outside the requested window.
-	old := time.Now().UTC().AddDate(0, 0, -40).Format("2006-01-02 15:04:05")
-	insertMonitoringRow(t, conn, 1, old, "orders", 7, 7)
-
-	trend := metricsFor(t, "1", "1h")["rowCountTrend"].([]interface{})
-
-	if len(trend) != 0 {
-		t.Errorf("a one-hour window returned %d points from outside it: %v", len(trend), trend)
 	}
 }
 

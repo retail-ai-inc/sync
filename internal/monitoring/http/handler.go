@@ -4,8 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -60,75 +58,6 @@ func SyncMonitorHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// GET /api/sync/{id}/metrics
-func SyncMetricsHandler(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-
-	sinceTime, err := parseRangeToSince(r.URL.Query().Get("range"))
-	if err != nil {
-		httpx.ErrorJSONStatus(w, http.StatusBadRequest, "unknown range", err)
-		return
-	}
-
-	samples, err := app.RowCountTrend(id, sinceTime)
-	if err != nil {
-		httpx.ErrorJSON(w, "query monitoring_log fail", err)
-		return
-	}
-
-	// A window with nothing in it used to be answered by running the query
-	// again without the window and returning the whole history -- up to a
-	// thousand rows, with nothing in the response to say the window had been
-	// abandoned. Somebody asking what happened in the last hour got last month.
-	rowCountTrend := make([]map[string]interface{}, 0, len(samples)*3)
-	for _, sample := range samples {
-		table := sample.Table
-		if id == "0" {
-			table = sample.QualifiedTable()
-		}
-		at := convertToJST(sample.LoggedAt)
-
-		rowCountTrend = append(rowCountTrend,
-			map[string]interface{}{"time": at, "table": table, "type": "source", "value": sample.Source},
-			map[string]interface{}{"time": at, "table": table, "type": "target", "value": sample.Target},
-			map[string]interface{}{"time": at, "table": table, "type": "diff", "value": sample.Difference()},
-		)
-	}
-
-	httpx.WriteJSON(w, map[string]interface{}{
-		"success": true,
-		"data":    map[string]interface{}{"rowCountTrend": rowCountTrend},
-	})
-}
-
-// parseRangeToSince resolves a window like "1h", "12h" or "7d" to the instant
-// it starts at. An empty range means no window at all.
-func parseRangeToSince(rangeStr string) (since time.Time, err error) {
-	trimmed := strings.TrimSpace(rangeStr)
-	if trimmed == "" {
-		return time.Time{}, nil
-	}
-
-	now := time.Now().UTC()
-	lower := strings.ToLower(trimmed)
-
-	// Days, which time.ParseDuration does not know.
-	if days, found := strings.CutSuffix(lower, "d"); found {
-		n, convErr := strconv.Atoi(days)
-		if convErr != nil || n < 1 {
-			return time.Time{}, fmt.Errorf("%q is not a range", rangeStr)
-		}
-		return now.AddDate(0, 0, -n), nil
-	}
-
-	span, err := time.ParseDuration(lower)
-	if err != nil || span <= 0 {
-		return time.Time{}, fmt.Errorf("%q is not a range", rangeStr)
-	}
-	return now.Add(-span), nil
-}
-
-// GET /api/changestreams/status
 func ChangeStreamsStatusHandler(w http.ResponseWriter, r *http.Request) {
 	report, err := app.ChangeStreamStatus()
 	if err != nil {

@@ -57,57 +57,6 @@ func insertSample(t *testing.T, db *sql.DB, taskID int, table string,
 	}
 }
 
-func TestRowCountHistoryFiltersByTaskAndWindow(t *testing.T) {
-	db := useMonitoringDB(t)
-
-	now := time.Now().UTC().Truncate(time.Second)
-	insertSample(t, db, 1, "orders", now.Add(-3*time.Hour), 10, 10)
-	insertSample(t, db, 1, "orders", now.Add(-1*time.Hour), 20, 19)
-	insertSample(t, db, 2, "customers", now.Add(-1*time.Hour), 5, 5)
-
-	all, err := RowCountHistory("0", time.Time{})
-	if err != nil {
-		t.Fatalf("RowCountHistory: %v", err)
-	}
-	if len(all) != 3 {
-		t.Fatalf("every task over no window read %d samples, want 3", len(all))
-	}
-	// Ascending, because the chart draws them in order.
-	if all[0].LoggedAt > all[len(all)-1].LoggedAt {
-		t.Errorf("the samples came back newest first: %q then %q",
-			all[0].LoggedAt, all[len(all)-1].LoggedAt)
-	}
-
-	one, err := RowCountHistory("1", time.Time{})
-	if err != nil {
-		t.Fatalf("RowCountHistory: %v", err)
-	}
-	if len(one) != 2 {
-		t.Errorf("task 1 read %d samples, want 2", len(one))
-	}
-
-	recent, err := RowCountHistory("1", now.Add(-2*time.Hour))
-	if err != nil {
-		t.Fatalf("RowCountHistory: %v", err)
-	}
-	if len(recent) != 1 {
-		t.Fatalf("a two-hour window read %d samples, want 1", len(recent))
-	}
-	if recent[0].Source != 20 || recent[0].Target != 19 {
-		t.Errorf("the sample read back as %d/%d, want 20/19", recent[0].Source, recent[0].Target)
-	}
-	if recent[0].Table != "orders" {
-		t.Errorf("table = %q, want orders", recent[0].Table)
-	}
-}
-
-func TestRowCountHistoryCannotReadATablelessDatabase(t *testing.T) {
-	emptyDB(t)
-	if _, err := RowCountHistory("0", time.Time{}); err == nil {
-		t.Error("a database with no tables reported row counts")
-	}
-}
-
 func TestChangeStreamStatisticsReadsEveryCounter(t *testing.T) {
 	db := useMonitoringDB(t)
 

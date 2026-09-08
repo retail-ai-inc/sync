@@ -3,7 +3,6 @@ package app
 import (
 	"errors"
 	"testing"
-	"time"
 
 	"github.com/retail-ai-inc/sync/internal/platform/metrics"
 	"github.com/retail-ai-inc/sync/internal/platform/sqlite/sqlitetest"
@@ -70,9 +69,6 @@ func TestTheReportsCannotReadATablelessDatabase(t *testing.T) {
 	if _, err := TaskStatus("1"); err == nil {
 		t.Error("a database with no tables reported a task's status")
 	}
-	if _, err := RowCountTrend("0", time.Time{}); err == nil {
-		t.Error("a database with no tables reported a row count trend")
-	}
 	if _, err := ChangeStreamStatus(); err == nil {
 		t.Error("a database with no tables reported change stream counters")
 	}
@@ -102,28 +98,5 @@ VALUES (1, 'orders', 10, 9, 1, 2, 4, 3, 2, '2026-01-01 00:00:00'),
 	}
 	if report.TasksCount != 1 {
 		t.Errorf("two collections of one task counted as %d tasks", report.TasksCount)
-	}
-}
-
-func TestRowCountTrendReadsWhatWasStored(t *testing.T) {
-	db := useMonitoringDB(t)
-	now := time.Now().UTC().Truncate(time.Second)
-	if _, err := db.Exec(
-		`INSERT INTO monitoring_log
-		   (sync_task_id, db_type, tgt_table, src_row_count, tgt_row_count, logged_at)
-		 VALUES (5, 'mysql', 'orders', 12, 11, ?)`,
-		now.Format("2006-01-02 15:04:05")); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-
-	samples, err := RowCountTrend("5", time.Time{})
-	if err != nil {
-		t.Fatalf("RowCountTrend: %v", err)
-	}
-	if len(samples) != 1 {
-		t.Fatalf("read %d samples, want 1", len(samples))
-	}
-	if samples[0].Source != 12 || samples[0].Target != 11 {
-		t.Errorf("the sample reads %d/%d, want 12/11", samples[0].Source, samples[0].Target)
 	}
 }

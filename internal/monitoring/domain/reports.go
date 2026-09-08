@@ -13,32 +13,6 @@ package domain
 // zone, and the endpoints hand it to a JST converter that expects exactly what
 // the column holds; parsing here would assume a zone the column does not name.
 
-// RowCountSample is one comparison of a table's source and target counts.
-type RowCountSample struct {
-	LoggedAt string
-	Table    string
-	Source   int64
-	Target   int64
-	TaskID   string
-}
-
-// Difference reports how far apart the two counts are, without a sign: which
-// side is ahead is a separate question from how far apart they are, and the
-// chart plots the distance.
-func (s RowCountSample) Difference() int64 {
-	if diff := s.Source - s.Target; diff >= 0 {
-		return diff
-	}
-	return s.Target - s.Source
-}
-
-// QualifiedTable names the table for a chart covering every task, where a bare
-// table name is ambiguous: two tasks replicating the same table would draw one
-// series.
-func (s RowCountSample) QualifiedTable() string {
-	return "taskID:" + s.TaskID + "_" + s.Table
-}
-
 // ChangeStreamStat is one collection's change stream counters.
 type ChangeStreamStat struct {
 	TaskID      int

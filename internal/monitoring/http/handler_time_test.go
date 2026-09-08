@@ -2,7 +2,6 @@ package monitoringhttp
 
 import (
 	"testing"
-	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/mattn/go-sqlite3"
@@ -47,88 +46,5 @@ func TestTheTwoJSTConvertersDisagree(t *testing.T) {
 	}
 	if httpx.ConvertTimeToJST(rfc) == rfc {
 		t.Fatal("ConvertTimeToJST no longer understands RFC3339 — the converters appear to have been unified")
-	}
-}
-
-func TestParseRangeToSince(t *testing.T) {
-	tests := []struct {
-		input string
-		back  time.Duration
-	}{
-		{"1h", time.Hour},
-		{"2h", 2 * time.Hour},
-		{"3h", 3 * time.Hour},
-		{"6h", 6 * time.Hour},
-		{"12h", 12 * time.Hour},
-		{"1d", 24 * time.Hour},
-		{"2d", 48 * time.Hour},
-		{"7d", 7 * 24 * time.Hour},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.input, func(t *testing.T) {
-			got, err := parseRangeToSince(tc.input)
-			if err != nil {
-				t.Fatalf("parseRangeToSince(%q): %v", tc.input, err)
-			}
-			want := time.Now().UTC().Add(-tc.back)
-			if delta := got.Sub(want); delta < -2*time.Second || delta > 2*time.Second {
-				t.Errorf("parseRangeToSince(%q) = %v, want ~%v (off by %v)", tc.input, got, want, delta)
-			}
-		})
-	}
-}
-
-func TestParseRangeToSinceIsCaseInsensitive(t *testing.T) {
-	lower, _ := parseRangeToSince("12h")
-	upper, _ := parseRangeToSince("12H")
-
-	if delta := upper.Sub(lower); delta < -2*time.Second || delta > 2*time.Second {
-		t.Errorf("parseRangeToSince(\"12H\") = %v, parseRangeToSince(\"12h\") = %v", upper, lower)
-	}
-}
-
-func TestParseRangeToSinceEmptyIsTheZeroTime(t *testing.T) {
-	got, err := parseRangeToSince("")
-	if err != nil {
-		t.Fatalf("parseRangeToSince(\"\"): %v", err)
-	}
-	if !got.IsZero() {
-		t.Errorf("parseRangeToSince(\"\") = %v, want the zero time", got)
-	}
-}
-
-// The switch listed eight spellings and answered anything else with ten hours
-// — a value that appears nowhere in the set it documents — so "30m" and "24h",
-// both perfectly reasonable, silently returned ten hours of data.
-func TestAnyDurationIsARange(t *testing.T) {
-	for input, back := range map[string]time.Duration{
-		"30m":   30 * time.Minute,
-		"24h":   24 * time.Hour,
-		"4h":    4 * time.Hour,
-		"90s":   90 * time.Second,
-		"30d":   30 * 24 * time.Hour,
-		"1h30m": 90 * time.Minute,
-	} {
-		t.Run(input, func(t *testing.T) {
-			got, err := parseRangeToSince(input)
-			if err != nil {
-				t.Fatalf("parseRangeToSince(%q): %v", input, err)
-			}
-			want := time.Now().UTC().Add(-back)
-			if delta := got.Sub(want); delta < -2*time.Second || delta > 2*time.Second {
-				t.Errorf("parseRangeToSince(%q) = %v, want ~%v", input, got, want)
-			}
-		})
-	}
-}
-
-// TestARangeThatIsNotOneIsReported is the other half: something that cannot be
-// read as a window is an error, not ten hours.
-func TestARangeThatIsNotOneIsReported(t *testing.T) {
-	for _, input := range []string{"banana", "-1h", "0", "1 hour", "d", "-3d"} {
-		if got, err := parseRangeToSince(input); err == nil {
-			t.Errorf("parseRangeToSince(%q) = %v, want a refusal", input, got)
-		}
 	}
 }
