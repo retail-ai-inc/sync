@@ -50,7 +50,6 @@ func withUsers(t *testing.T) (adminToken, guestToken string) {
 var readRoutes = []struct{ method, path string }{
 	{http.MethodGet, "/currentUser"},
 	{http.MethodGet, "/sync"},
-	{http.MethodGet, "/sync/1/tables"},
 	{http.MethodGet, "/sync/1/position"},
 	{http.MethodGet, "/sync/1/rowcounts"},
 	{http.MethodGet, "/changestreams/status"},

@@ -233,48 +233,6 @@ func SyncDeleteHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// SyncTablesHandler GET /api/sync/{id}/tables
-func SyncTablesHandler(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	logrus.Infof("[SyncTables] Fetching tables data for task: %s", id)
-
-	// The day is the one an operator is looking at, which is JST — everything
-	// else this API reports is converted to it. The window used to be built from
-	// the UTC calendar day while the answer was labelled with the JST date, so
-	// for the nine hours of each JST morning the figures belonged to the day
-	// before the label said.
-	now := time.Now().In(time.FixedZone("JST", 9*60*60))
-
-	stats, err := app.TableProgress(r.Context(), id, now)
-	if err != nil {
-		fail(w, "query monitoring_log fail", err)
-		return
-	}
-
-	tableStats := make([]map[string]interface{}, 0, len(stats))
-	for _, s := range stats {
-		tableStats = append(tableStats, map[string]interface{}{
-			"tableName":    s.TableName,
-			"syncedToday":  s.SyncedToday,
-			"totalRows":    s.TotalRows,
-			"lastSyncTime": httpx.ConvertTimeToJST(s.LastSyncTime),
-		})
-	}
-
-	jst := time.FixedZone("JST", 9*60*60)
-	jstDate := now.In(jst).Format("2006-01-02")
-
-	httpx.WriteJSON(w, map[string]interface{}{
-		"success": true,
-		"data": map[string]interface{}{
-			"taskId":     id,
-			"tableCount": len(tableStats),
-			"syncDate":   jstDate,
-			"tables":     tableStats,
-		},
-	})
-}
-
 // GET /api/sync/{id}/position
 //
 // Has the target applied what the source had? The endpoint a switch-over asks,

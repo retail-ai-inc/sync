@@ -51,7 +51,6 @@ func NewRouter() http.Handler {
 		r.Put("/updatePassword", identityhttp.UpdatePasswordHandler)
 
 		r.Get("/sync", replicationhttp.SyncListHandler)
-		r.Get("/sync/{id}/tables", replicationhttp.SyncTablesHandler)
 		r.Get("/sync/{id}/position", replicationhttp.SyncPositionHandler)
 		r.Get("/sync/{id}/rowcounts", replicationhttp.SyncRowCountsHandler)
 		r.Get("/changestreams/status", monitoringhttp.ChangeStreamsStatusHandler)

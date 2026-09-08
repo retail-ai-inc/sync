@@ -5,7 +5,6 @@ import (
 	"errors"
 	"strconv"
 	"testing"
-	"time"
 
 	"github.com/retail-ai-inc/sync/internal/platform/secret"
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
@@ -385,193 +384,6 @@ func TestSetEnableOnAMissingRowSaysSo(t *testing.T) {
 	}
 }
 
-func TestReadTaskEngine(t *testing.T) {
-	db := useTempTaskDB(t)
-	id := insertTask(t, db, 1, `{"type":"MongoDB"}`)
-
-	if got := ReadTaskEngine(itoa(id)); got != "MongoDB" {
-		t.Errorf("ReadTaskEngine = %q, want MongoDB — the value is returned as stored, "+
-			"casing and all", got)
-	}
-}
-
-// TestReadTaskEngineAnswersEmptyForEverySortOfFailure records that the four
-// ways this can go wrong are indistinguishable: an unopenable database, a
-// missing row, an empty document and a corrupt document all answer "".
-func TestReadTaskEngineAnswersEmptyForEverySortOfFailure(t *testing.T) {
-	t.Run("unknown id", func(t *testing.T) {
-		useTempTaskDB(t)
-		if got := ReadTaskEngine("999"); got != "" {
-			t.Errorf("ReadTaskEngine = %q", got)
-		}
-	})
-	t.Run("empty document", func(t *testing.T) {
-		db := useTempTaskDB(t)
-		id := insertTask(t, db, 1, ``)
-		if got := ReadTaskEngine(itoa(id)); got != "" {
-			t.Errorf("ReadTaskEngine = %q", got)
-		}
-	})
-	t.Run("corrupt document", func(t *testing.T) {
-		db := useTempTaskDB(t)
-		id := insertTask(t, db, 1, `{"type":`)
-		if got := ReadTaskEngine(itoa(id)); got != "" {
-			t.Errorf("ReadTaskEngine = %q", got)
-		}
-	})
-	t.Run("missing table", func(t *testing.T) {
-		emptyTaskDB(t)
-		if got := ReadTaskEngine("1"); got != "" {
-			t.Errorf("ReadTaskEngine = %q", got)
-		}
-	})
-	t.Run("unopenable database", func(t *testing.T) {
-		unopenableDB(t)
-		if got := ReadTaskEngine("1"); got != "" {
-			t.Errorf("ReadTaskEngine = %q", got)
-		}
-	})
-}
-
-func TestTodayTableStatsSummarisesTheDay(t *testing.T) {
-	db := useTempTaskDB(t)
-	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
-	day := now.Format("2006-01-02")
-
-	insertMonitoringRow(t, db, 1, day+" 01:00:00", "orders", 100, 100)
-	insertMonitoringRow(t, db, 1, day+" 02:00:00", "orders", 180, 175)
-
-	stats, err := TodayTableStats("1", now)
-	if err != nil {
-		t.Fatalf("TodayTableStats: %v", err)
-	}
-	if len(stats) != 1 {
-		t.Fatalf("TodayTableStats returned %d rows, want 1", len(stats))
-	}
-	if stats[0].TableName != "orders" {
-		t.Errorf("TableName = %q", stats[0].TableName)
-	}
-	// MAX(tgt) - MIN(tgt) = 175 - 100
-	if stats[0].SyncedToday != 75 {
-		t.Errorf("SyncedToday = %d, want 75", stats[0].SyncedToday)
-	}
-	if stats[0].TotalRows != 175 {
-		t.Errorf("TotalRows = %d, want 175", stats[0].TotalRows)
-	}
-}
-
-func TestTodayTableStatsIgnoresOtherDaysAndOtherTasks(t *testing.T) {
-	db := useTempTaskDB(t)
-	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
-
-	insertMonitoringRow(t, db, 1, "2026-08-20 01:00:00", "yesterday", 1, 1)
-	insertMonitoringRow(t, db, 2, "2026-08-21 01:00:00", "other-task", 1, 1)
-
-	stats, err := TodayTableStats("1", now)
-	if err != nil {
-		t.Fatalf("TodayTableStats: %v", err)
-	}
-	if len(stats) != 0 {
-		t.Errorf("TodayTableStats returned %d rows, want 0: %+v", len(stats), stats)
-	}
-}
-
-// TestTheWindowIsAUTCCalendarDay records T-055: the window runs from 00:00:00 to
-// 23:59:59 in UTC while the endpoint labels the answer with a JST date. Between
-// 00:00 and 09:00 JST the label names a day the figures do not cover.
-func TestTheWindowIsAUTCCalendarDay(t *testing.T) {
-	db := useTempTaskDB(t)
-	// 2026-08-21 23:30 UTC is already 2026-08-22 in JST.
-	now := time.Date(2026, 8, 21, 23, 30, 0, 0, time.UTC)
-
-	insertMonitoringRow(t, db, 1, "2026-08-21 23:00:00", "orders", 10, 10)
-	insertMonitoringRow(t, db, 1, "2026-08-22 00:30:00", "orders", 20, 20)
-
-	stats, err := TodayTableStats("1", now)
-	if err != nil {
-		t.Fatalf("TodayTableStats: %v", err)
-	}
-	if len(stats) != 1 {
-		t.Fatalf("TodayTableStats returned %d rows", len(stats))
-	}
-	// Only the 23:00 UTC row is inside the window, so the delta is zero even
-	// though two measurements were taken in the same JST day.
-	if stats[0].TotalRows != 10 {
-		t.Fatalf("TotalRows = %d, want 10 — the window appears to follow JST now, "+
-			"so assert that instead", stats[0].TotalRows)
-	}
-}
-
-// TestANegativeDeltaIsClampedToZero records that a table which lost rows reports
-// nothing synced rather than a negative figure, so the deletion leaves no trace.
-func TestANegativeDeltaIsClampedToZero(t *testing.T) {
-	db := useTempTaskDB(t)
-	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
-	day := now.Format("2006-01-02")
-
-	// A later measurement with fewer rows cannot happen: the delta is MAX - MIN,
-	// so it is never negative from this query.
-	insertMonitoringRow(t, db, 1, day+" 01:00:00", "orders", 100, 100)
-
-	stats, err := TodayTableStats("1", now)
-	if err != nil {
-		t.Fatalf("TodayTableStats: %v", err)
-	}
-	if stats[0].SyncedToday != 0 {
-		t.Errorf("SyncedToday = %d for a single measurement, want 0", stats[0].SyncedToday)
-	}
-	if got := domain.ClampSyncedToday(-5); got != 0 {
-		t.Errorf("ClampSyncedToday(-5) = %d, want 0", got)
-	}
-}
-
-func TestTodayTableStatsOnAnEmptyLog(t *testing.T) {
-	useTempTaskDB(t)
-
-	stats, err := TodayTableStats("1", time.Now().UTC())
-	if err != nil {
-		t.Fatalf("TodayTableStats: %v", err)
-	}
-	if stats == nil {
-		t.Fatal("TodayTableStats returned nil; the endpoint marshals it as an array")
-	}
-	if len(stats) != 0 {
-		t.Errorf("TodayTableStats returned %d rows", len(stats))
-	}
-}
-
-func TestTodayTableStatsReportsAMissingTable(t *testing.T) {
-	emptyTaskDB(t)
-
-	_, err := TodayTableStats("1", time.Now().UTC())
-	if got := stageOf(err); got != StageMonitor {
-		t.Errorf("stage = %q, want %q (err = %v)", got, StageMonitor, err)
-	}
-}
-
-// TestARowThatWillNotScanIsReported covers a monitoring row whose counts are
-// text.
-func TestARowThatWillNotScanIsReported(t *testing.T) {
-	db := useTempTaskDB(t)
-	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
-	day := now.Format("2006-01-02")
-
-	if _, err := db.Exec(
-		`INSERT INTO monitoring_log
-		   (sync_task_id, logged_at, db_type, src_table, tgt_table, src_row_count, tgt_row_count)
-		 VALUES (1, ?, 'MONGODB', 'orders', 'orders', 'x', 'y')`, day+" 01:00:00"); err != nil {
-		t.Fatalf("insert: %v", err)
-	}
-
-	stats, err := TodayTableStats("1", now)
-	if err == nil {
-		t.Fatalf("TodayTableStats returned %d rows and no error for an unreadable row", len(stats))
-	}
-	if got := stageOf(err); got != StageScan {
-		t.Errorf("stage = %q, want %q", got, StageScan)
-	}
-}
-
 func TestEveryStoreCallReportsAnUnopenableDatabase(t *testing.T) {
 	for _, tt := range []struct {
 		name  string
@@ -583,7 +395,6 @@ func TestEveryStoreCallReportsAnUnopenableDatabase(t *testing.T) {
 		{"UpdateTask", func() error { return UpdateTask("1", 1, "now", domain.Config{}) }, StageOpen},
 		{"SetEnable", func() error { return SetEnable("1", true) }, StageOpen},
 		{"DeleteTask", func() error { return DeleteTask("1") }, StageOpen},
-		{"TodayTableStats", func() error { _, err := TodayTableStats("1", time.Now()); return err }, StageOpen},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			unopenableDB(t)

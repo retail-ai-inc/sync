@@ -7,7 +7,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"time"
 
 	"github.com/retail-ai-inc/sync/internal/platform/httpx"
 	"github.com/retail-ai-inc/sync/internal/platform/secret"
@@ -30,8 +29,7 @@ const (
 	// StageDBFail is kept for callers outside this package that still name it;
 	// nothing here uses it any more, because "db fail" said less than
 	// "open db fail" for the same failure.
-	StageDBFail  = "db fail"
-	StageMonitor = "query monitoring_log fail"
+	StageDBFail = "db fail"
 )
 
 type Fault struct {
@@ -233,12 +231,10 @@ func storedConfig(configJSON string) map[string]interface{} {
 	return data
 }
 
-// ReadTaskConfig returns a task's stored configuration. It reports why it
-// could not, which ReadTaskEngine below cannot: that answers the empty string
-// for a database it could not open, a row that is not there, a document that
-// is empty, a document that will not parse and a table that does not exist,
-// and the caller reads all five as "not a MongoDB task" and quietly falls back
-// to stale figures.
+// ReadTaskConfig returns a task's stored configuration, reporting why it could
+// not: a database it could not open, a row that is not there, a document that
+// is empty and a document that will not parse are four different failures and
+// a caller that cannot tell them apart falls back to the wrong thing.
 func ReadTaskConfig(id string) (domain.Config, error) {
 	var cfg domain.Config
 
@@ -266,67 +262,4 @@ func ReadTaskConfig(id string) (domain.Config, error) {
 		return cfg, faultAt(StageScan, err)
 	}
 	return cfg, nil
-}
-
-// ReadTaskEngine returns the engine named in a task's stored configuration,
-// empty when the row is missing or the document will not parse.
-func ReadTaskEngine(id string) string {
-	cfg, err := ReadTaskConfig(id)
-	if err != nil {
-		logrus.Warnf("[Store] Could not read the engine of task %s, so it will be "+
-			"treated as one this does not measure live: %v", id, err)
-		return ""
-	}
-	return cfg.Type
-}
-
-// TodayTableStats reports each table's replication progress for the UTC day
-// that contains now.
-//
-// The window is a UTC calendar day while the endpoint labels the answer with a
-// JST date, so the figures belong to a different day than the label says
-// (T-055).
-func TodayTableStats(id string, now time.Time) ([]domain.TableStat, error) {
-	db, err := sqlite.OpenSQLiteDB()
-	if err != nil {
-		return nil, faultAt(StageOpen, err)
-	}
-	defer db.Close()
-
-	todayStart := now.Format("2006-01-02") + " 00:00:00"
-	todayEnd := now.Format("2006-01-02") + " 23:59:59"
-
-	rows, err := db.Query(`
-		SELECT
-			tgt_table,
-			MAX(tgt_row_count) - MIN(tgt_row_count) AS synced_today,
-			MAX(tgt_row_count) AS total_rows,
-			MAX(logged_at) AS last_sync_time
-		FROM monitoring_log
-		WHERE sync_task_id = ?
-		AND logged_at BETWEEN ? AND ?
-		GROUP BY tgt_table
-	`, id, todayStart, todayEnd)
-	if err != nil {
-		return nil, faultAt(StageMonitor, err)
-	}
-	defer rows.Close()
-
-	stats := make([]domain.TableStat, 0)
-	for rows.Next() {
-		var s domain.TableStat
-		if err := rows.Scan(&s.TableName, &s.SyncedToday, &s.TotalRows, &s.LastSyncTime); err != nil {
-			// A row that will not scan used to be dropped with a warning, so the
-			// table it described simply did not appear in the answer — and "this
-			// table had no traffic today" and "this table's row could not be
-			// read" look the same from the outside.
-			return nil, faultAt(StageScan, err)
-		}
-		s.SyncedToday = domain.ClampSyncedToday(s.SyncedToday)
-		stats = append(stats, s)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, faultAt(StageIterate, err)
-	}
-	return stats, nil
 }

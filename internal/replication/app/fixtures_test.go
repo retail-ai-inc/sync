@@ -61,20 +61,6 @@ func insertTask(t *testing.T, db *sql.DB, enable int, cfg string) int64 {
 	return id
 }
 
-func insertMonitoringRow(t *testing.T, db *sql.DB, taskID int, loggedAt, table string, src, tgt int64) {
-	t.Helper()
-
-	// db_type is NOT NULL in the real schema, which the fixtures' own copies used
-	// to leave off — so these rows could never have been written by the monitor
-	// that writes them in production.
-	if _, err := db.Exec(
-		`INSERT INTO monitoring_log
-		   (sync_task_id, logged_at, db_type, src_table, tgt_table, src_row_count, tgt_row_count)
-		 VALUES (?, ?, 'MONGODB', ?, ?, ?, ?)`, taskID, loggedAt, table, table, src, tgt); err != nil {
-		t.Fatalf("insert monitoring row: %v", err)
-	}
-}
-
 func readConfig(t *testing.T, db *sql.DB, id int64) string {
 	t.Helper()
 
