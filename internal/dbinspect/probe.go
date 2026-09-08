@@ -76,11 +76,12 @@ func TestConnectionHandler(w http.ResponseWriter, r *http.Request) {
 		Database string `json:"database"`
 		// TaskID and Role name the saved task an edit form was filled from, so
 		// the mask it carries can be resolved to what that task stores.
-		TaskID string `json:"taskId"`
-		Role   string `json:"role"`
+		// Numbers or strings: see flexibleID.
+		TaskID flexibleID `json:"taskId"`
+		Role   string     `json:"role"`
 		// BackupID names a saved backup job, for the other edit form that
 		// probes a connection.
-		BackupID string `json:"backupId"`
+		BackupID flexibleID `json:"backupId"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		httpx.ErrorJSONStatus(w, http.StatusBadRequest, "the request body could not be read", err)
@@ -96,7 +97,7 @@ func TestConnectionHandler(w http.ResponseWriter, r *http.Request) {
 	// open to list the source's tables, and that must keep working without
 	// making somebody retype a password to see them.
 	if req.Password == httpx.RedactedPassword {
-		stored, ok := resolveMask(req.TaskID, req.Role, req.BackupID)
+		stored, ok := resolveMask(req.TaskID.String(), req.Role, req.BackupID.String())
 		if !ok {
 			httpx.ErrorJSONStatus(w, http.StatusBadRequest,
 				"the password field holds the mask the task list answers with, and "+

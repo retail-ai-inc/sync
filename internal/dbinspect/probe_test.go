@@ -333,3 +333,73 @@ func TestWithNothingWiredAMaskIsRefused(t *testing.T) {
 		t.Error("a mask resolved with no resolver wired")
 	}
 }
+
+// The bodies these endpoints actually receive, id and all.
+//
+// The list endpoints answer with the row's id as a JSON number, because that
+// is what it is in the control database. One edit form stringifies it before
+// sending it back and the other does not, so a field declared as a string
+// decoded from one and refused the other outright: "cannot unmarshal number
+// into Go struct field .backupId of type string", and nobody could test a
+// backup job's connection. The tests that went with that change covered the
+// resolver -- the part that was written -- and not the decoding, which is
+// where the two sides meet and where it broke.
+func TestAnIdIsReadWhetherItArrivesAsANumberOrAString(t *testing.T) {
+	for name, body := range map[string]string{
+		"a number, as the backup form sends it": `{"backupId":10,"taskId":39}`,
+		"a string, as the sync form sends it":   `{"backupId":"10","taskId":"39"}`,
+		"null":                                  `{"backupId":null,"taskId":null}`,
+		"absent":                                `{}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			var req struct {
+				TaskID   flexibleID `json:"taskId"`
+				BackupID flexibleID `json:"backupId"`
+			}
+			if err := json.Unmarshal([]byte(body), &req); err != nil {
+				t.Fatalf("the body %s could not be read: %v", body, err)
+			}
+			switch name {
+			case "null", "absent":
+				if req.TaskID != "" || req.BackupID != "" {
+					t.Errorf("read %q/%q from %s, want both empty",
+						req.TaskID, req.BackupID, body)
+				}
+			default:
+				if req.TaskID.String() != "39" || req.BackupID.String() != "10" {
+					t.Errorf("read taskId=%q backupId=%q from %s, want 39 and 10",
+						req.TaskID, req.BackupID, body)
+				}
+			}
+		})
+	}
+}
+
+// End to end through the handler, with the body a browser sends: a numeric id
+// and the mask. The refusal it used to answer with named the id's type, which
+// is not something the person clicking "test connection" can do anything
+// about.
+func TestANumericBackupIdResolvesTheMask(t *testing.T) {
+	previous := StoredBackupPassword
+	t.Cleanup(func() { StoredBackupPassword = previous })
+
+	asked := ""
+	StoredBackupPassword = func(jobID string) (string, bool) {
+		asked = jobID
+		return "", false // no password stored, so the probe stops after the lookup
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/test-connection",
+		strings.NewReader(`{"dbType":"mongodb","host":"h","port":"27017","user":"root",`+
+			`"password":"********","database":"x","backupId":10}`))
+	rec := httptest.NewRecorder()
+	TestConnectionHandler(rec, req)
+
+	if asked != "10" {
+		t.Errorf("the job looked up was %q, want 10 -- the body was refused before "+
+			"the lookup", asked)
+	}
+	if body := rec.Body.String(); strings.Contains(body, "cannot unmarshal") {
+		t.Errorf("the body was refused for its shape rather than answered: %s", body)
+	}
+}
