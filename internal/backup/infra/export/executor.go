@@ -34,7 +34,6 @@ type ExecutorBackupConfig struct {
 	} `json:"database"`
 	Destination struct {
 		GCSPath         string `json:"gcsPath"`
-		Retention       int    `json:"retention"`
 		ServiceAccount  string `json:"serviceAccount"`
 		FileNamePattern string `json:"fileNamePattern"`
 	} `json:"destination"`
