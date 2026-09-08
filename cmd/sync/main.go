@@ -186,6 +186,11 @@ func newRouter() *chi.Mux {
 	// credential, which is what every scraper expects; keeping the port off the
 	// public network is the requirement that replaces the token.
 	router.Get("/metrics", metrics.Handler)
+	// The comparison of the two ends, on its own path so a scraper can read it
+	// on its own interval: the numbers behind it cost an exact count of every
+	// replicated object on both sides, so they are measured once an hour and
+	// there is nothing to gain from sampling them every thirty seconds.
+	router.Get("/metrics/rowcounts", metrics.RowCountsHandler)
 
 	router.Get("/*", serveUI)
 	return router

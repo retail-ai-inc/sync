@@ -1,18 +1,20 @@
 package infra
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"regexp"
+	"strconv"
+	"strings"
 	"sync"
-
-	"github.com/retail-ai-inc/sync/internal/monitoring/domain"
-
-	"github.com/retail-ai-inc/sync/internal/platform/sqlite"
-
-	"context"
+	"time"
 
 	"github.com/sirupsen/logrus"
+
+	"github.com/retail-ai-inc/sync/internal/monitoring/domain"
+	"github.com/retail-ai-inc/sync/internal/platform/metrics"
+	"github.com/retail-ai-inc/sync/internal/platform/sqlite"
 )
 
 // qualifiedName matches a "database.table" a task may name. The two parts are
@@ -107,10 +109,39 @@ func (m *monitoringLog) close() {
 func (m *monitoringLog) write(syncTaskID int, dbType, srcDB, srcTable string, srcCount int64,
 	tgtDB, tgtTable string, tgtCount int64, action string) {
 
+	publishRowCounts(syncTaskID, dbType, srcDB, srcTable, srcCount, tgtCount, action)
 	if m == nil {
 		return
 	}
 	insert(m.db, syncTaskID, dbType, srcDB, srcTable, srcCount, tgtDB, tgtTable, tgtCount, action)
+}
+
+// publishRowCounts reports a comparison to the scraper as well as to the
+// control database.
+//
+// Only the full comparison: the daily summary writes rows of its own for a
+// window of one day, and publishing those under the same name would report a
+// day's rows as the size of the object.
+//
+// The label is `object` rather than `table` because the four engines compare
+// tables, collections and whole databases, and one name for the thing being
+// compared is what lets one panel cover them all. A standalone Redis task
+// compares a database and has no object name; it is published under the
+// database's number.
+func publishRowCounts(syncTaskID int, dbType, srcDB, object string,
+	source, target int64, action string) {
+
+	if action != actionRowCount && action != actionCountFailed {
+		return
+	}
+	if object == "" {
+		object = "db" + srcDB
+	}
+	metrics.SetRowCounts(metrics.Labels{
+		"task":   strconv.Itoa(syncTaskID),
+		"engine": strings.ToLower(dbType),
+		"object": object,
+	}, source, target, time.Now())
 }
 
 // storeMonitoringLog writes one comparison and closes again, for the callers

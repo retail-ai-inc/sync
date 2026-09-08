@@ -258,6 +258,23 @@ func Handler(w http.ResponseWriter, _ *http.Request) {
 	_ = Default.Write(w)
 }
 
+// RowCounts is the exposition for the comparison of the two ends, kept apart
+// from Default so a scraper can read it on its own interval.
+//
+// The numbers on it cost an exact count of every replicated object on both
+// sides -- on a sharded source that is every shard, per collection -- so they
+// are measured once an hour where everything on Default is either free or
+// already being counted. Scraping them every thirty seconds along with the
+// rest would store a hundred and twenty copies of each hour's figure, which
+// for a metric billed per sample is the whole cost of the feature.
+var RowCounts = New()
+
+// RowCountsHandler serves it.
+func RowCountsHandler(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	_ = RowCounts.Write(w)
+}
+
 type Sample struct {
 	Name   string
 	Labels Labels

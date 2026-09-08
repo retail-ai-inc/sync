@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/retail-ai-inc/sync/internal/platform/config"
+	"github.com/retail-ai-inc/sync/internal/platform/metrics"
 	"github.com/sirupsen/logrus"
 )
 
@@ -343,4 +344,50 @@ func TestAnEmptyKeyspaceCountsZero(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The comparison reaches the scraper as well as the control database, and only
+// the full comparison does: the daily summary writes rows for a window of one
+// day, and publishing those under the same name would report a day's rows as
+// the size of the object.
+func TestOnlyTheFullComparisonIsPublished(t *testing.T) {
+	full := metrics.Labels{"task": "7", "engine": "mysql", "object": "Users"}
+	daily := metrics.Labels{"task": "7", "engine": "mysql", "object": "Orders"}
+	t.Cleanup(func() {
+		metrics.ForgetRowCounts(full)
+		metrics.ForgetRowCounts(daily)
+	})
+
+	publishRowCounts(7, "MYSQL", "shop", "Users", 100, 98, actionRowCount)
+	publishRowCounts(7, "MYSQL", "shop", "Orders", 5, 5, "data_volume_daily")
+
+	if !published(t, full) {
+		t.Error("the full comparison was not published")
+	}
+	if published(t, daily) {
+		t.Error("a daily summary row was published as the object's size")
+	}
+}
+
+// A standalone Redis task compares a whole database and has no object name.
+// An empty label would draw every database as one series.
+func TestADatabaseWithNoObjectNameIsPublishedUnderItsNumber(t *testing.T) {
+	labels := metrics.Labels{"task": "42", "engine": "redis", "object": "db0"}
+	t.Cleanup(func() { metrics.ForgetRowCounts(labels) })
+
+	publishRowCounts(42, "REDIS", "0", "", 220, 242, actionRowCount)
+
+	if !published(t, labels) {
+		t.Error("a database compared without an object name was not published as db0")
+	}
+}
+
+func published(t *testing.T, labels metrics.Labels) bool {
+	t.Helper()
+	for _, sample := range metrics.RowCounts.Snapshot(metrics.SourceRows) {
+		if sample.Labels.Key() == labels.Key() {
+			return true
+		}
+	}
+	return false
 }

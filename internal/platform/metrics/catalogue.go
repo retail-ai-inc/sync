@@ -720,3 +720,38 @@ func SetBackupInfo(labels Labels, name, source, schedule string) {
 	with = withLabel(with, "source", source)
 	Default.SetGauge(BackupInfo, helpBackupInfo, withLabel(with, "schedule", schedule), 1)
 }
+
+// The comparison of the two ends, object by object.
+//
+// These live on the RowCounts registry rather than Default: they cost an exact
+// count of every replicated object on both sides, so they are measured on
+// their own long interval and scraped on their own.
+const (
+	SourceRows = "sync_source_rows"
+	TargetRows = "sync_target_rows"
+	// RowCountMeasuredAt is when the pair above was counted, seconds since the
+	// epoch. Without it a gauge that stopped being updated looks exactly like
+	// one that is up to date, and these are updated once an hour.
+	RowCountMeasuredAt = "sync_row_count_measured_at_seconds"
+
+	helpSourceRows  = "Rows or documents the source holds, counted exactly"
+	helpTargetRows  = "Rows or documents the target holds, counted exactly"
+	helpRowCountsAt = "When this object's two counts were taken, seconds since the epoch"
+)
+
+// SetRowCounts records one object's comparison. A count of -1 is what the
+// monitor reports when it could not be taken, and it is published as it is:
+// the difference between "could not count" and "counted zero" is the whole
+// point of the pair.
+func SetRowCounts(labels Labels, source, target int64, at time.Time) {
+	RowCounts.SetGauge(SourceRows, helpSourceRows, labels, float64(source))
+	RowCounts.SetGauge(TargetRows, helpTargetRows, labels, float64(target))
+	RowCounts.SetGauge(RowCountMeasuredAt, helpRowCountsAt, labels, float64(at.Unix()))
+}
+
+// ForgetRowCounts drops the series of objects a task no longer replicates, so
+// a renamed table or a disabled task stops being reported as a difference for
+// ever.
+func ForgetRowCounts(labels Labels) {
+	RowCounts.Forget(labels)
+}

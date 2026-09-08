@@ -30,6 +30,7 @@ CREATE TABLE config_global (
     enable_table_row_count_monitoring INTEGER NOT NULL DEFAULT 0,
     log_level                         TEXT    NOT NULL DEFAULT 'info',
     monitor_interval                  INTEGER DEFAULT 60,
+    row_count_interval_seconds        INTEGER NOT NULL DEFAULT 3600,
     slackWebhookURL                   TEXT,
     slackChannel                      TEXT
 );
@@ -68,6 +69,12 @@ VALUES (1, 1, 'debug', 300, 'https://hooks.example.com/x', '#alerts')`); err != 
 	// The column stores seconds; the field is a Duration.
 	if want := 300 * time.Second; got.MonitorInterval != want {
 		t.Errorf("MonitorInterval = %v, want %v", got.MonitorInterval, want)
+	}
+	// The comparison of the two ends has its own interval: it is the expensive
+	// one, an exact count of every replicated object on both sides.
+	if want := time.Hour; got.RowCountInterval != want {
+		t.Errorf("RowCountInterval = %v, want the column's default of %v",
+			got.RowCountInterval, want)
 	}
 	if got.SlackWebhookURL != "https://hooks.example.com/x" {
 		t.Errorf("SlackWebhookURL = %q", got.SlackWebhookURL)

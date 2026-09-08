@@ -80,15 +80,26 @@ func fingerprint(sc config.SyncConfig) string {
 // reached.
 var drainTimeout = 30 * time.Second
 
+// rowCountInterval reports how often to compare the two ends, falling back to
+// the general monitor interval for a database written before the column
+// existed. Zero there would mean a ticker that panics.
+func rowCountInterval(cfg *config.Config) time.Duration {
+	if cfg.RowCountInterval > 0 {
+		return cfg.RowCountInterval
+	}
+	return cfg.MonitorInterval
+}
+
 func globalFingerprint(cfg *config.Config) string {
 	encoded, err := json.Marshal(struct {
-		Monitoring bool
-		Interval   time.Duration
-		Webhook    string
-		Channel    string
-		LogLevel   string
+		Monitoring    bool
+		Interval      time.Duration
+		RowCountEvery time.Duration
+		Webhook       string
+		Channel       string
+		LogLevel      string
 	}{
-		cfg.EnableTableRowCountMonitoring, cfg.MonitorInterval,
+		cfg.EnableTableRowCountMonitoring, cfg.MonitorInterval, cfg.RowCountInterval,
 		cfg.SlackWebhookURL, cfg.SlackChannel, cfg.LogLevel,
 	})
 	if err != nil {
@@ -378,7 +389,7 @@ func (s *supervisor) applyMonitoring(ctx context.Context, cfg *config.Config) {
 	// it was turned off do not remove themselves.
 	app.StartMonitoringRetention(monitorCtx, s.log)
 	if cfg.EnableTableRowCountMonitoring {
-		app.StartRowCountMonitoring(monitorCtx, cfg, s.log, cfg.MonitorInterval, s.currentTasks)
+		app.StartRowCountMonitoring(monitorCtx, cfg, s.log, rowCountInterval(cfg), s.currentTasks)
 	}
 }
 

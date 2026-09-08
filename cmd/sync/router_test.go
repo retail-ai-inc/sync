@@ -41,6 +41,20 @@ func TestTheMetricsAreServedWithoutACredential(t *testing.T) {
 	}
 }
 
+// TestTheComparisonIsServedOnItsOwnPath records why there are two expositions:
+// the row counts cost an exact count of every replicated object on both sides,
+// so they are measured hourly and scraped on their own interval. They take no
+// token for the same reason the other one does not.
+func TestTheComparisonIsServedOnItsOwnPath(t *testing.T) {
+	rec := serve(t, http.MethodGet, "/metrics/rowcounts")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /metrics/rowcounts = %d, want 200", rec.Code)
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "# HELP") && body != "" {
+		t.Errorf("body = %q, want the Prometheus text format", body)
+	}
+}
+
 // TestTheAPIRequiresACredential records that mounting the API under /api keeps
 // it behind the authentication middleware — the probes and the exposition are
 // the exceptions, and they are exceptions because they sit outside it.

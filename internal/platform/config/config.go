@@ -120,14 +120,19 @@ type Config struct {
 	SyncConfigs                   []SyncConfig
 	Logger                        *logrus.Logger
 	MonitorInterval               time.Duration
-	SlackWebhookURL               string
-	SlackChannel                  string
+	// RowCountInterval is how often the two ends are counted and compared.
+	// Separate from MonitorInterval because it is the expensive one: an exact
+	// count of every replicated object on both sides.
+	RowCountInterval time.Duration
+	SlackWebhookURL  string
+	SlackChannel     string
 }
 
 type globalConfig struct {
 	EnableTableRowCountMonitoring bool
 	LogLevel                      string
 	MonitorInterval               time.Duration
+	RowCountInterval              time.Duration
 	SlackWebhookURL               string
 	SlackChannel                  string
 }
@@ -187,6 +192,7 @@ func NewConfig() (*Config, error) {
 		SyncConfigs:                   syncCfgs,
 		Logger:                        logrus.New(),
 		MonitorInterval:               gcfg.MonitorInterval,
+		RowCountInterval:              gcfg.RowCountInterval,
 		SlackWebhookURL:               gcfg.SlackWebhookURL,
 		SlackChannel:                  gcfg.SlackChannel,
 	}, nil
@@ -196,14 +202,16 @@ func loadGlobalConfig(db *sql.DB) (globalConfig, error) {
 	var em int
 	var ll string
 	var mi int
+	var rci int
 	var swu string
 	var sc string
 	err := db.QueryRow(`
-SELECT enable_table_row_count_monitoring, log_level, monitor_interval, 
+SELECT enable_table_row_count_monitoring, log_level, monitor_interval,
+       row_count_interval_seconds,
        COALESCE(slackWebhookURL, ''), COALESCE(slackChannel, '')
 FROM config_global
 WHERE id=1
-`).Scan(&em, &ll, &mi, &swu, &sc)
+`).Scan(&em, &ll, &mi, &rci, &swu, &sc)
 	if err != nil {
 		return globalConfig{}, fmt.Errorf("load config_global: %w", err)
 	}
@@ -211,6 +219,7 @@ WHERE id=1
 		EnableTableRowCountMonitoring: (em != 0),
 		LogLevel:                      ll,
 		MonitorInterval:               time.Duration(mi) * time.Second,
+		RowCountInterval:              time.Duration(rci) * time.Second,
 		SlackWebhookURL:               swu,
 		SlackChannel:                  sc,
 	}, nil

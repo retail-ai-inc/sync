@@ -42,7 +42,8 @@ CREATE TABLE IF NOT EXISTS config_global (
     mongo_stream_await_ms             INTEGER NOT NULL DEFAULT 0,
     mongo_whole_documents             INTEGER NOT NULL DEFAULT 0,
     recopy_on_unusable_position       INTEGER NOT NULL DEFAULT 1,
-    redis_buffer_max_bytes            INTEGER NOT NULL DEFAULT 0
+    redis_buffer_max_bytes            INTEGER NOT NULL DEFAULT 0,
+    row_count_interval_seconds        INTEGER NOT NULL DEFAULT 3600
 );
 
 CREATE TABLE IF NOT EXISTS sync_tasks (
@@ -198,6 +199,11 @@ var addedColumns = []struct{ table, column, definition string }{
 	// column added with a default fills every row with it.
 	{"config_global", "recopy_on_unusable_position", "INTEGER NOT NULL DEFAULT 1"},
 	{"config_global", "redis_buffer_max_bytes", "INTEGER NOT NULL DEFAULT 0"},
+	// An hour by default, and an hour for a database that predates the column:
+	// the comparison costs an exact count of every replicated object on both
+	// sides, which on a sharded source is every shard per collection. It ran
+	// every sixty seconds because monitor_interval was the only knob there was.
+	{"config_global", "row_count_interval_seconds", "INTEGER NOT NULL DEFAULT 3600"},
 }
 
 // addColumns adds each of those columns if it is missing. SQLite has no ADD
