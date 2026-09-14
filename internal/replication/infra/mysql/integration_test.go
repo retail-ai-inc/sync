@@ -664,3 +664,60 @@ func TestATableTheTaskDoesNotListIsReported(t *testing.T) {
 		t.Error("the unreplicated table count was not recorded")
 	}
 }
+
+// TestATimestampArrivesAsTheSourceShowsIt covers the value a TIMESTAMP column
+// holds on the target, which is not what a row count can see.
+//
+// A TIMESTAMP is stored as an instant and rendered in the reader's zone. The
+// stream used to render it in this process's zone, so a syncer running in JST
+// wrote every TIMESTAMP nine hours ahead of the source while the first copy
+// wrote the same rows correctly — the two sides agreed on every count and
+// disagreed on the values.
+func TestATimestampArrivesAsTheSourceShowsIt(t *testing.T) {
+	table := harness.UniqueName("tstz")
+	src, tgt := open(t, harness.MySQLSource, sourceDB), open(t, harness.MySQLTarget, targetDB)
+
+	mustExec(t, src, fmt.Sprintf(
+		`CREATE TABLE %s (id INT PRIMARY KEY, seen TIMESTAMP NOT NULL, name VARCHAR(40))`, table))
+	t.Cleanup(func() {
+		_, _ = src.Exec("DROP TABLE IF EXISTS " + table)
+		_, _ = tgt.Exec("DROP TABLE IF EXISTS " + table)
+	})
+	// One row through the first copy, to compare the two paths against each
+	// other as well as against the source.
+	mustExec(t, src, fmt.Sprintf("INSERT INTO %s (id, seen, name) VALUES (1, ?, 'copied')", table),
+		"2026-03-01 04:05:06")
+
+	startSyncer(t, syncTask(t, table))
+	harness.Eventually(t, 45*time.Second, func() error {
+		if n := countRows(t, tgt, table, ""); n != 1 {
+			return fmt.Errorf("the first copy has not landed: %d rows", n)
+		}
+		return nil
+	})
+
+	// And one through the stream.
+	mustExec(t, src, fmt.Sprintf("INSERT INTO %s (id, seen, name) VALUES (2, ?, 'streamed')", table),
+		"2026-03-01 04:05:06")
+	harness.Eventually(t, 30*time.Second, func() error {
+		if n := countRows(t, tgt, table, "id = 2"); n != 1 {
+			return fmt.Errorf("the streamed row has not arrived")
+		}
+		return nil
+	})
+
+	for _, id := range []int{1, 2} {
+		var source, target string
+		if err := src.QueryRow(fmt.Sprintf("SELECT seen FROM %s WHERE id = ?", table), id).
+			Scan(&source); err != nil {
+			t.Fatalf("read the source row %d: %v", id, err)
+		}
+		if err := tgt.QueryRow(fmt.Sprintf("SELECT seen FROM %s WHERE id = ?", table), id).
+			Scan(&target); err != nil {
+			t.Fatalf("read the target row %d: %v", id, err)
+		}
+		if source != target {
+			t.Errorf("row %d reads %q on the source and %q on the target", id, source, target)
+		}
+	}
+}
