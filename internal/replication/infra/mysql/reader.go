@@ -77,10 +77,10 @@ type Reader struct {
 	// rows written before a schema change at risk of being decoded against the new
 	// shape.
 	resumed bool
-	// appliedSince names tables that have had rows handed over this run. A
-	// reordering statement arriving after them means those rows were read against
-	// the wrong shape.
-	appliedSince map[string]bool
+	// appliedSince records, per table, when this run first handed rows over.
+	// That is when canal asked the source for the table's shape, so it is what a
+	// reordering statement's own timestamp has to be compared against.
+	appliedSince map[string]time.Time
 
 	closeOnce sync.Once
 }
@@ -112,7 +112,7 @@ func (r *Reader) Open(_ context.Context, from domain.Position) error {
 
 	r.conv = r.converter()
 	r.resumed = !from.IsZero()
-	r.appliedSince = map[string]bool{}
+	r.appliedSince = map[string]time.Time{}
 	r.out = make(chan *domain.Event, 1)
 	r.fail = make(chan error, 1)
 	r.done = make(chan struct{})
@@ -362,7 +362,9 @@ func (r *Reader) OnRow(e *canal.RowsEvent) error {
 		r.tx[i].Key = rowKey(e, i-before)
 	}
 	if len(r.tx) > before {
-		r.appliedSince[ns.String()] = true
+		if _, seen := r.appliedSince[ns.String()]; !seen {
+			r.appliedSince[ns.String()] = time.Now()
+		}
 	}
 	return nil
 }
@@ -388,7 +390,11 @@ func (r *Reader) OnDDL(header *replication.EventHeader, pos mysql.Position, e *r
 	if e == nil {
 		return nil
 	}
-	if err := r.checkReordering(string(e.Schema), string(e.Query)); err != nil {
+	ddlAt := time.Time{}
+	if header != nil && header.Timestamp > 0 {
+		ddlAt = time.Unix(int64(header.Timestamp), 0)
+	}
+	if err := r.checkReordering(string(e.Schema), string(e.Query), ddlAt); err != nil {
 		return err
 	}
 
@@ -439,11 +445,24 @@ func (r *Reader) OnDDL(header *replication.EventHeader, pos mysql.Position, e *r
 	return r.handOver(pos, nil, header)
 }
 
-// checkReordering stops the task when a column-moving statement arrives after
-// rows for that table were handed over: those rows were decoded against the
-// shape this statement produced, because the column names come from the
-// source's current schema and not the binlog.
-func (r *Reader) checkReordering(defaultSchema, query string) error {
+// schemaReadSkew is how much disagreement between the source's clock and this
+// process's is absorbed before a statement counts as older than the shape read
+// for it. The comparison is across two clocks because the binlog timestamp is
+// the only source-side one there is; a few minutes of NTP drift must not turn
+// into either verdict on its own, and erring towards refusing is the safe side.
+const schemaReadSkew = 5 * time.Minute
+
+// checkReordering stops the task when a column-moving statement that had
+// already run on the source arrives after rows for that table were handed
+// over: canal resolves column names from the source's current shape, so those
+// rows were decoded against the shape this statement produced.
+//
+// A statement that runs while the stream is live is not that case. The shape
+// was read before it, the rows already handed over were decoded under the one
+// they were written with, and refusing there halts a healthy task -- which is
+// what happened to the staging MySQL task on 2026-09-14, where an ALTER ran
+// nine hours into a run and stopped replication over rows that were correct.
+func (r *Reader) checkReordering(defaultSchema, query string, at time.Time) error {
 	if !r.resumed || len(r.appliedSince) == 0 {
 		// Nothing was read before this statement, so nothing was read against the
 		// wrong shape.
@@ -465,7 +484,15 @@ func (r *Reader) checkReordering(defaultSchema, query string) error {
 				schemaName = defaultSchema
 			}
 			name := domain.Namespace{DB: schemaName, Object: ref.Name.O}.String()
-			if !r.appliedSince[name] {
+			readAt, applied := r.appliedSince[name]
+			if !applied {
+				continue
+			}
+			if !at.IsZero() && !at.Before(readAt.Add(-schemaReadSkew)) {
+				// The statement ran on the source after the shape was read for
+				// this table, so the rows decoded against that shape are the
+				// ones written under it. The change itself is propagated by the
+				// ordinary path below.
 				continue
 			}
 			return domain.Unrecoverable(

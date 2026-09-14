@@ -3,6 +3,7 @@ package mysql
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-mysql-org/go-mysql/canal"
 	"github.com/go-mysql-org/go-mysql/mysql"
@@ -399,7 +400,7 @@ func readerWithMappings(t *testing.T, mappings []config.DatabaseMapping) *Reader
 	r := readerFor(mappings, "u:p@tcp(h:3306)/shop")
 	r.Logger = logger
 	r.conv = r.converter()
-	r.appliedSince = map[string]bool{}
+	r.appliedSince = map[string]time.Time{}
 	// OnDDL hands the event straight over, a schema change being its own batch,
 	// so there has to be somewhere for it to go.
 	r.out = make(chan *domain.Event, 8)

@@ -236,30 +236,34 @@ func TestAChangeThatKeepsTheOrderIsNotAMove(t *testing.T) {
 func TestAMoveOnlyMattersAfterRowsHaveBeenApplied(t *testing.T) {
 	r := &Reader{Config: config.SyncConfig{Type: "mysql", SourceConnection: "u:p@tcp(h:3306)/shop"}}
 	const move = "ALTER TABLE orders MODIFY COLUMN amount DECIMAL(12,2) AFTER customer"
+	read := time.Now()
+	// A statement older than the shape that was read for the table: the case
+	// this refuses. A live one is covered by the test below.
+	stale := read.Add(-time.Hour)
 
 	// Started at the end of the log: nothing older than the statement was read.
 	r.resumed = false
-	r.appliedSince = map[string]bool{"shop.orders": true}
-	if err := r.checkReordering("shop", move); err != nil {
+	r.appliedSince = map[string]time.Time{"shop.orders": read}
+	if err := r.checkReordering("shop", move, stale); err != nil {
 		t.Errorf("a fresh stream was stopped: %v", err)
 	}
 
 	// Resumed, but nothing applied for that table yet.
 	r.resumed = true
-	r.appliedSince = map[string]bool{}
-	if err := r.checkReordering("shop", move); err != nil {
+	r.appliedSince = map[string]time.Time{}
+	if err := r.checkReordering("shop", move, stale); err != nil {
 		t.Errorf("a resumed stream with nothing applied was stopped: %v", err)
 	}
 
 	// Resumed, and rows for another table applied — not this one's problem.
-	r.appliedSince = map[string]bool{"shop.payments": true}
-	if err := r.checkReordering("shop", move); err != nil {
+	r.appliedSince = map[string]time.Time{"shop.payments": read}
+	if err := r.checkReordering("shop", move, stale); err != nil {
 		t.Errorf("another table's rows stopped this one: %v", err)
 	}
 
 	// Resumed, and rows for this table applied: those rows are wrong.
-	r.appliedSince = map[string]bool{"shop.orders": true}
-	err := r.checkReordering("shop", move)
+	r.appliedSince = map[string]time.Time{"shop.orders": read}
+	err := r.checkReordering("shop", move, stale)
 	if !domain.IsUnrecoverable(err) {
 		t.Fatalf("checkReordering returned %v, want an unrecoverable error", err)
 	}
@@ -268,6 +272,57 @@ func TestAMoveOnlyMattersAfterRowsHaveBeenApplied(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "copy") {
 		t.Errorf("error = %v, want it to say what to do", err)
+	}
+}
+
+// TestAMoveMadeWhileTheStreamIsRunningIsNotARefusal records what stopped the
+// staging MySQL task on 2026-09-14: an ALTER ran on the source nine hours into
+// a run and every row handed over until then was refused as wrongly decoded.
+// They were not. canal read the table's shape when the first of those rows
+// arrived, which was before the statement ran, so the rows carry the shape
+// they were written under and the statement is simply propagated.
+func TestAMoveMadeWhileTheStreamIsRunningIsNotARefusal(t *testing.T) {
+	r := &Reader{Config: config.SyncConfig{Type: "mysql", SourceConnection: "u:p@tcp(h:3306)/shop"}}
+	const move = "ALTER TABLE orders ADD COLUMN tablet VARCHAR(48) NULL AFTER customer"
+
+	r.resumed = true
+	shapeRead := time.Now().Add(-9 * time.Hour)
+	r.appliedSince = map[string]time.Time{"shop.orders": shapeRead}
+
+	if err := r.checkReordering("shop", move, time.Now()); err != nil {
+		t.Errorf("a statement that ran while the stream was live was refused: %v", err)
+	}
+
+	// The other side of the same comparison: a statement that ran before the
+	// shape was read is still refused, because those rows really were decoded
+	// against the shape it produced.
+	if err := r.checkReordering("shop", move, shapeRead.Add(-time.Hour)); !domain.IsUnrecoverable(err) {
+		t.Errorf("a statement older than the shape read for the table returned %v", err)
+	}
+
+	// A statement whose timestamp is missing keeps the old, conservative
+	// answer: with nothing to compare, refusing is the safe side.
+	if err := r.checkReordering("shop", move, time.Time{}); !domain.IsUnrecoverable(err) {
+		t.Errorf("a statement with no timestamp returned %v", err)
+	}
+}
+
+// TestClockSkewDoesNotDecideTheVerdict covers the margin: the two timestamps
+// come from different clocks, so a statement that ran a moment before the
+// shape was read is treated as the live case rather than as a corruption.
+func TestClockSkewDoesNotDecideTheVerdict(t *testing.T) {
+	r := &Reader{Config: config.SyncConfig{Type: "mysql", SourceConnection: "u:p@tcp(h:3306)/shop"}}
+	const move = "ALTER TABLE orders MODIFY COLUMN amount DECIMAL(12,2) AFTER customer"
+
+	r.resumed = true
+	read := time.Now()
+	r.appliedSince = map[string]time.Time{"shop.orders": read}
+
+	if err := r.checkReordering("shop", move, read.Add(-schemaReadSkew/2)); err != nil {
+		t.Errorf("a statement within the skew margin was refused: %v", err)
+	}
+	if err := r.checkReordering("shop", move, read.Add(-2*schemaReadSkew)); !domain.IsUnrecoverable(err) {
+		t.Errorf("a statement well outside the margin returned %v", err)
 	}
 }
 
