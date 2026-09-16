@@ -189,7 +189,7 @@ func (s *Syncer) Start(ctx context.Context) error {
 		return domain.Unrecoverable("%v", err)
 	}
 
-	labels := metrics.Labels{"task": fmt.Sprint(s.cfg.ID), "engine": "mongodb"}
+	labels := metrics.Labels{"task": fmt.Sprint(s.cfg.ID), "engine": domain.EngineLabel(s.cfg.Type)}
 	sourceDBName := dsn.GetDatabaseName(s.cfg.Type, s.cfg.SourceConnection)
 	targetDBName := dsn.GetDatabaseName(s.cfg.Type, s.cfg.TargetConnection)
 	metrics.SetTaskInfo(labels,

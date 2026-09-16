@@ -48,6 +48,14 @@ func main() {
 	}
 	log := logging.InitLogger(cfg.LogLevel)
 
+	// A knob that does nothing is worse than one that is missing: it is set, no
+	// error appears, and the deployment is believed to be configured the way the
+	// documentation says. Four documented variables were read by no code at all.
+	if unknown := config.EnvironmentFromOS(); len(unknown) > 0 {
+		log.Errorf("These SYNC_ variables are set and nothing reads them, so whatever "+
+			"they were meant to change has not changed: %s", strings.Join(unknown, ", "))
+	}
+
 	if _, err := os.Stat("ui/dist"); os.IsNotExist(err) {
 		log.Info("ui/dist directory does not exist, extracting ui/dist.zip...")
 		if err := webui.UnzipDistFile("ui/dist.zip", "ui/"); err != nil {

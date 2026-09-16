@@ -540,7 +540,7 @@ func (s *Syncer) claimDirection(ctx context.Context, source, target goredis.Univ
 func (s *Syncer) labels() metrics.Labels {
 	return metrics.Labels{
 		"task":   strconv.Itoa(s.cfg.ID),
-		"engine": "redis",
+		"engine": domain.EngineLabel(s.cfg.Type),
 	}
 }
 

@@ -406,7 +406,7 @@ func (s *Syncer) positionFile() checkpoint.Store {
 }
 
 func (s *Syncer) labels() metrics.Labels {
-	return metrics.Labels{"task": fmt.Sprint(s.cfg.ID), "engine": "postgresql"}
+	return metrics.Labels{"task": fmt.Sprint(s.cfg.ID), "engine": domain.EngineLabel(s.cfg.Type)}
 }
 
 // replicationConnection turns the task's connection string into one that opens

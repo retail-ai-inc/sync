@@ -224,3 +224,22 @@ func carryPassword(incoming, stored map[string]string) map[string]string {
 	delete(incoming, "password")
 	return incoming
 }
+
+// EngineLabel is the one spelling of an engine used in metrics.
+//
+// The supervisor used the configured string verbatim while every syncer wrote
+// its own literal, so "MySQL" from the interface and "mysql" from the syncer
+// were two different series for one task: a dashboard summing across them
+// counted the task twice, and the supervisor's own ForgetStale never matched
+// what the engine had published, so a stopped task's gauges stayed up for ever.
+// MariaDB is labelled mysql, because that is the engine that replicates it.
+func EngineLabel(configured string) string {
+	engine := strings.ToLower(strings.TrimSpace(configured))
+	switch engine {
+	case "mariadb":
+		return "mysql"
+	case "postgres":
+		return "postgresql"
+	}
+	return engine
+}

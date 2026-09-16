@@ -979,7 +979,7 @@ func (s *MySQLSyncer) metricLabels() metrics.Labels {
 	// instead of multiplying every series that carries it.
 	return metrics.Labels{
 		"task":   strconv.Itoa(s.cfg.ID),
-		"engine": s.cfg.Type,
+		"engine": domain.EngineLabel(s.cfg.Type),
 	}
 }
 

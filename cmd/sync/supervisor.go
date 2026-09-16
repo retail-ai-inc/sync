@@ -246,7 +246,7 @@ func (s *supervisor) reconsider(ctx context.Context, sc config.SyncConfig, task 
 func taskLabels(sc config.SyncConfig) metrics.Labels {
 	return metrics.Labels{
 		"task":   strconv.Itoa(sc.ID),
-		"engine": sc.Type,
+		"engine": domain.EngineLabel(sc.Type),
 	}
 }
 

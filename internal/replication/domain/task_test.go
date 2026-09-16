@@ -324,3 +324,32 @@ func TestARedactedPasswordWithNothingStoredIsDropped(t *testing.T) {
 		t.Errorf("the rest of the connection was lost: %v", got.SourceConn)
 	}
 }
+
+// TestOneSpellingOfTheEngineLabel records why the label is normalised.
+//
+// The supervisor used the configured string verbatim while every syncer wrote
+// its own literal, so a task configured as "MySQL" published two series: one
+// under "MySQL" and one under "mysql". A dashboard summing across them counted
+// the task twice, and the supervisor's cleanup of a stopped task's gauges never
+// matched the ones the engine had actually published, so they stayed up for
+// ever.
+func TestOneSpellingOfTheEngineLabel(t *testing.T) {
+	for configured, want := range map[string]string{
+		"mysql":      "mysql",
+		"MySQL":      "mysql",
+		"  MYSQL  ":  "mysql",
+		"mariadb":    "mysql", // replicated by the same engine
+		"MariaDB":    "mysql",
+		"mongodb":    "mongodb",
+		"MongoDB":    "mongodb",
+		"redis":      "redis",
+		"Redis":      "redis",
+		"postgresql": "postgresql",
+		"postgres":   "postgresql",
+		"":           "",
+	} {
+		if got := EngineLabel(configured); got != want {
+			t.Errorf("EngineLabel(%q) = %q, want %q", configured, got, want)
+		}
+	}
+}
