@@ -154,6 +154,14 @@ func (s *supervisor) apply(ctx context.Context, cfg *config.Config) {
 		}
 	}
 
+	// Published on every reload, and per process rather than per task: every
+	// other gauge here is keyed by task and disappears with it, so a control
+	// database that came up empty -- a volume that did not mount -- produced no
+	// series at all. "Nothing is configured" and "nothing is running" then look
+	// exactly like "the exporter is not there", which is the one reading nobody
+	// can alert on.
+	metrics.SetTaskCounts(len(cfg.SyncConfigs), len(desired))
+
 	for id, task := range s.running {
 		wanted, keep := desired[id]
 		if keep && fingerprint(wanted) == task.fingerprint {

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -114,5 +116,44 @@ func TestTheGlobalFingerprintIgnoresTheTasks(t *testing.T) {
 
 	if globalFingerprint(cfgWith(baseTask())) != globalFingerprint(cfgWith(other)) {
 		t.Error("a task edit changed the global fingerprint")
+	}
+}
+
+// TestAControlDatabaseThatHadToBeCreatedIsNotReady covers the failure that
+// looks exactly like a healthy first run.
+//
+// A volume that does not mount leaves SYNC_DB_PATH pointing at nothing. The
+// file is created, the schema applied, every query answered -- and the process
+// comes up with no tasks, no users, a /readyz of 200 and not one metric to say
+// that Tokyo is no longer being replicated anywhere.
+func TestAControlDatabaseThatHadToBeCreatedIsNotReady(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mounted", "sync.db")
+	t.Setenv("SYNC_DB_PATH", path)
+	t.Setenv("SYNC_DB_ALLOW_CREATE", "")
+
+	err := controlPlaneReady()
+	if err == nil {
+		t.Fatal("a control database that had to be created reported ready")
+	}
+	for _, want := range []string{"did not mount", "SYNC_DB_ALLOW_CREATE"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %v, want it to carry %q", err, want)
+		}
+	}
+
+	// And it stays unready: the process came up on an empty database, and
+	// having since written to it does not make that right.
+	if err := controlPlaneReady(); err == nil {
+		t.Error("the second look reported ready, so a restart is not needed to clear it")
+	}
+}
+
+// And a genuine first run says so deliberately.
+func TestAFirstRunCanBeDeclared(t *testing.T) {
+	t.Setenv("SYNC_DB_PATH", filepath.Join(t.TempDir(), "sync.db"))
+	t.Setenv("SYNC_DB_ALLOW_CREATE", "1")
+
+	if err := controlPlaneReady(); err != nil {
+		t.Errorf("a declared first run reported not ready: %v", err)
 	}
 }

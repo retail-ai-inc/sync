@@ -234,6 +234,20 @@ func controlPlaneReady() error {
 		"SELECT COUNT(*) FROM (SELECT 1 FROM sync_tasks LIMIT 1)").Scan(new(int)); err != nil {
 		return fmt.Errorf("read the control database: %w", err)
 	}
+
+	// A volume that did not mount reads as a first run: the file is created,
+	// the schema applied, every query answered, and the process replicates
+	// nothing while reporting itself healthy. Where the path was named
+	// deliberately, that is a misconfiguration and not a first run, and this is
+	// the one place it can be told apart.
+	if named := os.Getenv("SYNC_DB_PATH"); named != "" &&
+		sqlite.CreatedFresh(named) && os.Getenv("SYNC_DB_ALLOW_CREATE") == "" {
+		return fmt.Errorf("the control database at %s had to be created. "+
+			"SYNC_DB_PATH names it deliberately, so this is a volume that did not "+
+			"mount rather than a first run: the process would come up with no tasks, "+
+			"no users and nothing to say so. Set SYNC_DB_ALLOW_CREATE=1 if this "+
+			"really is a first run", os.Getenv("SYNC_DB_PATH"))
+	}
 	return nil
 }
 

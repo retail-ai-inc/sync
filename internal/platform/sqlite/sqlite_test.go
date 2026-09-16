@@ -133,3 +133,49 @@ func TestAnUnopenableDatabaseIsReportedPromptly(t *testing.T) {
 			"waits for it", taken)
 	}
 }
+
+// TestAFileThatHadToBeCreatedIsRemembered covers how a lost volume is told
+// apart from a first run: both give a working, empty database, and only the
+// fact that the file had to be created distinguishes them.
+func TestAFileThatHadToBeCreatedIsRemembered(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sync.db")
+
+	if CreatedFresh(path) {
+		t.Error("a path nothing has opened reports as created by this process")
+	}
+	if CreatedFresh("") {
+		t.Error("an empty path reports as created")
+	}
+
+	t.Setenv("SYNC_DB_PATH", path)
+	db, err := OpenSQLiteDB()
+	if err != nil {
+		t.Fatalf("OpenSQLiteDB: %v", err)
+	}
+	defer db.Close()
+
+	if !CreatedFresh(path) {
+		t.Error("a database that had to be created is not remembered as such")
+	}
+	// Relative and absolute spellings of the same file are the same file.
+	if relative, err := filepath.Rel(mustGetwd(t), path); err == nil {
+		if !CreatedFresh(relative) {
+			t.Error("the same file spelled relatively is not recognised")
+		}
+	}
+
+	// A different path is unaffected: the answer must not depend on what some
+	// other database in this process did.
+	if CreatedFresh(filepath.Join(t.TempDir(), "other.db")) {
+		t.Error("another path reports as created because this one was")
+	}
+}
+
+func mustGetwd(t *testing.T) string {
+	t.Helper()
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	return dir
+}

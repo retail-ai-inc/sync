@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -24,6 +25,35 @@ const openRetryPause = 50 * time.Millisecond
 // DefaultPath is where the control database lives when SYNC_DB_PATH says
 // nothing: alongside the working directory, not a path baked in at build time.
 const DefaultPath = "sync.db"
+
+// createdFresh records that a control database had to be created because the
+// file was not there.
+//
+// A lost volume and a first run look identical from inside: both give an empty
+// database, an empty task list, a /readyz that answers 200 and not one metric
+// to say anything is wrong -- the process runs, replicating nothing. Where the
+// path was named deliberately, the two are not the same thing at all, and the
+// caller is given the means to tell.
+var createdFresh sync.Map // absolute path -> struct{}
+
+// CreatedFresh reports whether the database at this path had to be created by
+// this process. A caller that named the path itself should treat that as a
+// misconfiguration rather than a first run.
+//
+// By path rather than a single flag: the answer must not depend on what some
+// other database in the same process did, and it must stay true once it is --
+// a process that came up on an empty control database does not become correct
+// because it has since written to it.
+func CreatedFresh(path string) bool {
+	if path == "" {
+		return false
+	}
+	if absolute, err := filepath.Abs(path); err == nil {
+		path = absolute
+	}
+	_, found := createdFresh.Load(path)
+	return found
+}
 
 func OpenSQLiteDB() (*sql.DB, error) {
 	dbPath := os.Getenv("SYNC_DB_PATH")
@@ -92,6 +122,7 @@ func OpenSQLiteDB() (*sql.DB, error) {
 	}
 
 	if fresh {
+		createdFresh.Store(dbPath, struct{}{})
 		logrus.Warnf("[SQLite] Created a new control database at %s. If this is not "+
 			"a first run, SYNC_DB_PATH is pointing somewhere unintended and this "+
 			"process has started with no sync tasks and no users.", dbPath)

@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/retail-ai-inc/sync/internal/platform/config"
+	"github.com/retail-ai-inc/sync/internal/platform/metrics"
 )
 
 func TestHTTPAddrDefaultsToTheContainerPort(t *testing.T) {
@@ -61,5 +62,33 @@ func TestPurgeCheckpointsForRecognisesEveryEngineWithAPurge(t *testing.T) {
 		if err != nil && strings.Contains(err.Error(), "no clean-up is implemented") {
 			t.Errorf("%q was not dispatched to an engine: %v", engine, err)
 		}
+	}
+}
+
+// TestAnEmptyControlDatabaseStillSaysSoInTheMetrics covers what a lost volume
+// looks like from outside.
+//
+// Every other gauge is per task and disappears with its task, so a process that
+// came up with no tasks published nothing at all -- indistinguishable from an
+// exporter that is not running, which is the one state nobody can alert on.
+func TestAnEmptyControlDatabaseStillSaysSoInTheMetrics(t *testing.T) {
+	metrics.SetTaskCounts(0, 0)
+
+	configured := metrics.Default.Snapshot(metrics.TasksConfigured)
+	enabled := metrics.Default.Snapshot(metrics.TasksEnabled)
+	if len(configured) != 1 || len(enabled) != 1 {
+		t.Fatalf("an empty deployment published %d/%d series, want one of each",
+			len(configured), len(enabled))
+	}
+	if configured[0].Value != 0 || enabled[0].Value != 0 {
+		t.Errorf("counts = %v/%v, want zeroes that are actually published",
+			configured[0].Value, enabled[0].Value)
+	}
+
+	metrics.SetTaskCounts(4, 3)
+	configured = metrics.Default.Snapshot(metrics.TasksConfigured)
+	enabled = metrics.Default.Snapshot(metrics.TasksEnabled)
+	if configured[0].Value != 4 || enabled[0].Value != 3 {
+		t.Errorf("counts = %v/%v, want 4/3", configured[0].Value, enabled[0].Value)
 	}
 }
