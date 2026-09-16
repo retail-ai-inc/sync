@@ -847,6 +847,10 @@ func permanentApplyFailure(err error) bool {
 		"E11001",                    // the older spelling of the same thing
 		"DOCUMENTVALIDATIONFAILURE", // a validator the target has and the source does not
 		"BSONOBJECTTOOLARGE",        // the document cannot be written at any time
+		// A session used on the client that did not start it. Always a wiring
+		// mistake, never a target that is merely busy, and retrying it silently
+		// is how one went unnoticed for as long as it did.
+		"SESSION WAS NOT CREATED BY THIS CLIENT",
 	} {
 		if strings.Contains(text, permanent) {
 			return true

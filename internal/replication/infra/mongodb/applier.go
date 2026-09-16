@@ -75,7 +75,7 @@ func (a *Applier) Apply(ctx context.Context, runs [][]*domain.Event, pos domain.
 	events, namespaces := shapeOf(runs)
 
 	if a.NoTransaction {
-		trips, err := a.write(ctx, runs)
+		trips, err := a.write(ctx, ctx, runs)
 		if err != nil {
 			return false, err
 		}
@@ -106,7 +106,10 @@ func (a *Applier) Apply(ctx context.Context, runs [][]*domain.Event, pos domain.
 	// ordinary context.
 	_, err = session.WithTransaction(ctx, func(sc context.Context) (interface{}, error) {
 		bodyStarted := time.Now()
-		written, err := a.write(sc, runs)
+		// sc carries the target's session; ctx does not. Reads of the SOURCE must
+		// use ctx: the driver refuses a session on the client that did not start
+		// it, and the whole-document fallback reads the source.
+		written, err := a.write(sc, ctx, runs)
 		if err != nil {
 			return nil, err
 		}
@@ -170,11 +173,18 @@ func onlySchemaChange(runs [][]*domain.Event) (*domain.Event, bool) {
 
 // write applies the runs in order. Within a run no document appears twice, so
 // its operations may go out together; between runs they may not.
-func (a *Applier) write(ctx context.Context, runs [][]*domain.Event) (roundTrips int, err error) {
+//
+// Two contexts, because two clients: ctx writes to the target and carries the
+// batch's session when there is one, sourceCtx reads the source and must never
+// carry it. A session belongs to the client that started it, and the driver
+// refuses it on any other with "session was not created by this client" —
+// before any I/O, so the whole-document fallback failed every single time it
+// was needed and the retry loop hid it as a stall.
+func (a *Applier) write(ctx, sourceCtx context.Context, runs [][]*domain.Event) (roundTrips int, err error) {
 	for _, run := range runs {
 		// A change that could not be turned into a write from the event alone
 		// needs its document first.
-		if err := a.resolveFullDocuments(ctx, run); err != nil {
+		if err := a.resolveFullDocuments(sourceCtx, run); err != nil {
 			return roundTrips, err
 		}
 
@@ -187,7 +197,7 @@ func (a *Applier) write(ctx context.Context, runs [][]*domain.Event) (roundTrips
 		// An update written as a delta cannot create the document it addresses,
 		// so one that matched nothing means the target is missing data. That is
 		// repaired here rather than left as a divergence nothing reports.
-		repaired, err := a.repairMissing(ctx, run, landed)
+		repaired, err := a.repairMissing(ctx, sourceCtx, run, landed)
 		roundTrips += repaired
 		if err != nil {
 			return roundTrips, err

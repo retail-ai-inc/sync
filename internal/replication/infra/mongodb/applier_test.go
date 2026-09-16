@@ -1,11 +1,15 @@
 package mongodb
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/retail-ai-inc/sync/internal/platform/config"
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
@@ -259,5 +263,66 @@ func TestADocumentReadBackIsMaskedLikeOneFromTheStream(t *testing.T) {
 	plain := (&Applier{}).mask("payments", bson.M{"card": "4111"})
 	if plain["card"] != "4111" {
 		t.Errorf("card = %v, want it untouched", plain["card"])
+	}
+}
+
+// TestTheSourceIsNeverReadThroughTheTargetsSession records the wiring that made
+// the whole-document fallback fail every time it was needed.
+//
+// The batch's transaction session belongs to the target client. A session used
+// on any other client is refused by the driver before a single byte goes out,
+// with "session was not created by this client" — and the source reads of the
+// fallback were being handed exactly that context. The retry loop then repeated
+// it for ever: the task stayed up, the position stopped, and nothing said why.
+func TestTheSourceIsNeverReadThroughTheTargetsSession(t *testing.T) {
+	// Two clients, as production has: the target starts the session, the source
+	// is a different connection. Neither needs a server — the session check
+	// happens before any I/O — so server selection is kept short for the reads
+	// that do go out.
+	quick := options.Client().SetServerSelectionTimeout(300 * time.Millisecond)
+	target, err := mongo.Connect(quick.ApplyURI("mongodb://127.0.0.1:1/?directConnection=true"))
+	if err != nil {
+		t.Fatalf("connect the target: %v", err)
+	}
+	source, err := mongo.Connect(quick.ApplyURI("mongodb://127.0.0.1:2/?directConnection=true"))
+	if err != nil {
+		t.Fatalf("connect the source: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = target.Disconnect(context.Background())
+		_ = source.Disconnect(context.Background())
+	})
+
+	applier := &Applier{
+		Client:         target,
+		Source:         source,
+		TargetDatabase: "shop",
+		Mappings: []config.DatabaseMapping{{
+			SourceDatabase: "shop", TargetDatabase: "shop",
+		}},
+	}
+
+	// One change that can only be applied by reading the document whole.
+	run := []*domain.Event{{
+		NS:      domain.Namespace{DB: "shop", Object: "orders"},
+		Op:      domain.OpUpdate,
+		Key:     "_id=1",
+		Payload: &fullDocumentRead{filter: bson.M{"_id": "1"}, reason: reasonUndescribed},
+	}}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	_, err = applier.Apply(ctx, [][]*domain.Event{run}, domain.Position{})
+
+	// It fails — there is no server on either port — but it must not fail
+	// because the source was read with the target's session.
+	if err == nil {
+		t.Fatal("Apply succeeded against two unreachable servers")
+	}
+	if strings.Contains(err.Error(), "session was not created by this client") {
+		t.Errorf("the source was read through the target's session: %v", err)
+	}
+	if errors.Is(err, mongo.ErrWrongClient) {
+		t.Errorf("the source was read through the target's session: %v", err)
 	}
 }

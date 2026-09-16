@@ -58,6 +58,9 @@ const maxFullDocumentBytes = 64 << 20
 
 // resolveFullDocuments turns every pending read in a run into a write.
 //
+// The context must be one WITHOUT the target's session on it: these reads go to
+// the source client, and the driver refuses another client's session outright.
+//
 // One read per document rather than one query per collection: an _id may be a
 // document, which cannot be matched back to its event by comparison as
 // reliably as by asking for it, and this path is the rare one.
@@ -158,7 +161,7 @@ func (a *Applier) mask(collection string, document bson.M) bson.M {
 // deltas are checked against the target one at a time. That is only worth
 // doing when the count is short — in a steady state it never is, and this
 // returns without a single round trip.
-func (a *Applier) repairMissing(ctx context.Context, run []*domain.Event, landed int64) (int, error) {
+func (a *Applier) repairMissing(ctx, sourceCtx context.Context, run []*domain.Event, landed int64) (int, error) {
 	addressed := 0
 	for _, event := range run {
 		switch event.Payload.(type) {
@@ -205,7 +208,8 @@ func (a *Applier) repairMissing(ctx context.Context, run []*domain.Event, landed
 			"missing data these updates assume; a consistency check will say how much",
 			len(missing), addressed)
 	}
-	if err := a.resolveFullDocuments(ctx, missing); err != nil {
+	// The source, not the target: sourceCtx carries no session of the target's.
+	if err := a.resolveFullDocuments(sourceCtx, missing); err != nil {
 		return 0, err
 	}
 	trips, _, err := a.writeRun(ctx, missing)
