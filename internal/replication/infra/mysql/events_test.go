@@ -779,3 +779,57 @@ func TestAGeneratedColumnIsLeftOutOfTheStatement(t *testing.T) {
 		t.Errorf("delete = %s args %v", del.query, del.args)
 	}
 }
+
+// TestARowWiderThanTheSchemaIsRefused covers the DROP COLUMN half of the
+// schema-change hazard.
+//
+// canal names the values from the source's current shape; the values came off
+// the binlog under the shape they were written with. After a DROP the row is
+// one value too wide, and pairing by position wrote every value after the
+// dropped column under its neighbour's name while the extra one was discarded
+// -- silently, with the row counts still agreeing.
+func TestARowWiderThanTheSchemaIsRefused(t *testing.T) {
+	db := sqliteTarget(t, ordersSchema)
+	h := newHandler(t, db, mapTable("orders", "orders"))
+
+	// Three columns now; the row was written when there were four.
+	err := apply(db, h, &canal.RowsEvent{
+		Table:  sourceTable("orders", "id", "customer", "email"),
+		Action: canal.InsertAction,
+		Rows:   [][]interface{}{{"1", "Ada", "dropped", "ada@example.com"}},
+	})
+	if err == nil {
+		t.Fatalf("a row one value too wide was applied: %v", rows(t, db))
+	}
+	if !domain.IsUnrecoverable(err) {
+		t.Errorf("error = %v, want it reported as needing intervention", err)
+	}
+	for _, want := range []string{"4 values", "3 columns", "orders"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %v, want it to carry %q", err, want)
+		}
+	}
+	if got := rows(t, db); len(got) != 0 {
+		t.Errorf("the target was written anyway: %v", got)
+	}
+}
+
+// And the same for a row that is too narrow, which is what an ADD COLUMN
+// replayed from an older position produces. It used to surface as an opaque
+// argument-count error from the driver.
+func TestARowNarrowerThanTheSchemaIsRefused(t *testing.T) {
+	db := sqliteTarget(t, ordersSchema)
+	h := newHandler(t, db, mapTable("orders", "orders"))
+
+	err := apply(db, h, &canal.RowsEvent{
+		Table:  sourceTable("orders", "id", "customer", "email"),
+		Action: canal.InsertAction,
+		Rows:   [][]interface{}{{"1", "Ada"}},
+	})
+	if !domain.IsUnrecoverable(err) {
+		t.Fatalf("error = %v, want it reported as needing intervention", err)
+	}
+	if !strings.Contains(err.Error(), "2 values") {
+		t.Errorf("error = %v, want it to say how wide the row was", err)
+	}
+}

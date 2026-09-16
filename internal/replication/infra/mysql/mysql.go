@@ -602,6 +602,17 @@ func (h *MyEventHandler) OnRow(e *canal.RowsEvent) error {
 		columnNames[i] = col.Name
 	}
 
+	// The names come from the source's shape now; the values came off the
+	// binlog under the shape the row was written with. When a column was added
+	// or dropped between the two, pairing them by position puts every value
+	// after that column under the wrong name -- and for a DROP that is silent,
+	// because the extra value is simply dropped on the floor and the row lands
+	// looking perfectly ordinary. Nothing downstream can tell afterwards, so it
+	// is refused here.
+	if err := sameWidth(e, table, sourceDB, tableName); err != nil {
+		return err
+	}
+
 	if e.Header != nil && e.Header.Timestamp > 0 {
 		at := time.Unix(int64(e.Header.Timestamp), 0)
 		metrics.SetReadLag(h.labels, time.Since(at).Seconds())
@@ -808,6 +819,31 @@ func writableColumns(table *schema.Table) []int {
 		keep = append(keep, i)
 	}
 	return keep
+}
+
+// sameWidth refuses a row event whose values do not line up with the columns
+// the source reports for its table.
+//
+// This is the DROP COLUMN half of the schema-change hazard: the ADD COLUMN
+// half surfaces as an opaque argument-count error from the driver, and a pure
+// reordering is caught by checkReordering. A drop produces neither -- the row
+// is one value too wide, the extra one is discarded, and everything after the
+// dropped column is written under its neighbour's name.
+func sameWidth(e *canal.RowsEvent, table *schema.Table, sourceDB, tableName string) error {
+	for _, row := range e.Rows {
+		if len(row) == len(table.Columns) {
+			continue
+		}
+		return domain.Unrecoverable(
+			"a %s row for %s.%s carries %d values while the source now reports %d "+
+				"columns, so the two cannot be paired by position: the table's shape "+
+				"changed between the position this stream resumed from and now. "+
+				"Applying it would write values under the wrong column names, which "+
+				"leaves the row counts agreeing and the values wrong. Copy %s.%s again "+
+				"from the source and restart the task",
+			e.Action, sourceDB, tableName, len(row), len(table.Columns), sourceDB, tableName)
+	}
+	return nil
 }
 
 // pick projects a column list or a row onto the given indexes.
