@@ -121,3 +121,30 @@ func TestTheDistanceIsNeverAByteCount(t *testing.T) {
 		t.Errorf("BehindBytes = %d, want it reported as not a byte count", got.BehindBytes)
 	}
 }
+
+// TestAnUnreachableSourceStillReportsWhatTheTargetApplied covers the case the
+// endpoint exists for: Tokyo is gone, and what Osaka holds is still readable
+// because it is written on Osaka.
+func TestAnUnreachableSourceStillReportsWhatTheTargetApplied(t *testing.T) {
+	stored := streamPosition{At: time.Date(2026, 9, 17, 4, 5, 6, 0, time.UTC).Unix()}
+	payload, err := checkpoint.Encode(stored)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+
+	// What Progress builds when the source could not be asked.
+	applied := compareClusterTime(time.Time{}, payload)
+	applied.Source = ""
+	applied.Comparable = false
+	applied.CaughtUp = false
+
+	if applied.Applied == "" {
+		t.Error("the position the target holds was discarded with the source")
+	}
+	if applied.CaughtUp {
+		t.Error("a shard with no source position is reported as caught up")
+	}
+	if applied.Comparable {
+		t.Error("a shard with no source position is reported as comparable")
+	}
+}

@@ -55,7 +55,13 @@ func Progress(ctx context.Context, cfg config.SyncConfig) (domain.Progress, erro
 
 	head, err := readBinlogHead(ctx, source)
 	if err != nil {
-		return domain.Progress{}, err
+		// Tokyo being gone is the condition this endpoint exists for, and the
+		// position it reports is kept on the target for that reason. Failing
+		// here threw the half that survives the outage away.
+		return domain.Progress{
+			Engine: cfg.Type,
+			Shards: []domain.ShardProgress{appliedOnly(stored, err)},
+		}, nil
 	}
 
 	return domain.Progress{
@@ -63,6 +69,19 @@ func Progress(ctx context.Context, cfg config.SyncConfig) (domain.Progress, erro
 		Shards: []domain.ShardProgress{compareBinlog(ctx, source, head, stored,
 			dsn.Endpoint(cfg.Type, cfg.SourceConnection))},
 	}, nil
+}
+
+// appliedOnly reports what the target holds when the source cannot be asked
+// where it is. Not comparable, not caught up -- and not nothing.
+func appliedOnly(stored *binlogCheckpoint, why error) domain.ShardProgress {
+	applied := describeStored(stored)
+	note := fmt.Sprintf("the source could not be reached, so this is what the target "+
+		"has applied and not how far behind it is: %v", why)
+	if applied == "" {
+		note = fmt.Sprintf("the target holds no position for this task, and the source "+
+			"could not be reached either: %v", why)
+	}
+	return domain.ShardProgress{Applied: applied, Note: note}
 }
 
 // binlogHead is where the source's binary log ends now.

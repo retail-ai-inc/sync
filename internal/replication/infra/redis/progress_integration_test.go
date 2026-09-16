@@ -98,7 +98,7 @@ func TestShardProgressNotesWhatItCouldNotRead(t *testing.T) {
 	defer dead.Close()
 	ctx := context.Background()
 
-	unreachable := shardProgress(ctx, shard{id: "s1"}, dead, target, 8802)
+	unreachable := shardProgress(ctx, shard{id: "s1"}, dead, target, 8802, nil)
 	if unreachable.Note == "" || unreachable.Comparable {
 		t.Errorf("a shard whose source would not answer came back comparable: %+v", unreachable)
 	}
@@ -162,5 +162,64 @@ func TestMetaKeyIsPerTaskAndShard(t *testing.T) {
 	}
 	if want := "__sync:pos:7:s"; metaKey(7, "s") != want {
 		t.Errorf("metaKey = %q, want %q", metaKey(7, "s"), want)
+	}
+}
+
+// TestProgressStillAnswersWhenTokyoIsGone is the case the endpoint exists for.
+//
+// "Has Osaka applied everything?" is asked when the source is unreachable --
+// that is what a regional outage is. The answer is written on the target for
+// exactly that reason, and the report used to throw it away and fail because
+// the source could not be dialled.
+func TestProgressStillAnswersWhenTokyoIsGone(t *testing.T) {
+	target := redisAt(t, addrsFrom(t, "SYNC_REDIS_TARGET"))
+	defer target.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	const taskID = 8807
+	writeStoredPosition(t, target, taskID, "0", 987654)
+	defer target.Del(context.Background(), metaKey(taskID, "0"))
+
+	report, err := Progress(ctx, config.SyncConfig{
+		ID: taskID, Type: "redis",
+		SourceConnection: "redis://127.0.0.1:1/0", // Tokyo is gone
+		TargetConnection: urlFor(t, "SYNC_REDIS_TARGET"),
+	})
+	if err != nil {
+		t.Fatalf("Progress refused to answer with the source unreachable: %v", err)
+	}
+	if len(report.Shards) != 1 {
+		t.Fatalf("report covers %d shards, want the one the target holds a position for", len(report.Shards))
+	}
+
+	shard := report.Shards[0]
+	if shard.Applied != "987654" {
+		t.Errorf("Applied = %q, want what the target holds", shard.Applied)
+	}
+	if shard.CaughtUp {
+		t.Error("a shard whose source could not be read is reported as caught up")
+	}
+	if shard.Comparable {
+		t.Error("a shard with no source position is reported as comparable")
+	}
+	if !strings.Contains(shard.Note, "source") {
+		t.Errorf("Note = %q, want it to say the source could not be reached", shard.Note)
+	}
+}
+
+// And the other half: a target that cannot be read is still a failed request,
+// because then there is no answer at all.
+func TestProgressFailsWhenTheTargetCannotBeRead(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	_, err := Progress(ctx, config.SyncConfig{
+		ID: 8808, Type: "redis",
+		SourceConnection: urlFor(t, "SYNC_REDIS_SOURCE"),
+		TargetConnection: "redis://127.0.0.1:1/0",
+	})
+	if err == nil {
+		t.Error("Progress reported on a target it could not read")
 	}
 }

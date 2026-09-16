@@ -2,6 +2,7 @@ package mysql
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -119,5 +120,34 @@ func TestAPositionWithNoRecordedServerIsStillCompared(t *testing.T) {
 
 	if !got.CaughtUp {
 		t.Errorf("a position stored before the server was recorded was not compared: %+v", got)
+	}
+}
+
+// TestAnUnreachableSourceStillReportsWhatTheTargetApplied covers the case this
+// endpoint exists for: Tokyo is gone, and the position Osaka holds is on Osaka.
+func TestAnUnreachableSourceStillReportsWhatTheTargetApplied(t *testing.T) {
+	stored := &binlogCheckpoint{Name: "mysql-bin.000007", Pos: 8192, GTID: "uuid:1-99"}
+
+	progress := appliedOnly(stored, errors.New("dial tcp 10.0.0.1:3306: connect: no route to host"))
+
+	if progress.Applied == "" {
+		t.Error("the position the target holds was discarded with the source")
+	}
+	if progress.CaughtUp || progress.Comparable {
+		t.Errorf("a shard with no source position reads as caughtUp=%v comparable=%v",
+			progress.CaughtUp, progress.Comparable)
+	}
+	if !strings.Contains(progress.Note, "no route to host") {
+		t.Errorf("Note = %q, want it to carry why the source could not be read", progress.Note)
+	}
+
+	// And a target that holds nothing says that, rather than reporting an empty
+	// position as though it were a position.
+	empty := appliedOnly(&binlogCheckpoint{}, errors.New("gone"))
+	if empty.Applied != "" {
+		t.Errorf("Applied = %q for a target that holds nothing", empty.Applied)
+	}
+	if !strings.Contains(empty.Note, "no position") {
+		t.Errorf("Note = %q, want it to say the target holds nothing", empty.Note)
 	}
 }

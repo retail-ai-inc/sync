@@ -51,7 +51,19 @@ func Progress(ctx context.Context, cfg config.SyncConfig) (domain.Progress, erro
 
 	head, err := sourceClusterTime(ctx, source)
 	if err != nil {
-		return domain.Progress{}, err
+		// The question this answers is asked when Tokyo is gone, and what the
+		// target has applied is written on the target for that reason. Failing
+		// here discarded the half that survives the outage.
+		applied := compareClusterTime(time.Time{}, payload)
+		applied.Source = ""
+		applied.Comparable = false
+		applied.CaughtUp = false
+		applied.Note = fmt.Sprintf("the source could not be reached, so this is what "+
+			"the target has applied and not how far behind it is: %v", err)
+		return domain.Progress{
+			Engine: "mongodb",
+			Shards: []domain.ShardProgress{applied},
+		}, nil
 	}
 
 	return domain.Progress{
