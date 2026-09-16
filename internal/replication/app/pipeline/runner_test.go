@@ -1347,3 +1347,41 @@ func TestTheLastBatchIsWrittenAfterTheRunIsAskedToStop(t *testing.T) {
 			"what a stop does with a batch it is holding", trials)
 	}
 }
+
+// TestTheQueueDepthIsReadLiveNotCached records why the gauge lied.
+//
+// The depth used to be cached when an event was dequeued, and the applier stops
+// dequeuing the moment a batch cannot be applied -- it retries with a backoff
+// instead. So the queue filled while the gauge held whatever it last saw:
+// "near-empty" exactly while replication was stuck with a full queue, which is
+// the one reading that makes the problem invisible.
+func TestTheQueueDepthIsReadLiveNotCached(t *testing.T) {
+	r := &Runner{}
+	queue := make(chan *domain.Event, 8)
+	r.mu.Lock()
+	r.queue = queue
+	r.queueCap = 8
+	r.mu.Unlock()
+
+	depth := func() int {
+		r.mu.Lock()
+		held := r.queue
+		r.mu.Unlock()
+		return len(held)
+	}
+
+	if got := depth(); got != 0 {
+		t.Fatalf("an empty queue reads %d", got)
+	}
+	for i := 0; i < 5; i++ {
+		queue <- &domain.Event{}
+	}
+	// Nothing has been dequeued: the old reading would still be 0.
+	if got := depth(); got != 5 {
+		t.Errorf("queue depth = %d after 5 events were queued and none taken, want 5", got)
+	}
+	<-queue
+	if got := depth(); got != 4 {
+		t.Errorf("queue depth = %d after one was taken, want 4", got)
+	}
+}

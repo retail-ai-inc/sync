@@ -158,7 +158,12 @@ type Runner struct {
 	// lastReadAt is the source's time of the newest change read. A re-copy holds
 	// each chunk until this passes it, which is what orders the two.
 	lastReadAt time.Time
-	queueUsed  int
+	// queue is the channel between the reader and the applier, held so the
+	// health reporter can read its depth directly. It used to be cached on a
+	// dequeue, which meant the gauge froze at its last value the moment the
+	// applier stopped dequeuing -- exactly when the queue is filling up, so a
+	// full queue read as near-empty while replication was stuck.
+	queue chan *domain.Event
 	// queueCap is the capacity the queue was made with, which differs between the
 	// initial copy and the stream that follows it.
 	queueCap int
@@ -262,6 +267,9 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 	r.held = newBudget(r.Opts.queueBytes())
 	queue := make(chan *domain.Event, r.queueCap)
+	r.mu.Lock()
+	r.queue = queue
+	r.mu.Unlock()
 	readCtx, stopReading := context.WithCancel(ctx)
 	defer stopReading()
 
@@ -715,7 +723,6 @@ func (r *Runner) apply(ctx context.Context, queue <-chan *domain.Event) error {
 				continue
 			}
 			r.mu.Lock()
-			r.queueUsed = len(queue)
 			r.mu.Unlock()
 
 			// Nothing else waiting, so holding the batch back only costs latency —
@@ -984,8 +991,11 @@ func (r *Runner) report(ctx context.Context) (stop func()) {
 				applied := r.lastAppliedAt
 				read := r.lastReadAt
 				heard := r.lastHeardAt
-				used := r.queueUsed
+				queue := r.queue
 				r.mu.Unlock()
+				// len on a channel is safe to read concurrently, and it is the
+				// live depth rather than whatever the last dequeue saw.
+				used := len(queue)
 				// What is held between the reader and the applier, not what the
 				// current batch happens to hold: the events still in the queue are
 				// held too, and they are the ones the count cannot bound.
