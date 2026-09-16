@@ -51,18 +51,11 @@ func (s *Snapshotter) Pin(ctx context.Context) (domain.Position, error) {
 	}
 	s.conn = conn
 
-	if _, err := conn.ExecContext(ctx, "START TRANSACTION WITH CONSISTENT SNAPSHOT"); err != nil {
-		s.release()
-		return domain.Position{}, fmt.Errorf("open a consistent snapshot: %w", err)
-	}
-
 	s.syncer = &MySQLSyncer{cfg: s.Config, logger: s.Logger}
-	pinned, err := s.syncer.sourceCheckpoint(ctx, conn)
+	pinned, err := s.pinConsistently(ctx, conn)
 	if err != nil {
 		s.release()
-		return domain.Position{}, fmt.Errorf("read the source's binlog coordinates: %w. "+
-			"The copy cannot start without them, because every write made while it ran "+
-			"would then belong to neither the copy nor the stream", err)
+		return domain.Position{}, err
 	}
 	pinned.Source = dsn.Endpoint(s.Config.Type, s.Config.SourceConnection)
 
@@ -73,6 +66,113 @@ func (s *Snapshotter) Pin(ctx context.Context) (domain.Position, error) {
 	}
 	s.Logger.Infof("[MySQL] Snapshot pinned at %+v", *pinned)
 	return domain.Position{Payload: payload}, nil
+}
+
+// pinAttempts is how many times the coordinates are read against the snapshot
+// before giving up. Each attempt costs two SHOW MASTER STATUS on one pinned
+// connection, so the window a write has to land in is sub-millisecond; ten of
+// them make a source busy enough to lose every time the operator's problem
+// rather than a silent one.
+const pinAttempts = 10
+
+// pinConsistently opens the snapshot and returns coordinates that provably
+// belong to it.
+//
+// The coordinates and the snapshot have to name the same instant. Reading them
+// after the snapshot was opened does not: SHOW MASTER STATUS reports where the
+// server is NOW, while the snapshot sees where it was THEN, so every
+// transaction committed in between is in neither -- the copy cannot see it and
+// the stream starts after it. That is silent, permanent data loss on the
+// standby, and a row count cannot find it.
+//
+// Two ways to make them agree, and this uses both. A global read lock stops
+// writes while the snapshot is taken, which is what mysqldump does; Cloud SQL
+// may refuse it, so it is attempted and not required. Whether or not the lock
+// was granted, the coordinates are read once before the snapshot and once
+// after, and only accepted when the two agree -- if nothing was committed
+// between the two reads, the snapshot's view is exactly that position.
+func (s *Snapshotter) pinConsistently(ctx context.Context, conn *sql.Conn) (*binlogCheckpoint, error) {
+	if _, err := conn.ExecContext(ctx, "FLUSH TABLES WITH READ LOCK"); err != nil {
+		// Cloud SQL does not grant RELOAD to its default user. Without the lock
+		// the agreement below is still proof, it just may need another attempt.
+		s.Logger.Warnf("[MySQL] The source would not grant a global read lock for the "+
+			"snapshot (%v), so its coordinates are pinned by reading them either side "+
+			"of the snapshot and requiring them to agree", err)
+	} else {
+		defer func() {
+			if _, err := conn.ExecContext(context.Background(), "UNLOCK TABLES"); err != nil {
+				s.Logger.Warnf("[MySQL] Could not release the snapshot's read lock: %v", err)
+			}
+		}()
+	}
+
+	var last error
+	for attempt := 1; attempt <= pinAttempts; attempt++ {
+		before, err := s.syncer.sourceCheckpoint(ctx, conn)
+		if err != nil {
+			return nil, fmt.Errorf("read the source's binlog coordinates: %w. "+
+				"The copy cannot start without them, because every write made while it ran "+
+				"would then belong to neither the copy nor the stream", err)
+		}
+
+		if _, err := conn.ExecContext(ctx, "START TRANSACTION WITH CONSISTENT SNAPSHOT"); err != nil {
+			return nil, fmt.Errorf("open a consistent snapshot: %w", err)
+		}
+
+		after, err := s.syncer.sourceCheckpoint(ctx, conn)
+		if err != nil {
+			return nil, fmt.Errorf("read the source's binlog coordinates: %w. "+
+				"The copy cannot start without them, because every write made while it ran "+
+				"would then belong to neither the copy nor the stream", err)
+		}
+
+		if samePosition(before, after) {
+			if attempt > 1 {
+				s.Logger.Infof("[MySQL] Snapshot pinned on attempt %d", attempt)
+			}
+			return after, nil
+		}
+
+		// Something was committed between the two reads, so the snapshot is
+		// older than the coordinates and the gap would be lost. Start over.
+		last = fmt.Errorf("the source committed %s -> %s while the snapshot was being taken",
+			describe(before), describe(after))
+		if _, err := conn.ExecContext(ctx, "ROLLBACK"); err != nil {
+			return nil, fmt.Errorf("roll back a snapshot that could not be pinned: %w", err)
+		}
+	}
+
+	return nil, domain.Unrecoverable(
+		"could not pin the source's binlog coordinates to the snapshot in %d attempts: %v. "+
+			"Every attempt found the source had committed between the two reads, which "+
+			"means a first copy taken now would miss those writes with nothing to show "+
+			"for it. Grant RELOAD so the snapshot can be taken under a global read lock, "+
+			"or start the copy when the source is quieter",
+		pinAttempts, last)
+}
+
+// describe renders coordinates for an error message.
+func describe(c *binlogCheckpoint) string {
+	if c == nil {
+		return "nowhere"
+	}
+	if c.GTID != "" {
+		return c.GTID
+	}
+	return fmt.Sprintf("%s:%d", c.Name, c.Pos)
+}
+
+// samePosition reports whether two reads of the source's coordinates describe
+// the same instant. The GTID set is the authority when the server keeps one;
+// the file and offset answer for a server that does not.
+func samePosition(before, after *binlogCheckpoint) bool {
+	if before == nil || after == nil {
+		return false
+	}
+	if before.GTID != "" || after.GTID != "" {
+		return before.GTID == after.GTID
+	}
+	return before.Name == after.Name && before.Pos == after.Pos
 }
 
 func (s *Snapshotter) Copy(ctx context.Context) error {

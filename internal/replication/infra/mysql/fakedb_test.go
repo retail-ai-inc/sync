@@ -30,6 +30,11 @@ type reply struct {
 	columns []string
 	rows    [][]driver.Value
 	err     error
+	// sequence answers successive calls with successive row sets, the last one
+	// repeating. A server whose binlog moves between two reads cannot be
+	// modelled with a single fixed answer.
+	sequence [][][]driver.Value
+	calls    int
 }
 
 type fakeDB struct {
@@ -84,10 +89,23 @@ func (f *fakeDB) answer(query string) (reply, bool) {
 	f.asked = append(f.asked, query)
 	f.mu.Unlock()
 
-	for _, r := range f.replies {
-		if strings.Contains(query, r.match) {
-			return r, true
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := range f.replies {
+		r := &f.replies[i]
+		if !strings.Contains(query, r.match) {
+			continue
 		}
+		answer := *r
+		if len(r.sequence) > 0 {
+			at := r.calls
+			if at >= len(r.sequence) {
+				at = len(r.sequence) - 1
+			}
+			answer.rows = r.sequence[at]
+		}
+		r.calls++
+		return answer, true
 	}
 	return reply{}, false
 }
