@@ -23,7 +23,17 @@ const (
 	RoleSource Role = "source"
 	// RoleTarget: the task writes changes into this database.
 	RoleTarget Role = "target"
+	// RolePromoted: this database has been promoted and is being written by the
+	// application. It belongs to no task, never goes stale, and is removed by
+	// hand -- the point of it is to outlive every process that might otherwise
+	// resume replicating over it.
+	RolePromoted Role = "promoted"
 )
+
+// PromotionTaskID is the task id a promotion marker carries. Zero is not a
+// valid task id, so the marker can never be mistaken for a task's own claim and
+// can never be skipped as one.
+const PromotionTaskID = 0
 
 // DefaultStaleAfter is how long a claim survives without a heartbeat.
 // Comfortably longer than the interval, because a claim expiring under a live
@@ -93,6 +103,12 @@ func (g *Guard) owner() string {
 	if g.Owner != "" {
 		return g.Owner
 	}
+	return defaultOwner()
+}
+
+// defaultOwner names this process, so a claim can be traced to something an
+// operator can look at.
+func defaultOwner() string {
 	if named := strings.TrimSpace(os.Getenv("SYNC_INSTANCE")); named != "" {
 		return named
 	}
@@ -185,6 +201,22 @@ func (g *Guard) Acquire(ctx context.Context) error {
 		return fmt.Errorf("read the direction claims on %s: %w", g.Target.Endpoint(), err)
 	}
 	for _, existing := range targetClaims {
+		// Before anything else, and before the skip below: a promoted target is
+		// refused even when the claim belongs to this very task, and however old
+		// it is. The real failover writes no claim of its own -- somebody
+		// repoints the application at Osaka, and no task is involved -- so the
+		// only thing that can stop this task resuming over it when Tokyo comes
+		// back is a marker that outlives both.
+		if existing.Role == RolePromoted {
+			return &Conflict{
+				Endpoint: g.Target.Endpoint(),
+				Existing: existing,
+				Reason: "this database has been promoted and is being written directly. " +
+					"Replicating into it would overwrite everything written since the " +
+					"promotion with older data and call it catching up. Clear the " +
+					"promotion deliberately once the direction has been decided",
+			}
+		}
 		if conflict := g.concurrentWith(existing, now, g.Target.Endpoint()); conflict != nil {
 			return conflict
 		}
@@ -378,4 +410,43 @@ func Hold(ctx context.Context, guard *Guard, log Warner, engine string) (release
 			}
 		})
 	}, nil
+}
+
+// Promote marks a database as promoted: written directly by the application,
+// not by a task. The marker belongs to no task and never expires, so it stops
+// any task from replicating into that database until somebody clears it.
+//
+// This is what a real failover leaves behind. Repointing the application at
+// Osaka writes no claim, so when Tokyo returns and the tasks start again there
+// was nothing to tell them the direction had changed.
+func Promote(ctx context.Context, store Store, owner string) error {
+	if owner == "" {
+		owner = defaultOwner()
+	}
+	return store.Put(ctx, Claim{
+		TaskID:    PromotionTaskID,
+		Role:      RolePromoted,
+		Owner:     owner,
+		UpdatedAt: time.Now().UTC(),
+	})
+}
+
+// Demote clears the promotion, which is the deliberate step that lets
+// replication into this database again.
+func Demote(ctx context.Context, store Store) error {
+	return store.Remove(ctx, PromotionTaskID)
+}
+
+// Promoted reports whether this database carries a promotion marker.
+func Promoted(ctx context.Context, store Store) (Claim, bool, error) {
+	claims, err := store.Claims(ctx)
+	if err != nil {
+		return Claim{}, false, err
+	}
+	for _, claim := range claims {
+		if claim.Role == RolePromoted {
+			return claim, true, nil
+		}
+	}
+	return Claim{}, false, nil
 }

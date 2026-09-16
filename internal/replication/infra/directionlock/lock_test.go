@@ -750,3 +750,70 @@ func TestTheTargetClaimIsEncodedForSomebodyElseToWrite(t *testing.T) {
 		t.Error("the claim has no timestamp, so it reads as stale the moment it lands")
 	}
 }
+
+// TestAPromotedTargetIsRefusedEvenToItsOwnTask is the failover that actually
+// happens.
+//
+// Nobody creates a task on Osaka: the application is repointed at it, and no
+// claim is written. The claim already on Osaka is this task's own, from before
+// the outage — and Acquire skipped its own claim before looking at any role, so
+// when Tokyo came back the task resumed and replicated over everything Osaka
+// had taken. The promotion marker belongs to no task and never goes stale for
+// that reason.
+func TestAPromotedTargetIsRefusedEvenToItsOwnTask(t *testing.T) {
+	source := newStore("tokyo:3306/shop")
+	target := newStore("osaka:3306/shop",
+		// This task's own claim, left behind before the outage.
+		claim(1, RoleTarget, "tokyo:3306/shop", time.Hour),
+		// And the promotion, written when somebody repointed the application.
+		Claim{TaskID: PromotionTaskID, Role: RolePromoted, Owner: "operator",
+			UpdatedAt: fixedNow.Add(-72 * time.Hour)},
+	)
+	g := guardFor(source, target)
+
+	err := g.Acquire(context.Background())
+	if err == nil {
+		t.Fatal("Acquire succeeded against a promoted target")
+	}
+	if !IsBlocking(err) {
+		t.Errorf("error = %v, want it to block the task rather than be retried", err)
+	}
+	if !strings.Contains(err.Error(), "promoted") {
+		t.Errorf("error = %v, want it to say the target was promoted", err)
+	}
+	if len(source.claims) != 0 {
+		t.Error("a claim was written despite the refusal")
+	}
+}
+
+// Promote and Demote are the two deliberate steps, and nothing else moves the
+// marker: age does not, and a restart does not.
+func TestAPromotionIsOnlyClearedDeliberately(t *testing.T) {
+	store := newStore("osaka:3306/shop")
+	ctx := context.Background()
+
+	if _, promoted, err := Promoted(ctx, store); err != nil || promoted {
+		t.Fatalf("a fresh endpoint reports promoted=%v (%v)", promoted, err)
+	}
+
+	if err := Promote(ctx, store, "operator"); err != nil {
+		t.Fatalf("Promote: %v", err)
+	}
+	claim, promoted, err := Promoted(ctx, store)
+	if err != nil || !promoted {
+		t.Fatalf("Promoted after Promote = %v (%v)", promoted, err)
+	}
+	if claim.Owner != "operator" {
+		t.Errorf("owner = %q, want the operator who promoted it", claim.Owner)
+	}
+	if claim.TaskID != PromotionTaskID {
+		t.Errorf("task id = %d, want the marker to belong to no task", claim.TaskID)
+	}
+
+	if err := Demote(ctx, store); err != nil {
+		t.Fatalf("Demote: %v", err)
+	}
+	if _, promoted, _ := Promoted(ctx, store); promoted {
+		t.Error("the promotion survived being cleared")
+	}
+}

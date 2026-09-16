@@ -65,6 +65,10 @@ var adminRoutes = []struct{ method, path string }{
 	{http.MethodPut, "/sync/1/start"},
 	{http.MethodPut, "/sync/1/stop"},
 	{http.MethodDelete, "/sync/1"},
+	// Promoting a target stops every task writing to it, and clearing the
+	// promotion lets them write again: both are decisions, not readings.
+	{http.MethodPost, "/sync/1/promotion"},
+	{http.MethodDelete, "/sync/1/promotion"},
 	{http.MethodGet, "/users"},
 	{http.MethodPut, "/users/access"},
 	{http.MethodDelete, "/users"},

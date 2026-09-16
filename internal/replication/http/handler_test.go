@@ -264,3 +264,34 @@ func TestEverySettingTheStoredConfigReadsCanBeSet(t *testing.T) {
 		t.Errorf("resync = %v, want the object named for a re-copy", payload["resync"])
 	}
 }
+
+// The promotion endpoint answers POST and DELETE, and refuses anything else
+// rather than doing something surprising with it.
+func TestThePromotionEndpointTakesOnlyPostAndDelete(t *testing.T) {
+	useTempTaskDB(t)
+
+	rec := httptest.NewRecorder()
+	SyncPromoteHandler(rec, httptest.NewRequest(http.MethodPut, "/sync/1/promotion", nil))
+
+	resp := decodeEnvelope(t, rec)
+	if resp["success"] != false {
+		t.Errorf("a PUT was accepted: %v", resp)
+	}
+	if message, _ := resp["errorMessage"].(string); !strings.Contains(message, "POST") {
+		t.Errorf("errorMessage = %q, want it to say which methods are taken", message)
+	}
+}
+
+// A promotion asked for on a task that does not exist is refused, not silently
+// treated as done: believing Osaka is fenced when it is not is the whole risk.
+func TestPromotingATaskThatIsNotThereFails(t *testing.T) {
+	useTempTaskDB(t)
+
+	rec := httptest.NewRecorder()
+	SyncPromoteHandler(rec, httptest.NewRequest(http.MethodPost, "/sync/404/promotion", nil))
+
+	resp := decodeEnvelope(t, rec)
+	if resp["success"] != false {
+		t.Errorf("promoting a task that does not exist reported success: %v", resp)
+	}
+}

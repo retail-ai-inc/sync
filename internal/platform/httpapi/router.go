@@ -84,6 +84,10 @@ func NewRouter() http.Handler {
 		r.Put("/sync/{id}/stop", replicationhttp.SyncStopHandler)
 		r.Put("/sync/{id}/start", replicationhttp.SyncStartHandler)
 		r.Delete("/sync/{id}", replicationhttp.SyncDeleteHandler)
+		// Promoting a target, and taking it back. A failover leaves no trace of
+		// itself in the databases, so this is where somebody records it.
+		r.Post("/sync/{id}/promotion", replicationhttp.SyncPromoteHandler)
+		r.Delete("/sync/{id}/promotion", replicationhttp.SyncPromoteHandler)
 
 		r.Get("/users", identityhttp.GetUsersHandler)
 		r.Put("/users/access", identityhttp.UpdateUserAccessHandler)

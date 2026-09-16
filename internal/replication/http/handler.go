@@ -233,6 +233,45 @@ func SyncDeleteHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// SyncPromoteHandler POST and DELETE /api/sync/{id}/promotion
+//
+// Marks the task's target as promoted, or clears the mark. A failover writes
+// nothing by itself -- somebody repoints the application at Osaka -- so this
+// is how the databases are told the direction has changed. Until it is
+// cleared, no task will replicate into that database, which is what stops a
+// returning Tokyo overwriting everything Osaka has taken since.
+func SyncPromoteHandler(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+
+	switch r.Method {
+	case http.MethodPost:
+		if err := app.PromoteTarget(r.Context(), id, ""); err != nil {
+			fail(w, "promote the target", err)
+			return
+		}
+		httpx.WriteJSON(w, map[string]interface{}{
+			"success": true,
+			"data": map[string]interface{}{
+				"promoted": true,
+				"msg": "The target is marked as promoted. No task will replicate into " +
+					"it until the mark is cleared.",
+			},
+		})
+	case http.MethodDelete:
+		if err := app.DemoteTarget(r.Context(), id); err != nil {
+			fail(w, "clear the target's promotion", err)
+			return
+		}
+		httpx.WriteJSON(w, map[string]interface{}{
+			"success": true,
+			"data":    map[string]interface{}{"promoted": false, "msg": "Promotion cleared."},
+		})
+	default:
+		httpx.WriteJSON(w, map[string]interface{}{"success": false,
+			"errorMessage": "use POST to promote and DELETE to clear"})
+	}
+}
+
 // GET /api/sync/{id}/position
 //
 // Has the target applied what the source had? The endpoint a switch-over asks,
