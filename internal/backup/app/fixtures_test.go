@@ -71,13 +71,32 @@ func unopenableDB(t *testing.T) {
 	t.Setenv("SYNC_DB_PATH", filepath.Join(blocker, "sub", "sync.db"))
 }
 
+// insertJob adds a job that has never run. Whether a job has run, and when,
+// now decides whether a window it missed is made up, so the fixture says
+// "never" and a test that cares says otherwise with insertJobLastRun.
 func insertJob(t *testing.T, db *sql.DB, enable int, cfg string) int64 {
 	t.Helper()
 
 	res, err := db.Exec(
 		`INSERT INTO backup_tasks (enable, last_update_time, last_backup_time, next_backup_time, config_json)
-		 VALUES (?, '2026-08-21 00:00:00', '2026-08-20 18:00:00', '2026-08-22 18:00:00', ?)`,
+		 VALUES (?, '2026-08-21 00:00:00', NULL, '2026-08-22 18:00:00', ?)`,
 		enable, cfg)
+	if err != nil {
+		t.Fatalf("insert backup task: %v", err)
+	}
+	id, _ := res.LastInsertId()
+	return id
+}
+
+// insertJobLastRun adds a job that last backed up at the time given, in the
+// UTC the column holds.
+func insertJobLastRun(t *testing.T, db *sql.DB, enable int, cfg, lastRun string) int64 {
+	t.Helper()
+
+	res, err := db.Exec(
+		`INSERT INTO backup_tasks (enable, last_update_time, last_backup_time, next_backup_time, config_json)
+		 VALUES (?, '2026-08-21 00:00:00', ?, '2026-08-22 18:00:00', ?)`,
+		enable, lastRun, cfg)
 	if err != nil {
 		t.Fatalf("insert backup task: %v", err)
 	}

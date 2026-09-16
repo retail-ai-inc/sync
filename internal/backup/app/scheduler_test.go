@@ -255,3 +255,67 @@ func TestAnUneditedScheduleKeepsItsDeadline(t *testing.T) {
 			first.at, s.due[1].at)
 	}
 }
+
+// A window that passed while nothing was running is made up once.
+//
+// The deadline lives in this process and the process is replaced daily, so a
+// job seen for the first time was always given its NEXT occurrence: staging
+// went two nights with no backup at all and nothing anywhere recorded that a
+// window had been skipped. The job row already carries the answer -- when it
+// last backed up -- and it was never read.
+func TestAWindowMissedWhileNothingWasRunningIsMadeUp(t *testing.T) {
+	db := useTempJobDB(t)
+	// Last backup two days ago; the schedule has come round twice since.
+	insertJobLastRun(t, db, 1, `{"name":"nightly","schedule":"20 0 * * *","sourceType":"mysql"}`,
+		"2026-08-31 15:20:00") // UTC, which is 2026-09-01 00:20 in the scheduler's clock
+
+	s, fired := schedulerFor(t, at(t, "2026-09-03 09:00:00"))
+	s.tick(context.Background())
+
+	if len(*fired) != 1 {
+		t.Fatalf("the scheduler ran %v, want the missed window made up exactly once", *fired)
+	}
+
+	// Once, not once per occurrence: a second tick at the same moment must not
+	// fire again, and the deadline is the next occurrence rather than a replay.
+	s.tick(context.Background())
+	if len(*fired) != 1 {
+		t.Errorf("the scheduler ran %v, want the catch-up not repeated", *fired)
+	}
+	if when := s.due[1].at; !when.After(at(t, "2026-09-03 09:00:00")) {
+		t.Errorf("next due %s, want a future occurrence", when)
+	}
+}
+
+// And a job that did run inside its last window is left alone, which is the
+// case a rolling update at nine in the morning produces for every job.
+func TestAJobThatRanInItsLastWindowIsNotRunAgain(t *testing.T) {
+	db := useTempJobDB(t)
+	// 00:20 this morning in the scheduler's clock.
+	insertJobLastRun(t, db, 1, `{"name":"nightly","schedule":"20 0 * * *","sourceType":"mysql"}`,
+		at(t, "2026-09-03 00:20:00").UTC().Format("2006-01-02 15:04:05"))
+
+	s, fired := schedulerFor(t, at(t, "2026-09-03 09:00:00"))
+	s.tick(context.Background())
+	s.tick(context.Background())
+
+	if len(*fired) != 0 {
+		t.Errorf("the scheduler ran %v for a job that already backed up this window", *fired)
+	}
+}
+
+// A job that has never run is still left alone: a fresh deployment would
+// otherwise start every job at once, which is what the forward scheduling was
+// there to prevent in the first place.
+func TestAJobThatHasNeverRunIsNotMadeUp(t *testing.T) {
+	db := useTempJobDB(t)
+	insertJob(t, db, 1, `{"name":"nightly","schedule":"20 0 * * *","sourceType":"mysql"}`)
+
+	s, fired := schedulerFor(t, at(t, "2026-09-03 09:00:00"))
+	s.tick(context.Background())
+	s.tick(context.Background())
+
+	if len(*fired) != 0 {
+		t.Errorf("the scheduler ran %v for a job that has never run", *fired)
+	}
+}

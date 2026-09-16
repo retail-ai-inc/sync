@@ -206,7 +206,7 @@ func snapshotRun(t *testing.T, taskID string) (domain.Run, bool) {
 // process.
 func TestAFailedRunIsRecordedInTheDatabase(t *testing.T) {
 	db := useTempJobDB(t)
-	id := insertJob(t, db, 1, `{"name":"nightly","sourceType":"mongodb"}`)
+	id := insertJobLastRun(t, db, 1, `{"name":"nightly","sourceType":"mongodb"}`, "2026-08-20 18:00:00")
 	ForgetRuns()
 	t.Cleanup(ForgetRuns)
 

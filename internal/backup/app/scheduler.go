@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
 
@@ -9,6 +10,8 @@ import (
 
 	"github.com/retail-ai-inc/sync/internal/backup/domain"
 	"github.com/retail-ai-inc/sync/internal/backup/infra"
+	"github.com/retail-ai-inc/sync/internal/platform/metrics"
+	"github.com/retail-ai-inc/sync/internal/platform/timex"
 )
 
 // The backup schedule, run by this process.
@@ -133,6 +136,25 @@ func (s *scheduler) tick(ctx context.Context) {
 			s.due[job.ID()] = next
 			s.log.Infof("[Backup] Job %d (%s) is scheduled %q, next at %s",
 				job.ID(), config.Name, config.Schedule, next.at.Format(time.RFC3339))
+			metrics.SetBackupNextDue(backupLabels(job.ID()), next.at)
+
+			// A window missed while nothing was running is invisible otherwise:
+			// the deadline lives in this process, the process is replaced daily,
+			// and a job seen for the first time is given its NEXT occurrence. Two
+			// nights in a row went unbacked-up in staging with no record anywhere
+			// that a window had been skipped.
+			//
+			// One catch-up, not a replay: whether an occurrence has passed since
+			// the last run is the whole question, and how many is not.
+			if missed, at := s.missedWindow(job, schedule, now); missed {
+				metrics.CountBackupMissedWindow(backupLabels(job.ID()))
+				s.log.Warnf("[Backup] Job %d (%s) should have run at %s and nothing did, "+
+					"so it is running now. Its last backup was %q",
+					job.ID(), config.Name, at.Format(time.RFC3339), job.LastBackupTime())
+				taskID := s.run1(job.ID())
+				s.log.Infof("[Backup] Job %d started as %s to cover the missed window",
+					job.ID(), taskID)
+			}
 			continue
 		}
 		if now.Before(held.at) {
@@ -143,6 +165,7 @@ func (s *scheduler) tick(ctx context.Context) {
 		// hour must not work through the hour's occurrences one tick at a time.
 		next := deadline{at: schedule.Next(now), expression: config.Schedule}
 		s.due[job.ID()] = next
+		metrics.SetBackupNextDue(backupLabels(job.ID()), next.at)
 		taskID := s.run1(job.ID())
 		s.log.Infof("[Backup] Job %d started as %s; next at %s",
 			job.ID(), taskID, next.at.Format(time.RFC3339))
@@ -156,6 +179,36 @@ func (s *scheduler) tick(ctx context.Context) {
 		}
 	}
 	_ = ctx
+}
+
+// missedWindow reports whether an occurrence fell between a job's last backup
+// and now, which is what a process that was not running through it looks like
+// afterwards.
+//
+// A job that has never run is left alone: a fresh deployment would otherwise
+// fire every job at once, which is the reason the first sighting schedules
+// forward in the first place.
+func (s *scheduler) missedWindow(job domain.BackupJob, schedule domain.Schedule,
+	now time.Time) (bool, time.Time) {
+
+	last := strings.TrimSpace(job.LastBackupTime())
+	if last == "" {
+		return false, time.Time{}
+	}
+	at, err := timex.ParseDatabaseTimestamp(last)
+	if err != nil {
+		s.log.Warnf("[Backup] Job %d has a last backup time that will not parse (%q), "+
+			"so a missed window cannot be told from a first run: %v", job.ID(), last, err)
+		return false, time.Time{}
+	}
+
+	// The schedule is read in the same clock the scheduler fires in; the stored
+	// time is UTC.
+	due := schedule.Next(at.In(now.Location()))
+	if due.After(now) {
+		return false, time.Time{}
+	}
+	return true, due
 }
 
 func (s *scheduler) run1(id int) string {

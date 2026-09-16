@@ -652,6 +652,18 @@ var keptOnStop = map[string]bool{
 // replication task are different things that happen to be numbered
 // separately, and one dashboard variable filtering both would mix them.
 const (
+	// BackupNextDue is when the scheduler will fire a job next, and
+	// BackupMissedWindows counts the occurrences that passed with nothing
+	// running. Without them a window missed across a restart left no trace at
+	// all: the deadline lives in the process, and the process is replaced daily.
+	// TasksConfigured and TasksEnabled are per process, not per task: they are
+	// how "this deployment knows about no tasks at all" can be seen.
+	TasksConfigured = "sync_tasks_configured"
+	TasksEnabled    = "sync_tasks_enabled"
+
+	BackupNextDue       = "sync_backup_next_due_timestamp_seconds"
+	BackupMissedWindows = "sync_backup_missed_windows_total"
+
 	BackupRunsTotal = "sync_backup_runs_total"
 	// BackupLastStatus is 1 when the last run finished and 0 when it failed.
 	BackupLastStatus = "sync_backup_last_status"
@@ -679,6 +691,10 @@ const (
 	helpBackupLastOK     = "When a backup job last finished successfully, seconds since the epoch"
 	helpBackupDuration   = "How long a backup job's last run took"
 	helpBackupInfo       = "A backup job's name and what it backs up"
+	helpTasksConfigured  = "Replication tasks in the control database"
+	helpTasksEnabled     = "Replication tasks the control database has enabled"
+	helpBackupNextDue    = "When the scheduler will run a backup job next, seconds since the epoch"
+	helpBackupMissed     = "Scheduled backup windows that passed with nothing running"
 	helpBackupRecords    = "Records a backup job's last run wrote out"
 	helpBackupBytes      = "Bytes a backup job's last run wrote out"
 	helpBackupFiles      = "Files a backup job's last run wrote out"
@@ -694,6 +710,26 @@ func CountBackupRun(labels Labels, result string) {
 // SetBackupOutcome publishes how a job's last run went. A run that failed
 // leaves the last success where it was: that gauge is the age of the newest
 // backup that exists, not of the newest attempt.
+// SetTaskCounts publishes how many tasks this process knows about and how many
+// of them are enabled. Process-level on purpose: per-task series vanish with
+// their task, so an empty control database published nothing whatsoever.
+func SetTaskCounts(configured, enabled int) {
+	Default.SetGauge(TasksConfigured, helpTasksConfigured, nil, float64(configured))
+	Default.SetGauge(TasksEnabled, helpTasksEnabled, nil, float64(enabled))
+}
+
+// SetBackupNextDue records when the scheduler will fire a job next, so a
+// schedule that is not firing can be told from one that has not come round yet.
+func SetBackupNextDue(labels Labels, at time.Time) {
+	Default.SetGauge(BackupNextDue, helpBackupNextDue, labels, float64(at.Unix()))
+}
+
+// CountBackupMissedWindow records an occurrence that passed with nothing
+// running. A window missed across a restart used to leave no trace anywhere.
+func CountBackupMissedWindow(labels Labels) {
+	Default.AddCounter(BackupMissedWindows, helpBackupMissed, labels, 1)
+}
+
 func SetBackupOutcome(labels Labels, ok bool, at time.Time, took time.Duration) {
 	setBool(BackupLastStatus, helpBackupLastStatus, labels, ok)
 	Default.SetGauge(BackupLastRunTimestamp, helpBackupLastRun, labels, float64(at.Unix()))
