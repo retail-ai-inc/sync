@@ -39,19 +39,19 @@ func TestBuildDSNByType(t *testing.T) {
 			"mysql",
 			"mysql",
 			conn("root", "root", "localhost", "3306", "source_db"),
-			"root:root@tcp(localhost:3306)/source_db?tls=preferred",
+			"root:root@tcp(localhost:3306)/source_db?time_zone=%27%2B00%3A00%27&tls=preferred",
 		},
 		{
 			"mariadb uses the mysql form",
 			"mariadb",
 			conn("root", "root", "localhost", "3307", "source_db"),
-			"root:root@tcp(localhost:3307)/source_db?tls=preferred",
+			"root:root@tcp(localhost:3307)/source_db?time_zone=%27%2B00%3A00%27&tls=preferred",
 		},
 		{
 			"type is case-insensitive",
 			"MySQL",
 			conn("root", "root", "localhost", "3306", "source_db"),
-			"root:root@tcp(localhost:3306)/source_db?tls=preferred",
+			"root:root@tcp(localhost:3306)/source_db?time_zone=%27%2B00%3A00%27&tls=preferred",
 		},
 		{
 			"postgresql",

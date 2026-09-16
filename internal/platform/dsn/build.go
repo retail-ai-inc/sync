@@ -115,7 +115,20 @@ func buildDSNByType(dbType string, c map[string]string) string {
 // replaces and cannot break a server that has no certificate, while a
 // deployment that must not fall back sets tls=true explicitly.
 func buildMySQLDSN(c map[string]string) string {
-	params := map[string]string{}
+	params := map[string]string{
+		// Both sides read and write TIMESTAMP literals in UTC, whatever zone the
+		// servers are set to.
+		//
+		// A TIMESTAMP is an instant rendered in the session's zone, and nothing
+		// pinned either session: the source rendered in its zone, the target
+		// parsed in its own, and a pair of servers that disagreed shifted every
+		// replicated timestamp by the difference -- silently, with the row counts
+		// still matching. Staging shifted every streamed row by nine hours that
+		// way. The copy reads through one of these sessions and the stream
+		// renders to match (see Reader.canalConfig), so pinning both ends the
+		// class rather than inferring one side from the other.
+		"time_zone": "%27%2B00%3A00%27", // '+00:00'
+	}
 	switch {
 	case tlsSetting(c) == "false":
 		// Left off entirely, which is the driver's own default.

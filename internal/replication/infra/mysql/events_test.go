@@ -761,10 +761,10 @@ func TestAGeneratedColumnIsLeftOutOfTheStatement(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build the update: %v", err)
 	}
-	if strings.Contains(update.query, "NameHashed = ?") {
+	if strings.Contains(update.query, "`NameHashed` = ?") {
 		t.Errorf("update sets the generated column: %s", update.query)
 	}
-	if !strings.Contains(update.query, "WHERE Id = ?") {
+	if !strings.Contains(update.query, "WHERE `Id` = ?") {
 		t.Errorf("update addresses the wrong column: %s", update.query)
 	}
 	if got := update.args[len(update.args)-1]; got != 7 {
@@ -775,7 +775,7 @@ func TestAGeneratedColumnIsLeftOutOfTheStatement(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build the delete: %v", err)
 	}
-	if !strings.Contains(del.query, "WHERE Id = ?") || del.args[0] != 7 {
+	if !strings.Contains(del.query, "WHERE `Id` = ?") || del.args[0] != 7 {
 		t.Errorf("delete = %s args %v", del.query, del.args)
 	}
 }

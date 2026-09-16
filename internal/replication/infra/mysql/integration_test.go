@@ -721,3 +721,60 @@ func TestATimestampArrivesAsTheSourceShowsIt(t *testing.T) {
 		}
 	}
 }
+
+// TestATimestampSurvivesAServerInAnotherZone is the half the 2026-09-14 fix
+// left open.
+//
+// That fix pinned how the binlog's instants are rendered into text. What the
+// target then makes of that text is decided by the target's own session zone,
+// and nothing pinned it: a pair of servers set to different zones shifted every
+// replicated TIMESTAMP by the difference, with the row counts still agreeing.
+// Both DSNs carry time_zone='+00:00' now, so the session the task writes
+// through is the same one it reads through whatever the servers are set to.
+func TestATimestampSurvivesAServerInAnotherZone(t *testing.T) {
+	table := harness.UniqueName("tszone")
+	src, tgt := open(t, harness.MySQLSource, sourceDB), open(t, harness.MySQLTarget, targetDB)
+
+	mustExec(t, src, fmt.Sprintf(
+		`CREATE TABLE %s (id INT PRIMARY KEY, seen TIMESTAMP NOT NULL)`, table))
+	t.Cleanup(func() {
+		_, _ = src.Exec("DROP TABLE IF EXISTS " + table)
+		_, _ = tgt.Exec("DROP TABLE IF EXISTS " + table)
+	})
+	mustExec(t, src, fmt.Sprintf("INSERT INTO %s (id, seen) VALUES (1, ?)", table),
+		"2026-03-01 04:05:06")
+
+	startSyncer(t, syncTask(t, table))
+	harness.Eventually(t, 45*time.Second, func() error {
+		if n := countRows(t, tgt, table, ""); n != 1 {
+			return fmt.Errorf("the first copy has not landed")
+		}
+		return nil
+	})
+	mustExec(t, src, fmt.Sprintf("INSERT INTO %s (id, seen) VALUES (2, ?)", table),
+		"2026-03-01 04:05:06")
+	harness.Eventually(t, 30*time.Second, func() error {
+		if n := countRows(t, tgt, table, "id = 2"); n != 1 {
+			return fmt.Errorf("the streamed row has not arrived")
+		}
+		return nil
+	})
+
+	// Read both sides through a session pinned the same way, which is what the
+	// task itself does: the instant has to be the same on both.
+	for _, id := range []int{1, 2} {
+		var source, target int64
+		if err := src.QueryRow(fmt.Sprintf(
+			"SELECT UNIX_TIMESTAMP(seen) FROM %s WHERE id = ?", table), id).Scan(&source); err != nil {
+			t.Fatalf("read the source row %d: %v", id, err)
+		}
+		if err := tgt.QueryRow(fmt.Sprintf(
+			"SELECT UNIX_TIMESTAMP(seen) FROM %s WHERE id = ?", table), id).Scan(&target); err != nil {
+			t.Fatalf("read the target row %d: %v", id, err)
+		}
+		if source != target {
+			t.Errorf("row %d is %d on the source and %d on the target, %d seconds apart",
+				id, source, target, target-source)
+		}
+	}
+}

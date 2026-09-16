@@ -414,10 +414,21 @@ const (
 // upsertStatement renders an idempotent multi-row insert for d. Replication is
 // at-least-once: the binlog position is persisted periodically, so a restart
 // replays whatever came after the last write.
+//
+// Every identifier is quoted. A column called "order" or a table with a hyphen
+// in its name is perfectly legal on the source and produced a syntax error on
+// the target -- once per row, for ever, on a table nobody had thought about.
 func upsertStatement(d dialect, dbName, table string, cols []string, rowCount int) string {
 	if rowCount < 1 {
 		rowCount = 1
 	}
+
+	dbName, table = quoteName(dbName), quoteName(table)
+	quoted := make([]string, len(cols))
+	for i, c := range cols {
+		quoted[i] = quoteName(c)
+	}
+	cols = quoted
 
 	placeholder := "(" + strings.Join(makeQuestionMarks(len(cols)), ",") + ")"
 	values := make([]string, rowCount)
@@ -769,17 +780,17 @@ func (h *MyEventHandler) buildStatement(
 		}
 		setClauses := make([]string, len(writableCols))
 		for i, colName := range writableCols {
-			setClauses[i] = fmt.Sprintf("%s = ?", colName)
+			setClauses[i] = fmt.Sprintf("%s = ?", quoteName(colName))
 		}
 		var whereClauses []string
 		args := pick(process(newRow), writable)
 		for _, pkIndex := range table.PKColumns {
-			whereClauses = append(whereClauses, fmt.Sprintf("%s = ?", cols[pkIndex]))
+			whereClauses = append(whereClauses, fmt.Sprintf("%s = ?", quoteName(cols[pkIndex])))
 			args = append(args, oldRow[pkIndex])
 		}
 		return &statement{
 			query: fmt.Sprintf("UPDATE %s.%s SET %s WHERE %s",
-				tgtDB, tgtTable,
+				quoteName(tgtDB), quoteName(tgtTable),
 				strings.Join(setClauses, ", "),
 				strings.Join(whereClauses, " AND ")),
 			args: args,
@@ -796,12 +807,12 @@ func (h *MyEventHandler) buildStatement(
 		var whereClauses []string
 		var args []interface{}
 		for _, pkIndex := range table.PKColumns {
-			whereClauses = append(whereClauses, fmt.Sprintf("%s = ?", cols[pkIndex]))
+			whereClauses = append(whereClauses, fmt.Sprintf("%s = ?", quoteName(cols[pkIndex])))
 			args = append(args, newRow[pkIndex])
 		}
 		return &statement{
 			query: fmt.Sprintf("DELETE FROM %s.%s WHERE %s",
-				tgtDB, tgtTable, strings.Join(whereClauses, " AND ")),
+				quoteName(tgtDB), quoteName(tgtTable), strings.Join(whereClauses, " AND ")),
 			args: args,
 		}, nil
 	}

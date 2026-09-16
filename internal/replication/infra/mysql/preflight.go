@@ -119,6 +119,16 @@ func targetPreflight(
 		return err
 	}
 
+	// Both connections are pinned to UTC by their DSN, so a difference here
+	// means something else is setting the session zone -- a DSN written by hand,
+	// or an init_connect on the server. Left alone that shifts every TIMESTAMP
+	// this task writes by the difference, silently, with the row counts still
+	// agreeing. It happened, and it went unnoticed for as long as it did because
+	// nothing compared the two.
+	if err := refuseMismatchedTimeZone(ctx, target, log); err != nil {
+		return err
+	}
+
 	// A warning and not a refusal from here down: each one is a property of a
 	// target somebody else administers, and stopping replication over it leaves
 	// Osaka further behind than running with a caveat does.
@@ -137,6 +147,33 @@ func targetPreflight(
 		log.Warn(warning)
 	}
 	return nil
+}
+
+// refuseMismatchedTimeZone stops a task whose target session does not read a
+// timestamp the way this process writes it.
+//
+// The offset is asked for rather than the name: a server set to SYSTEM reports
+// "SYSTEM", which names no zone, and the offset is what actually decides the
+// instant.
+func refuseMismatchedTimeZone(ctx context.Context, target *sql.DB, log logrus.FieldLogger) error {
+	var offset int
+	err := target.QueryRowContext(ctx,
+		`SELECT TIMESTAMPDIFF(SECOND, UTC_TIMESTAMP(), NOW())`).Scan(&offset)
+	if err != nil {
+		// Not a refusal: a target that will not answer this still replicates.
+		log.Debugf("[MySQL] Could not read the target's session time zone: %v", err)
+		return nil
+	}
+	if offset == 0 {
+		return nil
+	}
+	return domain.Unrecoverable(
+		"the target's session reads timestamps %+d seconds from UTC, and this task "+
+			"writes them in UTC. Every TIMESTAMP it replicated would be shifted by "+
+			"that much on the target, with the row counts still agreeing and nothing "+
+			"else to show for it. Something is overriding the session zone this task "+
+			"asks for -- a connection string written by hand, or an init_connect on "+
+			"the server", offset)
 }
 
 // refuseReadOnlyTarget stops a task whose target will not accept a write.

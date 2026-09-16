@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/go-mysql-org/go-mysql/canal"
@@ -30,8 +31,8 @@ func keyedTarget(t *testing.T) *sql.DB {
 func TestTheMySQLInsertIsAnUpsert(t *testing.T) {
 	got := upsertStatement(dialectMySQL, "shop", "orders", []string{"id", "customer"}, 1)
 
-	want := "INSERT INTO shop.orders (id, customer) VALUES (?,?) " +
-		"ON DUPLICATE KEY UPDATE id = VALUES(id), customer = VALUES(customer)"
+	want := "INSERT INTO `shop`.`orders` (`id`, `customer`) VALUES (?,?) " +
+		"ON DUPLICATE KEY UPDATE `id` = VALUES(`id`), `customer` = VALUES(`customer`)"
 	if got != want {
 		t.Errorf("statement =\n%s\nwant\n%s", got, want)
 	}
@@ -40,8 +41,8 @@ func TestTheMySQLInsertIsAnUpsert(t *testing.T) {
 func TestTheMySQLUpsertCarriesEveryRow(t *testing.T) {
 	got := upsertStatement(dialectMySQL, "shop", "orders", []string{"id"}, 3)
 
-	want := "INSERT INTO shop.orders (id) VALUES (?), (?), (?) " +
-		"ON DUPLICATE KEY UPDATE id = VALUES(id)"
+	want := "INSERT INTO `shop`.`orders` (`id`) VALUES (?), (?), (?) " +
+		"ON DUPLICATE KEY UPDATE `id` = VALUES(`id`)"
 	if got != want {
 		t.Errorf("statement =\n%s\nwant\n%s", got, want)
 	}
@@ -53,7 +54,7 @@ func TestTheMySQLUpsertCarriesEveryRow(t *testing.T) {
 func TestTheSQLiteUpsertNeedsNoConflictTarget(t *testing.T) {
 	got := upsertStatement(dialectSQLite, "main", "orders", []string{"id", "customer"}, 2)
 
-	want := "INSERT OR REPLACE INTO main.orders (id, customer) VALUES (?,?), (?,?)"
+	want := "INSERT OR REPLACE INTO `main`.`orders` (`id`, `customer`) VALUES (?,?), (?,?)"
 	if got != want {
 		t.Errorf("statement =\n%s\nwant\n%s", got, want)
 	}
@@ -71,7 +72,7 @@ func TestAnUnsetDialectRendersMySQL(t *testing.T) {
 func TestAnEmptyBatchStillRendersOneRow(t *testing.T) {
 	got := upsertStatement(dialectSQLite, "main", "orders", []string{"id"}, 0)
 
-	if want := "INSERT OR REPLACE INTO main.orders (id) VALUES (?)"; got != want {
+	if want := "INSERT OR REPLACE INTO `main`.`orders` (`id`) VALUES (?)"; got != want {
 		t.Errorf("statement = %q, want %q", got, want)
 	}
 }
@@ -143,5 +144,34 @@ func TestAResumedSnapshotDoesNotLoseRows(t *testing.T) {
 
 	if got := rows(t, db); len(got) != 2 {
 		t.Errorf("target holds %v, want the two rows once each", got)
+	}
+}
+
+// TestAReservedWordColumnIsQuoted covers the names a source is allowed to use
+// and the target refused to parse.
+//
+// "order" is a keyword, and a hyphen is legal in a quoted identifier. Neither
+// was quoted, so a table nobody had thought about produced a syntax error once
+// per row, for ever, on a link that had been running for months.
+func TestAReservedWordColumnIsQuoted(t *testing.T) {
+	got := upsertStatement(dialectMySQL, "shop-eu", "order", []string{"order", "from", "id"}, 1)
+
+	for _, want := range []string{"`shop-eu`.`order`", "`order`", "`from`"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("statement %q does not quote %s", got, want)
+		}
+	}
+	if strings.Contains(got, "INTO shop-eu") || strings.Contains(got, "(order,") {
+		t.Errorf("statement leaves an identifier bare: %s", got)
+	}
+}
+
+// A backtick inside a name is doubled rather than ending the quoting, which is
+// the difference between a quoted identifier and an injection.
+func TestABacktickInsideAnIdentifierIsDoubled(t *testing.T) {
+	got := upsertStatement(dialectMySQL, "shop", "we`ird", []string{"id"}, 1)
+
+	if !strings.Contains(got, "`we``ird`") {
+		t.Errorf("statement = %q, want the embedded backtick doubled", got)
 	}
 }

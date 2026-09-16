@@ -3,7 +3,6 @@ package mysql
 import (
 	"context"
 	"crypto/tls"
-	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
@@ -257,47 +256,17 @@ func (r *Reader) canalConfig() (*canal.Config, error) {
 	}
 	cfg.IncludeTableRegex = includes
 
-	// Render TIMESTAMP values the way the source does; see sourceTimeZone.
-	zone, err := sourceTimeZone(r.Config.SourceConnection)
-	if err != nil {
-		r.Logger.Warnf("[MySQL] Could not read the source's time zone, so TIMESTAMP "+
-			"values are written as UTC: %v", err)
-		zone = time.UTC
-	}
-	cfg.TimestampStringLocation = zone
+	// UTC, to match the sessions both ends are pinned to.
+	//
+	// A TIMESTAMP is an instant, and it becomes text somewhere: here for the
+	// stream, and in a SELECT for the first copy. Both DSNs carry
+	// time_zone='+00:00' (see buildMySQLDSN), so rendering here in the same zone
+	// makes the two paths agree with each other and with the source -- rather
+	// than inferring one side's zone and hoping the other matches, which is how
+	// every streamed row ended up nine hours out.
+	cfg.TimestampStringLocation = time.UTC
 
 	return cfg, nil
-}
-
-// sourceTimeZone reports the zone the source server renders a TIMESTAMP in.
-//
-// A TIMESTAMP is stored as an instant and rendered in the session's zone, and
-// the binlog carries the instant. go-mysql turns it back into text with
-// time.Unix, whose zone is this process's — so a syncer running in JST wrote
-// every TIMESTAMP to the target nine hours ahead of what the source shows,
-// and only rows the first copy wrote were right. The zone the source renders
-// in is the one that makes the two sides read the same.
-func sourceTimeZone(dsn string) (*time.Location, error) {
-	db, err := sql.Open("mysql", dsn)
-	if err != nil {
-		return nil, err
-	}
-	defer db.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	// The offset rather than the name: a server set to SYSTEM reports "SYSTEM",
-	// which names no zone this can load.
-	var offset int
-	if err := db.QueryRowContext(ctx,
-		`SELECT TIMESTAMPDIFF(SECOND, UTC_TIMESTAMP(), NOW())`).Scan(&offset); err != nil {
-		return nil, err
-	}
-	if offset == 0 {
-		return time.UTC, nil
-	}
-	return time.FixedZone(fmt.Sprintf("source%+d", offset/3600), offset), nil
 }
 
 // includeTables lists the tables the stream carries, across every mapped
