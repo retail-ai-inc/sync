@@ -57,7 +57,7 @@ func TestBuildDSNByType(t *testing.T) {
 			"postgresql",
 			"postgresql",
 			conn("root", "root", "localhost", "5432", "source_db"),
-			"postgres://root:root@localhost:5432/source_db?sslmode=prefer",
+			"postgres://root:root@localhost:5432/source_db?sslmode=require",
 		},
 		{
 			"mongodb with credentials",
@@ -135,16 +135,38 @@ func TestBuildDSNRoundTripsDatabaseName(t *testing.T) {
 }
 
 // TestTheDefaultIsEncryptionWhereItCannotBreakAnything records the choice made
-// for the two engines whose drivers can negotiate: MySQL asks for "preferred"
-// and PostgreSQL for "prefer", so a server offering a certificate is used
-// encrypted and one that offers none still connects.
+// for MySQL, whose driver can negotiate: "preferred" uses a server that offers
+// a certificate and still connects to one that does not.
+//
+// PostgreSQL cannot have that default. libpq spells it "prefer", and the Go
+// driver in use here does not implement it -- it refuses the DSN with
+// "unsupported sslmode", so a task configured through the interface could not
+// connect at all. The default is "require" instead: encrypted or not at all,
+// which for payment data is the right way round, and a server without TLS is
+// reached by setting sslmode=disable deliberately.
 func TestTheDefaultIsEncryptionWhereItCannotBreakAnything(t *testing.T) {
 	if got := buildDSNByType("mysql", conn("root", "root", "h", "3306", "db")); !strings.Contains(got, "tls=preferred") {
 		t.Errorf("mysql DSN = %q, want tls=preferred", got)
 	}
-	if got := buildDSNByType("postgresql", conn("root", "root", "h", "5432", "db")); !strings.Contains(got, "sslmode=prefer") {
-		t.Errorf("postgresql DSN = %q, want sslmode=prefer", got)
+	if got := buildDSNByType("postgresql", conn("root", "root", "h", "5432", "db")); !strings.Contains(got, "sslmode=require") {
+		t.Errorf("postgresql DSN = %q, want sslmode=require", got)
 	}
+}
+
+// TestTheDefaultPostgresModeIsOneTheDriverAccepts is the reason for the mode
+// above: lib/pq rejects the DSN outright rather than falling back, so a default
+// it does not implement is a task that never connects.
+func TestTheDefaultPostgresModeIsOneTheDriverAccepts(t *testing.T) {
+	got := buildDSNByType("postgresql", conn("root", "root", "h", "5432", "db"))
+
+	// The four lib/pq accepts, from its own error message.
+	accepted := []string{"sslmode=require", "sslmode=verify-full", "sslmode=verify-ca", "sslmode=disable"}
+	for _, mode := range accepted {
+		if strings.Contains(got, mode) {
+			return
+		}
+	}
+	t.Errorf("postgresql DSN = %q, want one of %v", got, accepted)
 }
 
 func TestTLSCanBeRequired(t *testing.T) {

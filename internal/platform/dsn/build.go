@@ -133,9 +133,13 @@ func buildMySQLDSN(c map[string]string) string {
 
 // buildPostgresDSN renders postgres://user:password@host:port/database.
 //
-// sslmode defaults to "prefer" rather than the "disable" it replaces: the
-// server's certificate is used when there is one. An operator who needs the
-// connection to fail rather than fall back sets sslmode=require or verify-full.
+// sslmode defaults to "require": the connection is encrypted or it does not
+// happen, which is the right default for payment data. "prefer" -- try TLS,
+// fall back to plaintext -- is what libpq means by a default, but the Go driver
+// this uses does not implement it and refuses the DSN outright ("unsupported
+// sslmode \"prefer\""), so every task configured through the interface, which
+// sends host and port rather than a DSN, could not connect at all. An operator
+// with a server that has no TLS sets sslmode=disable deliberately.
 func buildPostgresDSN(c map[string]string) string {
 	mode := c[KeySSLMode]
 	if mode == "" {
@@ -147,7 +151,7 @@ func buildPostgresDSN(c map[string]string) string {
 		case tlsSetting(c) == "false":
 			mode = "disable"
 		default:
-			mode = "prefer"
+			mode = "require"
 		}
 	}
 
