@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"go.mongodb.org/mongo-driver/v2/bson"
+
 	"github.com/retail-ai-inc/sync/internal/replication/infra/checkpoint"
 )
 
@@ -146,5 +148,81 @@ func TestAnUnreachableSourceStillReportsWhatTheTargetApplied(t *testing.T) {
 	}
 	if applied.Comparable {
 		t.Error("a shard with no source position is reported as comparable")
+	}
+}
+
+// TestTheSourcesLastWriteIsWhatTheTargetIsComparedWith records why the
+// comparison changed.
+//
+// $clusterTime is a gossiped logical clock: it advances on every operation
+// anywhere in the cluster and on the periodic no-op write, so an idle source is
+// always a second or two ahead of the last event anybody applied. Compared
+// against that, a target that holds everything reads as "not caught up" for
+// ever -- and "caught up" is what somebody waits for before promoting Osaka.
+func TestTheSourcesLastWriteIsWhatTheTargetIsComparedWith(t *testing.T) {
+	// A hello reply from a replica set member: its last write is older than the
+	// gossiped cluster time, which is what an idle source looks like.
+	reply, err := bson.Marshal(bson.D{
+		{Key: "lastWrite", Value: bson.D{
+			{Key: "opTime", Value: bson.D{{Key: "ts", Value: bson.Timestamp{T: 1000, I: 1}}}},
+			{Key: "majorityOpTime", Value: bson.D{{Key: "ts", Value: bson.Timestamp{T: 1000, I: 1}}}},
+		}},
+		{Key: "$clusterTime", Value: bson.D{
+			{Key: "clusterTime", Value: bson.Timestamp{T: 1010, I: 1}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	at, ok := lastWriteFrom(reply)
+	if !ok {
+		t.Fatal("the hello reply's last write was not read")
+	}
+	if at.T != 1000 {
+		t.Errorf("last write = %d, want the committed write and not the gossiped clock", at.T)
+	}
+
+	// A mongos carries no lastWrite, and then the gossiped clock is the only
+	// answer -- an upper bound, so the report errs towards "behind".
+	mongos, err := bson.Marshal(bson.D{
+		{Key: "msg", Value: "isdbgrid"},
+		{Key: "$clusterTime", Value: bson.D{
+			{Key: "clusterTime", Value: bson.Timestamp{T: 1010, I: 1}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if _, ok := lastWriteFrom(mongos); ok {
+		t.Error("a mongos reply reported a last write it does not carry")
+	}
+	if gossiped, err := clusterTimeFrom(mongos); err != nil || gossiped.T != 1010 {
+		t.Errorf("fallback cluster time = %v (%v)", gossiped, err)
+	}
+}
+
+// And the gap is reported, so "not caught up" says how far.
+func TestHowFarBehindIsReported(t *testing.T) {
+	stored := streamPosition{At: time.Date(2026, 9, 17, 0, 0, 0, 0, time.UTC).Unix()}
+	payload, err := checkpoint.Encode(stored)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+
+	behind := compareClusterTime(time.Date(2026, 9, 17, 0, 0, 30, 0, time.UTC), payload)
+	if behind.CaughtUp {
+		t.Error("a target thirty seconds behind reads as caught up")
+	}
+	if !strings.Contains(behind.Note, "30s") {
+		t.Errorf("Note = %q, want it to say how far behind", behind.Note)
+	}
+
+	level := compareClusterTime(time.Date(2026, 9, 17, 0, 0, 0, 0, time.UTC), payload)
+	if !level.CaughtUp {
+		t.Error("a target level with the source's last write is not caught up")
+	}
+	if level.Note != "" {
+		t.Errorf("Note = %q for a target that is level", level.Note)
 	}
 }

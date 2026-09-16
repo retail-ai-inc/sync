@@ -101,6 +101,10 @@ func compareClusterTime(head time.Time, payload string) domain.ShardProgress {
 
 	progress.Applied = applied.UTC().Format(time.RFC3339)
 	progress.Comparable = true
+	if behind := head.Sub(applied); behind > 0 {
+		progress.Note = fmt.Sprintf("the target is %s behind the source's last write",
+			behind.Truncate(time.Second))
+	}
 	// The source's cluster time advances on its own, with no write involved, so
 	// an idle source is always a second or two ahead of the last event anybody
 	// applied. Caught up is "the target has the source's last event", which is
@@ -122,17 +126,46 @@ func appliedTime(stored streamPosition) (time.Time, bool) {
 	return time.Time{}, false
 }
 
-// sourceClusterTime reads the source's own clock, which is what a position is
-// measured against.
+// sourceClusterTime reads how far the source has been written to.
+//
+// The source's LAST WRITE, not its clock. $clusterTime is a gossiped logical
+// clock that advances on every operation anywhere in the cluster and on the
+// periodic no-op, so comparing the last event the target applied against it
+// left an idle source permanently "not caught up" -- and "caught up" is what
+// somebody waits for before promoting Osaka. lastWrite is what the source has
+// actually committed, which is the thing the target can be level with.
 func sourceClusterTime(ctx context.Context, source *mongo.Client) (time.Time, error) {
 	raw, err := source.Database("admin").
 		RunCommand(ctx, bson.D{{Key: "hello", Value: 1}}).Raw()
 	if err != nil {
 		return time.Time{}, fmt.Errorf("read the source's cluster time: %w", err)
 	}
+	if at, ok := lastWriteFrom(raw); ok {
+		return time.Unix(int64(at.T), 0), nil
+	}
+	// A source that reports no lastWrite -- a mongos, which does not carry one
+	// -- falls back to the gossiped clock. It is an upper bound: the report then
+	// errs towards "behind", which is the safe direction for a promotion.
 	at, err := clusterTimeFrom(raw)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("read the source's cluster time: %w", err)
 	}
 	return time.Unix(int64(at.T), 0), nil
+}
+
+// lastWriteFrom reads the source's last committed write out of a hello reply.
+func lastWriteFrom(raw bson.Raw) (bson.Timestamp, bool) {
+	for _, path := range [][]string{
+		{"lastWrite", "majorityOpTime", "ts"},
+		{"lastWrite", "opTime", "ts"},
+	} {
+		v, err := raw.LookupErr(path...)
+		if err != nil {
+			continue
+		}
+		if t, i, ok := v.TimestampOK(); ok {
+			return bson.Timestamp{T: t, I: i}, true
+		}
+	}
+	return bson.Timestamp{}, false
 }
