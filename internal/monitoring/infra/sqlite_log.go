@@ -89,7 +89,7 @@ func rowCountAction(srcOK, tgtOK bool) string {
 // compares a database and has no object name; it is published under the
 // database's number.
 func publishRowCounts(syncTaskID int, dbType, srcDB, object string,
-	source, target int64, action string) {
+	source, target int64, action, method string) {
 
 	if action != actionRowCount && action != actionCountFailed {
 		return
@@ -97,12 +97,29 @@ func publishRowCounts(syncTaskID int, dbType, srcDB, object string,
 	if object == "" {
 		object = "db" + srcDB
 	}
+	if method == "" {
+		method = methodExact
+	}
 	metrics.SetRowCounts(metrics.Labels{
 		"task":   strconv.Itoa(syncTaskID),
 		"engine": strings.ToLower(dbType),
 		"object": object,
+		// How the number was arrived at. MongoDB counts a whole collection from
+		// its metadata, which lags a write and counts orphans on a sharded
+		// source, so a difference of one is routine and means nothing; a SQL
+		// COUNT(*) is exact and a difference of one means a row. Publishing both
+		// under one name made every panel read the looser one as though it were
+		// the stricter, and somebody chases a discrepancy that is not there.
+		"method": method,
 	}, source, target, time.Now())
 }
+
+const (
+	// methodExact: the number is what the object holds.
+	methodExact = "exact"
+	// methodEstimated: the number is the engine's own estimate.
+	methodEstimated = "estimated"
+)
 
 func StoreChangeStreamStatistics(syncTaskID int, activeStreams map[string]*domain.ChangeStreamInfo) error {
 	db, err := sqlite.OpenSQLiteDB()

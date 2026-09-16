@@ -414,6 +414,10 @@ const unlistedScanEvery = 5 * time.Minute
 // target's trigger check specific rather than a scan of the whole schema.
 //
 // A mapping that names no target table writes to one with the source's name.
+// A task that names no tables at all replicates the whole database, and
+// returns nil for "every table" -- an empty non-nil slice would mean "none",
+// which is what the trigger check used to read it as, so the check did nothing
+// for exactly the tasks that run in production.
 func (s *Syncer) targetTables() []string {
 	var tables []string
 	for _, mapping := range s.cfg.Mappings {

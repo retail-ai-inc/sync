@@ -83,6 +83,6 @@ func CountAndLogMySQLOrMariaDB(ctx context.Context, sc config.SyncConfig, log *l
 			"monitor_action": action,
 		}).Info(action)
 
-		publishRowCounts(sc.ID, dbType, srcDBName, srcName, srcCount, tgtCount, action)
+		publishRowCounts(sc.ID, dbType, srcDBName, srcName, srcCount, tgtCount, action, methodExact)
 	}
 }

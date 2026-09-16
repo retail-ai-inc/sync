@@ -1,9 +1,14 @@
 package export
 
 import (
+	"fmt"
+	"net/url"
+	"os"
 	"strings"
 
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/sirupsen/logrus"
+
 	"github.com/retail-ai-inc/sync/internal/platform/dsn"
 )
 
@@ -110,4 +115,56 @@ func (e *BackupExecutor) maskSensitiveArgs(args []string) string {
 	}
 
 	return strings.Join(maskedArgs, " ")
+}
+
+// splitMongoPassword takes the password out of a MongoDB URI and returns the
+// two separately, so the password never reaches a command line.
+//
+// A URI without one comes back unchanged with an empty password, which is what
+// a source with no authentication looks like.
+func splitMongoPassword(uri string) (string, string) {
+	parsed, err := url.Parse(uri)
+	if err != nil || parsed.User == nil {
+		return uri, ""
+	}
+	password, set := parsed.User.Password()
+	if !set || password == "" {
+		return uri, ""
+	}
+	parsed.User = url.User(parsed.User.Username())
+	return parsed.String(), password
+}
+
+// mongoConfigFile writes the password where only this process can read it.
+// mongoexport takes --config with a YAML password field, which is how it is
+// meant to be given one.
+func mongoConfigFile(password string) (string, func(), error) {
+	if password == "" {
+		return "", func() {}, nil
+	}
+
+	file, err := os.CreateTemp("", "mongo-credentials-*.yaml")
+	if err != nil {
+		return "", func() {}, fmt.Errorf("write the credentials file: %w", err)
+	}
+	remove := func() {
+		if err := os.Remove(file.Name()); err != nil && !os.IsNotExist(err) {
+			logrus.Warnf("[BackupExecutor] Failed to remove %s: %v", file.Name(), err)
+		}
+	}
+
+	// CreateTemp already makes it 0600, which is the point of the file. The
+	// value is quoted because a password may hold anything YAML would otherwise
+	// read as syntax.
+	quoted := strings.NewReplacer("\\", `\\`, `"`, `\"`).Replace(password)
+	if _, err := fmt.Fprintf(file, "password: \"%s\"\n", quoted); err != nil {
+		_ = file.Close()
+		remove()
+		return "", func() {}, fmt.Errorf("write the credentials file: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		remove()
+		return "", func() {}, fmt.Errorf("write the credentials file: %w", err)
+	}
+	return file.Name(), remove, nil
 }

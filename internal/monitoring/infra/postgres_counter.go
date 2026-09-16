@@ -101,7 +101,7 @@ func CountAndLogPostgreSQL(ctx context.Context, sc config.SyncConfig, log *logru
 				"monitor_action": action,
 			}).Info(action)
 
-			publishRowCounts(sc.ID, dbType, srcDBName, srcName, srcCount, tgtCount, action)
+			publishRowCounts(sc.ID, dbType, srcDBName, srcName, srcCount, tgtCount, action, methodExact)
 		}
 	}
 }

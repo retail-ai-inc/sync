@@ -215,7 +215,7 @@ func TestTheMongoDBCounterPublishesMinusOneForAFailedCount(t *testing.T) {
 	useMonitoringDB(t)
 	logger, out := captureLog()
 
-	labels := metrics.Labels{"task": "42", "engine": "mongodb", "object": "orders"}
+	labels := metrics.Labels{"task": "42", "engine": "mongodb", "object": "orders", "method": methodEstimated}
 	t.Cleanup(func() { metrics.ForgetRowCounts(labels) })
 
 	CountAndLogMongoDB(briefCtx(t), config.SyncConfig{
@@ -352,15 +352,15 @@ func TestAnEmptyKeyspaceCountsZero(t *testing.T) {
 // day, and publishing those under the same name would report a day's rows as
 // the size of the object.
 func TestOnlyTheFullComparisonIsPublished(t *testing.T) {
-	full := metrics.Labels{"task": "7", "engine": "mysql", "object": "Users"}
-	daily := metrics.Labels{"task": "7", "engine": "mysql", "object": "Orders"}
+	full := metrics.Labels{"task": "7", "engine": "mysql", "object": "Users", "method": methodExact}
+	daily := metrics.Labels{"task": "7", "engine": "mysql", "object": "Orders", "method": methodExact}
 	t.Cleanup(func() {
 		metrics.ForgetRowCounts(full)
 		metrics.ForgetRowCounts(daily)
 	})
 
-	publishRowCounts(7, "MYSQL", "shop", "Users", 100, 98, actionRowCount)
-	publishRowCounts(7, "MYSQL", "shop", "Orders", 5, 5, "data_volume_daily")
+	publishRowCounts(7, "MYSQL", "shop", "Users", 100, 98, actionRowCount, methodExact)
+	publishRowCounts(7, "MYSQL", "shop", "Orders", 5, 5, "data_volume_daily", methodExact)
 
 	if !published(t, full) {
 		t.Error("the full comparison was not published")
@@ -373,10 +373,10 @@ func TestOnlyTheFullComparisonIsPublished(t *testing.T) {
 // A standalone Redis task compares a whole database and has no object name.
 // An empty label would draw every database as one series.
 func TestADatabaseWithNoObjectNameIsPublishedUnderItsNumber(t *testing.T) {
-	labels := metrics.Labels{"task": "42", "engine": "redis", "object": "db0"}
+	labels := metrics.Labels{"task": "42", "engine": "redis", "object": "db0", "method": methodExact}
 	t.Cleanup(func() { metrics.ForgetRowCounts(labels) })
 
-	publishRowCounts(42, "REDIS", "0", "", 220, 242, actionRowCount)
+	publishRowCounts(42, "REDIS", "0", "", 220, 242, actionRowCount, methodExact)
 
 	if !published(t, labels) {
 		t.Error("a database compared without an object name was not published as db0")
@@ -408,4 +408,37 @@ func published(t *testing.T, labels metrics.Labels) bool {
 		}
 	}
 	return false
+}
+
+// TestAnEstimateSaysThatItIsOne records why the method is a label.
+//
+// MongoDB counts a whole collection from its metadata: the number lags a write
+// and includes orphans on a sharded source, so a difference of one between the
+// two sides is routine and means nothing. A SQL COUNT(*) is exact, and there a
+// difference of one means a row. Published under one name, every panel read the
+// looser number as though it were the stricter one, and somebody went looking
+// for a discrepancy that was not there.
+func TestAnEstimateSaysThatItIsOne(t *testing.T) {
+	estimated := metrics.Labels{"task": "9", "engine": "mongodb", "object": "Events",
+		"method": methodEstimated}
+	exact := metrics.Labels{"task": "9", "engine": "mysql", "object": "Orders",
+		"method": methodExact}
+	t.Cleanup(func() {
+		metrics.ForgetRowCounts(estimated)
+		metrics.ForgetRowCounts(exact)
+	})
+
+	publishRowCounts(9, "MONGODB", "shop", "Events", 1206, 1207, actionRowCount, methodEstimated)
+	publishRowCounts(9, "MYSQL", "shop", "Orders", 100, 100, actionRowCount, methodExact)
+
+	if !published(t, estimated) {
+		t.Error("an estimated count was not published")
+	}
+	if !published(t, exact) {
+		t.Error("an exact count was not published")
+	}
+	// And the two are separate series, so a panel can tell them apart.
+	if estimated.Key() == exact.Key() {
+		t.Error("the two methods share one series")
+	}
 }

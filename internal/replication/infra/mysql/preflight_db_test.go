@@ -228,7 +228,7 @@ func TestTheTriggerCheckBindsTheTableNames(t *testing.T) {
 	}
 }
 
-func TestTheTriggerCheckAsksNothingWithoutASchemaOrTables(t *testing.T) {
+func TestTheTriggerCheckAsksNothingWithoutASchema(t *testing.T) {
 	fake := &fakeDB{}
 	db := fake.open(t)
 
@@ -236,9 +236,11 @@ func TestTheTriggerCheckAsksNothingWithoutASchemaOrTables(t *testing.T) {
 		schema string
 		tables []string
 	}{
-		"no schema": {"", []string{"orders"}},
-		"no tables": {"db", nil},
-		"neither":   {"", nil},
+		"no schema":            {"", []string{"orders"}},
+		"no schema, no tables": {"", nil},
+		// An empty, non-nil list is "this task writes to nothing", which is a
+		// different thing from nil.
+		"an empty list of tables": {"db", []string{}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			found, err := triggersOn(context.Background(), db, c.schema, c.tables)
@@ -252,6 +254,39 @@ func TestTheTriggerCheckAsksNothingWithoutASchemaOrTables(t *testing.T) {
 	}
 	if len(fake.statements()) != 0 {
 		t.Errorf("statements were run with nothing to check: %v", fake.statements())
+	}
+}
+
+// TestAWholeDatabaseTaskChecksEveryTableForTriggers covers the case every
+// production task is in.
+//
+// A task that names no tables replicates the whole database, and the check read
+// that as "no tables to check" and asked nothing at all -- so the one warning
+// that catches a target writing changes the source never made was silent for
+// exactly the tasks that needed it.
+func TestAWholeDatabaseTaskChecksEveryTableForTriggers(t *testing.T) {
+	fake := &fakeDB{replies: []reply{{
+		match:   "information_schema.triggers",
+		columns: []string{"trigger_name", "event_object_table"},
+		rows: [][]driver.Value{
+			{[]byte("audit_after_insert"), []byte("payments")},
+		},
+	}}}
+	db := fake.open(t)
+
+	found, err := triggersOn(context.Background(), db, "shop", nil)
+	if err != nil {
+		t.Fatalf("triggersOn: %v", err)
+	}
+	if len(found) != 1 {
+		t.Fatalf("found %v, want the one trigger on the schema", found)
+	}
+	asked := strings.Join(fake.statements(), " ")
+	if !strings.Contains(asked, "trigger_schema = ?") {
+		t.Errorf("statement did not ask about the schema: %s", asked)
+	}
+	if strings.Contains(asked, "event_object_table IN") {
+		t.Errorf("a whole-database task asked about a list of tables: %s", asked)
 	}
 }
 

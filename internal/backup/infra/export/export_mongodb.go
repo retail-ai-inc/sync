@@ -73,12 +73,27 @@ func (e *BackupExecutor) executeExternalMongoExportSimple(ctx context.Context, c
 
 // executeExternalMongoExportWithOptions executes external mongoexport command with support for query conditions and field selection
 func (e *BackupExecutor) executeExternalMongoExportWithOptions(ctx context.Context, connStr, database, collection, outputPath string, config ExecutorBackupConfig) error {
+	// The password goes in a file, not in argv: anything in argv is in
+	// /proc/<pid>/cmdline for the life of the process, readable by anyone on the
+	// node, and this is the password to the payment database. The MySQL path was
+	// already fixed this way; masking only ever applied to the copy that was
+	// logged.
+	uri, password := splitMongoPassword(connStr)
+	configPath, removeConfig, err := mongoConfigFile(password)
+	if err != nil {
+		return err
+	}
+	defer removeConfig()
+
 	args := []string{
-		"--uri", connStr,
+		"--uri", uri,
 		"--db", database,
 		"--collection", collection,
 		"--out", outputPath,
 		"--quiet",
+	}
+	if configPath != "" {
+		args = append(args, "--config", configPath)
 	}
 
 	queryDescription := "none, so the whole collection"

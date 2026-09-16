@@ -233,24 +233,37 @@ func describeTriggers(triggers []string) string {
 //
 // The table names are bound rather than interpolated, so a table named by a
 // task's configuration cannot become part of the statement.
+// triggersOn lists the triggers on the tables a task writes to.
+//
+// A nil table list means "every table in the schema", which is what a task that
+// names no tables replicates -- and how all four production tasks are
+// configured. Treating that as "no tables" made the check a no-op precisely
+// where it was needed: a trigger on the target fires on the row replication
+// just applied and writes a change the source never made.
 func triggersOn(ctx context.Context, db *sql.DB, schema string, tables []string) ([]string, error) {
-	if schema == "" || len(tables) == 0 {
+	if schema == "" {
 		return nil, nil
 	}
 
-	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(tables)), ",")
-	params := make([]interface{}, 0, len(tables)+1)
-	params = append(params, schema)
-	for _, table := range tables {
-		params = append(params, table)
-	}
-
-	rows, err := db.QueryContext(ctx, `
+	query := `
 SELECT trigger_name, event_object_table
 FROM information_schema.triggers
-WHERE trigger_schema = ?
-  AND event_object_table IN (`+placeholders+`)
-ORDER BY event_object_table, trigger_name`, params...)
+WHERE trigger_schema = ?`
+	params := []interface{}{schema}
+
+	if tables != nil {
+		if len(tables) == 0 {
+			return nil, nil
+		}
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(tables)), ",")
+		query += "\n  AND event_object_table IN (" + placeholders + ")"
+		for _, table := range tables {
+			params = append(params, table)
+		}
+	}
+	query += "\nORDER BY event_object_table, trigger_name"
+
+	rows, err := db.QueryContext(ctx, query, params...)
 	if err != nil {
 		return nil, err
 	}

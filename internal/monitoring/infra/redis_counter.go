@@ -87,7 +87,7 @@ func CountAndLogRedis(ctx context.Context, sc config.SyncConfig, log *logrus.Log
 		"monitor_action": action,
 	}).Info(action)
 
-	publishRowCounts(sc.ID, dbType, srcDBName, "", srcCount, tgtCount, action)
+	publishRowCounts(sc.ID, dbType, srcDBName, "", srcCount, tgtCount, action, methodExact)
 }
 
 // keyCount reports how many keys an instance holds, and which databases they

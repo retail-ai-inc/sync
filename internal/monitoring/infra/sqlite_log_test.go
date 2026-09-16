@@ -138,9 +138,9 @@ func TestAFailedMeasurementIsMarkedAsOne(t *testing.T) {
 		}
 	}
 
-	labels := metrics.Labels{"task": "7", "engine": "mysql", "object": "orders"}
+	labels := metrics.Labels{"task": "7", "engine": "mysql", "object": "orders", "method": methodExact}
 	t.Cleanup(func() { metrics.ForgetRowCounts(labels) })
-	publishRowCounts(7, "mysql", "src", "orders", -1, -1, actionCountFailed)
+	publishRowCounts(7, "mysql", "src", "orders", -1, -1, actionCountFailed, methodExact)
 
 	if !published(t, labels) {
 		t.Error("a failed measurement was not published, so the last good figures " +

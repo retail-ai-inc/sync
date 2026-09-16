@@ -96,8 +96,16 @@ func CountAndLogMongoDB(ctx context.Context, sc config.SyncConfig, log *logrus.L
 			"monitor_action": rowCountAction(srcOK, tgtOK),
 		}).Info(rowCountAction(srcOK, tgtOK))
 
+		// A collection with no count query is counted from the collection's
+		// metadata, which lags and counts orphans: the number is an estimate and
+		// says so, rather than being published beside exact ones under the same
+		// name.
+		method := methodEstimated
+		if countQuery != nil && len(countQuery.Conditions) > 0 {
+			method = methodExact
+		}
 		publishRowCounts(sc.ID, dbType, srcDBName, tblMap.SourceTable, srcCount, tgtCount,
-			rowCountAction(srcOK, tgtOK))
+			rowCountAction(srcOK, tgtOK), method)
 	}
 
 	// Log comprehensive ChangeStream status for each sync task.
