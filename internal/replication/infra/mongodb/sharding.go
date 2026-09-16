@@ -261,26 +261,24 @@ func (a documentAddress) filter(doc bson.M) (bson.M, error) {
 
 // lookupPath reads a dotted path out of a document, since a shard key may name
 // a field inside a subdocument.
+//
+// Every level is read through documentOf, which knows all four shapes the
+// driver hands back. A nested document inside a bson.M decodes as bson.D, not
+// bson.M -- so a shard key like "customer.region" was never found, and a
+// resumed copy or a re-copy of a collection sharded that way failed for good.
 func lookupPath(doc bson.M, path string) (interface{}, bool) {
 	parts := strings.Split(path, ".")
 	var current interface{} = doc
 	for _, part := range parts {
-		switch held := current.(type) {
-		case bson.M:
-			value, ok := held[part]
-			if !ok {
-				return nil, false
-			}
-			current = value
-		case map[string]interface{}:
-			value, ok := held[part]
-			if !ok {
-				return nil, false
-			}
-			current = value
-		default:
+		held := documentOf(current)
+		if held == nil {
 			return nil, false
 		}
+		value, ok := held[part]
+		if !ok {
+			return nil, false
+		}
+		current = value
 	}
 	return current, true
 }

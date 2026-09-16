@@ -133,17 +133,51 @@ func TestAnUnshardedCollectionIsAddressedByItsIDAlone(t *testing.T) {
 
 // TestAShardKeyInsideASubdocumentIsFound covers the dotted paths a shard key is
 // allowed to name.
+//
+// The document is round-tripped through the driver rather than written by hand,
+// because that is where the bug was: a nested document inside a bson.M comes
+// back as bson.D, and a fixture written as a literal bson.M never sees it. A
+// hand-written fixture passed while every resumed copy of a collection sharded
+// on a dotted key failed for good.
 func TestAShardKeyInsideASubdocumentIsFound(t *testing.T) {
 	address := documentAddress{Paths: []string{"customer.region"}}
 
-	filter, err := address.filter(bson.M{
-		"_id":      1,
-		"customer": bson.M{"region": "tokyo", "tier": "gold"},
+	raw, err := bson.Marshal(bson.D{
+		{Key: "_id", Value: 1},
+		{Key: "customer", Value: bson.D{
+			{Key: "region", Value: "tokyo"},
+			{Key: "tier", Value: "gold"},
+		}},
 	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var decoded bson.M
+	if err := bson.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, isD := decoded["customer"].(bson.D); !isD {
+		t.Fatalf("the driver now decodes a subdocument as %T; the shape this "+
+			"guards against has changed", decoded["customer"])
+	}
+
+	filter, err := address.filter(decoded)
 	if err != nil {
 		t.Fatalf("filter: %v", err)
 	}
 	if filter["customer.region"] != "tokyo" {
+		t.Errorf("filter = %v, want the dotted path resolved", filter)
+	}
+
+	// The hand-written shape still works, since both reach this code.
+	filter, err = address.filter(bson.M{
+		"_id":      1,
+		"customer": bson.M{"region": "osaka"},
+	})
+	if err != nil {
+		t.Fatalf("filter: %v", err)
+	}
+	if filter["customer.region"] != "osaka" {
 		t.Errorf("filter = %v, want the dotted path resolved", filter)
 	}
 }
