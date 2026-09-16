@@ -523,6 +523,21 @@ func (c *Cursor) waitOrAdvance(ctx context.Context) (bool, error) {
 		c.buffer.mu.Unlock()
 		return false, io.EOF
 	}
+	// The segment this cursor is reading may have been trimmed under it: the
+	// fd stays valid on a deleted file, so the reads keep working to the end of
+	// what was written and then there is nowhere to go. Waiting there is a
+	// replication stop with no error, no metric and no log line -- the task
+	// reads as healthy for ever. Say so instead.
+	if !c.buffer.holdsLocked(c.segment) {
+		oldest := int64(-1)
+		if len(c.buffer.segments) > 0 {
+			oldest = c.buffer.segments[0].start
+		}
+		c.buffer.mu.Unlock()
+		return false, fmt.Errorf("%w: the segment being read from offset %d was "+
+			"discarded to stay inside the buffer's size limit, and the oldest one "+
+			"still held starts at %d", ErrTruncated, c.offset, oldest)
+	}
 	if c.offset < c.segment.end {
 		c.buffer.mu.Unlock()
 		return true, nil
@@ -546,6 +561,16 @@ func (c *Cursor) waitOrAdvance(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+// holdsLocked reports whether the buffer still holds this segment.
+func (b *Buffer) holdsLocked(want *segment) bool {
+	for _, seg := range b.segments {
+		if seg == want {
+			return true
+		}
+	}
+	return false
 }
 
 // nextSegmentLocked returns the segment after the one being read, if the cursor

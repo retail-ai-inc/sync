@@ -1,6 +1,7 @@
 package redis
 
 import (
+	"math"
 	"strings"
 	"testing"
 )
@@ -127,5 +128,37 @@ func TestEachTaskAndShardGetsItsOwnMetadataKey(t *testing.T) {
 		if !strings.Contains(key, c.task) || !strings.Contains(key, c.shard) {
 			t.Errorf("key %q does not identify task %s shard %s", key, c.task, c.shard)
 		}
+	}
+}
+
+// The value phase has to cover the whole of the first copy.
+//
+// The copy is taken with SCAN, so it is a smear: a key read early may have
+// changed before a key read late. Everything inside that smear is applied by
+// re-reading the key's value, because replaying the command instead could
+// apply it twice — an INCR already in the copy, a DEL of a key the copy then
+// re-adds. The window used to be closed at the offset the copy STARTED at,
+// which left every command issued during the copy on the replay path.
+func TestTheValuePhaseCoversTheWholeCopy(t *testing.T) {
+	const copyStarted, copyFinished = 1000, 5000
+
+	// While the copy runs the end is not known, so nothing is excluded.
+	open := streamPosition{Phase: phaseValue, ValueUntil: math.MaxInt64}
+	for _, offset := range []int64{copyStarted, copyStarted + 1, copyFinished - 1} {
+		if !open.inValuePhase(offset) {
+			t.Errorf("offset %d during the copy is not applied by value", offset)
+		}
+	}
+
+	// Once the copy has finished the window closes where it really ended.
+	closed := streamPosition{Phase: phaseValue, ValueUntil: copyFinished}
+	if !closed.inValuePhase(copyFinished - 1) {
+		t.Error("an offset from inside the copy window is replayed by command")
+	}
+	if closed.inValuePhase(copyFinished) {
+		t.Error("an offset after the copy is still applied by value")
+	}
+	if closed.inValuePhase(copyFinished + 1) {
+		t.Error("an offset after the copy is still applied by value")
 	}
 }

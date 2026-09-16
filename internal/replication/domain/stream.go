@@ -128,6 +128,17 @@ type Reader interface {
 	Close() error
 }
 
+// CopyBoundary is a Reader that reads the first copy's window differently from
+// what follows it, and so needs to be told where that window ended.
+//
+// Only the pipeline knows: the boundary is the moment the snapshotter returns.
+// Redis implements it because a command issued while the copy was running may
+// already be inside the copy, so those are applied by re-reading the value
+// rather than by replaying the command.
+type CopyBoundary interface {
+	CopyFinished()
+}
+
 // Applier writes a batch of events to the target.
 //
 // Apply must be idempotent, because a batch may be applied twice when the

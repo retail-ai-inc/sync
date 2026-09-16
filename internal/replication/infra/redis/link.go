@@ -69,10 +69,19 @@ func (l *link) start(ctx context.Context, from streamPosition) (streamPosition, 
 		switch head := l.buffer.Newest(); {
 		case head > from.Offset:
 			resume.Offset = head
-		case head == 0:
-			// Nothing on disk — a replaced volume, or a first run after the position was
-			// recorded. Appends must start where the position says or every later offset
-			// is wrong.
+		case head < from.Offset:
+			// The disk is behind what the target has already applied: a volume
+			// replaced, or bytes committed to the target that the buffer had not
+			// yet sealed. Appending from here would number every later byte
+			// (from.Offset - head) too low, and the applier would then read
+			// bytes it has already applied as if they were new — silently, at
+			// offsets that no longer mean what they say. Everything still held
+			// is at or below the applied position, so discarding it is safe.
+			if head > 0 && l.logger != nil {
+				l.logger.Warnf("[Redis] The buffer for shard %s ends at %d while the "+
+					"target has applied up to %d, so the buffered history is being "+
+					"discarded and refilled from the applied position", l.shard, head, from.Offset)
+			}
 			if err := l.buffer.Reset(from.Offset); err != nil {
 				return streamPosition{}, err
 			}

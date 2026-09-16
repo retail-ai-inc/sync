@@ -485,6 +485,15 @@ func (r *Runner) copy(ctx context.Context, pinned domain.Position, queue chan *d
 		return failed(fmt.Errorf("copy the source: %w", err))
 	}
 
+	// Where the copy ended is only known here. A reader that treats the events
+	// read while it ran differently -- Redis re-reads their values rather than
+	// replaying the commands, because a command from inside the copy's smear
+	// may already be in it -- needs that boundary, and guessing it at open time
+	// put it at the offset the copy STARTED at.
+	if boundary, ok := r.Reader.(domain.CopyBoundary); ok {
+		boundary.CopyFinished()
+	}
+
 	// What the source has deleted since the position this copy replaces. It
 	// runs here, before the queue is drained: everything the stream carries
 	// from the pinned point onwards is still waiting, so a key this removes and

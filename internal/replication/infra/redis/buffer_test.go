@@ -436,3 +436,52 @@ func TestAppendingBeforeResetIsRefused(t *testing.T) {
 		t.Error("Append succeeded before Reset, so the frame landed at an invented offset")
 	}
 }
+
+// TestACursorWhoseSegmentWasDiscardedIsToldSo covers the way replication used
+// to stop without saying anything.
+//
+// A cursor holds an open fd, so it keeps reading a segment that has been
+// deleted to stay inside the size limit — right up to the end of what that
+// segment held. From there the buffer has nowhere to send it: the segment is
+// no longer in the list, so no next one is found, and it waited on the writer
+// for ever. The task stayed up, the position stopped, and nothing anywhere
+// said the stream had been cut.
+func TestACursorWhoseSegmentWasDiscardedIsToldSo(t *testing.T) {
+	buffer := newBuffer(t, BufferOptions{SegmentBytes: 8, MaxBytes: 16})
+	if err := buffer.Reset(0); err != nil {
+		t.Fatalf("Reset: %v", err)
+	}
+	if err := buffer.Append([]byte("12345678")); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	// A reader sitting on the first segment, having read what it holds.
+	cursor, err := buffer.Cursor(0)
+	if err != nil {
+		t.Fatalf("Cursor: %v", err)
+	}
+	defer cursor.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, _, err := cursor.Next(ctx); err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+
+	// The writer runs on, and the first segment is discarded under the cursor.
+	for i := 0; i < 8; i++ {
+		if err := buffer.Append([]byte("abcdefgh")); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+	}
+
+	_, _, err = cursor.Next(ctx)
+	if err == nil {
+		t.Fatal("the cursor read on past a segment that had been discarded")
+	}
+	if !errors.Is(err, ErrTruncated) {
+		t.Errorf("error = %v, want it reported as truncation", err)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Error("the cursor waited instead of reporting the truncation")
+	}
+}

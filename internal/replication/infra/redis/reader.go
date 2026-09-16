@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"strconv"
 	"sync"
 	"time"
@@ -94,9 +95,16 @@ func (r *Reader) Open(ctx context.Context, from domain.Position) error {
 		// How long to keep re-reading values rather than replaying commands. The
 		// first copy is taken with SCAN, so it is a smear rather than a point in
 		// time, and a command from inside that smear may already be in the copy.
-		r.position.ValueUntil = r.Link.head()
-		r.logger().Infof("[Redis] Shard %s applies by value up to offset %d, then "+
-			"replays commands", r.Shard, r.position.ValueUntil)
+		//
+		// The end of that smear is where the copy FINISHES, which is not known
+		// here -- the copy has not started. Reading the head now ended the value
+		// phase at the offset the copy began at, so every command issued while
+		// the copy ran was replayed over a copy that may already contain it: an
+		// INCR applied twice, a DEL that removes a key the copy re-added. Left
+		// open until CopyFinished says where it really ended.
+		r.position.ValueUntil = math.MaxInt64
+		r.logger().Infof("[Redis] Shard %s applies by value until the first copy "+
+			"finishes, then replays commands", r.Shard)
 	}
 
 	cursor, err := r.Link.cursor(r.offset)
@@ -105,6 +113,19 @@ func (r *Reader) Open(ctx context.Context, from domain.Position) error {
 	}
 	r.cursor = cursor
 	return nil
+}
+
+// CopyFinished closes the value phase at the offset the copy actually ended
+// at. The pipeline calls it when the snapshotter returns, which is the only
+// moment that offset is known.
+func (r *Reader) CopyFinished() {
+	if r.position.Phase != phaseValue {
+		return
+	}
+	r.position.ValueUntil = r.Link.head()
+	r.logger().Infof("[Redis] Shard %s finished its copy at offset %d; commands "+
+		"after that are replayed rather than re-read by value",
+		r.Shard, r.position.ValueUntil)
 }
 
 func (r *Reader) logger() logrus.FieldLogger { return orDefault(r.Logger) }
