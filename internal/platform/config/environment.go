@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -70,16 +71,49 @@ var knownVariables = map[string]bool{
 func UnknownVariables(environ []string) []string {
 	var unknown []string
 	for _, entry := range environ {
-		name, _, found := strings.Cut(entry, "=")
+		name, value, found := strings.Cut(entry, "=")
 		if !found || !strings.HasPrefix(name, "SYNC_") {
 			continue
 		}
-		if !knownVariables[name] {
-			unknown = append(unknown, name)
+		if knownVariables[name] || injectedByKubernetes(name, value) {
+			continue
 		}
+		unknown = append(unknown, name)
 	}
 	sort.Strings(unknown)
 	return unknown
+}
+
+// Kubernetes gives every container a variable per service in the namespace,
+// named after the service. The service in front of this process is called
+// sync, so a pod running it is handed SYNC_SERVICE_HOST, SYNC_PORT and a
+// SYNC_PORT_8080_TCP family -- none of which anybody set and none of which
+// this process reads. Reporting them buried the line below them, which says
+// the database passwords are being kept in the clear.
+var (
+	servicePort = regexp.MustCompile(`_SERVICE_PORT(_[A-Z0-9_]+)?$`)
+	portFamily  = regexp.MustCompile(`_PORT_[0-9]+_(TCP|UDP)(_(PROTO|PORT|ADDR))?$`)
+)
+
+// injectedByKubernetes reports whether a variable is one of those, rather than
+// one somebody meant to configure this process with.
+//
+// The bare <NAME>_PORT form is told apart by its value: Kubernetes sets it to a
+// URL, so SYNC_PORT=tcp://10.60.1.2:8080 is the injected one and SYNC_PORT=8080
+// is somebody expecting it to change the port this listens on -- which it does
+// not, and which is exactly what this report exists to say.
+func injectedByKubernetes(name, value string) bool {
+	switch {
+	case strings.HasSuffix(name, "_SERVICE_HOST"):
+		return true
+	case servicePort.MatchString(name):
+		return true
+	case portFamily.MatchString(name):
+		return true
+	case strings.HasSuffix(name, "_PORT"):
+		return strings.HasPrefix(value, "tcp://") || strings.HasPrefix(value, "udp://")
+	}
+	return false
 }
 
 // EnvironmentFromOS is UnknownVariables over this process's environment.

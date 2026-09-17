@@ -40,3 +40,50 @@ func TestAMalformedEnvironmentEntryIsIgnored(t *testing.T) {
 		t.Errorf("unknown = %v, want nothing", got)
 	}
 }
+
+// Kubernetes names these after the service in front of this process, which is
+// called sync. Nobody set them, nothing can read them, and reporting seven of
+// them at start-up pushed the line that matters -- the one saying the database
+// passwords are in the clear -- off the top of what anybody reads.
+func TestTheVariablesKubernetesInjectsAreNotReported(t *testing.T) {
+	injected := []string{
+		"SYNC_SERVICE_HOST=10.60.117.91",
+		"SYNC_SERVICE_PORT=8080",
+		"SYNC_SERVICE_PORT_HTTP=8080",
+		"SYNC_PORT=tcp://10.60.117.91:8080",
+		"SYNC_PORT_80_TCP=tcp://10.60.117.91:80",
+		"SYNC_PORT_80_TCP_PROTO=tcp",
+		"SYNC_PORT_80_TCP_PORT=80",
+		"SYNC_PORT_80_TCP_ADDR=10.60.117.91",
+		// A second service whose name also begins with sync.
+		"SYNC_UI_SERVICE_HOST=10.60.117.92",
+		"SYNC_UI_PORT_8080_TCP_ADDR=10.60.117.92",
+	}
+
+	if got := UnknownVariables(injected); len(got) != 0 {
+		t.Fatalf("reported variables nobody set: %v", got)
+	}
+}
+
+// The bare form is told apart by its value, because somebody setting
+// SYNC_PORT=8080 expects it to change the port this listens on, and it does
+// not.
+func TestAPortSomebodySetIsStillReported(t *testing.T) {
+	got := UnknownVariables([]string{"SYNC_PORT=8080"})
+
+	if len(got) != 1 || got[0] != "SYNC_PORT" {
+		t.Fatalf("unknown = %v, want SYNC_PORT reported", got)
+	}
+}
+
+func TestAMistypedVariableIsStillReportedBesideTheInjectedOnes(t *testing.T) {
+	got := UnknownVariables([]string{
+		"SYNC_SERVICE_HOST=10.60.117.91",
+		"SYNC_VERIFY_INTERVALL=1h",
+		"SYNC_PORT_8080_TCP_ADDR=10.60.117.91",
+	})
+
+	if len(got) != 1 || got[0] != "SYNC_VERIFY_INTERVALL" {
+		t.Fatalf("unknown = %v, want only the mistyped one", got)
+	}
+}
