@@ -114,7 +114,21 @@ CREATE TABLE IF NOT EXISTS audit_log (
     remote_addr TEXT
 );
 
+-- One operator decision to let one refused schema change past, used once.
+-- A task stopped by a DROP COLUMN had no way back that did not either copy
+-- everything again or skip every transaction around it.
+CREATE TABLE IF NOT EXISTS ddl_acknowledgements (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id    INTEGER NOT NULL,
+    digest     TEXT NOT NULL,
+    statement  TEXT NOT NULL,
+    created_by TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    used_at    DATETIME
+);
+
 CREATE INDEX IF NOT EXISTS idx_last_updated ON changestream_statistics(last_updated);
+CREATE INDEX IF NOT EXISTS idx_ddl_ack_outstanding ON ddl_acknowledgements(task_id, digest, used_at);
 CREATE INDEX IF NOT EXISTS idx_audit_log_at ON audit_log(at);
 `
 

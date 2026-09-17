@@ -35,6 +35,10 @@ type Reader struct {
 	// AllowKeyless replicates a table with no primary key best-effort rather than
 	// refusing it.
 	AllowKeyless bool
+	// AllowDDL reports whether an operator has already dealt with a statement
+	// this task refuses to carry, and spends that decision. Nil refuses
+	// everything, which is what a task with no control database should do.
+	AllowDDL func(statement string) (bool, error)
 
 	canal *canal.Canal
 	conv  *MyEventHandler
@@ -422,6 +426,12 @@ func (r *Reader) OnDDL(header *replication.EventHeader, pos mysql.Position, e *r
 		at = time.Unix(int64(header.Timestamp), 0)
 	}
 
+	// One event can carry several statements, and an acknowledgement names the
+	// event's text. Asking once means two blocked statements written together
+	// are let past together, rather than the second one blocking on an
+	// acknowledgement the first spent.
+	var allowed, asked bool
+
 	for _, decision := range decisions {
 		switch decision.action {
 		case ddlNotSchema:
@@ -434,12 +444,28 @@ func (r *Reader) OnDDL(header *replication.EventHeader, pos mysql.Position, e *r
 			metrics.CountDDLSkipped(r.Labels, decision.kind)
 			r.Logger.Debugf("[MySQL][DDL] Skipping %q: %s", e.Query, decision.reason)
 		case ddlBlock:
+			if !asked {
+				asked = true
+				allowed = r.acknowledged(string(e.Query))
+			}
+			if allowed {
+				// Passed over, never applied: the operator said they had dealt with
+				// the target, and applying a destructive statement on their say-so
+				// is the thing this whole path exists to avoid.
+				metrics.CountDDLAcknowledged(r.Labels)
+				r.Logger.Warnf("[MySQL][DDL] Passing over %q: it %s, and an operator "+
+					"acknowledged it. The target is not being changed by this task",
+					e.Query, decision.reason)
+				continue
+			}
 			// A refusal nobody can see is a decision nobody can audit. Debezium has no
 			// equivalent because it propagates whatever it is told to.
 			metrics.CountSchemaRefused(r.Labels, "blocked")
 			return domain.Unrecoverable(
 				"refusing to replicate %q: it %s. Replication has stopped so the change "+
-					"can be made on the target deliberately", e.Query, decision.reason)
+					"can be made on the target deliberately. Make it there, then POST the "+
+					"statement to /api/sync/%d/ddl-acknowledgements to let this task past "+
+					"it once", e.Query, decision.reason, r.Config.ID)
 		case ddlApply:
 			metrics.CountSchemaChange(r.Labels, 1)
 			metrics.SetSchemaChangeAge(r.Labels, 0)
@@ -454,6 +480,25 @@ func (r *Reader) OnDDL(header *replication.EventHeader, pos mysql.Position, e *r
 		}
 	}
 	return r.handOver(pos, nil, header)
+}
+
+// acknowledged reports whether an operator has already dealt with a statement
+// this task refuses to carry.
+//
+// An error reading the decision is not one: it says no. The alternative is
+// treating a control database that cannot be read as blanket permission to
+// skip destructive schema changes.
+func (r *Reader) acknowledged(statement string) bool {
+	if r.AllowDDL == nil {
+		return false
+	}
+	allowed, err := r.AllowDDL(statement)
+	if err != nil {
+		r.Logger.Errorf("[MySQL][DDL] Could not read whether %q was acknowledged, so it "+
+			"is not: %v", statement, err)
+		return false
+	}
+	return allowed
 }
 
 // schemaReadSkew is how much disagreement between the source's clock and this

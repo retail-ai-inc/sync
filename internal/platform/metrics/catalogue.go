@@ -352,10 +352,16 @@ const (
 	// halted under one that means nothing happened.
 	DDLSkippedTotal = "sync_source_ddl_skipped_total"
 
+	// DDLAcknowledgedTotal counts statements this task refused and an operator
+	// then allowed past, once each. A refusal is visible as a halted task; the
+	// decision to go on past one is otherwise visible nowhere.
+	DDLAcknowledgedTotal = "sync_source_ddl_acknowledged_total"
+
 	helpSchemaChanges = "Schema changes carried through to the target"
 	helpSchemaAge     = "Seconds since the last schema change was carried through"
 	helpSchemaRefused = "Schema changes deliberately not carried through, which stops replication"
 	helpDDLSkipped    = "Statements passed over because they touch nothing this task replicates"
+	helpDDLAcked      = "Refused statements an operator acknowledged, so replication went on past them"
 )
 
 func CountSchemaChange(labels Labels, n int) {
@@ -371,6 +377,11 @@ func SetSchemaChangeAge(labels Labels, seconds float64) {
 func CountSchemaRefused(labels Labels, reason string) {
 	Default.AddCounter(SchemaChangesRefusedTotal, helpSchemaRefused,
 		withLabel(labels, "reason", reason), 1)
+}
+
+// CountDDLAcknowledged records a refused statement an operator let past.
+func CountDDLAcknowledged(labels Labels) {
+	Default.AddCounter(DDLAcknowledgedTotal, helpDDLAcked, labels, 1)
 }
 
 // CountDDLSkipped records a statement passed over as none of this task's

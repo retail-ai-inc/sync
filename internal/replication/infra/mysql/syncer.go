@@ -17,6 +17,7 @@ import (
 	"github.com/retail-ai-inc/sync/internal/replication/app/pipeline"
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/checkpoint"
+	"github.com/retail-ai-inc/sync/internal/replication/infra/ddlack"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/directionlock"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/discovery"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/security"
@@ -287,7 +288,12 @@ func (s *Syncer) Start(ctx context.Context) error {
 		return fmt.Errorf("prepare the position table: %w", err)
 	}
 
-	reader := &Reader{Config: s.cfg, Logger: s.logger, Labels: labels}
+	reader := &Reader{
+		Config: s.cfg, Logger: s.logger, Labels: labels,
+		AllowDDL: func(statement string) (bool, error) {
+			return ddlack.Consume(ctx, s.cfg.ID, statement)
+		},
+	}
 	defer reader.Close()
 
 	// A task that names its tables means it, so nothing here widens the scope.

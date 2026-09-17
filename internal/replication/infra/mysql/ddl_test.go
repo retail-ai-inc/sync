@@ -1,6 +1,7 @@
 package mysql
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -543,5 +544,87 @@ func TestEverySkipCarriesABoundedKind(t *testing.T) {
 				t.Error("a skip with no reason")
 			}
 		})
+	}
+}
+
+// The way back from a task halted on a statement it refuses to carry. Before
+// this, there was none: the task stopped on the same statement every time it
+// started, and the only ways on were a full re-copy or moving the stored
+// position past it by hand -- which skips every transaction beside it.
+
+func TestARefusedStatementStopsTheTaskWhenNobodyHasAcknowledgedIt(t *testing.T) {
+	r := readerWithMappings(t, mapTable("orders", "orders"))
+
+	err := r.OnDDL(nil, mysql.Position{}, query("ALTER TABLE orders DROP COLUMN email"))
+	if err == nil {
+		t.Fatal("a DROP COLUMN was carried through with nothing said about it")
+	}
+	if !domain.IsUnrecoverable(err) {
+		t.Fatalf("error = %v, want one that stops the task", err)
+	}
+	// The operator reads this line and has to be able to act on it.
+	if !strings.Contains(err.Error(), "ddl-acknowledgements") {
+		t.Errorf("the refusal does not say how to get past it: %v", err)
+	}
+}
+
+func TestAnAcknowledgedStatementIsPassedOverAndNotApplied(t *testing.T) {
+	r := readerWithMappings(t, mapTable("orders", "orders"))
+
+	var asked []string
+	r.AllowDDL = func(statement string) (bool, error) {
+		asked = append(asked, statement)
+		return true, nil
+	}
+
+	if err := r.OnDDL(nil, mysql.Position{},
+		query("ALTER TABLE orders DROP COLUMN email")); err != nil {
+		t.Fatalf("OnDDL: %v", err)
+	}
+	if len(asked) != 1 {
+		t.Fatalf("the acknowledgement was asked for %d times", len(asked))
+	}
+	// Never applied: an acknowledgement says the operator has dealt with the
+	// target, not that this task should drop the column there.
+	for _, event := range handedOver(r) {
+		if event.Op == domain.OpSchema {
+			t.Fatalf("an acknowledged statement was sent to the target: %v", event.Payload)
+		}
+	}
+}
+
+func TestOneAcknowledgementCoversAnEventsRefusedStatements(t *testing.T) {
+	r := readerWithMappings(t, mapTable("orders", "orders"))
+
+	calls := 0
+	r.AllowDDL = func(string) (bool, error) {
+		calls++
+		return calls == 1, nil
+	}
+
+	// Two refusals written as one statement: the operator acknowledged the text
+	// of the event, and spending one permission per statement would block on the
+	// second half of what they already read.
+	err := r.OnDDL(nil, mysql.Position{},
+		query("ALTER TABLE orders DROP COLUMN email; ALTER TABLE orders DROP COLUMN note"))
+	if err != nil {
+		t.Fatalf("OnDDL: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("the acknowledgement was spent %d times for one event", calls)
+	}
+}
+
+func TestAnAcknowledgementThatCannotBeReadIsNotOne(t *testing.T) {
+	r := readerWithMappings(t, mapTable("orders", "orders"))
+	r.AllowDDL = func(string) (bool, error) {
+		return false, errors.New("the control database is unreadable")
+	}
+
+	err := r.OnDDL(nil, mysql.Position{}, query("ALTER TABLE orders DROP COLUMN email"))
+	if !domain.IsUnrecoverable(err) {
+		// Failing open would make an unreadable control database a standing
+		// permission to skip destructive schema changes.
+		t.Fatalf("error = %v, want the task stopped", err)
 	}
 }

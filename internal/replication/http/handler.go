@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -387,5 +388,90 @@ func SyncRowCountsHandler(w http.ResponseWriter, r *http.Request) {
 			"objects":    objects,
 			"differing":  counts.Difference(),
 		},
+	})
+}
+
+// GET /api/sync/{id}/ddl-acknowledgements
+//
+// What this task is allowed to pass over, and what it already has. A standing
+// permission to skip a destructive schema change is the kind of thing that has
+// to be readable without grepping a log.
+func SyncDDLAcknowledgementsHandler(w http.ResponseWriter, r *http.Request) {
+	all, err := app.DDLAcknowledgements(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		fail(w, "read the acknowledgements", err)
+		return
+	}
+
+	items := make([]map[string]interface{}, 0, len(all))
+	for _, a := range all {
+		item := map[string]interface{}{
+			"id":        a.ID,
+			"statement": a.Statement,
+			"digest":    a.Digest,
+			"createdBy": a.CreatedBy,
+			"createdAt": a.CreatedAt,
+			"used":      a.Used(),
+		}
+		if a.Used() {
+			item["usedAt"] = a.UsedAt
+		}
+		items = append(items, item)
+	}
+	httpx.WriteJSON(w, map[string]interface{}{"success": true, "data": items})
+}
+
+// SyncDDLAcknowledgeHandler POST /api/sync/{id}/ddl-acknowledgements
+//
+// The way back from a task halted on a schema change it refuses to carry: make
+// the change on the target, then acknowledge the statement here. The task
+// passes over that one statement, once, and goes on replicating the rows around
+// it -- which moving the stored position by hand would have thrown away.
+//
+// who is passed in rather than read here, so this package does not need the
+// identity context to record a name.
+func SyncDDLAcknowledgeHandler(who func(*http.Request) string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Statement string `json:"statement"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			fail(w, "read the request", err)
+			return
+		}
+
+		ack, err := app.AcknowledgeDDL(r.Context(), chi.URLParam(r, "id"), body.Statement, who(r))
+		if err != nil {
+			fail(w, "record the acknowledgement", err)
+			return
+		}
+		httpx.WriteJSON(w, map[string]interface{}{
+			"success": true,
+			"data": map[string]interface{}{
+				"id":     ack.ID,
+				"digest": ack.Digest,
+				"msg": "Acknowledged. Start the task again; it will pass over this " +
+					"statement once and carry on. The target is not changed by this.",
+			},
+		})
+	}
+}
+
+// SyncDDLAcknowledgementDeleteHandler DELETE /api/sync/{id}/ddl-acknowledgements/{ack}
+//
+// Withdraws one that has not been used yet.
+func SyncDDLAcknowledgementDeleteHandler(w http.ResponseWriter, r *http.Request) {
+	ackID, err := strconv.ParseInt(chi.URLParam(r, "ack"), 10, 64)
+	if err != nil {
+		fail(w, "read the acknowledgement id", err)
+		return
+	}
+	if err := app.RevokeDDLAcknowledgement(r.Context(), chi.URLParam(r, "id"), ackID); err != nil {
+		fail(w, "withdraw the acknowledgement", err)
+		return
+	}
+	httpx.WriteJSON(w, map[string]interface{}{
+		"success": true,
+		"data":    map[string]interface{}{"msg": "Withdrawn."},
 	})
 }

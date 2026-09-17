@@ -53,6 +53,7 @@ func NewRouter() http.Handler {
 		r.Get("/sync", replicationhttp.SyncListHandler)
 		r.Get("/sync/{id}/position", replicationhttp.SyncPositionHandler)
 		r.Get("/sync/{id}/rowcounts", replicationhttp.SyncRowCountsHandler)
+		r.Get("/sync/{id}/ddl-acknowledgements", replicationhttp.SyncDDLAcknowledgementsHandler)
 		r.Get("/changestreams/status", monitoringhttp.ChangeStreamsStatusHandler)
 		r.Get("/settings", SettingsHandler)
 
@@ -89,6 +90,14 @@ func NewRouter() http.Handler {
 		r.Post("/sync/{id}/promotion", replicationhttp.SyncPromoteHandler)
 		r.Delete("/sync/{id}/promotion", replicationhttp.SyncPromoteHandler)
 
+		// The way back from a task halted on a schema change it refuses to
+		// carry. A write, and audited as one: the audit middleware records who
+		// called it beside what it allowed.
+		r.Post("/sync/{id}/ddl-acknowledgements",
+			replicationhttp.SyncDDLAcknowledgeHandler(caller))
+		r.Delete("/sync/{id}/ddl-acknowledgements/{ack}",
+			replicationhttp.SyncDDLAcknowledgementDeleteHandler)
+
 		r.Get("/users", identityhttp.GetUsersHandler)
 		r.Put("/users/access", identityhttp.UpdateUserAccessHandler)
 		r.Delete("/users", identityhttp.DeleteUserHandler)
@@ -108,6 +117,12 @@ func NewRouter() http.Handler {
 // principal tells the audit trail who a request belongs to. The resolution
 // lives here, with the rest of the wiring, so the audit package does not import
 // the identity context to record what it is handed.
+// caller names who is making a request, for a record that outlives it.
+func caller(r *http.Request) string {
+	username, _ := principal(r)
+	return username
+}
+
 func principal(r *http.Request) (username, access string) {
 	caller, ok := identityhttp.PrincipalFrom(r.Context())
 	if !ok {
