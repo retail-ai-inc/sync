@@ -114,7 +114,11 @@ const (
 	helpCaptured     = "Tables or collections this task is watching"
 	helpDisconnects  = "Times the source stream dropped and had to be re-established"
 	helpApplied      = "Changes written to the target"
-	helpFailed       = "Changes the target refused"
+	// Attempts, not losses: the same batch is counted again on every retry, and a
+	// target that was briefly away shows here as dozens of failures that all
+	// ended in one success. What did not end well is elsewhere: a task that gave
+	// up is TaskBlocked, an event set aside is DeadLettered.
+	helpFailed = "Write attempts the target refused, retries of the same batch included; a refusal that stuck shows as sync_task_blocked or sync_dead_lettered_operations"
 )
 
 // The op label uses the domain's own words. Debezium says "create" for
