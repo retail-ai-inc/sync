@@ -300,6 +300,7 @@ func (s *Syncer) Start(ctx context.Context) error {
 	// What it does is say which tables are not in the copy, because the
 	// alternative is finding out during a failover.
 	go s.watchSourceTables(ctx, dsn.GetDatabaseName(s.cfg.Type, s.cfg.SourceConnection), labels)
+	go s.watchBacklog(ctx, store, labels)
 
 	runner := &pipeline.Runner{
 		Reader: reader,

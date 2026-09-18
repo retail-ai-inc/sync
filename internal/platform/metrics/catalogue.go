@@ -232,7 +232,14 @@ const (
 	// the log file and the server it came from.
 	SourceInfo = "sync_source_info"
 
+	// TransactionsBehind is the source's executed GTID set minus the target's
+	// applied set, counted. Unlike the two offsets above it survives a binlog
+	// rotation and a failover, which is what makes it the number to watch when
+	// deciding whether a load level converges.
+	TransactionsBehind = "sync_source_transactions_behind"
+
 	helpSourcePosition  = "Byte offset read to within the source's current log segment"
+	helpBehind          = "Transactions the source has committed that the target has not applied"
 	helpAppliedPosition = "Byte offset the target has recorded as applied"
 	helpSourceInfo      = "1, labelled with the source log file and server identity"
 )
@@ -243,6 +250,10 @@ func SetSourcePosition(labels Labels, offset int64) {
 
 func SetAppliedPosition(labels Labels, offset int64) {
 	Default.SetGauge(AppliedPositionBytes, helpAppliedPosition, labels, float64(offset))
+}
+
+func SetTransactionsBehind(labels Labels, n int64) {
+	Default.SetGauge(TransactionsBehind, helpBehind, labels, float64(n))
 }
 
 // SetSourceInfo publishes the identity of the position. Only values that change
