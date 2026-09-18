@@ -195,7 +195,7 @@ func readBinlogHead(ctx context.Context, source *sql.DB) (binlogHead, error) {
 	for _, statement := range []string{"SHOW BINARY LOG STATUS", "SHOW MASTER STATUS"} {
 		found, err := readStatusRow(ctx, source, statement, &head)
 		if err != nil {
-			lastErr = err
+			lastErr = preferInformative(lastErr, err)
 			continue
 		}
 		if found {
@@ -208,6 +208,23 @@ func readBinlogHead(ctx context.Context, source *sql.DB) (binlogHead, error) {
 			"has the binary log switched off and nothing can be replicated from it")
 	}
 	return head, fmt.Errorf("read the source's binary log position: %w", lastErr)
+}
+
+// unknownStatement reports the server not recognising a spelling. One of the two
+// always fails this way, so it says nothing about the source.
+func unknownStatement(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "error in your SQL syntax")
+}
+
+// preferInformative keeps, of two failures, the one worth reporting. Whichever
+// spelling was tried last used to win, so on 8.0 a missing REPLICATION CLIENT
+// privilege was reported as a syntax error in a statement the server did not
+// have, and the operator was sent to look at the wrong thing.
+func preferInformative(kept, latest error) error {
+	if kept == nil || unknownStatement(kept) {
+		return latest
+	}
+	return kept
 }
 
 func parseUint(value string) uint64 {

@@ -212,3 +212,41 @@ func TestAServerThatWillNotCompareFallsBackToFileAndOffset(t *testing.T) {
 		t.Error("nothing said the comparison is only good until a failover")
 	}
 }
+
+// When both spellings fail, the one the server did not recognise says nothing;
+// the other failure is what the operator has to act on.
+func TestAMissingPrivilegeIsReportedRatherThanTheUnknownSpelling(t *testing.T) {
+	denied := "Error 1227 (42000): Access denied; you need (at least one of) the SUPER, REPLICATION CLIENT privilege(s) for this operation"
+	unknown := "Error 1064 (42000): You have an error in your SQL syntax; check the manual"
+
+	for name, replies := range map[string][]reply{
+		"8.0, newer spelling unknown": {
+			{match: "SHOW BINARY LOG STATUS", err: errors.New(unknown)},
+			{match: "SHOW MASTER STATUS", err: errors.New(denied)},
+		},
+		"8.4, older spelling unknown": {
+			{match: "SHOW BINARY LOG STATUS", err: errors.New(denied)},
+			{match: "SHOW MASTER STATUS", err: errors.New(unknown)},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fake := &fakeDB{replies: replies}
+			db := fake.open(t)
+
+			_, err := readBinlogHead(context.Background(), db)
+			if err == nil || !strings.Contains(err.Error(), "Access denied") {
+				t.Errorf("readBinlogHead reported %v, want the denied privilege", err)
+			}
+
+			conn, cerr := db.Conn(context.Background())
+			if cerr != nil {
+				t.Fatalf("Conn: %v", cerr)
+			}
+			defer conn.Close()
+			_, err = (&MySQLSyncer{}).sourceCheckpoint(context.Background(), conn)
+			if err == nil || !strings.Contains(err.Error(), "Access denied") {
+				t.Errorf("sourceCheckpoint reported %v, want the denied privilege", err)
+			}
+		})
+	}
+}

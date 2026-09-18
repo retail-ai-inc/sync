@@ -80,7 +80,7 @@ func (s *MySQLSyncer) sourceCheckpoint(ctx context.Context, conn *sql.Conn) (*bi
 			}
 			return cp, nil
 		}
-		lastErr = err
+		lastErr = preferInformative(lastErr, err)
 	}
 	return nil, lastErr
 }
