@@ -88,14 +88,42 @@ func (e *BackupExecutor) executeExternalMySQLBackupSimple(ctx context.Context, c
 	return nil
 }
 
-// mysqlCredentialsFile writes the password into a defaults file that only this
-// process can read, and returns its path along with the function that removes
-// it. An empty password produces no file.
-func mysqlCredentialsFile(password string) (string, func(), error) {
-	if password == "" {
-		return "", func() {}, nil
+// mysqlTransport reports the TLS settings written into the defaults file, and
+// whether the connection they describe authenticates the server.
+//
+// The client in the image is MariaDB's, and from 11.4 it negotiates TLS
+// whenever the server offers it and verifies the certificate by default.
+// Cloud SQL's server certificate carries CN=project:instance and no
+// subjectAltName at all, so that verification cannot pass over an address of
+// any kind, and every MySQL backup failed on "unable to get local issuer
+// certificate" the morning the servers began advertising TLS.
+//
+// The default here keeps the transport encrypted and stops verifying, which is
+// what the pre-11.4 client did and what restores the backups. It is not
+// authentication: an attacker who can answer on the server's address is
+// trusted. SYNC_MYSQL_SSL_CA names a CA to verify against instead -- worth
+// having for a server whose certificate names it, and useless for this one.
+func mysqlTransport() (settings []string, verified bool) {
+	if strings.EqualFold(os.Getenv("SYNC_MYSQL_TLS"), "off") {
+		// A server that does not offer TLS at all: the client would otherwise
+		// keep trying and the export would fail with a handshake error rather
+		// than say what is wrong.
+		return []string{"skip-ssl"}, false
 	}
+	if ca := os.Getenv("SYNC_MYSQL_SSL_CA"); ca != "" {
+		return []string{"ssl-ca=" + ca}, true
+	}
+	return []string{"ssl-verify-server-cert=0"}, false
+}
 
+// mysqlCredentialsFile writes the password and the transport settings into a
+// defaults file that only this process can read, and returns its path along
+// with the function that removes it.
+//
+// The file is written even with no password, because it is where the TLS
+// settings live too: without it the client falls back to its own defaults, and
+// its defaults are what broke the backups.
+func mysqlCredentialsFile(password string) (string, func(), error) {
 	file, err := os.CreateTemp("", "mysql-credentials-*.cnf")
 	if err != nil {
 		return "", func() {}, fmt.Errorf("write the credentials file: %w", err)
@@ -107,8 +135,25 @@ func mysqlCredentialsFile(password string) (string, func(), error) {
 	}
 
 	// CreateTemp already makes it 0600, which is the point of the file.
-	quoted := strings.NewReplacer("\\", `\\`, `"`, `\"`).Replace(password)
-	if _, err := fmt.Fprintf(file, "[client]\npassword=\"%s\"\n", quoted); err != nil {
+	contents := "[client]\n"
+	if password != "" {
+		quoted := strings.NewReplacer("\\", `\\`, `"`, `\"`).Replace(password)
+		contents += fmt.Sprintf("password=\"%s\"\n", quoted)
+	}
+	settings, verified := mysqlTransport()
+	for _, setting := range settings {
+		contents += setting + "\n"
+	}
+	if !verified {
+		// Once per export rather than once per process: an operator reading why
+		// a backup ran has the line beside it, and the alternative -- saying it
+		// at start-up only -- is a line nobody sees in the logs of the run they
+		// are looking at.
+		logrus.Warnf("[BackupExecutor] The connection to MySQL is encrypted but the "+
+			"server is not authenticated (%s). Set SYNC_MYSQL_SSL_CA to a CA that "+
+			"names this server to verify it", strings.Join(settings, " "))
+	}
+	if _, err := file.WriteString(contents); err != nil {
 		_ = file.Close()
 		remove()
 		return "", func() {}, fmt.Errorf("write the credentials file: %w", err)

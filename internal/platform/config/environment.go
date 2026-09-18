@@ -27,6 +27,8 @@ var knownVariables = map[string]bool{
 	"SYNC_INSTANCE":             true,
 	"SYNC_LAG_ALERT_SECONDS":    true,
 	"SYNC_MONGO_NO_TRANSACTION": true,
+	"SYNC_MYSQL_SSL_CA":         true,
+	"SYNC_MYSQL_TLS":            true,
 	"SYNC_PASSWORD_ITERATIONS":  true,
 	"SYNC_TOKEN_SECRET":         true,
 	"SYNC_VERIFY_INTERVAL":      true,

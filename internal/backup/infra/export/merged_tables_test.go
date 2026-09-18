@@ -203,17 +203,26 @@ echo zipped > "$2"
 	}
 }
 
-// TestNoCredentialsFileWithoutAPassword records that a job with no password
-// does not leave an empty defaults file behind on every run.
-func TestNoCredentialsFileWithoutAPassword(t *testing.T) {
+// A job with no password still gets a defaults file, because the transport
+// settings live in it too. It used to be written only for a password, and
+// leaving the client to its own TLS defaults is what stopped every MySQL
+// backup.
+func TestTheOptionsFileIsWrittenWithoutAPassword(t *testing.T) {
 	path, remove, err := mysqlCredentialsFile("")
 	if err != nil {
 		t.Fatalf("mysqlCredentialsFile: %v", err)
 	}
 	defer remove()
 
-	if path != "" {
-		t.Errorf("path = %q, want no file for an empty password", path)
+	if path == "" {
+		t.Fatal("no options file was written, so the client would use its own TLS defaults")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	if strings.Contains(string(data), "password") {
+		t.Errorf("file = %q, want no password line", string(data))
 	}
 }
 
@@ -231,7 +240,7 @@ func TestTheCredentialsFileQuotesThePassword(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read %s: %v", path, err)
 	}
-	if got := string(data); got != "[client]\npassword=\"pa\\\"ss\\\\word\"\n" {
+	if got := string(data); !strings.Contains(got, "password=\"pa\\\"ss\\\\word\"\n") {
 		t.Errorf("file = %q, want the quote and the backslash escaped", got)
 	}
 
@@ -267,5 +276,95 @@ func TestAnUnwritableCredentialsFileIsReported(t *testing.T) {
 	}
 	if remove == nil {
 		t.Error("no cleanup function was returned, so the caller's defer would panic")
+	}
+}
+
+// What the client does about TLS, which it used to decide for itself.
+//
+// MariaDB's client from 11.4 negotiates TLS whenever the server offers it and
+// verifies the certificate by default. Cloud SQL's certificate carries
+// CN=project:instance and no subjectAltName, so that verification cannot pass
+// over an address of any kind: every MySQL backup failed on "unable to get
+// local issuer certificate" the morning the servers began advertising TLS,
+// while the MongoDB ones went on working.
+
+func TestTheConnectionIsEncryptedAndSaysSoInTheOptionsFile(t *testing.T) {
+	path, remove, err := mysqlCredentialsFile("secret")
+	if err != nil {
+		t.Fatalf("mysqlCredentialsFile: %v", err)
+	}
+	defer remove()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	// Encryption stays on; only the verification the certificate cannot satisfy
+	// is turned off. skip-ssl would drop the encryption with it.
+	if got := string(data); !strings.Contains(got, "ssl-verify-server-cert=0\n") {
+		t.Errorf("file = %q, want verification off", got)
+	}
+	if got := string(data); strings.Contains(got, "skip-ssl") {
+		t.Errorf("file = %q, want the transport still encrypted", got)
+	}
+}
+
+func TestACertificateAuthorityIsVerifiedAgainstWhenOneIsNamed(t *testing.T) {
+	t.Setenv("SYNC_MYSQL_SSL_CA", "/etc/sync/cloudsql/server-ca.pem")
+
+	path, remove, err := mysqlCredentialsFile("secret")
+	if err != nil {
+		t.Fatalf("mysqlCredentialsFile: %v", err)
+	}
+	defer remove()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	got := string(data)
+	if !strings.Contains(got, "ssl-ca=/etc/sync/cloudsql/server-ca.pem\n") {
+		t.Errorf("file = %q, want the CA named", got)
+	}
+	// Naming a CA and then not verifying against it would be theatre: the
+	// setting disables the check the CA exists for.
+	if strings.Contains(got, "ssl-verify-server-cert=0") {
+		t.Errorf("file = %q, want verification left on when a CA is named", got)
+	}
+}
+
+func TestTLSCanBeTurnedOffForAServerThatDoesNotOfferIt(t *testing.T) {
+	t.Setenv("SYNC_MYSQL_TLS", "off")
+
+	path, remove, err := mysqlCredentialsFile("secret")
+	if err != nil {
+		t.Fatalf("mysqlCredentialsFile: %v", err)
+	}
+	defer remove()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	if got := string(data); !strings.Contains(got, "skip-ssl\n") {
+		t.Errorf("file = %q, want TLS off", got)
+	}
+}
+
+// The option file is where the password is, so its settings must not widen who
+// can read it.
+func TestTheOptionsFileStaysPrivateWithTheTransportSettings(t *testing.T) {
+	path, remove, err := mysqlCredentialsFile("secret")
+	if err != nil {
+		t.Fatalf("mysqlCredentialsFile: %v", err)
+	}
+	defer remove()
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	if mode := info.Mode().Perm(); mode != 0o600 {
+		t.Errorf("mode = %o, want 600", mode)
 	}
 }
