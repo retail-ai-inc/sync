@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -246,16 +248,37 @@ func SyncPromoteHandler(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodPost:
-		if err := app.PromoteTarget(r.Context(), id, ""); err != nil {
+		stopped, err := app.PromoteTarget(r.Context(), id, "")
+		if stopped == nil {
+			stopped = []int{}
+		}
+		var halfDone *app.StopAfterPromotion
+		switch {
+		case errors.As(err, &halfDone):
+			// Not "promote the target": the marker is written, and saying the
+			// promotion failed would have somebody try again while a task they
+			// were not told about keeps writing.
+			httpx.WriteJSON(w, map[string]interface{}{
+				"success": false, "errorMessage": err.Error(),
+				"data": map[string]interface{}{"promoted": true, "stoppedTasks": stopped},
+			})
+			return
+		case err != nil:
 			fail(w, "promote the target", err)
 			return
+		}
+		msg := "The target is marked as promoted. No task will replicate into it " +
+			"until the mark is cleared."
+		if len(stopped) > 0 {
+			msg += fmt.Sprintf(" Task(s) %s replicated into it and have been stopped; "+
+				"they exit within a few seconds.", joinIDs(stopped))
 		}
 		httpx.WriteJSON(w, map[string]interface{}{
 			"success": true,
 			"data": map[string]interface{}{
-				"promoted": true,
-				"msg": "The target is marked as promoted. No task will replicate into " +
-					"it until the mark is cleared.",
+				"promoted":     true,
+				"stoppedTasks": stopped,
+				"msg":          msg,
 			},
 		})
 	case http.MethodDelete:
@@ -271,6 +294,14 @@ func SyncPromoteHandler(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteJSON(w, map[string]interface{}{"success": false,
 			"errorMessage": "use POST to promote and DELETE to clear"})
 	}
+}
+
+func joinIDs(ids []int) string {
+	parts := make([]string, len(ids))
+	for i, id := range ids {
+		parts[i] = strconv.Itoa(id)
+	}
+	return strings.Join(parts, ", ")
 }
 
 // GET /api/sync/{id}/position

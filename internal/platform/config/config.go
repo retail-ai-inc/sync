@@ -446,19 +446,23 @@ ORDER BY id ASC
 	return results, nil
 }
 
+// LoadSyncTasks reads every task's configuration, enabled or not.
+func LoadSyncTasks() ([]SyncConfig, error) {
+	db, err := sqlite.OpenSQLiteDB()
+	if err != nil {
+		return nil, fmt.Errorf("open the control database: %w", err)
+	}
+	defer db.Close()
+	return loadSyncTasks(db)
+}
+
 // LoadSyncTask reads one task's configuration.
 //
 // It exists for the caller that has to read a task before deleting it: the
 // clean-up needs the target's connection, and after the row is gone there is
 // nowhere to read it from.
 func LoadSyncTask(id int) (SyncConfig, error) {
-	db, err := sqlite.OpenSQLiteDB()
-	if err != nil {
-		return SyncConfig{}, fmt.Errorf("open the control database: %w", err)
-	}
-	defer db.Close()
-
-	tasks, err := loadSyncTasks(db)
+	tasks, err := LoadSyncTasks()
 	if err != nil {
 		return SyncConfig{}, err
 	}
