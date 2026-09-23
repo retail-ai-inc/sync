@@ -1385,3 +1385,439 @@ func TestTheQueueDepthIsReadLiveNotCached(t *testing.T) {
 		t.Errorf("queue depth = %d after one was taken, want 4", got)
 	}
 }
+
+// scriptedReader hands out exactly what the test sends it, one step at a time.
+type scriptedReader struct{ steps chan scriptedStep }
+
+type scriptedStep struct {
+	event *domain.Event
+	err   error
+}
+
+func (s *scriptedReader) Open(context.Context, domain.Position) error { return nil }
+
+func (s *scriptedReader) Next(ctx context.Context) (*domain.Event, error) {
+	select {
+	case step := <-s.steps:
+		return step.event, step.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (s *scriptedReader) Close() error { return nil }
+
+func (s *scriptedReader) send(e *domain.Event) { s.steps <- scriptedStep{event: e} }
+
+// producing reads onto an unbuffered queue: each receive is the moment that event was queued.
+func producing(t *testing.T) (*Runner, *scriptedReader, chan *domain.Event, context.Context) {
+	t.Helper()
+	stream := &scriptedReader{steps: make(chan scriptedStep)}
+	r := newRunner(t, stream, &fakeApplier{}, newStore())
+	r.turn = make(turn, 1)
+	r.held = newBudget(1 << 20)
+	queue := make(chan *domain.Event)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- r.read(ctx, queue) }()
+	t.Cleanup(func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Errorf("read: %v", err)
+		}
+	})
+	return r, stream, queue, ctx
+}
+
+// receive takes the next n events off the queue in the order they were queued.
+func receive(queue <-chan *domain.Event, n int) []*domain.Event {
+	got := make([]*domain.Event, 0, n)
+	for len(got) < n {
+		got = append(got, <-queue)
+	}
+	return got
+}
+
+// batchesOf applies events in the order given and reports each batch, flattened.
+func batchesOf(t *testing.T, r *Runner, events []*domain.Event) ([][]*domain.Event, error) {
+	t.Helper()
+	applier := &fakeApplier{}
+	r.Applier = applier
+	queue := make(chan *domain.Event, len(events))
+	for _, e := range events {
+		queue <- e
+	}
+	close(queue)
+	err := r.apply(context.Background(), queue)
+
+	var batches [][]*domain.Event
+	for _, runs := range applier.applied() {
+		var batch []*domain.Event
+		for _, run := range runs {
+			batch = append(batch, run...)
+		}
+		batches = append(batches, batch)
+	}
+	return batches, err
+}
+
+func holds(batch []*domain.Event, e *domain.Event) bool {
+	for _, held := range batch {
+		if held == e {
+			return true
+		}
+	}
+	return false
+}
+
+func sameOrder(got, want []*domain.Event) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func TestAChunkIsNotQueuedInsideASourceTransaction(t *testing.T) {
+	r, stream, queue, ctx := producing(t)
+
+	opening := event("orders", "1", "", midTransaction)
+	closing := event("payments", "9", "p1")
+	stream.send(opening)
+	if got := <-queue; got != opening {
+		t.Fatalf("queued %v first, want the transaction's first event", got.Key)
+	}
+
+	chunk := []*domain.Event{chunkRow("a"), chunkRow("b"), chunkRow("c")}
+	handed := make(chan error, 1)
+	go func() { handed <- r.queueChunk(ctx, queue, chunk) }()
+	stream.send(closing)
+
+	got := append([]*domain.Event{opening}, receive(queue, 1+len(chunk))...)
+	if err := <-handed; err != nil {
+		t.Fatalf("queueChunk: %v", err)
+	}
+	if want := append([]*domain.Event{opening, closing}, chunk...); !sameOrder(got, want) {
+		t.Fatalf("queued %v, want the whole transaction and then the chunk", keysIn(got))
+	}
+
+	batches, err := batchesOf(t, r, got)
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	for _, batch := range batches {
+		if holds(batch, opening) != holds(batch, closing) {
+			t.Errorf("batch %v holds half of a source transaction", keysIn(batch))
+		}
+	}
+}
+
+func TestASchemaChangeReadDuringAChunkIsAppliedAlone(t *testing.T) {
+	r, stream, queue, ctx := producing(t)
+
+	chunk := []*domain.Event{chunkRow("a"), chunkRow("b"), chunkRow("c"), chunkRow("d")}
+	handed := make(chan error, 1)
+	go func() { handed <- r.queueChunk(ctx, queue, chunk) }()
+	if got := <-queue; got != chunk[0] {
+		t.Fatalf("queued %v first, want the chunk's first row", got.Key)
+	}
+
+	change := event("orders", "", "p1", schema)
+	stream.send(change)
+
+	got := append([]*domain.Event{chunk[0]}, receive(queue, len(chunk))...)
+	if err := <-handed; err != nil {
+		t.Fatalf("queueChunk: %v", err)
+	}
+	if want := append(append([]*domain.Event{}, chunk...), change); !sameOrder(got, want) {
+		t.Fatalf("queued %v, want the whole chunk and then the schema change", keysIn(got))
+	}
+
+	batches, err := batchesOf(t, r, got)
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	applied := false
+	for _, batch := range batches {
+		if !holds(batch, change) {
+			continue
+		}
+		applied = true
+		if len(batch) != 1 {
+			t.Errorf("the schema change shared its batch: %v", keysIn(batch))
+		}
+	}
+	if !applied {
+		t.Error("the schema change was never applied")
+	}
+}
+
+func TestASchemaChangeBehindABatchThatCannotBeCutIsRefused(t *testing.T) {
+	applier := &fakeApplier{}
+	store := newStore()
+	r := newRunner(t, &fakeReader{}, applier, store)
+	r.Opts.FlushInterval = time.Hour
+
+	queue := make(chan *domain.Event, 2)
+	queue <- event("orders", "1", "", midTransaction)
+	queue <- event("orders", "", "p1", schema)
+	close(queue)
+
+	if err := r.apply(context.Background(), queue); err == nil {
+		t.Fatal("apply took a schema change into a batch that ends inside a transaction")
+	}
+	if got := len(applier.applied()); got != 0 {
+		t.Errorf("applied %d batches, want none", got)
+	}
+	if got := store.value(""); got != "" {
+		t.Errorf("recorded position %q, want none", got)
+	}
+}
+
+func TestASchemaChangeThatLeavesItsTransactionOpenIsRefused(t *testing.T) {
+	applier := &fakeApplier{}
+	store := newStore()
+	r := newRunner(t, &fakeReader{}, applier, store)
+	r.Opts.FlushInterval = time.Hour
+
+	queue := make(chan *domain.Event, 2)
+	queue <- event("orders", "", "p1", schema, midTransaction)
+	queue <- event("orders", "1", "p2")
+	close(queue)
+
+	if err := r.apply(context.Background(), queue); err == nil {
+		t.Fatal("apply let a schema change share its batch with the event after it")
+	}
+	if got := len(applier.applied()); got != 0 {
+		t.Errorf("applied %d batches, want none", got)
+	}
+	if got := store.value(""); got != "" {
+		t.Errorf("recorded position %q, want none", got)
+	}
+}
+
+// A chunk queued after the stream stopped part-way would close the half transaction.
+func TestAReaderThatStopsInsideATransactionKeepsTheTurn(t *testing.T) {
+	stream := &scriptedReader{steps: make(chan scriptedStep)}
+	r := newRunner(t, stream, &fakeApplier{}, newStore())
+	r.turn = make(turn, 1)
+	queue := make(chan *domain.Event)
+
+	done := make(chan error, 1)
+	go func() { done <- r.read(context.Background(), queue) }()
+
+	opening := event("orders", "1", "", midTransaction)
+	stream.send(opening)
+	<-queue
+	failure := errors.New("connection reset")
+	stream.steps <- scriptedStep{err: failure}
+	if err := <-done; !errors.Is(err, failure) {
+		t.Fatalf("read returned %v, want the stream's failure", err)
+	}
+	if len(r.turn) != 1 {
+		t.Fatal("the reader gave the turn back with half a transaction queued")
+	}
+}
+
+// A chunk left part-way in the queue could never be cut.
+func TestAChunkWithANilRowQueuesNothing(t *testing.T) {
+	r := newRunner(t, &fakeReader{}, &fakeApplier{}, newStore())
+	r.turn = make(turn, 1)
+	queue := make(chan *domain.Event, 3)
+
+	chunk := []*domain.Event{chunkRow("a"), nil, chunkRow("c")}
+	if err := r.queueChunk(context.Background(), queue, chunk); err == nil {
+		t.Fatal("queueChunk accepted a chunk holding a nil row")
+	}
+	if got := len(queue); got != 0 {
+		t.Errorf("queued %d rows of the chunk, want none", got)
+	}
+	if len(r.turn) != 0 {
+		t.Error("queueChunk kept the turn after refusing the chunk")
+	}
+}
+
+// Nothing else would stop a re-copy waiting for a stream that has failed.
+func TestAFailedStreamEndsTheRunWhileAReCopyWaitsForIt(t *testing.T) {
+	failure := errors.New("connection reset")
+	stream := &scriptedReader{steps: make(chan scriptedStep, 2)}
+	stream.steps <- scriptedStep{event: event("orders", "1", "p1", func(e *domain.Event) {
+		e.SourceTime = time.Now().Add(-time.Hour)
+	})}
+	stream.steps <- scriptedStep{err: failure}
+
+	r := newRunner(t, stream, &fakeApplier{}, newStore())
+	r.Resyncs = []*Resync{{
+		NS: domain.Namespace{DB: "shop", Object: "orders"},
+		Reader: &fakeChunks{chunks: []Chunk{
+			{Events: []*domain.Event{chunkRow("a")}, After: "a", ReadAt: time.Now()},
+		}},
+	}}
+
+	done := make(chan error, 1)
+	go func() { done <- r.Run(context.Background()) }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, failure) {
+			t.Errorf("Run returned %v, want the stream's failure", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not end after the stream failed")
+	}
+}
+
+// While the copy or the applier outlives a failed reader, the gauges are the only live signal.
+func TestTheGaugesKeepRefreshingAfterTheStreamFails(t *testing.T) {
+	for _, during := range []string{"copy", "apply"} {
+		t.Run(during, func(t *testing.T) {
+			stream := &scriptedReader{steps: make(chan scriptedStep)}
+			hold := make(chan struct{})
+			applier := &fakeApplier{}
+			r := newRunner(t, stream, applier, newStore())
+			if during == "copy" {
+				r.Snapshotter = &fakeSnapshotter{pinned: domain.Position{Payload: "pinned"},
+					onCopy: func() { <-hold }}
+			} else {
+				applier.block = hold
+			}
+
+			var mu sync.Mutex
+			var ticked chan struct{}
+			r.clock = func() time.Time {
+				mu.Lock()
+				c := ticked
+				mu.Unlock()
+				if c != nil {
+					select {
+					case c <- struct{}{}:
+					default:
+					}
+				}
+				return time.Now()
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			go func() { done <- r.Run(ctx) }()
+			defer func() {
+				cancel()
+				close(hold)
+				select {
+				case <-done:
+				case <-time.After(5 * time.Second):
+					t.Error("Run did not end after it was asked to stop")
+				}
+			}()
+
+			stream.send(event("orders", "1", "p1"))
+			stream.steps <- scriptedStep{err: errors.New("connection reset")}
+
+			c := make(chan struct{})
+			mu.Lock()
+			ticked = c
+			mu.Unlock()
+			deadline := time.After(5 * time.Second)
+			for i := 0; i < 10; i++ {
+				select {
+				case <-c:
+				case <-deadline:
+					t.Fatalf("the gauges refreshed %d times after the stream failed, then stopped", i)
+				}
+			}
+		})
+	}
+}
+
+// Every producer blocks on room or on the queue while holding the turn; none may stall.
+func TestATightBudgetStallsNeitherTheStreamNorAReCopy(t *testing.T) {
+	const transactions = 40
+	var events []*domain.Event
+	for i := 0; i < transactions; i++ {
+		for j := 0; j < 3; j++ {
+			e := event("orders", fmt.Sprintf("%d-%d", i, j), fmt.Sprintf("p%d", i))
+			e.Bytes = 8
+			if j < 2 {
+				e.EndsTransaction = false
+				e.Pos = domain.Position{}
+			}
+			events = append(events, e)
+		}
+	}
+	var chunks []Chunk
+	var rows []*domain.Event
+	for i := 0; i < 5; i++ {
+		var chunk []*domain.Event
+		for j := 0; j < 4; j++ {
+			row := chunkRow(fmt.Sprintf("r%d-%d", i, j))
+			row.Bytes = 8
+			chunk = append(chunk, row)
+		}
+		rows = append(rows, chunk...)
+		chunks = append(chunks, Chunk{Events: chunk, After: chunk[len(chunk)-1].Key,
+			ReadAt: time.Now().Add(-time.Hour)})
+	}
+
+	want := len(events) + len(rows)
+	all := make(chan struct{})
+	var once sync.Once
+	applier := &fakeApplier{}
+	applier.onApply = func() {
+		n := 0
+		for _, runs := range applier.batches {
+			for _, run := range runs {
+				n += len(run)
+			}
+		}
+		if n >= want {
+			once.Do(func() { close(all) })
+		}
+	}
+
+	r := newRunner(t, &fakeReader{events: events}, applier, newStore())
+	r.Opts.QueueBytes = 16
+	r.Opts.QueueCapacity = 2
+	r.Resyncs = []*Resync{{NS: domain.Namespace{DB: "shop", Object: "orders"},
+		Reader: &fakeChunks{chunks: chunks}}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- r.Run(ctx) }()
+	select {
+	case <-all:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the stream and the re-copy stalled against the byte budget")
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	for _, runs := range applier.applied() {
+		var batch []*domain.Event
+		for _, run := range runs {
+			batch = append(batch, run...)
+		}
+		for i := 0; i+2 < len(events); i += 3 {
+			if holds(batch, events[i]) != holds(batch, events[i+2]) {
+				t.Errorf("batch %v holds part of a source transaction", keysIn(batch))
+			}
+		}
+	}
+}
+
+func keysIn(events []*domain.Event) []string {
+	keys := make([]string, 0, len(events))
+	for _, e := range events {
+		if e.Op == domain.OpSchema {
+			keys = append(keys, "DDL")
+			continue
+		}
+		keys = append(keys, e.Key)
+	}
+	return keys
+}

@@ -183,7 +183,32 @@ type Runner struct {
 	// queue's own capacity does not: it counts events, and an event has no fixed
 	// size.
 	held *budget
+	// turn is held by whichever producer is queuing a unit, made once per run.
+	turn turn
 }
+
+// turn lets one producer at a time queue a unit (a source transaction or a
+// re-copy's chunk): the applier cuts a batch wherever its last event ends a
+// unit, so a unit queued inside another would cut the open one in half.
+type turn chan struct{}
+
+// take waits for the turn. One taken after the run was asked to stop is given
+// straight back, so nothing is queued behind a unit a stopping producer left
+// part-way.
+func (t turn) take(ctx context.Context) error {
+	select {
+	case t <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	if err := ctx.Err(); err != nil {
+		t.give()
+		return err
+	}
+	return nil
+}
+
+func (t turn) give() { <-t }
 
 func (r *Runner) counters() *metrics.EventCounters {
 	if r.events == nil {
@@ -266,12 +291,17 @@ func (r *Runner) Run(ctx context.Context) error {
 		r.queueCap = r.Opts.snapshotQueueCapacity()
 	}
 	r.held = newBudget(r.Opts.queueBytes())
+	r.turn = make(turn, 1)
 	queue := make(chan *domain.Event, r.queueCap)
 	r.mu.Lock()
 	r.queue = queue
 	r.mu.Unlock()
 	readCtx, stopReading := context.WithCancel(ctx)
 	defer stopReading()
+	// Not readCtx: the health reporter runs on that, and it has to keep running
+	// while the copy or the applier outlives a failed reader.
+	recopyCtx, stopRecopies := context.WithCancel(readCtx)
+	defer stopRecopies()
 
 	// The queue has several producers once a re-copy runs, so it is closed after
 	// all of them finish: closing it from the reader raced, and a re-copy still
@@ -282,6 +312,9 @@ func (r *Runner) Run(ctx context.Context) error {
 	producers.Add(1)
 	go func() {
 		defer producers.Done()
+		// A re-copy cannot be ordered against a stream that has stopped, and one
+		// waiting for the turn a stopped reader kept would wait for good.
+		defer stopRecopies()
 		readErr <- resilience.Guard(func() error { return r.read(readCtx, queue) })
 	}()
 
@@ -299,7 +332,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		}
 	}
 
-	resyncErr := r.startResyncs(readCtx, queue, &producers)
+	resyncErr := r.startResyncs(recopyCtx, queue, &producers)
 
 	go func() {
 		producers.Wait()
@@ -360,31 +393,13 @@ func (r *Runner) startResyncs(ctx context.Context, queue chan<- *domain.Event, p
 				if len(events) == 0 {
 					return nil
 				}
-				// A chunk is its own batch: it carries no position, and its last event
-				// closes the batch so it is not held for a boundary that will not come.
-				events[len(events)-1].EndsTransaction = true
 				// Closed by the applier once the batch carrying the chunk has
 				// reached the target, which is what the re-copy waits on before
 				// recording its progress.
 				landed := make(chan struct{})
 				events[len(events)-1].Landed = landed
-				for i, event := range events {
-					event.Pos = domain.Position{}
-					// A chunk is one unit to the applier, so only its first event
-					// may wait for room: the rest are what will let the batch be
-					// cut and the room given back. Same rule as the stream's
-					// transactions.
-					if i == 0 {
-						r.held.acquire(ctx, int64(event.Bytes))
-					} else {
-						r.held.admit(int64(event.Bytes))
-					}
-					select {
-					case queue <- event:
-					case <-ctx.Done():
-						r.held.release(int64(event.Bytes))
-						return ctx.Err()
-					}
+				if err := r.queueChunk(ctx, queue, events); err != nil {
+					return err
 				}
 
 				// Handing the chunk over is not applying it. The caller records
@@ -406,6 +421,48 @@ func (r *Runner) startResyncs(ctx context.Context, queue chan<- *domain.Event, p
 		}()
 	}
 	return failed
+}
+
+// queueChunk queues a re-copy's chunk as one unit. The turn is given back as
+// soon as the last row is queued: holding it until the chunk lands would hold
+// the stream back for a whole write to the target.
+func (r *Runner) queueChunk(ctx context.Context, queue chan<- *domain.Event, events []*domain.Event) error {
+	if len(events) == 0 {
+		return nil
+	}
+	// Checked before the first row is queued: a chunk left part-way can never be
+	// cut, so nothing queued behind it would be applied or give its room back.
+	for _, event := range events {
+		if event == nil {
+			return errors.New("a re-copy's chunk holds a nil row")
+		}
+	}
+	if err := r.turn.take(ctx); err != nil {
+		return err
+	}
+	defer r.turn.give()
+
+	// A chunk carries no position, and its last event closes the unit so the
+	// batch is not held for a boundary that will not come.
+	events[len(events)-1].EndsTransaction = true
+	for i, event := range events {
+		event.Pos = domain.Position{}
+		// A chunk is one unit to the applier, so only its first event may wait
+		// for room: the rest are what will let the batch be cut and the room
+		// given back. Same rule as the stream's transactions.
+		if i == 0 {
+			r.held.acquire(ctx, int64(event.Bytes))
+		} else {
+			r.held.admit(int64(event.Bytes))
+		}
+		select {
+		case queue <- event:
+		case <-ctx.Done():
+			r.held.release(int64(event.Bytes))
+			return ctx.Err()
+		}
+	}
+	return nil
 }
 
 // recoverPosition decides what to do about a stored position the source cannot
@@ -565,9 +622,11 @@ func (r *Runner) watchQueuePressure(ctx context.Context, queue chan *domain.Even
 }
 
 func (r *Runner) read(ctx context.Context, queue chan<- *domain.Event) error {
-	// Whether the last event handed over left a source transaction open, which
-	// is what decides whether the byte budget may make this one wait.
-	inTransaction := false
+	// Whether the last event handed over left a source transaction open, and so
+	// whether this reader still holds the turn. A reader that stops part-way
+	// keeps it, so no chunk's last event can close the half it queued; Run stops
+	// the other producers once this returns.
+	holding := false
 	for {
 		event, err := r.Reader.Next(ctx)
 		if err != nil {
@@ -616,18 +675,29 @@ func (r *Runner) read(ctx context.Context, queue chan<- *domain.Event) error {
 		// inside one, so while a transaction is open it cannot release anything
 		// -- and a reader that waited here for room would be waiting for a
 		// release that only its own next event can bring about.
-		if inTransaction {
+		//
+		// The turn comes before the room: bytes charged while waiting for the turn
+		// are in no batch, so nothing that lands gives them back, and the producer
+		// holding the turn may be waiting for exactly that room.
+		if holding {
 			r.held.admit(int64(event.Bytes))
 		} else {
+			if err := r.turn.take(ctx); err != nil {
+				return nil
+			}
+			holding = true
 			r.held.acquire(ctx, int64(event.Bytes))
 		}
 
 		select {
 		case queue <- event:
-			inTransaction = !event.EndsTransaction
 		case <-ctx.Done():
 			r.held.release(int64(event.Bytes))
 			return nil
+		}
+		if event.EndsTransaction {
+			holding = false
+			r.turn.give()
 		}
 	}
 }
@@ -708,6 +778,14 @@ func (r *Runner) apply(ctx context.Context, queue <-chan *domain.Event) error {
 				if err := flush(); err != nil {
 					return err
 				}
+				if b.len() > 0 {
+					// Joining would apply it inside a unit still open, and MongoDB's
+					// applier skips it while its position is recorded.
+					return fmt.Errorf("a schema change arrived behind %d events that do not "+
+						"end a source transaction or a re-copy's chunk, so it could not be "+
+						"applied on its own; the position has not moved past it, so the "+
+						"next start replays it", b.len())
+				}
 			}
 
 			b.add(event)
@@ -718,6 +796,12 @@ func (r *Runner) apply(ctx context.Context, queue <-chan *domain.Event) error {
 			if standsAlone(event) {
 				if err := flush(); err != nil {
 					return err
+				}
+				if b.len() > 0 {
+					// Left open, it would take the events after it into its batch.
+					return fmt.Errorf("a schema change did not end its source " +
+						"transaction, so it could not be applied on its own; the position " +
+						"has not moved past it, so the next start replays it")
 				}
 				resetTimer(timer, r.Opts.flushInterval())
 				continue
