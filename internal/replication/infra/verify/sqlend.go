@@ -25,11 +25,16 @@ type SQLEnd struct {
 	// so a row whose key was rewritten shows up as two differences rather than
 	// none.
 	Columns []string
+	// Protect, on the source side only, masks each column as replication masks
+	// it. Columns must already leave out what it encrypts: see Comparable.
+	Protect *Protection
 
 	// last is the key of the last row streamed, which is where the next page
 	// starts.
 	last []sql.NullString
 	done bool
+	// masked marks the Columns that Protect masks.
+	masked []bool
 }
 
 func (e *SQLEnd) Name() string {
@@ -61,14 +66,46 @@ func (e *SQLEnd) selectList() string {
 	return strings.Join(append(quoteAll(e.Keys), quoteAll(e.Columns)...), ", ")
 }
 
+func (e *SQLEnd) maskedColumns() []bool {
+	if e.masked == nil {
+		e.masked = make([]bool, len(e.Columns))
+		for i, c := range e.Columns {
+			e.masked[i] = e.Protect.column(c) == masked
+		}
+	}
+	return e.masked
+}
+
 func (e *SQLEnd) scanRow(rows *sql.Rows) (Row, []sql.NullString, error) {
 	cells := make([]sql.NullString, len(e.Keys)+len(e.Columns))
 	scan := make([]interface{}, len(cells))
 	for i := range cells {
 		scan[i] = &cells[i]
 	}
+	// A masked column is scanned as the replication path scans it, so it masks
+	// by the same type.
+	masked := e.maskedColumns()
+	var raw []interface{}
+	if e.Protect != nil {
+		raw = make([]interface{}, len(e.Columns))
+	}
+	for i := range e.Columns {
+		if masked[i] {
+			scan[len(e.Keys)+i] = &raw[i]
+		}
+	}
 	if err := rows.Scan(scan...); err != nil {
 		return Row{}, nil, err
+	}
+	for i, c := range e.Columns {
+		if !masked[i] {
+			continue
+		}
+		cell, err := e.Protect.maskedCell(c, raw[i])
+		if err != nil {
+			return Row{}, nil, err
+		}
+		cells[len(e.Keys)+i] = cell
 	}
 	key := cells[:len(e.Keys)]
 	return Row{Key: encodeKey(key), Digest: Digest(cells[len(e.Keys):])}, key, nil
@@ -180,6 +217,12 @@ type SQLRepairer struct {
 	// than built here because the two flavours spell an upsert differently, and
 	// the syncer already has a builder for its own dialect.
 	Upsert func(schema, table string, columns []string) string
+	// Columns are the columns written, which include those left out of the
+	// comparison; empty means Source.Columns.
+	Columns []string
+	// Protect makes a repair write what replication writes: a protected column
+	// never receives its raw source value.
+	Protect *Protection
 }
 
 // Repair makes the named rows right and reports how many it fixed.
@@ -227,7 +270,10 @@ func (r *SQLRepairer) deleteRow(ctx context.Context, key []sql.NullString) error
 }
 
 func (r *SQLRepairer) copyRow(ctx context.Context, key []sql.NullString) error {
-	columns := r.Source.Columns
+	columns := r.Columns
+	if len(columns) == 0 {
+		columns = r.Source.Columns
+	}
 	keyArgs := make([]interface{}, len(key))
 	for i, v := range key {
 		keyArgs[i] = nullable(v)
@@ -236,10 +282,16 @@ func (r *SQLRepairer) copyRow(ctx context.Context, key []sql.NullString) error {
 	query := fmt.Sprintf("SELECT %s FROM %s WHERE %s",
 		strings.Join(quoteAll(columns), ", "), r.Source.Name(), r.Source.where())
 
+	// A protected column is scanned as the replication path scans it, so it is
+	// rewritten by the same type.
 	cells := make([]sql.NullString, len(columns))
+	raw := make([]interface{}, len(columns))
 	scan := make([]interface{}, len(cells))
-	for i := range cells {
+	for i, c := range columns {
 		scan[i] = &cells[i]
+		if r.Protect.rewrites(c) {
+			scan[i] = &raw[i]
+		}
 	}
 	switch err := r.Source.DB.QueryRowContext(ctx, query, keyArgs...).Scan(scan...); {
 	case err == sql.ErrNoRows:
@@ -251,8 +303,16 @@ func (r *SQLRepairer) copyRow(ctx context.Context, key []sql.NullString) error {
 	}
 
 	values := make([]interface{}, len(cells))
-	for i, cell := range cells {
-		values[i] = nullable(cell)
+	for i, c := range columns {
+		if !r.Protect.rewrites(c) {
+			values[i] = nullable(cells[i])
+			continue
+		}
+		written, err := r.Protect.written(c, raw[i])
+		if err != nil {
+			return err
+		}
+		values[i] = written
 	}
 	_, err := r.Target.DB.ExecContext(ctx,
 		r.Upsert(r.Target.Schema, r.Target.Table, columns), values...)

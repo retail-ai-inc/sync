@@ -21,6 +21,12 @@ import (
 // why the comparison this feeds only ever tests keys for equality.
 type MongoEnd struct {
 	Coll *mongo.Collection
+	// Protect, on the source side only, masks each document as replication
+	// masks it.
+	Protect *Protection
+	// Skip names the dotted field paths left out of the digest, on both sides:
+	// what Protect encrypts cannot be compared by value.
+	Skip []string
 
 	cursor *mongo.Cursor
 	done   bool
@@ -44,7 +50,7 @@ func (e *MongoEnd) Next(ctx context.Context, limit int) ([]Row, error) {
 
 	var batch []Row
 	for len(batch) < limit && e.cursor.Next(ctx) {
-		row, err := rowFromDocument(e.cursor.Current)
+		row, err := e.row(e.cursor.Current)
 		if err != nil {
 			return nil, err
 		}
@@ -82,7 +88,7 @@ func (e *MongoEnd) Lookup(ctx context.Context, keys []string) (map[string]Row, e
 
 	found := make(map[string]Row, len(keys))
 	for cursor.Next(ctx) {
-		row, err := rowFromDocument(cursor.Current)
+		row, err := e.row(cursor.Current)
 		if err != nil {
 			return nil, err
 		}
@@ -91,7 +97,18 @@ func (e *MongoEnd) Lookup(ctx context.Context, keys []string) (map[string]Row, e
 	return found, cursor.Err()
 }
 
-func rowFromDocument(raw bson.Raw) (Row, error) {
+func (e *MongoEnd) row(raw bson.Raw) (Row, error) {
+	if e.Protect == nil && len(e.Skip) == 0 {
+		return rowFromDocument(raw, nil)
+	}
+	return rowFromDocument(raw, func(doc bson.M) bson.M {
+		return without(e.Protect.comparable(doc), e.Skip)
+	})
+}
+
+// rowFromDocument keys and hashes a document; shape, when given, rewrites the
+// decoded document before it is hashed.
+func rowFromDocument(raw bson.Raw, shape func(bson.M) bson.M) (Row, error) {
 	value, err := raw.LookupErr("_id")
 	if err != nil {
 		return Row{}, fmt.Errorf("a document in the comparison has no _id")
@@ -101,7 +118,7 @@ func rowFromDocument(raw bson.Raw) (Row, error) {
 	if err != nil {
 		return Row{}, err
 	}
-	return Row{Key: key, Digest: documentDigest(raw)}, nil
+	return Row{Key: key, Digest: documentDigest(raw, shape)}, nil
 }
 
 // keyFromID renders an _id as a string that is equal for equal ids and
@@ -154,13 +171,16 @@ func describeID(id interface{}) string {
 // were written in and two servers can hold the same document with its fields in
 // different orders. Reporting that as a difference would send an operator
 // looking for data loss that is not there.
-func documentDigest(raw bson.Raw) string {
+func documentDigest(raw bson.Raw, shape func(bson.M) bson.M) string {
 	var doc bson.M
 	if err := bson.Unmarshal(raw, &doc); err != nil {
 		// An unreadable document is hashed as its bytes, which at least
 		// distinguishes it from a different unreadable document.
 		sum := sha256.Sum256(raw)
 		return hex.EncodeToString(sum[:])
+	}
+	if shape != nil {
+		doc = shape(doc)
 	}
 
 	h := sha256.New()
@@ -184,6 +204,10 @@ func canonical(v interface{}) string {
 			parts = append(parts, fmt.Sprintf("%d:%s=%s", len(k), k, canonical(value[k])))
 		}
 		return "{" + strings.Join(parts, ",") + "}"
+
+	case map[string]interface{}:
+		// ProcessValue hands back the levels it rewrote in this shape.
+		return canonical(bson.M(value))
 
 	case bson.D:
 		// The driver's v2 decodes a nested document into a bson.D where its v1 gave
@@ -227,6 +251,21 @@ func canonical(v interface{}) string {
 type MongoRepairer struct {
 	Source *mongo.Collection
 	Target *mongo.Collection
+	// Protect makes a repair write what replication writes: a protected field
+	// never receives its raw source value.
+	Protect *Protection
+}
+
+// replacement is the document a repair writes for one read from the source.
+func (r *MongoRepairer) replacement(raw bson.Raw) (interface{}, error) {
+	if r.Protect == nil {
+		return raw, nil
+	}
+	var doc bson.M
+	if err := bson.Unmarshal(raw, &doc); err != nil {
+		return nil, fmt.Errorf("read the source document: %w", err)
+	}
+	return r.Protect.document(doc)
 }
 
 // Repair re-reads each named document from the source and writes it to the
@@ -265,7 +304,11 @@ func (r *MongoRepairer) Repair(ctx context.Context, differences []Difference) (i
 			return fixed, fmt.Errorf("repair %s %s: %w", d.Kind, d.Key, err)
 		}
 
-		if _, err := r.Target.ReplaceOne(ctx, bson.M{"_id": id}, doc,
+		replacement, err := r.replacement(doc)
+		if err != nil {
+			return fixed, fmt.Errorf("repair %s %s: %w", d.Kind, d.Key, err)
+		}
+		if _, err := r.Target.ReplaceOne(ctx, bson.M{"_id": id}, replacement,
 			options.Replace().SetUpsert(true)); err != nil {
 			return fixed, fmt.Errorf("repair %s %s: %w", d.Kind, d.Key, err)
 		}

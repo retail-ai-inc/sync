@@ -816,7 +816,7 @@ func TestAnIdRoundTripsThroughItsKey(t *testing.T) {
 		t.Fatalf("Marshal: %v", err)
 	}
 
-	row, err := rowFromDocument(raw)
+	row, err := rowFromDocument(raw, nil)
 	if err != nil {
 		t.Fatalf("rowFromDocument: %v", err)
 	}
@@ -848,11 +848,11 @@ func TestTwoIdTypesDoNotShareAKey(t *testing.T) {
 		t.Fatalf("Marshal: %v", err)
 	}
 
-	first, err := rowFromDocument(fromID)
+	first, err := rowFromDocument(fromID, nil)
 	if err != nil {
 		t.Fatalf("rowFromDocument: %v", err)
 	}
-	second, err := rowFromDocument(fromString)
+	second, err := rowFromDocument(fromString, nil)
 	if err != nil {
 		t.Fatalf("rowFromDocument: %v", err)
 	}
@@ -867,7 +867,7 @@ func TestADocumentWithNoIdIsReported(t *testing.T) {
 		t.Fatalf("Marshal: %v", err)
 	}
 
-	if _, err := rowFromDocument(raw); err == nil {
+	if _, err := rowFromDocument(raw, nil); err == nil {
 		t.Error("a document with no _id was accepted")
 	}
 }
@@ -904,7 +904,7 @@ func TestADocumentIdIsDescribedByItsValue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
 	}
-	row, err := rowFromDocument(raw)
+	row, err := rowFromDocument(raw, nil)
 	if err != nil {
 		t.Fatalf("rowFromDocument: %v", err)
 	}
@@ -919,7 +919,7 @@ func TestAStringDocumentIdIsDescribedAsItself(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
 	}
-	row, err := rowFromDocument(raw)
+	row, err := rowFromDocument(raw, nil)
 	if err != nil {
 		t.Fatalf("rowFromDocument: %v", err)
 	}
@@ -936,7 +936,7 @@ func TestANumericDocumentIdIsDescribed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
 	}
-	row, err := rowFromDocument(raw)
+	row, err := rowFromDocument(raw, nil)
 	if err != nil {
 		t.Fatalf("rowFromDocument: %v", err)
 	}

@@ -14,6 +14,7 @@ import (
 	"github.com/retail-ai-inc/sync/internal/platform/metrics"
 	"github.com/retail-ai-inc/sync/internal/platform/slack"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/discovery"
+	"github.com/retail-ai-inc/sync/internal/replication/infra/security"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/verify"
 	"github.com/sirupsen/logrus"
 	"go.mongodb.org/mongo-driver/v2/mongo"
@@ -214,8 +215,12 @@ func checkSQLTask(ctx context.Context, task config.SyncConfig, n notifier, log *
 			continue
 		}
 
-		sourceSide := &verify.SQLEnd{DB: source, Schema: sourceDB, Table: pair.Source, Keys: keys, Columns: columns}
-		targetSide := &verify.SQLEnd{DB: target, Schema: targetDB, Table: pair.Target, Keys: keys, Columns: columns}
+		sourceSide, targetSide, repairer, err := sqlComparison(task, pair, source, target,
+			sourceDB, targetDB, keys, columns)
+		if err != nil {
+			log.Warnf("[Verify] Task %d: %s cannot be compared: %v", task.ID, pair.Source, err)
+			continue
+		}
 
 		// Repairing during the walk rather than from the reported sample
 		// afterwards: the sample is capped, so a table a thousand rows apart
@@ -223,7 +228,6 @@ func checkSQLTask(ctx context.Context, task config.SyncConfig, n notifier, log *
 		// it was.
 		var fix func(verify.Difference) error
 		if repair {
-			repairer := &verify.SQLRepairer{Source: sourceSide, Target: targetSide, Upsert: mysqlUpsert}
 			fix = func(d verify.Difference) error {
 				_, err := repairer.Repair(ctx, []verify.Difference{d})
 				if err != nil {
@@ -241,6 +245,27 @@ func checkSQLTask(ctx context.Context, task config.SyncConfig, n notifier, log *
 		}
 		report(ctx, n, log, task, pair.Source, result)
 	}
+}
+
+// sqlComparison builds one table's comparison against what replication writes:
+// the table's field security is applied to the source as replication applies it.
+func sqlComparison(task config.SyncConfig, pair discovery.Pair, source, target *sql.DB,
+	sourceDB, targetDB string, keys, columns []string) (*verify.SQLEnd, *verify.SQLEnd, *verify.SQLRepairer, error) {
+	// By the target's name, as the stream and the first copy look it up.
+	protection := verify.ProtectionOf(security.FindTableSecurityFromMappings(pair.Target, task.Mappings))
+	if protected := protection.Protected(keys); len(protected) > 0 {
+		return nil, nil, nil, fmt.Errorf("its key column %s has field security, so its rows "+
+			"cannot be matched with the target's", strings.Join(protected, ", "))
+	}
+
+	compared := protection.Comparable(columns)
+	sourceSide := &verify.SQLEnd{DB: source, Schema: sourceDB, Table: pair.Source, Keys: keys,
+		Columns: compared, Protect: protection}
+	targetSide := &verify.SQLEnd{DB: target, Schema: targetDB, Table: pair.Target, Keys: keys,
+		Columns: compared}
+	repairer := &verify.SQLRepairer{Source: sourceSide, Target: targetSide, Upsert: mysqlUpsert,
+		Columns: columns, Protect: protection}
+	return sourceSide, targetSide, repairer, nil
 }
 
 // sqlTablePairs reports the tables to compare, discovering them when the task
@@ -327,12 +352,15 @@ func checkMongoTask(ctx context.Context, task config.SyncConfig, n notifier, log
 	targetDB := target.Database(dsn.GetDatabaseName(task.Type, task.TargetConnection))
 
 	for _, pair := range mongoCollectionPairs(ctx, task, sourceDB, log) {
-		sourceColl := sourceDB.Collection(pair.Source)
-		targetColl := targetDB.Collection(pair.Target)
+		sourceSide, targetSide, repairer, err := mongoComparison(task, pair,
+			sourceDB.Collection(pair.Source), targetDB.Collection(pair.Target))
+		if err != nil {
+			log.Warnf("[Verify] Task %d: %s cannot be compared: %v", task.ID, pair.Source, err)
+			continue
+		}
 
 		var fix func(verify.Difference) error
 		if repair {
-			repairer := &verify.MongoRepairer{Source: sourceColl, Target: targetColl}
 			fix = func(d verify.Difference) error {
 				_, err := repairer.Repair(ctx, []verify.Difference{d})
 				if err != nil {
@@ -343,14 +371,32 @@ func checkMongoTask(ctx context.Context, task config.SyncConfig, n notifier, log
 			}
 		}
 
-		result, err := verify.CompareAndRepair(ctx,
-			&verify.MongoEnd{Coll: sourceColl}, &verify.MongoEnd{Coll: targetColl}, 0, fix)
+		result, err := verify.CompareAndRepair(ctx, sourceSide, targetSide, 0, fix)
 		if err != nil {
 			log.Errorf("[Verify] Task %d: comparing %s: %v", task.ID, pair.Source, err)
 			continue
 		}
 		report(ctx, n, log, task, pair.Source, result)
 	}
+}
+
+// mongoComparison builds one collection's comparison against what replication
+// writes: the collection's field security is applied to the source as
+// replication applies it.
+func mongoComparison(task config.SyncConfig, pair discovery.Pair, source, target *mongo.Collection) (
+	*verify.MongoEnd, *verify.MongoEnd, *verify.MongoRepairer, error) {
+	// By the source's name, as the MongoDB syncer looks it up.
+	protection := verify.ProtectionOf(security.FindTableSecurityFromMappings(pair.Source, task.Mappings))
+	if protection.ProtectsID() {
+		return nil, nil, nil, fmt.Errorf("its _id has field security, so its documents " +
+			"cannot be matched with the target's")
+	}
+
+	skip := protection.Encrypted()
+	return &verify.MongoEnd{Coll: source, Protect: protection, Skip: skip},
+		&verify.MongoEnd{Coll: target, Skip: skip},
+		&verify.MongoRepairer{Source: source, Target: target, Protect: protection},
+		nil
 }
 
 // mongoCollectionPairs reports the collections to compare, discovering them when
