@@ -137,7 +137,8 @@ func ProcessValue(value interface{}, fieldName string, config TableSecurity) int
 			continue
 		}
 		{
-			logging.Log.Debugf("[Security] Processing top level field: %s = %v, type=%s", fieldName, value, fc.SecurityType)
+			// Never log the value: it is what this protects.
+			logging.Log.Debugf("[Security] Processing top level field: %s, type=%s", fieldName, fc.SecurityType)
 			// Anything other than the two known kinds used to fall out of the
 			// switch with processed still nil, and nil was returned — so a
 			// securityType of "Masked", or anything a client had made up, wrote
@@ -180,7 +181,7 @@ func ProcessValue(value interface{}, fieldName string, config TableSecurity) int
 					"The kinds this understands are \"masked\" and \"encrypted\".",
 					fieldName, fc.SecurityType)
 			}
-			logging.Log.Debugf("[Security] After processing: %s = %v", fieldName, processed)
+			logging.Log.Debugf("[Security] After processing: %s", fieldName)
 			return processed
 		}
 	}
