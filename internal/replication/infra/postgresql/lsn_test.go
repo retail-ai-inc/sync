@@ -162,11 +162,8 @@ func TestAMalformedPositionIsReported(t *testing.T) {
 	}
 }
 
-// TestAPositionFromAnotherSourceIsIgnored: an LSN addresses one server's WAL
-// and nowhere else. Read against a different server it names unrelated bytes,
-// and the read succeeds -- so the task would resume from somewhere arbitrary
-// with nothing to show for it.
-func TestAPositionFromAnotherSourceIsIgnored(t *testing.T) {
+// The LSN comes back only to be named; TestResumePoint pins that it is never resumed from.
+func TestAPositionFromAnotherSourceNamesThatSource(t *testing.T) {
 	payload, err := encodeLSN(pglogrepl.LSN(1<<32), "10.118.192.9:5432/shop")
 	if err != nil {
 		t.Fatalf("encodeLSN: %v", err)
@@ -176,11 +173,89 @@ func TestAPositionFromAnotherSourceIsIgnored(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decodeLSN: %v", err)
 	}
-	if got != 0 {
-		t.Errorf("a position from another server was used: %s", got)
-	}
 	if elsewhere != "10.118.192.9:5432/shop" {
 		t.Errorf("the other server was reported as %q", elsewhere)
+	}
+	if got != 1<<32 {
+		t.Errorf("read %s, want the recorded 1/0 to name in a refusal", got)
+	}
+}
+
+func TestResumePoint(t *testing.T) {
+	const other = "10.118.192.9:5432/shop"
+	stored := pglogrepl.LSN(uint64(3)<<32 | 0x1A2B)
+	encode := func(source string) string {
+		payload, err := encodeLSN(stored, source)
+		if err != nil {
+			t.Fatalf("encodeLSN: %v", err)
+		}
+		return payload
+	}
+
+	tests := []struct {
+		name       string
+		payload    string
+		slotExists bool
+		want       pglogrepl.LSN
+		refusal    []string
+	}{
+		{name: "no stored position, new slot", payload: "", want: 0},
+		{name: "no stored position, slot there", payload: "", slotExists: true, want: 0},
+		{name: "this server, slot there", payload: encode(thisSource), slotExists: true, want: stored},
+		{name: "this server, no slot", payload: encode(thisSource),
+			refusal: []string{thisSource, "slot_shop", "3/1A2B", "task_id = 7", "_sync_checkpoint"}},
+		{name: "bare legacy LSN, slot there", payload: "3/1A2B", slotExists: true, want: stored},
+		{name: "bare legacy LSN, no slot", payload: "3/1A2B",
+			refusal: []string{thisSource, "slot_shop", "3/1A2B"}},
+		{name: "document naming no server, slot there", payload: encode(""), slotExists: true, want: stored},
+		{name: "another server, slot there", payload: encode(other), slotExists: true, want: 0},
+		{name: "another server, no slot", payload: encode(other),
+			refusal: []string{other, thisSource, "slot_shop", "3/1A2B", "task_id = 7"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			lsn, elsewhere, err := decodeLSN(tt.payload, thisSource)
+			if err != nil {
+				t.Fatalf("decodeLSN: %v", err)
+			}
+			got, err := resumePoint(lsn, elsewhere, thisSource, "slot_shop", tt.slotExists, 7)
+			if tt.refusal != nil {
+				if !domain.IsUnrecoverable(err) {
+					t.Fatalf("err = %v, want unrecoverable", err)
+				}
+				if got != 0 {
+					t.Errorf("resumePoint = %s alongside the refusal, want 0", got)
+				}
+				for _, named := range tt.refusal {
+					if !strings.Contains(err.Error(), named) {
+						t.Errorf("the refusal does not name %s: %v", named, err)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resumePoint: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("resumePoint = %s, want %s", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSlotIdentifier(t *testing.T) {
+	long := strings.Repeat("s", 70)
+	tests := []struct{ in, want string }{
+		{"sync_slot", "sync_slot"},
+		{"Sync_Slot", "sync_slot"},
+		{`"sync_slot"`, "sync_slot"},
+		{long, long[:63]},
+		{`"` + long + `"`, long[:63]},
+	}
+	for _, tt := range tests {
+		if got := slotIdentifier(tt.in); got != tt.want {
+			t.Errorf("slotIdentifier(%q) = %q, want %q", tt.in, got, tt.want)
+		}
 	}
 }
 

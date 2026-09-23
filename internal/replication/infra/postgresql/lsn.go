@@ -7,6 +7,7 @@ import (
 	"github.com/jackc/pglogrepl"
 
 	"github.com/retail-ai-inc/sync/internal/platform/dsn"
+	"github.com/retail-ai-inc/sync/internal/replication/domain"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/checkpoint"
 )
 
@@ -37,7 +38,9 @@ func encodeLSN(lsn pglogrepl.LSN, source string) (string, error) {
 	return checkpoint.Encode(walCheckpoint{LSN: lsn.String(), Source: source})
 }
 
-// decodeLSN reads a stored position, reporting zero when there is none.
+// decodeLSN reads a stored position, reporting zero when there is none. A
+// position recorded against a server other than source comes back with that
+// server named, and its LSN must not be resumed from: it addresses unrelated WAL.
 //
 // A payload written by an older build holds the LSN as plain text rather than a
 // document, so both forms are read: refusing the old form would make every task
@@ -54,14 +57,43 @@ func decodeLSN(payload, source string) (pglogrepl.LSN, string, error) {
 		return lsn, "", parseErr
 	}
 
+	lsn, err := parseLSNFromString(stored.LSN)
+	if err != nil {
+		return 0, "", err
+	}
 	if stored.Source != "" && source != "" && stored.Source != source {
-		// An LSN addresses one server's WAL and nowhere else. Resuming from it
-		// here would read unrelated bytes, and the read would succeed.
-		return 0, stored.Source, nil
+		return lsn, stored.Source, nil
+	}
+	return lsn, "", nil
+}
+
+// resumePoint must run before any slot is created: a slot left behind by a task
+// that then stops makes the source retain WAL indefinitely.
+func resumePoint(stored pglogrepl.LSN, elsewhere, here, slot string, slotExists bool,
+	taskID int) (pglogrepl.LSN, error) {
+
+	if stored == 0 && elsewhere == "" {
+		return 0, nil
+	}
+	if slotExists {
+		if elsewhere != "" {
+			// Zero lets the server resume the slot from its own confirmed position.
+			return 0, nil
+		}
+		return stored, nil
 	}
 
-	lsn, parseErr := parseLSNFromString(stored.LSN)
-	return lsn, "", parseErr
+	origin := here
+	if elsewhere != "" {
+		origin = elsewhere
+	}
+	return 0, domain.Unrecoverable("the target holds what was replicated from %s up to "+
+		"%s, and %s has no replication slot %s to read the changes committed after it "+
+		"from. A slot created there now starts at the current end of the log, so it "+
+		"would skip them, and the next start would trust it. To recover, empty the "+
+		"target tables, delete the rows with task_id = %d from _sync_checkpoint on the "+
+		"target, and edit this task or restart sync: a fresh copy then runs",
+		origin, stored, here, slot, taskID)
 }
 
 // parseLSNFromString reads the "X/Y" form PostgreSQL prints, and tolerates a

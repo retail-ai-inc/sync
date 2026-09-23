@@ -3,16 +3,20 @@
 package postgresql
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/jackc/pglogrepl"
 	_ "github.com/lib/pq"
 	"github.com/sirupsen/logrus"
 
 	"github.com/retail-ai-inc/sync/internal/platform/config"
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
+	"github.com/retail-ai-inc/sync/internal/replication/infra/checkpoint"
 	"github.com/retail-ai-inc/sync/test/harness"
 )
 
@@ -256,4 +260,84 @@ func TestATaskWithNoSlotStopsForGood(t *testing.T) {
 	if !domain.IsUnrecoverable(err) {
 		t.Errorf("err = %v, want it marked unrecoverable so the supervisor stops retrying", err)
 	}
+}
+
+// storePosition records a position for the task as though a run against source had written it.
+func storePosition(t *testing.T, tgt *sql.DB, taskID int, source string) {
+	t.Helper()
+
+	store := &checkpoint.SQLStore{DB: tgt, TaskID: taskID, NumberedPlaceholders: true}
+	payload, err := encodeLSN(pglogrepl.LSN(1<<32), source)
+	if err != nil {
+		t.Fatalf("encodeLSN: %v", err)
+	}
+	if err := store.Save(t.Context(), "", payload); err != nil {
+		t.Fatalf("store the position: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Purge(context.Background()) })
+}
+
+const foreignSource = "10.0.0.9:5432/" + sourceDatabase
+
+// A slot made here now would start after the changes the target is missing.
+func TestAStoredPositionWithNoSlotStopsWithoutCreatingOne(t *testing.T) {
+	for _, tt := range []struct {
+		name, source string
+	}{
+		{"another server", foreignSource},
+		{"this server", endpointOf(connString(harness.PostgresSource, sourceDatabase))},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			table, publication, slot := names(t, "pg_stored_noslot")
+			src, tgt := open(t, harness.PostgresSource, sourceDatabase), open(t, harness.PostgresTarget, targetDatabase)
+			sourceTable(t, src, tgt, table, publication, slot)
+
+			cfg := syncTask(t, table, publication, slot)
+			storePosition(t, tgt, cfg.ID, tt.source)
+
+			logger := logrus.New()
+			logger.SetLevel(logrus.ErrorLevel)
+
+			ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+			defer cancel()
+			err := NewPostgreSQLSyncer(cfg, logger).Start(ctx)
+			if ctx.Err() != nil {
+				t.Fatalf("Start was still running after the timeout: %v", err)
+			}
+			if !domain.IsUnrecoverable(err) {
+				t.Fatalf("err = %v, want it marked unrecoverable", err)
+			}
+			for _, named := range []string{tt.source, slot, "1/0"} {
+				if !strings.Contains(err.Error(), named) {
+					t.Errorf("the refusal does not name %s: %v", named, err)
+				}
+			}
+			if n := countRows(t, src, "pg_replication_slots", "slot_name = $1", slot); n != 0 {
+				t.Errorf("the refused start left %d replication slot(s) %s behind", n, slot)
+			}
+		})
+	}
+}
+
+// A foreign position with the slot already here resumes from the slot.
+func TestAForeignPositionResumesFromTheSlotHere(t *testing.T) {
+	table, publication, slot := names(t, "pg_foreign_slot")
+	src, tgt := open(t, harness.PostgresSource, sourceDatabase), open(t, harness.PostgresTarget, targetDatabase)
+	sourceTable(t, src, tgt, table, publication, slot)
+	mustExec(t, src, "SELECT pg_create_logical_replication_slot($1, 'pgoutput')", slot)
+
+	cfg := syncTask(t, table, publication, slot)
+	storePosition(t, tgt, cfg.ID, foreignSource)
+
+	// Written while nothing is replicating, so only the slot's retained WAL carries it.
+	mustExec(t, src, fmt.Sprintf("INSERT INTO %s (id, name) VALUES (1, 'while stopped')", table))
+
+	startSyncer(t, cfg)
+	mustExec(t, src, fmt.Sprintf("INSERT INTO %s (id, name) VALUES (2, 'after the start')", table))
+	harness.Eventually(t, 45*time.Second, func() error {
+		if n := countRows(t, tgt, table, "id IN (1, 2)"); n != 2 {
+			return fmt.Errorf("the target holds %d of the 2 rows written after the move", n)
+		}
+		return nil
+	})
 }

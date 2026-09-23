@@ -115,12 +115,12 @@ func (s *Syncer) Start(ctx context.Context) error {
 		return fmt.Errorf("prepare the position table: %w", err)
 	}
 
-	from, err := s.startingPoint(ctx, store)
+	from, slotSeen, err := s.startingPoint(ctx, store, source, slot)
 	if err != nil {
 		return err
 	}
 
-	consistent, err := s.ensureSlot(ctx, stream, slot, plugin)
+	consistent, err := s.ensureSlot(ctx, stream, slot, plugin, slotSeen)
 	if err != nil {
 		return fmt.Errorf("prepare the replication slot: %w", err)
 	}
@@ -257,26 +257,73 @@ func (s *Syncer) keyLookup(ctx context.Context, work *schemaWork) func(string, s
 	}
 }
 
-func (s *Syncer) startingPoint(ctx context.Context, store *checkpoint.SQLStore) (pglogrepl.LSN, error) {
+// startingPoint's bool is true only when the slot was looked for and found.
+func (s *Syncer) startingPoint(ctx context.Context, store *checkpoint.SQLStore,
+	source *pgx.Conn, slot string) (pglogrepl.LSN, bool, error) {
+
 	payload, err := store.Load(ctx, "")
 	if err != nil {
-		return 0, fmt.Errorf("read the stored position: %w", err)
+		return 0, false, fmt.Errorf("read the stored position: %w", err)
 	}
-	lsn, elsewhere, err := decodeLSN(payload, dsn.Endpoint("postgresql", s.cfg.SourceConnection))
+	here := dsn.Endpoint("postgresql", s.cfg.SourceConnection)
+	lsn, elsewhere, err := decodeLSN(payload, here)
 	if err != nil {
-		return 0, fmt.Errorf("read the stored position: %w", err)
+		return 0, false, fmt.Errorf("read the stored position: %w", err)
 	}
-	if elsewhere != "" {
-		s.logger.Warnf("[PostgreSQL] Ignoring a position recorded against %s: this "+
-			"task reads %s, and a log position means nothing on another server. The "+
-			"copy will be made again.", elsewhere,
-			dsn.Endpoint("postgresql", s.cfg.SourceConnection))
-		return 0, nil
+
+	exists := false
+	if lsn > 0 || elsewhere != "" {
+		if exists, err = hasSlot(ctx, source, slot); err != nil {
+			return 0, false, fmt.Errorf("look for the replication slot %s: %w", slot, err)
+		}
 	}
-	if lsn > 0 {
-		s.logger.Infof("[PostgreSQL] Resuming from %s", lsn)
+	from, err := resumePoint(lsn, elsewhere, here, slot, exists, s.cfg.ID)
+	if err != nil {
+		return 0, false, err
 	}
-	return lsn, nil
+
+	switch {
+	case elsewhere != "":
+		s.logger.Warnf("[PostgreSQL] The stored position %s belongs to %s, and this "+
+			"task reads %s: a log position means nothing on another server, so "+
+			"replication slot %s resumes from its own position on %s instead",
+			lsn, elsewhere, here, slot, here)
+	case from > 0:
+		s.logger.Infof("[PostgreSQL] Resuming from %s", from)
+	}
+	return from, exists, nil
+}
+
+func hasSlot(ctx context.Context, source *pgx.Conn, slot string) (bool, error) {
+	var exists bool
+	err := source.QueryRow(ctx,
+		"SELECT EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = $1)",
+		slotIdentifier(slot)).Scan(&exists)
+	return exists, err
+}
+
+// maxIdentifierBytes is NAMEDATALEN - 1 in a default PostgreSQL build.
+const maxIdentifierBytes = 63
+
+// slotIdentifier is the name the server gives the slot pglogrepl names without
+// quoting: the replication grammar folds an unquoted identifier to lower case,
+// keeps a quoted one as written, and truncates either to maxIdentifierBytes.
+func slotIdentifier(slot string) string {
+	name := slot
+	if len(name) >= 2 && name[0] == '"' && name[len(name)-1] == '"' {
+		name = strings.ReplaceAll(name[1:len(name)-1], `""`, `"`)
+	} else {
+		name = strings.Map(func(r rune) rune {
+			if r >= 'A' && r <= 'Z' {
+				return r + ('a' - 'A')
+			}
+			return r
+		}, name)
+	}
+	if len(name) > maxIdentifierBytes {
+		name = name[:maxIdentifierBytes]
+	}
+	return name
 }
 
 // ensureSlot creates the replication slot, or reports that it is already there.
@@ -286,8 +333,11 @@ func (s *Syncer) startingPoint(ctx context.Context, store *checkpoint.SQLStore) 
 // position: that is where it is writing now, and this is the restart case, so
 // taking it would skip everything committed while the task was down and no
 // later message would ever carry it.
-func (s *Syncer) ensureSlot(ctx context.Context, stream *pgconn.PgConn, slot, plugin string) (
-	pglogrepl.LSN, error) {
+//
+// seen skips the create for a slot already found on the source: one dropped
+// since must fail the stream, not be made again at the current end of the WAL.
+func (s *Syncer) ensureSlot(ctx context.Context, stream *pgconn.PgConn, slot, plugin string,
+	seen bool) (pglogrepl.LSN, error) {
 
 	system, err := pglogrepl.IdentifySystem(ctx, stream)
 	if err != nil {
@@ -295,6 +345,11 @@ func (s *Syncer) ensureSlot(ctx context.Context, stream *pgconn.PgConn, slot, pl
 	}
 	s.logger.Infof("[PostgreSQL] Source system %s, timeline %d, at %s",
 		system.SystemID, system.Timeline, system.XLogPos)
+
+	if seen {
+		s.logger.Infof("[PostgreSQL] Replication slot %s is already there", slot)
+		return 0, nil
+	}
 
 	created, err := pglogrepl.CreateReplicationSlot(ctx, stream, slot, plugin,
 		pglogrepl.CreateReplicationSlotOptions{Temporary: false})
