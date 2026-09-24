@@ -842,8 +842,9 @@ func TestStreamOrderHandsTheBatchOverUnsplit(t *testing.T) {
 func TestWithoutStreamOrderTheBatchIsStillSplit(t *testing.T) {
 	applier := &fakeApplier{commits: true}
 	events := []*domain.Event{
+		// One transaction, so the applier cannot flush between the two.
 		{NS: domain.Namespace{DB: "shop", Object: "orders"}, Op: domain.OpUpdate, Key: "1",
-			Pos: domain.Position{Payload: "1"}, EndsTransaction: true},
+			Pos: domain.Position{Payload: "1"}},
 		{NS: domain.Namespace{DB: "shop", Object: "orders"}, Op: domain.OpUpdate, Key: "1",
 			Pos: domain.Position{Payload: "2"}, EndsTransaction: true},
 	}
