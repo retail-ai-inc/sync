@@ -3,7 +3,10 @@ package resilience
 import (
 	"errors"
 	"fmt"
+	"net"
 	"testing"
+
+	"go.mongodb.org/mongo-driver/v2/mongo"
 )
 
 // Whether a failure is worth trying again is the one judgement this package
@@ -48,6 +51,51 @@ func TestACodeEmbeddedInAnotherNumberIsNotMatched(t *testing.T) {
 	code := retryableMongoCodes[0]
 	if mongoServerRetries(fmt.Errorf("wrote %d bytes", code)) {
 		t.Errorf("a message merely containing %d was treated as retryable", code)
+	}
+}
+
+// A typed failover error read as permanent fails the task instead of riding through the election.
+func TestTypedMongoFailoverErrorsAreRetried(t *testing.T) {
+	for _, code := range retryableMongoCodes {
+		typed := mongo.CommandError{Code: int32(code), Name: "X", Message: "operation was interrupted"}
+
+		if !IsConnectionError(typed) {
+			t.Errorf("a CommandError with code %d was treated as permanent", code)
+		}
+		if !IsConnectionError(fmt.Errorf("apply: %w", typed)) {
+			t.Errorf("a wrapped CommandError with code %d was treated as permanent", code)
+		}
+	}
+
+	writeConcern := mongo.WriteException{WriteConcernError: &mongo.WriteConcernError{
+		Code: 91, Name: "X", Message: "operation was interrupted"}}
+	if !IsConnectionError(writeConcern) {
+		t.Error("a write concern error with code 91 was treated as permanent")
+	}
+}
+
+// A retried Unauthorized spends the whole backoff before the bad credential is reported.
+func TestATypedMongoErrorWithAnotherCodeIsNotRetried(t *testing.T) {
+	unauthorized := mongo.CommandError{Code: 13, Name: "Unauthorized", Message: "command find requires authentication"}
+
+	if IsConnectionError(unauthorized) {
+		t.Error("a CommandError with code 13 was treated as retryable")
+	}
+}
+
+// Errors the driver or the network stack classify by type carry no transient phrase to fall back on.
+func TestNetworkAndTimeoutErrorsAreRetriedByTheirType(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"net.Error", &net.OpError{Op: "read", Net: "tcp", Err: errors.New("x")}},
+		{"network label", mongo.CommandError{Name: "X", Message: "m", Labels: []string{"NetworkError"}}},
+		{"max time expired", mongo.CommandError{Code: 50, Name: "X", Message: "m"}},
+	} {
+		if !IsConnectionError(tc.err) {
+			t.Errorf("%s (%v) was treated as permanent", tc.name, tc.err)
+		}
 	}
 }
 
