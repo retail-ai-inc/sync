@@ -130,3 +130,74 @@ func TestTheFirstCopyQuotesTheNamesItReads(t *testing.T) {
 		}
 	}
 }
+
+// showCreate answers SHOW CREATE TABLE as the server does.
+func showCreate(match, table, statement string) reply {
+	return reply{match: match, columns: []string{"Table", "Create Table"},
+		rows: [][]driver.Value{{table, statement}}}
+}
+
+// A failure means a renamed target is created under the source's name, so every batch into the mapped table fails and the first copy never completes.
+func TestARenamedTargetIsCreatedUnderItsMappedName(t *testing.T) {
+	source := &fakeDB{replies: []reply{
+		showCreate("SHOW CREATE TABLE `shop`.`users`", "users",
+			"CREATE TABLE `users` (\n  `id` int NOT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB"),
+		showColumns("SHOW COLUMNS FROM `shop`.`users`", "id"),
+		{match: "SELECT `id` FROM `shop`.`users`", columns: []string{"id"},
+			rows: [][]driver.Value{{int64(1)}}},
+	}}
+	target := &fakeDB{replies: []reply{
+		targetHolds(0),
+		{match: "CREATE TABLE"},
+		{match: "INSERT INTO"},
+	}}
+
+	if err := firstCopy(t, source, target, mapTable("users", "users_dr")); err != nil {
+		t.Fatalf("the first copy failed: %v", err)
+	}
+	if !target.wasAsked("CREATE TABLE `shop_bk`.`users_dr` (") {
+		t.Errorf("users_dr was not created; the target was asked %q", target.statements())
+	}
+	if target.wasAsked("CREATE TABLE `users`") {
+		t.Error("a table was created under the source's name")
+	}
+	if !target.wasAsked("INSERT INTO `shop_bk`.`users_dr`") {
+		t.Errorf("no row reached users_dr; the target was asked %q", target.statements())
+	}
+}
+
+// A failure means the target table is created under a name nobody mapped, or from a statement this cannot rename.
+func TestTheCreatedTableTakesTheMappedNameHoweverTheSourceQuotesIt(t *testing.T) {
+	for name, c := range map[string]struct {
+		statement string
+		want      string
+	}{
+		"quoted":   {"CREATE TABLE `users` (`id` int)", "CREATE TABLE `shop_bk`.`users_dr` (`id` int)"},
+		"unquoted": {"CREATE TABLE users (id int)", "CREATE TABLE `shop_bk`.`users_dr` (id int)"},
+		"ansi":     {`CREATE TABLE "users" ("id" int)`, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			source := &fakeDB{replies: []reply{showCreate("SHOW CREATE TABLE", "users", c.statement)}}
+			conn, err := source.open(t).Conn(context.Background())
+			if err != nil {
+				t.Fatalf("conn: %v", err)
+			}
+			defer conn.Close()
+
+			got, _, err := (&MySQLSyncer{}).generateCreateTableSQL(context.Background(), conn,
+				"shop", "users", "shop_bk", "users_dr")
+			if c.want == "" {
+				if err == nil {
+					t.Errorf("a statement that does not open with the table's name was renamed to %q", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("generateCreateTableSQL: %v", err)
+			}
+			if got != c.want {
+				t.Errorf("got %q, want %q", got, c.want)
+			}
+		})
+	}
+}

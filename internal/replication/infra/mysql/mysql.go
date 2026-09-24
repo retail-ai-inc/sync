@@ -349,16 +349,15 @@ func (s *MySQLSyncer) generateCreateTableSQL(
 	if err := row.Scan(&tableName, &createSQL); err != nil {
 		return "", nil, fmt.Errorf("SHOW CREATE TABLE fail: %w", err)
 	}
-	oldPrefix := fmt.Sprintf("CREATE TABLE %s.", srcDBName)
-	newPrefix := fmt.Sprintf("CREATE TABLE %s.", tgtDBName)
-	createSQL = strings.Replace(createSQL, oldPrefix, newPrefix, 1)
-
-	oldTable := fmt.Sprintf("%s.%s", srcDBName, srcTableName)
-	newTable := fmt.Sprintf("%s.%s", tgtDBName, tgtTableName)
-	createSQL = strings.Replace(createSQL, oldTable, newTable, 1)
-
-	var seqs []string
-	return createSQL, seqs, nil
+	// SHOW CREATE TABLE opens with the bare table name, so that name is what the
+	// target's has to replace.
+	for _, name := range []string{quoteName(tableName), tableName} {
+		if body, found := strings.CutPrefix(createSQL, "CREATE TABLE "+name+" "); found {
+			return fmt.Sprintf("CREATE TABLE %s.%s %s", quoteName(tgtDBName), quoteName(tgtTableName), body), nil, nil
+		}
+	}
+	return "", nil, fmt.Errorf("SHOW CREATE TABLE %s.%s does not open with the table's name, "+
+		"so it cannot be rewritten to create %s.%s", srcDBName, srcTableName, tgtDBName, tgtTableName)
 }
 
 func (s *MySQLSyncer) batchInsert(
