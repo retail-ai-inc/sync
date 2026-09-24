@@ -573,3 +573,77 @@ func TestATaskWithNoRetiredPathsIsSilent(t *testing.T) {
 		t.Errorf("a task configuring none of them was reported anyway: %s", out.String())
 	}
 }
+
+// blockedSeries reports sync_task_blocked for exactly these labels.
+func blockedSeries(labels metrics.Labels) (float64, bool) {
+	for _, sample := range metrics.Default.Snapshot(metrics.TaskBlocked) {
+		if sample.Labels["task"] == labels["task"] && sample.Labels["engine"] == labels["engine"] {
+			return sample.Value, true
+		}
+	}
+	return 0, false
+}
+
+func TestABlockedTaskTakenOutOfServiceStopsReportingBlocked(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		id   int
+		next func(config.SyncConfig) *config.Config
+	}{
+		{"disabled", 61, func(sc config.SyncConfig) *config.Config { sc.Enable = false; return cfgWith(sc) }},
+		{"removed", 62, func(config.SyncConfig) *config.Config { return cfgWith() }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			starts := make(chan int, 8)
+			s := runWith(t, exitingTask(starts, domain.Unrecoverable("the binlog is gone")))
+			ctx := context.Background()
+			task := baseTask()
+			task.ID = c.id
+
+			s.apply(ctx, cfgWith(task))
+			drain(t, starts, 1)
+			settled(t, s, task.ID)
+			s.apply(ctx, cfgWith(task))
+			if value, _ := blockedSeries(taskLabels(task)); value != 1 {
+				t.Fatalf("sync_task_blocked = %v before the change, want 1", value)
+			}
+
+			s.apply(ctx, c.next(task))
+
+			// A failure means the blocked alert goes on firing for a task nobody is running.
+			if value, _ := blockedSeries(taskLabels(task)); value != 0 {
+				t.Errorf("sync_task_blocked = %v after the task was %s, want 0", value, c.name)
+			}
+		})
+	}
+}
+
+func TestCorrectingAnUnknownEngineClearsItsBlockedSeries(t *testing.T) {
+	s := runWith(t, func(sc config.SyncConfig, _ *config.Config, _ *logrus.Logger) func(context.Context) error {
+		if sc.Type == "sybase" {
+			return nil
+		}
+		return func(ctx context.Context) error { <-ctx.Done(); return nil }
+	})
+	ctx := context.Background()
+
+	broken := baseTask()
+	broken.ID = 63
+	broken.Type = "sybase"
+	s.apply(ctx, cfgWith(broken))
+	if value, _ := blockedSeries(taskLabels(broken)); value != 1 {
+		t.Fatalf("sync_task_blocked{engine=sybase} = %v before the fix, want 1", value)
+	}
+
+	fixed := broken
+	fixed.Type = "mysql"
+	s.apply(ctx, cfgWith(fixed))
+
+	// A failure means the old engine's series stays at 1 for a task that is now running.
+	if value, _ := blockedSeries(taskLabels(broken)); value != 0 {
+		t.Errorf("sync_task_blocked{engine=sybase} = %v after the type was corrected, want 0", value)
+	}
+	if value, found := blockedSeries(taskLabels(fixed)); !found || value != 0 {
+		t.Errorf("sync_task_blocked{engine=mysql} = %v (found=%v), want 0", value, found)
+	}
+}

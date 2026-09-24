@@ -50,6 +50,9 @@ type runningTask struct {
 	// blocked means the task stopped for a reason retrying cannot fix, so it stays
 	// stopped until somebody changes something.
 	blocked bool
+	// labels are the ones its gauges were published under. stop clears the
+	// blocked series through them: an edit may change the engine label.
+	labels metrics.Labels
 }
 
 func (t *runningTask) exited() bool {
@@ -267,6 +270,7 @@ func (s *supervisor) start(parentCtx context.Context, sc config.SyncConfig) {
 			cancel:      func() {},
 			done:        done,
 			blocked:     true,
+			labels:      taskLabels(sc),
 		}
 		metrics.SetTaskBlocked(taskLabels(sc), true)
 		return
@@ -274,7 +278,8 @@ func (s *supervisor) start(parentCtx context.Context, sc config.SyncConfig) {
 
 	ctx, cancel := context.WithCancel(parentCtx)
 	done := make(chan struct{})
-	task := &runningTask{fingerprint: fingerprint(sc), cancel: cancel, done: done}
+	task := &runningTask{fingerprint: fingerprint(sc), cancel: cancel, done: done,
+		labels: taskLabels(sc)}
 	s.running[sc.ID] = task
 
 	go func() {
@@ -338,6 +343,8 @@ func (s *supervisor) stop(id int) {
 		s.log.Warnf("Task %d did not finish within %v of being asked to stop",
 			id, drainTimeout)
 	}
+	// TaskBlocked survives ForgetStale, so nothing else takes a stopped task's 1 away.
+	metrics.SetTaskBlocked(task.labels, false)
 }
 
 // stopAll asks every task to stop and waits for them together, so shutdown
