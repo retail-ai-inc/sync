@@ -263,6 +263,11 @@ func (s *MySQLSyncer) doInitialSync(ctx context.Context, sourceDB *sql.Conn, tar
 					batchRows = batchRows[:0]
 				}
 			}
+			// A dropped connection ends Next too; taken for the table's end, the
+			// rows after it are never copied.
+			if errRows := srcRows.Err(); errRows != nil {
+				fail("could not read all of %s.%s: %v", sourceDBName, tableMap.SourceTable, errRows)
+			}
 			srcRows.Close()
 
 			if len(batchRows) > 0 {

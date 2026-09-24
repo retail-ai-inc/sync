@@ -30,6 +30,9 @@ type reply struct {
 	columns []string
 	rows    [][]driver.Value
 	err     error
+	// rowsErr ends the rows with this error instead of io.EOF, as a connection
+	// dropped partway through a read does.
+	rowsErr error
 	// sequence answers successive calls with successive row sets, the last one
 	// repeating. A server whose binlog moves between two reads cannot be
 	// modelled with a single fixed answer.
@@ -160,13 +163,14 @@ func (s *fakeStmt) Query(args []driver.Value) (driver.Rows, error) {
 	if answer.err != nil {
 		return nil, answer.err
 	}
-	return &fakeRows{columns: answer.columns, rows: answer.rows}, nil
+	return &fakeRows{columns: answer.columns, rows: answer.rows, err: answer.rowsErr}, nil
 }
 
 type fakeRows struct {
 	columns []string
 	rows    [][]driver.Value
 	at      int
+	err     error
 }
 
 func (r *fakeRows) Columns() []string { return r.columns }
@@ -174,6 +178,9 @@ func (r *fakeRows) Close() error      { return nil }
 
 func (r *fakeRows) Next(dest []driver.Value) error {
 	if r.at >= len(r.rows) {
+		if r.err != nil {
+			return r.err
+		}
 		return io.EOF
 	}
 	copy(dest, r.rows[r.at])
