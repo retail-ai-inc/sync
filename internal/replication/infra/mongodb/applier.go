@@ -67,7 +67,15 @@ func (a *Applier) Apply(ctx context.Context, runs [][]*domain.Event, pos domain.
 
 	// A schema change stands alone and runs outside a transaction: MongoDB's
 	// catalogue is not transactional, so a DDL inside one is refused.
-	if schema, ok := onlySchemaChange(runs); ok {
+	if schema, alone := onlySchemaChange(runs); schema != nil {
+		if !alone {
+			// Written as part of the batch, the DDL is passed over while the
+			// position moves past it.
+			return false, domain.Unrecoverable(
+				"a schema change to %s shares its batch with other changes, which the "+
+					"pipeline never builds. Replication has stopped rather than apply the "+
+					"rows and pass over the schema change", schema.NS)
+		}
 		return false, a.applySchemaChange(ctx, schema)
 	}
 

@@ -326,3 +326,46 @@ func TestTheSourceIsNeverReadThroughTheTargetsSession(t *testing.T) {
 		t.Errorf("the source was read through the target's session: %v", err)
 	}
 }
+
+func TestASchemaChangeSharingABatchFailsItBeforeAnyWrite(t *testing.T) {
+	client, err := mongo.Connect(options.Client().ApplyURI(
+		"mongodb://127.0.0.1:1/?directConnection=true&serverSelectionTimeoutMS=200"))
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(func() { _ = client.Disconnect(context.Background()) })
+	applier := &Applier{Client: client, TargetDatabase: "shop", NoTransaction: true}
+
+	schema := func() *domain.Event {
+		return &domain.Event{
+			NS: domain.Namespace{DB: "shop", Object: "orders"},
+			Op: domain.OpSchema,
+			Payload: schemaChange{
+				Kind:       "createIndexes",
+				Collection: "orders",
+				Command: bson.D{{Key: "createIndexes", Value: "orders"}, {Key: "indexes", Value: bson.A{
+					bson.D{{Key: "key", Value: bson.D{{Key: "customer", Value: 1}}}, {Key: "name", Value: "customer_1"}},
+				}}},
+				Describe: "create 1 index(es) on orders",
+			},
+		}
+	}
+	for _, c := range []struct {
+		name string
+		runs [][]*domain.Event
+	}{
+		{"row after", [][]*domain.Event{{schema(), writeEvent("orders", "a")}}},
+		{"row before", [][]*domain.Event{{writeEvent("orders", "a"), schema()}}},
+		{"row in another run", [][]*domain.Event{{schema()}, {writeEvent("orders", "a")}}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_, err := applier.Apply(ctx, c.runs, domain.Position{})
+			// Anything else writes the rows, passes over the DDL and moves the position past it.
+			if !domain.IsUnrecoverable(err) {
+				t.Errorf("Apply = %v, want the batch refused as a pipeline bug", err)
+			}
+		})
+	}
+}
