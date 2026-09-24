@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -366,5 +367,60 @@ func TestTheOptionsFileStaysPrivateWithTheTransportSettings(t *testing.T) {
 	}
 	if mode := info.Mode().Perm(); mode != 0o600 {
 		t.Errorf("mode = %o, want 600", mode)
+	}
+}
+
+// mongoexportWritesItsCollection writes one document naming its collection to
+// the file given by --out.
+const mongoexportWritesItsCollection = `
+out=""; coll=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --out) out="$2"; shift 2;;
+    --collection) coll="$2"; shift 2;;
+    *) shift;;
+  esac
+done
+printf '{"_id":1,"from":"%s"}\n' "$coll" > "$out"
+`
+
+// gsutilThatStoresSeven answers the size check for the seven bytes zipThatKeeps
+// writes.
+const gsutilThatStoresSeven = `case "$1" in stat) echo "Content-Length: 7";; esac`
+
+// zipThatKeeps copies the file it is given to kept before writing a seven-byte
+// archive, because the export removes the file once it has been zipped.
+func zipThatKeeps(kept string) string {
+	return `cp "$3" ` + kept + `
+echo zipped > "$2"
+`
+}
+
+// A merge left in its buffer would upload an empty backup while every other test stays green.
+func TestTheMergedMongoFileHoldsEveryDocument(t *testing.T) {
+	binDir := stubPATH(t)
+	kept := filepath.Join(binDir, "merged.captured")
+	stubBin(t, binDir, "mongoexport", mongoexportWritesItsCollection, 0)
+	stubBin(t, binDir, "zip", zipThatKeeps(kept), 0)
+	stubBin(t, binDir, "gsutil", gsutilThatStoresSeven, 0)
+
+	e := newExecutor()
+	if err := e.exportMongoDBMergedTables(context.Background(), "mongodb://host/", "shop",
+		[]string{"orders_202607", "orders_202608"}, t.TempDir(),
+		mongoMergedConfig("gs://bucket/backups")); err != nil {
+		t.Fatalf("exportMongoDBMergedTables: %v", err)
+	}
+
+	data, err := os.ReadFile(kept)
+	if err != nil {
+		t.Fatalf("the merged file was never zipped: %v", err)
+	}
+	got := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	want := []string{
+		`{"_id":1,"from":"orders_202607"}`,
+		`{"_id":1,"from":"orders_202608"}`,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("merged file = %q, want one document from each collection in order", data)
 	}
 }

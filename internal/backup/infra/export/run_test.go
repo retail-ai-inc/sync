@@ -445,3 +445,99 @@ func TestRegexModeNeedsAPattern(t *testing.T) {
 		t.Error("ExpandAndGroupTables = nil for a pattern-mode job with no pattern")
 	}
 }
+
+// uploadedObjects lists the objects gsutil was asked to copy to, in order.
+func uploadedObjects(t *testing.T, dir string) []string {
+	t.Helper()
+
+	args := stubArgs(t, dir, "gsutil")
+	var objects []string
+	for i, a := range args {
+		if a == "cp" && i+2 < len(args) {
+			objects = append(objects, args[i+2])
+		}
+	}
+	return objects
+}
+
+// A swapped or missing argument in the MongoDB branch would reach staging with every test green.
+func TestExecuteRunsTheMongoWorkflow(t *testing.T) {
+	dir := stubPATH(t)
+	stubBin(t, dir, "mongoexport", mongoexportWritesItsCollection, 0)
+	stubBin(t, dir, "zip", zipThatKeeps(filepath.Join(dir, "export.captured")), 0)
+	stubBin(t, dir, "gsutil", gsutilThatStoresSeven, 0)
+
+	db := taskDB(t)
+	id := insertBackupTask(t, db, 1, `{
+		"name":"nightly","sourceType":"mongodb",
+		"database":{"url":"mongos:27017","username":"svc","password":"hunter2",
+			"database":"shop","tables":["orders"]},
+		"destination":{"gcsPath":"gs://bucket/x"}
+	}`)
+
+	e := NewBackupExecutor(db)
+	if err := e.Execute(context.Background(), id); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	args := stubArgs(t, dir, "mongoexport")
+	for _, want := range [][2]string{{"--db", "shop"}, {"--collection", "orders"}} {
+		if at := indexOfArg(args, want[0]); at < 0 || args[at+1] != want[1] {
+			t.Errorf("mongoexport args = %v, want %s %s", args, want[0], want[1])
+		}
+	}
+	if at := indexOfArg(args, "--uri"); at < 0 || !strings.Contains(args[at+1], "svc@mongos:27017") {
+		t.Errorf("mongoexport args = %v, want --uri naming the user and the host", args)
+	}
+	if indexOfArg(args, "--config") < 0 {
+		t.Errorf("mongoexport args = %v, want the password passed through --config", args)
+	}
+	for _, arg := range args {
+		if strings.Contains(arg, "hunter2") {
+			t.Errorf("the password is in the argument list: %q", arg)
+		}
+	}
+
+	want := []string{"gs://bucket/x/orders-" + yesterdayStamp() + ".zip"}
+	if got := uploadedObjects(t, dir); !reflect.DeepEqual(got, want) {
+		t.Errorf("uploaded objects = %v, want %v", got, want)
+	}
+	if got, want := e.Uploaded(), (Tally{Files: 1, Bytes: 7, Records: 1}); got != want {
+		t.Errorf("Uploaded() = %+v, want %+v", got, want)
+	}
+}
+
+// Monthly shards that each reached the bucket would overwrite one another under the group's name.
+func TestExecuteMergesMongoShardsIntoOneUpload(t *testing.T) {
+	dir := stubPATH(t)
+	kept := filepath.Join(dir, "merged.captured")
+	stubBin(t, dir, "mongoexport", mongoexportWritesItsCollection, 0)
+	stubBin(t, dir, "zip", zipThatKeeps(kept), 0)
+	stubBin(t, dir, "gsutil", gsutilThatStoresSeven, 0)
+
+	db := taskDB(t)
+	id := insertBackupTask(t, db, 1, `{
+		"name":"monthly","sourceType":"mongodb",
+		"database":{"url":"mongos:27017","database":"shop",
+			"tables":["orders_202607","orders_202608"]},
+		"destination":{"gcsPath":"gs://bucket/x"}
+	}`)
+
+	if err := NewBackupExecutor(db).Execute(context.Background(), id); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	want := []string{"gs://bucket/x/orders-" + yesterdayStamp() + ".zip"}
+	if got := uploadedObjects(t, dir); !reflect.DeepEqual(got, want) {
+		t.Errorf("uploaded objects = %v, want %v", got, want)
+	}
+	data, err := os.ReadFile(kept)
+	if err != nil {
+		t.Fatalf("the merged file was never zipped: %v", err)
+	}
+	for _, shard := range []string{"orders_202607", "orders_202608"} {
+		if !strings.Contains(string(data), `"from":"`+shard+`"`) {
+			t.Errorf("merged file = %q, want the document from %s", data, shard)
+		}
+	}
+}

@@ -3,6 +3,7 @@ package export
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -872,5 +873,100 @@ func TestTheMongoBackupWorkflowStillZipsByDefault(t *testing.T) {
 	stubArgs(t, binDir, "zip")
 	if gsutil := stubArgs(t, binDir, "gsutil"); !strings.HasSuffix(gsutil[2], ".zip") {
 		t.Errorf("upload target = %q, want a .zip", gsutil[2])
+	}
+}
+
+// mongoexportThatKeepsItsConfig copies the file named by --config to kept, since
+// the export removes it as soon as mongoexport returns.
+func mongoexportThatKeepsItsConfig(kept string) string {
+	return `
+out=""; config=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --out) out="$2"; shift 2;;
+    --config) config="$2"; shift 2;;
+    *) shift;;
+  esac
+done
+[ -n "$config" ] && cp "$config" ` + kept + `
+printf '{"_id":1}\n' > "$out"
+`
+}
+
+// A password back on --uri would sit in /proc/<pid>/cmdline while the masked log line looked fine.
+func TestTheMongoPasswordStaysOutOfTheProcessList(t *testing.T) {
+	binDir := stubPATH(t)
+	kept := filepath.Join(binDir, "config.captured")
+	stubBin(t, binDir, "mongoexport", mongoexportThatKeepsItsConfig(kept), 0)
+
+	const password = "p@ss:w/rd%+x"
+	connStr := buildMongoDBConnectionString("mongos:27017", "svc", password)
+
+	e := newExecutor()
+	if err := e.executeExternalMongoExportWithOptions(context.Background(), connStr, "shop",
+		"orders", filepath.Join(t.TempDir(), "orders.json"), mongoBackupConfig("")); err != nil {
+		t.Fatalf("executeExternalMongoExportWithOptions: %v", err)
+	}
+
+	args := stubArgs(t, binDir, "mongoexport")
+	escaped := url.QueryEscape(password)
+	for _, arg := range args {
+		if strings.Contains(arg, password) || strings.Contains(arg, escaped) {
+			t.Fatalf("the password is in the argument list: %q", arg)
+		}
+	}
+	uri := indexOfArg(args, "--uri")
+	if uri < 0 || !strings.Contains(args[uri+1], "svc@mongos:27017") {
+		t.Errorf("args = %v, want --uri naming the user and the host", args)
+	}
+	config := indexOfArg(args, "--config")
+	if config < 0 {
+		t.Fatalf("args = %v, want --config carrying the password", args)
+	}
+
+	data, err := os.ReadFile(kept)
+	if err != nil {
+		t.Fatalf("the credentials file was not readable by mongoexport: %v", err)
+	}
+	if got, want := string(data), `password: "`+password+`"`+"\n"; got != want {
+		t.Errorf("credentials file = %q, want %q", got, want)
+	}
+	if _, err := os.Stat(args[config+1]); !os.IsNotExist(err) {
+		t.Errorf("%s outlived the export (%v)", args[config+1], err)
+	}
+}
+
+// Losing the "all" sentinel would export every document as its _id alone; losing the list would export every field.
+func TestAFieldListNarrowsTheMongoExportAndAllLeavesItWhole(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		fields []string
+		want   string
+	}{
+		{name: "all", fields: []string{"all"}},
+		{name: "listed", fields: []string{"a", "b"}, want: "a,b"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			binDir := stubPATH(t)
+			stubBin(t, binDir, "mongoexport", mongoexportStubBody, 0)
+
+			cfg := mongoBackupConfig("")
+			cfg.Database.Fields = map[string][]string{"orders": tc.fields}
+			e := newExecutor()
+			if err := e.executeExternalMongoExportWithOptions(context.Background(),
+				"mongodb://mongos:27017/", "shop", "orders",
+				filepath.Join(t.TempDir(), "orders.json"), cfg); err != nil {
+				t.Fatalf("executeExternalMongoExportWithOptions: %v", err)
+			}
+
+			args := stubArgs(t, binDir, "mongoexport")
+			at := indexOfArg(args, "--fields")
+			switch {
+			case tc.want == "" && at >= 0:
+				t.Errorf("args = %v, want no --fields for %v", args, tc.fields)
+			case tc.want != "" && (at < 0 || args[at+1] != tc.want):
+				t.Errorf("args = %v, want --fields %s", args, tc.want)
+			}
+		})
 	}
 }
