@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -819,4 +820,133 @@ func TestATimestampSurvivesAServerInAnotherZone(t *testing.T) {
 				id, source, target, target-source)
 		}
 	}
+}
+
+// parityColumns are the column types the first copy and the binlog deliver in
+// different shapes: text through database/sql, raw values through canal. read
+// is how both sides are compared, byte for byte where the type has bytes.
+var parityColumns = []struct{ name, def, read, copied, streamed string }{
+	{"emoji", "VARCHAR(20) CHARACTER SET utf8mb4", "HEX(%s)", "'寿司🍣'", "'東京😀'"},
+	{"big", "BIGINT UNSIGNED", "CAST(%s AS CHAR)", "18446744073709551615", "9223372036854775808"},
+	{"money", "DECIMAL(20,6)", "CAST(%s AS CHAR)", "'12345678901234.123456'", "'-0.000001'"},
+	{"doc", "JSON", "CAST(%s AS CHAR)", `'{"a": [1, "東京", null], "b": 1.5}'`, `'[{"k": "🍣"}, 18446744073709551615]'`},
+	{"state", "ENUM('new','paid','void')", "HEX(%s)", "'paid'", "'void'"},
+	{"flags", "SET('a','b','c')", "HEX(%s)", "'a,c'", "'b'"},
+	{"bits", "BIT(10)", "HEX(%s)", "b'1010000011'", "b'1'"},
+	{"blobby", "BLOB", "HEX(%s)", "x'00ff10e38182'", "NULL"},
+	{"fixed", "BINARY(4)", "HEX(%s)", "x'00010203'", "x'ff'"},
+	{"at", "DATETIME(6)", "CAST(%s AS CHAR)", "'2026-03-01 04:05:06.123456'", "'1000-01-01 00:00:00.000001'"},
+	{"dur", "TIME(3)", "CAST(%s AS CHAR)", "'-12:34:56.789'", "'838:59:59.000'"},
+	{"yr", "YEAR", "CAST(%s AS CHAR)", "2026", "1901"},
+	{"dbl", "DOUBLE", "CAST(%s AS CHAR)", "0.1", "-1.7976931348623157e308"},
+	{"flt", "FLOAT", "CAST(%s AS CHAR)", "1.5", "-0.25"},
+	{"tiny", "TINYINT", "CAST(%s AS CHAR)", "-128", "127"},
+	{"medu", "MEDIUMINT UNSIGNED", "CAST(%s AS CHAR)", "16777215", "0"},
+}
+
+// parityRows reads every row of table as the parity columns render it, keyed
+// by the hex of its binary primary key.
+func parityRows(t *testing.T, db *sql.DB, table string) (map[string][]string, error) {
+	t.Helper()
+
+	reads := []string{"HEX(id)"}
+	for _, c := range parityColumns {
+		reads = append(reads, fmt.Sprintf("COALESCE("+c.read+", 'NULL')", c.name))
+	}
+	rows, err := db.Query(fmt.Sprintf("SELECT %s FROM %s", strings.Join(reads, ", "), table))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := map[string][]string{}
+	for rows.Next() {
+		values := make([]string, len(reads))
+		dest := make([]interface{}, len(values))
+		for i := range values {
+			dest[i] = &values[i]
+		}
+		if err := rows.Scan(dest...); err != nil {
+			return nil, err
+		}
+		out[values[0]] = values[1:]
+	}
+	return out, rows.Err()
+}
+
+// A failure means a value the first copy writes correctly arrives differently through the binlog.
+func TestEveryColumnTypeArrivesTheSameByCopyAndByStream(t *testing.T) {
+	table := harness.UniqueName("parity")
+	src, tgt := open(t, harness.MySQLSource, sourceDB), open(t, harness.MySQLTarget, targetDB)
+
+	var defs, names, copied, streamed, sets []string
+	for _, c := range parityColumns {
+		defs = append(defs, c.name+" "+c.def)
+		names = append(names, c.name)
+		copied = append(copied, c.copied)
+		streamed = append(streamed, c.streamed)
+		sets = append(sets, c.name+" = "+c.streamed)
+	}
+	mustExec(t, src, fmt.Sprintf("CREATE TABLE %s (id VARBINARY(16) PRIMARY KEY, %s)",
+		table, strings.Join(defs, ", ")))
+	t.Cleanup(func() {
+		_, _ = src.Exec("DROP TABLE IF EXISTS " + table)
+		_, _ = tgt.Exec("DROP TABLE IF EXISTS " + table)
+	})
+	insert := func(id string, values []string) {
+		mustExec(t, src, fmt.Sprintf("INSERT INTO %s (id, %s) VALUES (%s, %s)",
+			table, strings.Join(names, ", "), id, strings.Join(values, ", ")))
+	}
+	for _, id := range []string{"x'c0ff'", "x'c1'", "x'd0'"} {
+		insert(id, copied)
+	}
+
+	startSyncer(t, syncTask(t, table))
+	harness.Eventually(t, 45*time.Second, func() error {
+		if n := countRows(t, tgt, table, ""); n != 3 {
+			return fmt.Errorf("the first copy has not landed: %d rows", n)
+		}
+		return nil
+	})
+
+	insert("x'00ff'", streamed)
+	insert("x'00'", copied)
+	mustExec(t, src, fmt.Sprintf("UPDATE %s SET %s WHERE id = x'c1'", table, strings.Join(sets, ", ")))
+	mustExec(t, src, fmt.Sprintf("DELETE FROM %s WHERE id = x'd0'", table))
+
+	harness.Eventually(t, 30*time.Second, func() error {
+		want, err := parityRows(t, src, table)
+		if err != nil {
+			return err
+		}
+		got, err := parityRows(t, tgt, table)
+		if err != nil {
+			return err
+		}
+		ids := make([]string, 0, len(want))
+		for id := range want {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		var differences []string
+		for _, id := range ids {
+			if _, ok := got[id]; !ok {
+				differences = append(differences, fmt.Sprintf("row %s is missing", id))
+				continue
+			}
+			for i, c := range parityColumns {
+				if want[id][i] != got[id][i] {
+					differences = append(differences, fmt.Sprintf("row %s %s: source %s, target %s",
+						id, c.name, want[id][i], got[id][i]))
+				}
+			}
+		}
+		if len(got) != len(want) {
+			differences = append(differences, fmt.Sprintf("target holds %d rows, source %d", len(got), len(want)))
+		}
+		if len(differences) > 0 {
+			return fmt.Errorf("%s", strings.Join(differences, "; "))
+		}
+		return nil
+	})
 }
