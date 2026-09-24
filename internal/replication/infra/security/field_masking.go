@@ -152,6 +152,9 @@ func ProcessValue(value interface{}, fieldName string, config TableSecurity) int
 				processed = maskValue(value)
 			case "encrypted":
 				switch v := value.(type) {
+				case nil:
+					// NULL stays NULL: a ciphertext of "<nil>" would make an absent value look present.
+					processed = nil
 				case string:
 					encrypted, err := encryptAES([]byte(v))
 					if err != nil {

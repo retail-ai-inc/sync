@@ -170,6 +170,32 @@ func TestProcessValueEncryptedIsNonDeterministic(t *testing.T) {
 	}
 }
 
+// A failure means the target holds a ciphertext of "<nil>" where the source holds NULL.
+func TestAnEncryptedNullStaysNull(t *testing.T) {
+	cfg := enabled(
+		FieldSecurityConfig{Field: "phone", SecurityType: "encrypted"},
+		FieldSecurityConfig{Field: "profile.contact.phone", SecurityType: "encrypted"})
+
+	if got := ProcessValue(nil, "phone", cfg); got != nil {
+		t.Errorf("ProcessValue(nil) = %#v, want nil", got)
+	}
+
+	processed, ok := ProcessValue(map[string]interface{}{
+		"phone":   nil,
+		"profile": bson.M{"contact": bson.M{"phone": nil}},
+	}, "", cfg).(map[string]interface{})
+	if !ok {
+		t.Fatalf("ProcessValue did not return a document")
+	}
+	if phone, present := processed["phone"]; !present || phone != nil {
+		t.Errorf("phone = %#v (present %v), want a null", phone, present)
+	}
+	contact := processed["profile"].(map[string]interface{})["contact"].(map[string]interface{})
+	if phone, present := contact["phone"]; !present || phone != nil {
+		t.Errorf("profile.contact.phone = %#v (present %v), want a null", phone, present)
+	}
+}
+
 // The switch left `processed` at its zero value for anything outside {masked,
 // encrypted} and returned it unconditionally, so a securityType of "Masked" —
 // the comparison was case-sensitive — or anything a client had made up

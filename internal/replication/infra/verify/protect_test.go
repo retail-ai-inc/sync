@@ -181,6 +181,22 @@ func TestARepairEncryptsRatherThanCopies(t *testing.T) {
 	}
 }
 
+// A failure means a repair writes a ciphertext, or nothing, where the source holds NULL.
+func TestARepairKeepsANullEncryptedColumnNull(t *testing.T) {
+	t.Setenv("SYNC_FIELD_KEY", testFieldKey)
+	source := usersEnd(t, "source", [5]interface{}{1, "a", nil, "Ann", 7})
+	target := usersEnd(t, "target")
+	r := protectedPair(source, target, policyOf("card", "encrypted"))
+
+	if _, err := r.Repair(context.Background(), []Difference{{Key: keyOf("1"), Kind: Missing}}); err != nil {
+		t.Fatalf("Repair: %v", err)
+	}
+
+	if _, card, found := userOf(t, target, 1); !found || card.Valid {
+		t.Errorf("the target holds card %q/%v after the repair, want a NULL", card.String, found)
+	}
+}
+
 func TestARepairWithNoFieldKeyWritesNothing(t *testing.T) {
 	t.Setenv("SYNC_FIELD_KEY", "")
 	t.Setenv("SYNC_CONFIG_KEY", "")
@@ -299,6 +315,24 @@ func TestADocumentRepairWritesWhatReplicationWrites(t *testing.T) {
 	}
 	if doc["name"] != "Ann" {
 		t.Errorf("an unprotected field became %v", doc["name"])
+	}
+}
+
+// A failure means a document repair writes a ciphertext, or nothing, where the source holds null.
+func TestADocumentRepairKeepsANullEncryptedFieldNull(t *testing.T) {
+	t.Setenv("SYNC_FIELD_KEY", testFieldKey)
+	r := &MongoRepairer{Protect: ProtectionOf(policyOf("card", "encrypted"))}
+
+	replacement, err := r.replacement(documentOf(t, bson.M{"_id": 1, "card": nil}))
+	if err != nil {
+		t.Fatalf("replacement: %v", err)
+	}
+	doc, ok := replacement.(bson.M)
+	if !ok {
+		t.Fatalf("replacement is a %T", replacement)
+	}
+	if card, present := doc["card"]; !present || card != nil {
+		t.Errorf("card = %#v (present %v), want a null", card, present)
 	}
 }
 

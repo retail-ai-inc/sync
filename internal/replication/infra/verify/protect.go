@@ -137,8 +137,8 @@ func (p *Protection) written(column string, value interface{}) (interface{}, err
 		return nil, fmt.Errorf("%s: %w", column, security.ErrNoFieldKey)
 	}
 	out := security.ProcessValue(value, column, p.policy)
-	// ProcessValue hands back its input when encryption fails.
-	if kind == encrypted && reflect.DeepEqual(out, value) {
+	// ProcessValue hands back its input when encryption fails, and a NULL as NULL.
+	if kind == encrypted && value != nil && reflect.DeepEqual(out, value) {
 		return nil, fmt.Errorf("%s could not be encrypted", column)
 	}
 	return out, nil
@@ -177,7 +177,7 @@ func (p *Protection) document(doc bson.M) (bson.M, error) {
 	for _, field := range p.encrypted {
 		path := strings.Split(field, ".")
 		before, present := valueAt(doc, path)
-		if !present {
+		if !present || before == nil {
 			continue
 		}
 		// ProcessValue hands back its input when encryption fails.
