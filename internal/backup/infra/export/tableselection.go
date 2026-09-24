@@ -76,14 +76,18 @@ func (e *BackupExecutor) ExpandAndGroupTables(ctx context.Context, config *Execu
 				}
 			}
 		} else {
-			// Multiple groups or no grouping possible, treat each table individually
-			for _, table := range config.Database.Tables {
-				filteredTables := e.filterRelevantTables([]string{table}, config.Query, table)
+			// The exporters name a file by prefix alone, so tables sharing one
+			// must stay in one group or their uploads overwrite each other.
+			for groupName, tables := range tempGroups {
+				if len(tables) == 1 {
+					groupName = tables[0]
+				}
+				filteredTables := e.filterRelevantTables(tables, config.Query, groupName)
 				if len(filteredTables) > 0 {
-					tableGroups[table] = filteredTables
+					tableGroups[groupName] = filteredTables
 				}
 			}
-			logrus.Infof("[BackupExecutor] Manual mode: processing %d individual tables (after filtering)", len(tableGroups))
+			logrus.Infof("[BackupExecutor] Manual mode: processing %d table groups (after filtering)", len(tableGroups))
 		}
 	}
 

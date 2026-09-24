@@ -239,6 +239,48 @@ func TestAFailedExportIsReportedAndLeavesNoTempDirectory(t *testing.T) {
 	}
 }
 
+// A merged group and a single table in one job each reach the bucket as their own object.
+func TestEachPrefixIsUploadedToItsOwnObject(t *testing.T) {
+	dir := stubPATH(t)
+	stubBin(t, dir, "mysqldump", "echo '-- dump'", 0)
+	linkRealBinary(t, dir, "zip")
+	stubBin(t, dir, "gsutil", "", 0)
+
+	db := taskDB(t)
+	id := insertBackupTask(t, db, 1, `{
+		"name":"nightly","sourceType":"mysql","format":"sql","compressionType":"zip",
+		"database":{"url":"127.0.0.1:3306","database":"shop",
+			"tables":["orders_202607","orders_202608","customers"]},
+		"destination":{"gcsPath":"gs://bucket/x"}
+	}`)
+
+	if err := NewBackupExecutor(db).Execute(context.Background(), id); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	args := stubArgs(t, dir, "gsutil")
+	var objects []string
+	for i, a := range args {
+		if a == "cp" && i+2 < len(args) {
+			objects = append(objects, args[i+2])
+		}
+	}
+	sort.Strings(objects)
+	want := []string{
+		"gs://bucket/x/customers-" + yesterdayStamp() + ".zip",
+		"gs://bucket/x/orders-" + yesterdayStamp() + ".zip",
+	}
+	if !reflect.DeepEqual(objects, want) {
+		t.Errorf("uploaded objects = %v, want %v", objects, want)
+	}
+	dumped := strings.Join(stubArgs(t, dir, "mysqldump"), " ")
+	for _, table := range []string{"orders_202607", "orders_202608", "customers"} {
+		if !strings.Contains(dumped, table) {
+			t.Errorf("mysqldump arguments = %q, want %s among them", dumped, table)
+		}
+	}
+}
+
 // tempDirCount counts the executor's working directories left under the system
 // temporary directory.
 func tempDirCount(t *testing.T) int {
@@ -315,6 +357,33 @@ func TestASingleShardIsNotMerged(t *testing.T) {
 	}
 	if got := groupKeys(groups); !reflect.DeepEqual(got, []string{"orders_202601"}) {
 		t.Errorf("groups = %v, want the table's own name", got)
+	}
+}
+
+// Every exporter names its file after the prefix of the group's first table.
+func TestTablesSharingAPrefixAreMergedEvenBesideOtherGroups(t *testing.T) {
+	cfg := ExecutorBackupConfig{}
+	cfg.Database.Tables = []string{"orders_202607", "orders_202608", "customers"}
+
+	e := newExecutor()
+	groups, err := e.ExpandAndGroupTables(context.Background(), &cfg)
+	if err != nil {
+		t.Fatalf("ExpandAndGroupTables: %v", err)
+	}
+	want := map[string][]string{
+		"orders":    {"orders_202607", "orders_202608"},
+		"customers": {"customers"},
+	}
+	if !reflect.DeepEqual(groups, want) {
+		t.Errorf("groups = %v, want %v", groups, want)
+	}
+	written := map[string]string{}
+	for group, tables := range groups {
+		name := e.extractTablePrefix(tables[0])
+		if other, taken := written[name]; taken {
+			t.Errorf("groups %q and %q both write %s-<date>.zip", other, group, name)
+		}
+		written[name] = group
 	}
 }
 
