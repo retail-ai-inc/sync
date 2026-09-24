@@ -1,6 +1,7 @@
 package mongodb
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -174,7 +175,8 @@ func (a *Applier) repairMissing(ctx, sourceCtx context.Context, run []*domain.Ev
 	}
 
 	var missing []*domain.Event
-	for _, event := range run {
+	rewritten := 0
+	for i, event := range run {
 		model, ok := event.Payload.(*mongo.UpdateOneModel)
 		if !ok {
 			continue
@@ -194,6 +196,14 @@ func (a *Applier) repairMissing(ctx, sourceCtx context.Context, run []*domain.Ev
 			return 0, fmt.Errorf("check whether the target holds the document a change "+
 				"to %s addressed: %w", event.NS, err)
 		}
+		if upsertedLater(run[i+1:], event.NS, model.Filter) {
+			rewritten++
+		}
+	}
+	// A delta that matched nothing can find its document there because a later
+	// upsert in the run wrote it whole.
+	if len(missing) == 0 && landed+int64(rewritten) >= int64(addressed) {
+		return 0, nil
 	}
 	if len(missing) == 0 {
 		// Short by the count and yet every document is there: a bulk result that
@@ -214,4 +224,43 @@ func (a *Applier) repairMissing(ctx, sourceCtx context.Context, run []*domain.Ev
 	}
 	trips, _, err := a.writeRun(ctx, missing)
 	return trips, err
+}
+
+// upsertedLater reports whether a whole-document upsert of the document a filter
+// addresses follows in the run.
+func upsertedLater(rest []*domain.Event, ns domain.Namespace, filter interface{}) bool {
+	for _, event := range rest {
+		model, ok := event.Payload.(*mongo.ReplaceOneModel)
+		if !ok || event.NS != ns || model.Upsert == nil || !*model.Upsert {
+			continue
+		}
+		if sameDocument(filter, model.Filter) {
+			return true
+		}
+	}
+	return false
+}
+
+// sameDocument compares two filters field by field as BSON, whatever order a
+// map hands the fields over in.
+func sameDocument(a, b interface{}) bool {
+	x, y := documentOf(a), documentOf(b)
+	if len(x) == 0 || len(x) != len(y) {
+		return false
+	}
+	for field, value := range x {
+		other, ok := y[field]
+		if !ok {
+			return false
+		}
+		kind, data, err := bson.MarshalValue(value)
+		if err != nil {
+			return false
+		}
+		otherKind, otherData, err := bson.MarshalValue(other)
+		if err != nil || kind != otherKind || !bytes.Equal(data, otherData) {
+			return false
+		}
+	}
+	return true
 }

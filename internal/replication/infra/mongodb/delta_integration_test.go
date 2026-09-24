@@ -128,6 +128,37 @@ func TestAnUpdateToADocumentTheTargetLacksIsWrittenWhole(t *testing.T) {
 	}
 }
 
+func TestADeltaOnAMissingDocumentFollowedByItsUpsertInOneRun(t *testing.T) {
+	collection := harness.UniqueName("missing-then-upsert")
+	applier, src, tgt := deltaApplier(t, collection)
+	ctx := context.Background()
+
+	if _, err := src.Database(sourceDB).Collection(collection).InsertOne(ctx, bson.M{
+		"_id": "order-5", "a": 2, "note": "read by the re-copy",
+	}); err != nil {
+		t.Fatalf("seed the source: %v", err)
+	}
+
+	upsert := writeEvent(collection, "order-5")
+	upsert.NS.DB = sourceDB
+	upsert.Payload.(*mongo.ReplaceOneModel).SetReplacement(bson.M{
+		"_id": "order-5", "a": 2, "note": "read by the re-copy",
+	})
+	run := []*domain.Event{deltaEvent(collection, "order-5", bson.M{"$set": bson.M{"a": 2}}), upsert}
+	// An error here fails every retry of the batch, so the task stalls on a target that is right.
+	if _, err := applier.Apply(ctx, [][]*domain.Event{run}, domain.Position{}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	got, err := findOne(t, tgt, targetDB, collection, bson.M{"_id": "order-5"})
+	if err != nil {
+		t.Fatalf("the target does not hold the document: %v", err)
+	}
+	if fmt.Sprint(got["a"]) != "2" || got["note"] != "read by the re-copy" {
+		t.Errorf("the target holds %v, want the upserted document", got)
+	}
+}
+
 // A document the source no longer holds is not written at all: the delete for
 // it is further along the same stream, and an upsert here would leave the
 // target holding a document the source does not have.

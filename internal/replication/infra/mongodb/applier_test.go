@@ -369,3 +369,30 @@ func TestASchemaChangeSharingABatchFailsItBeforeAnyWrite(t *testing.T) {
 		})
 	}
 }
+
+func TestOnlyALaterUpsertOfTheSameDocumentExplainsADeltaThatMatchedNothing(t *testing.T) {
+	orders := domain.Namespace{DB: "shop", Object: "orders"}
+	replace := func(ns domain.Namespace, filter bson.M, upsert bool) *domain.Event {
+		return &domain.Event{NS: ns, Payload: mongo.NewReplaceOneModel().
+			SetFilter(filter).SetReplacement(bson.M{}).SetUpsert(upsert)}
+	}
+	filter := bson.M{"_id": int32(7), "region": "jp"}
+	for _, c := range []struct {
+		name string
+		rest []*domain.Event
+		want bool
+	}{
+		{"same document", []*domain.Event{replace(orders, bson.M{"region": "jp", "_id": int32(7)}, true)}, true},
+		{"another document", []*domain.Event{replace(orders, bson.M{"_id": int32(8), "region": "jp"}, true)}, false},
+		{"another collection", []*domain.Event{replace(domain.Namespace{DB: "shop", Object: "payments"}, filter, true)}, false},
+		{"not an upsert", []*domain.Event{replace(orders, filter, false)}, false},
+		{"nothing after it", nil, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			// True where it should be false lets a bulk result that does not add up pass as applied.
+			if got := upsertedLater(c.rest, orders, filter); got != c.want {
+				t.Errorf("upsertedLater = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
