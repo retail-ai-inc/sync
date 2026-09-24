@@ -236,6 +236,48 @@ func TestDDLIsPropagated(t *testing.T) {
 	}
 }
 
+// A failure means the restart was sent the ALTER again, which the target refuses with 1060.
+func TestAResumeAfterASchemaChangeDoesNotReplayIt(t *testing.T) {
+	table := harness.UniqueName("ddlresume")
+	src, tgt := open(t, harness.MySQLSource, sourceDB), open(t, harness.MySQLTarget, targetDB)
+
+	createSourceTable(t, src, tgt, table)
+	mustExec(t, src, fmt.Sprintf("INSERT INTO %s (id, name) VALUES (1, 'before')", table))
+
+	base := syncTask(t, table)
+	stop := startSyncer(t, base)
+	harness.Eventually(t, 45*time.Second, func() error {
+		if n := countRows(t, tgt, table, ""); n != 1 {
+			return fmt.Errorf("initial sync has not landed: %d rows", n)
+		}
+		return nil
+	})
+
+	mustExec(t, src, fmt.Sprintf("ALTER TABLE %s ADD COLUMN email VARCHAR(100)", table))
+	harness.Eventually(t, 30*time.Second, func() error {
+		var n int
+		if err := tgt.QueryRow(`
+			SELECT COUNT(*) FROM information_schema.columns
+			WHERE table_schema = ? AND table_name = ? AND column_name = 'email'`,
+			targetDB, table).Scan(&n); err != nil || n == 0 {
+			return fmt.Errorf("the column has not been propagated (%v)", err)
+		}
+		return nil
+	})
+
+	// Stopped and started again with no transaction after the ALTER.
+	stop()
+	startSyncer(t, base)
+	mustExec(t, src, fmt.Sprintf("INSERT INTO %s (id, name, email) VALUES (2, 'after', 'a@b.com')", table))
+
+	harness.Eventually(t, 45*time.Second, func() error {
+		if n := countRows(t, tgt, table, "id = 2"); n != 1 {
+			return fmt.Errorf("the row written after the restart has not arrived")
+		}
+		return nil
+	})
+}
+
 // A DROP at the source is not applied to the disaster-recovery copy, because
 // that copy is what a mistaken DROP would be recovered from.
 func TestADroppedTableStopsReplication(t *testing.T) {

@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-mysql-org/go-mysql/canal"
 	"github.com/go-mysql-org/go-mysql/mysql"
+	"github.com/go-mysql-org/go-mysql/replication"
 	"github.com/go-mysql-org/go-mysql/schema"
 	"github.com/pingcap/tidb/pkg/parser"
 	"github.com/pingcap/tidb/pkg/parser/ast"
@@ -16,6 +17,7 @@ import (
 	"github.com/retail-ai-inc/sync/internal/platform/config"
 	"github.com/retail-ai-inc/sync/internal/platform/metrics"
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
+	"github.com/retail-ai-inc/sync/internal/replication/infra/checkpoint"
 )
 
 func readerFor(mappings []config.DatabaseMapping, sourceDSN string) *Reader {
@@ -456,6 +458,106 @@ func TestAPositionInsideATransactionIsNotHandedOver(t *testing.T) {
 		}
 	default:
 		t.Fatal("nothing handed over after the transaction ended, so the position never moves")
+	}
+}
+
+// A failure means a restart before the next DML replays the ALTER, which the target refuses.
+func TestAPositionAfterASchemaChangeCountsIt(t *testing.T) {
+	r := readerWithMappings(t, mapTable("orders", "orders"))
+	r.source, r.flavor = "10.0.0.1:3306/shop", "mysql"
+	r.lastGTID = "e67b8f4b-a2d6-11f1-9406-42010a400002:1-10"
+
+	withDDL, err := mysql.ParseGTIDSet("mysql", "e67b8f4b-a2d6-11f1-9406-42010a400002:1-11")
+	if err != nil {
+		t.Fatalf("ParseGTIDSet: %v", err)
+	}
+	pos := mysql.Position{Name: "mysql-bin.000005", Pos: 900}
+
+	// canal's order for one DDL: its GTID event, the statement, then the synced position.
+	if err := r.OnGTID(nil, nil); err != nil {
+		t.Fatalf("OnGTID: %v", err)
+	}
+	ddl := query("ALTER TABLE orders ADD COLUMN note TEXT")
+	ddl.GSet = withDDL
+	if err := r.OnDDL(nil, pos, ddl); err != nil {
+		t.Fatalf("OnDDL: %v", err)
+	}
+	if err := r.OnPosSynced(nil, pos, withDDL, true); err != nil {
+		t.Fatalf("OnPosSynced: %v", err)
+	}
+	later := mysql.Position{Name: "mysql-bin.000006", Pos: 4}
+	if err := r.OnPosSynced(nil, later, withDDL, true); err != nil {
+		t.Fatalf("OnPosSynced: %v", err)
+	}
+
+	events := handedOver(r)
+	var change, last *domain.Event
+	for _, e := range events {
+		if e.Op == domain.OpSchema && !e.Heartbeat {
+			change = e
+		}
+		if !e.Pos.IsZero() {
+			last = e
+		}
+	}
+	if change == nil {
+		t.Fatalf("handed over %d events and no schema change", len(events))
+	}
+
+	resumesAt := func(e *domain.Event) binlogCheckpoint {
+		t.Helper()
+		var cp binlogCheckpoint
+		if _, err := checkpoint.Decode(e.Pos.Payload, &cp); err != nil {
+			t.Fatalf("decode %q: %v", e.Pos.Payload, err)
+		}
+		return cp
+	}
+	if cp := resumesAt(change); cp.gtidSet() == nil || !cp.gtidSet().Contain(withDDL) || cp.Pos != pos.Pos {
+		t.Errorf("the schema change carries %+v, want GTID %s at offset %d: a restart "+
+			"from it is sent the ALTER again", cp, withDDL, pos.Pos)
+	}
+	if cp := resumesAt(last); cp.Name != later.Name || cp.gtidSet() == nil || !cp.gtidSet().Contain(withDDL) {
+		t.Errorf("the newest position is %+v, want %s with GTID %s: the reader is still "+
+			"inside the schema change and drops every position after it", cp, later.Name, withDDL)
+	}
+}
+
+// A failure means a restart between MariaDB's CREATE ... SELECT and its rows skips the rows.
+func TestASchemaChangeFollowedByRowsInItsTransactionDoesNotEndIt(t *testing.T) {
+	r := readerWithMappings(t, mapTable("orders", "orders"))
+	r.source, r.flavor = "10.0.0.1:3306/shop", "mariadb"
+	r.lastGTID = "0-1-10"
+
+	withGroup, err := mysql.ParseGTIDSet("mariadb", "0-1-11")
+	if err != nil {
+		t.Fatalf("ParseGTIDSet: %v", err)
+	}
+	pos := mysql.Position{Name: "mysql-bin.000005", Pos: 900}
+
+	// Not standalone: the group ends with its own COMMIT, after the rows.
+	if err := r.OnGTID(nil, &replication.MariadbGTIDEvent{}); err != nil {
+		t.Fatalf("OnGTID: %v", err)
+	}
+	ddl := query("ALTER TABLE orders ADD COLUMN note TEXT")
+	ddl.GSet = withGroup
+	if err := r.OnDDL(nil, pos, ddl); err != nil {
+		t.Fatalf("OnDDL: %v", err)
+	}
+	if err := r.OnPosSynced(nil, pos, withGroup, true); err != nil {
+		t.Fatalf("OnPosSynced: %v", err)
+	}
+
+	for _, e := range handedOver(r) {
+		if e.Pos.IsZero() {
+			continue
+		}
+		var cp binlogCheckpoint
+		if _, err := checkpoint.Decode(e.Pos.Payload, &cp); err != nil {
+			t.Fatalf("decode %q: %v", e.Pos.Payload, err)
+		}
+		if cp.gtidSet() != nil && cp.gtidSet().Contain(withGroup) {
+			t.Errorf("handed over %+v before the group's rows were read", cp)
+		}
 	}
 }
 

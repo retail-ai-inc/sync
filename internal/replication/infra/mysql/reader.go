@@ -76,6 +76,9 @@ type Reader struct {
 	// set already counts the transaction as done, and recording it steps over rows
 	// nobody read.
 	inTransaction bool
+	// ddlSharesTransaction says the open transaction goes on past its DDL, as MariaDB's
+	// CREATE ... SELECT does: counting it done at the DDL steps over the rows after it.
+	ddlSharesTransaction bool
 
 	// resumed says the stream started from a stored position, which is what puts
 	// rows written before a schema change at risk of being decoded against the new
@@ -132,7 +135,7 @@ func (r *Reader) Open(_ context.Context, from domain.Position) error {
 
 	// A starting stream begins outside any transaction, whatever the last one was
 	// doing.
-	r.inTransaction = false
+	r.inTransaction, r.ddlSharesTransaction = false, false
 
 	metrics.SetConnected(r.Labels, true)
 	// Only when the task lists its tables; see the MongoDB reader's copy of this.
@@ -394,8 +397,11 @@ func (r *Reader) OnXID(header *replication.EventHeader, pos mysql.Position) erro
 // OnGTID marks the start of a source transaction: it carries no rows, but
 // everything until the matching XID belongs to one transaction and is no place
 // to record a position.
-func (r *Reader) OnGTID(_ *replication.EventHeader, _ mysql.BinlogGTIDEvent) error {
+func (r *Reader) OnGTID(_ *replication.EventHeader, e mysql.BinlogGTIDEvent) error {
 	r.inTransaction = true
+	// MySQL gives every DDL canal can parse a transaction of its own.
+	mariadb, ok := e.(*replication.MariadbGTIDEvent)
+	r.ddlSharesTransaction = ok && !mariadb.IsStandalone()
 	return nil
 }
 
@@ -404,6 +410,13 @@ func (r *Reader) OnGTID(_ *replication.EventHeader, _ mysql.BinlogGTIDEvent) err
 func (r *Reader) OnDDL(header *replication.EventHeader, pos mysql.Position, e *replication.QueryEvent) error {
 	if e == nil {
 		return nil
+	}
+	// No XID follows a DDL, so it ends its transaction; a position left short of
+	// it makes a restart apply it again, which the target refuses.
+	var set mysql.GTIDSet
+	if !r.ddlSharesTransaction {
+		r.inTransaction = false
+		set = e.GSet
 	}
 	ddlAt := time.Time{}
 	if header != nil && header.Timestamp > 0 {
@@ -479,7 +492,7 @@ func (r *Reader) OnDDL(header *replication.EventHeader, pos mysql.Position, e *r
 			})
 		}
 	}
-	return r.handOver(pos, nil, header)
+	return r.handOver(pos, set, header)
 }
 
 // acknowledged reports whether an operator has already dealt with a statement
