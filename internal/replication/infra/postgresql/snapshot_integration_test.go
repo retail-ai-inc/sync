@@ -4,6 +4,7 @@ package postgresql
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"reflect"
 	"strings"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/sirupsen/logrus"
 
+	"github.com/retail-ai-inc/sync/internal/platform/config"
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
 	"github.com/retail-ai-inc/sync/test/harness"
 )
@@ -105,5 +107,65 @@ func TestASlotLeftWithoutAStoredPositionStopsTheTask(t *testing.T) {
 	}
 	if n := countRows(t, src, "pg_replication_slots", "slot_name = $1", slot); n != 1 {
 		t.Errorf("the refused start left %d replication slot(s) %s, want the one it found", n, slot)
+	}
+}
+
+// A failure means the first copy wrote a protected field to the target as the source holds it.
+func TestTheFirstCopyMasksAndEncryptsTheFieldsATableProtects(t *testing.T) {
+	t.Setenv("SYNC_FIELD_KEY", testFieldKey)
+	table, publication, slot := names(t, "pg_copy_secured")
+	src, tgt := open(t, harness.PostgresSource, sourceDatabase), open(t, harness.PostgresTarget, targetDatabase)
+
+	mustExec(t, src, fmt.Sprintf("CREATE TABLE %s (id INT PRIMARY KEY, email TEXT, card TEXT, score INT)", table))
+	mustExec(t, src, fmt.Sprintf("CREATE PUBLICATION %s FOR TABLE %s", publication, table))
+	t.Cleanup(func() {
+		_, _ = src.Exec("DROP PUBLICATION IF EXISTS " + publication)
+		_, _ = src.Exec("DROP TABLE IF EXISTS " + table)
+		_, _ = tgt.Exec("DROP TABLE IF EXISTS " + table)
+		_, _ = src.Exec(`SELECT pg_drop_replication_slot($1)
+			WHERE EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = $1)`, slot)
+	})
+	mustExec(t, src, fmt.Sprintf("INSERT INTO %s VALUES (1, 'ada@example.com', '4111111111111111', 7), "+
+		"(2, NULL, NULL, NULL)", table))
+
+	startSyncer(t, syncTask(t, table, publication, slot, config.TableMapping{
+		SourceTable: table, TargetTable: table, SecurityEnabled: true,
+		FieldSecurity: []interface{}{
+			map[string]interface{}{"field": "email", "securityType": "masked"},
+			map[string]interface{}{"field": "card", "securityType": "encrypted"},
+			map[string]interface{}{"field": "score", "securityType": "masked"},
+		},
+	}))
+	harness.Eventually(t, 45*time.Second, func() error {
+		if n := countRows(t, tgt, table, ""); n != 2 {
+			return fmt.Errorf("target holds %d rows, want 2", n)
+		}
+		return nil
+	})
+
+	var email, card sql.NullString
+	var score sql.NullInt64
+	read := func(id int) {
+		t.Helper()
+		if err := tgt.QueryRow(fmt.Sprintf("SELECT email, card, score FROM %s WHERE id = $1", table), id).
+			Scan(&email, &card, &score); err != nil {
+			t.Fatalf("read row %d: %v", id, err)
+		}
+	}
+
+	read(1)
+	if want := strings.Repeat("*", len("ada@example.com")); email.String != want {
+		t.Errorf("email = %q, want %q", email.String, want)
+	}
+	if plain, err := opened(card.String); err != nil || plain != "4111111111111111" {
+		t.Errorf("card = %q, want the source's value encrypted: %v", card.String, err)
+	}
+	if !score.Valid || score.Int64 != 0 {
+		t.Errorf("score = %v, want it masked to 0", score)
+	}
+
+	read(2)
+	if email.Valid || card.Valid || score.Valid {
+		t.Errorf("email = %v, card = %v, score = %v, want all NULL", email, card, score)
 	}
 }

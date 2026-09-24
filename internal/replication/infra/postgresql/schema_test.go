@@ -2,7 +2,10 @@ package postgresql
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
 	"database/sql"
+	"encoding/base64"
 	"errors"
 	"strings"
 	"testing"
@@ -244,13 +247,58 @@ func TestTheCopyFillsAnEmptyTable(t *testing.T) {
 	}
 }
 
+// A failure means the first copy wrote a protected field to the target as the source holds it.
+func TestTheCopyMasksAndEncryptsTheFieldsATableProtects(t *testing.T) {
+	t.Setenv("SYNC_FIELD_KEY", testFieldKey)
+	target := schemaTargetDB(t)
+	if _, err := target.Exec(`CREATE TABLE public.customers (id TEXT, email TEXT, card TEXT)`); err != nil {
+		t.Fatalf("create the table: %v", err)
+	}
+	source := &answering{replies: []sourceReply{{
+		match:   "SELECT * FROM public.customers",
+		columns: []string{"id", "email", "card"},
+		rows:    [][]any{{"1", "ada@example.com", "4111111111111111"}, {"2", nil, nil}},
+	}}}
+	snap := snapshotOver(source, target, [2]string{"customers", "customers"})
+	snap.Config.Mappings[0].Tables[0].SecurityEnabled = true
+	snap.Config.Mappings[0].Tables[0].FieldSecurity = []interface{}{
+		map[string]interface{}{"field": "email", "securityType": "masked"},
+		map[string]interface{}{"field": "card", "securityType": "encrypted"},
+	}
+
+	if err := snap.Copy(context.Background()); err != nil {
+		t.Fatalf("Copy: %v", err)
+	}
+
+	var email, card sql.NullString
+	if err := target.QueryRow(`SELECT email, card FROM public.customers WHERE id = '1'`).
+		Scan(&email, &card); err != nil {
+		t.Fatalf("read row 1: %v", err)
+	}
+	if want := strings.Repeat("*", len("ada@example.com")); email.String != want {
+		t.Errorf("email = %q, want %q", email.String, want)
+	}
+	if plain, err := opened(card.String); err != nil || plain != "4111111111111111" {
+		t.Errorf("card = %q, want the source's value encrypted: %v", card.String, err)
+	}
+
+	if err := target.QueryRow(`SELECT email, card FROM public.customers WHERE id = '2'`).
+		Scan(&email, &card); err != nil {
+		t.Fatalf("read row 2: %v", err)
+	}
+	if email.Valid || card.Valid {
+		t.Errorf("email = %q, card = %q, want both NULL", email.String, card.String)
+	}
+}
+
 // TestACopyOfNothingSaysSo: a task that names no tables replicates nothing, and
 // finishing quietly makes that look like success.
 func TestACopyOfNothingSaysSo(t *testing.T) {
 	snap := &Snapshotter{
-		Schema: &schemaWork{Logger: quiet()},
-		Config: config.SyncConfig{},
-		Logger: quiet(),
+		Schema:   &schemaWork{Logger: quiet()},
+		Snapshot: snapshotRead{},
+		Config:   config.SyncConfig{},
+		Logger:   quiet(),
 	}
 	if err := snap.Copy(context.Background()); err != nil {
 		t.Fatalf("Copy with no tables: %v", err)
@@ -330,11 +378,47 @@ func snapshotOver(source sourceQuerier, target *sql.DB, tables ...[2]string) *Sn
 	}
 	work := &schemaWork{Source: source, Target: target, Logger: quiet()}
 	return &Snapshotter{
-		Schema: work,
-		Config: config.SyncConfig{Mappings: []config.DatabaseMapping{{Tables: mapped}}},
-		Logger: quiet(),
+		Schema:   work,
+		Snapshot: snapshotRead{source: source},
+		Config:   config.SyncConfig{Mappings: []config.DatabaseMapping{{Tables: mapped}}},
+		Logger:   quiet(),
 	}
 }
+
+const testFieldKey = "abcdefghijklmnopqrstuvwxyz012345"
+
+// opened decrypts a field sealed under testFieldKey.
+func opened(sealed string) (string, error) {
+	raw, err := base64.StdEncoding.DecodeString(sealed)
+	if err != nil {
+		return "", err
+	}
+	block, err := aes.NewCipher([]byte(testFieldKey))
+	if err != nil {
+		return "", err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+	if len(raw) < gcm.NonceSize() {
+		return "", errors.New("shorter than a nonce, so not sealed")
+	}
+	plain, err := gcm.Open(nil, raw[:gcm.NonceSize()], raw[gcm.NonceSize():], nil)
+	return string(plain), err
+}
+
+// snapshotRead answers the copy's reads from source, as the slot's snapshot would.
+type snapshotRead struct {
+	pgx.Tx
+	source sourceQuerier
+}
+
+func (s snapshotRead) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+	return s.source.Query(ctx, sql, args...)
+}
+
+func (snapshotRead) Rollback(context.Context) error { return nil }
 
 // TestATargetTableThatCannotBeCountedStopsTheCopy covers a silent skip that is
 // now a stop.

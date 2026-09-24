@@ -12,6 +12,7 @@ import (
 	"github.com/retail-ai-inc/sync/internal/platform/config"
 	"github.com/retail-ai-inc/sync/internal/platform/metrics"
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
+	"github.com/retail-ai-inc/sync/internal/replication/infra/security"
 )
 
 // The first copy, and the position it is taken at.
@@ -171,6 +172,12 @@ func (s *Snapshotter) copyTable(ctx context.Context, pair tablePair) (int, error
 	insert := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s) ON CONFLICT DO NOTHING",
 		pair.target(), strings.Join(names, ", "), strings.Join(placeholders, ", "))
 
+	// The copied rows must carry the protection the stream gives later changes to them.
+	policy := security.FindTableSecurityFromMappings(security.TableRef{
+		Schema: pair.sourceSchema, Table: pair.sourceTable, Target: pair.targetTable,
+	}, s.Config.Mappings)
+	secured := policy.SecurityEnabled && len(policy.FieldSecurity) > 0
+
 	tx, err := s.Schema.Target.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
@@ -182,6 +189,13 @@ func (s *Snapshotter) copyTable(ctx context.Context, pair tablePair) (int, error
 		values, err := rows.Values()
 		if err != nil {
 			return 0, err
+		}
+		if secured {
+			// Every value, not only strings: these are decoded, so an int or a
+			// timestamp field would otherwise pass through in the clear.
+			for i := range values {
+				values[i] = security.ProcessValue(values[i], names[i], policy)
+			}
 		}
 		result, err := tx.ExecContext(ctx, insert, values...)
 		if err != nil {
