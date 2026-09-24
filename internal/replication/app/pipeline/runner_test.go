@@ -528,8 +528,7 @@ func TestAnInterruptedCopyRecordsNoPosition(t *testing.T) {
 	}
 }
 
-// slowToStopReader returns from Next a moment after its context ends, as a
-// driver finishing a round trip does, and notes a Close that lands during it.
+// slowToStopReader leaves Next a moment after its context ends and notes a Close that lands meanwhile.
 type slowToStopReader struct {
 	fakeReader
 	inNext       atomic.Bool
@@ -557,6 +556,11 @@ func TestTheStreamIsNotClosedUnderItsReader(t *testing.T) {
 	r.Snapshotter = &fakeSnapshotter{
 		pinned:  domain.Position{Payload: "pinned"},
 		copyErr: errors.New("connection reset"),
+		onCopy: func() {
+			for !reader.inNext.Load() {
+				time.Sleep(time.Millisecond)
+			}
+		},
 	}
 
 	if err := runFor(t, r, time.Second); err == nil {

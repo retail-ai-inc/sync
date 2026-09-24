@@ -327,8 +327,12 @@ func (r *Runner) Run(ctx context.Context) error {
 	}()
 	// Runs before the deferred Close: a driver's stream is not safe to close
 	// while its reader is still inside a call on it.
+	var readerStuck bool
 	defer func() {
 		stopReading()
+		if readerStuck {
+			return
+		}
 		select {
 		case <-readDone:
 		case <-time.After(5 * time.Second):
@@ -376,6 +380,7 @@ func (r *Runner) Run(ctx context.Context) error {
 			return err
 		}
 	case <-time.After(5 * time.Second):
+		readerStuck = true
 		r.log().Warn(r.tag("The source reader did not stop within five seconds"))
 	}
 	return applyErr
