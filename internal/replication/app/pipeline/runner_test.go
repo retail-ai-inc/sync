@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1949,6 +1951,76 @@ func TestAChangeReadAfterTheChunkIsNotOverwrittenByIt(t *testing.T) {
 			// The chunk's row is older than the change, so writing it last leaves the target stale.
 			if last != change {
 				t.Errorf("the re-copy's row was written over a newer change the stream read after it")
+			}
+		})
+	}
+}
+
+// errorHook hands each error-level entry to a channel.
+type errorHook chan *logrus.Entry
+
+func (h errorHook) Levels() []logrus.Level { return []logrus.Level{logrus.ErrorLevel} }
+
+func (h errorHook) Fire(e *logrus.Entry) error {
+	select {
+	case h <- e:
+	default:
+	}
+	return nil
+}
+
+// A failure here means a requested repair can stop and say nothing until the task does.
+func TestAFailedReCopyIsReportedWhileTheStreamRuns(t *testing.T) {
+	failure := errors.New("connection reset")
+	for _, how := range []string{"an error", "a panic"} {
+		t.Run(how, func(t *testing.T) {
+			stream := &scriptedReader{steps: make(chan scriptedStep, 1)}
+			stream.send(event("orders", "1", "p1"))
+
+			var asked int
+			r := newRunner(t, stream, &fakeApplier{}, newStore())
+			r.Resyncs = []*Resync{{
+				NS: domain.Namespace{DB: "shop", Object: "orders"},
+				Reader: chunkFunc(func() (Chunk, error) {
+					asked++
+					if asked == 1 {
+						return Chunk{Events: []*domain.Event{chunkRow("a")}, After: "a",
+							ReadAt: time.Now().Add(-time.Hour)}, nil
+					}
+					if how == "a panic" {
+						panic(failure)
+					}
+					return Chunk{}, failure
+				}),
+			}}
+			logger := logrus.New()
+			logger.SetLevel(logrus.ErrorLevel)
+			logger.SetOutput(io.Discard)
+			reported := make(errorHook, 1)
+			logger.AddHook(reported)
+			r.Opts.Logger = logger
+
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			go func() { done <- r.Run(ctx) }()
+			defer func() {
+				cancel()
+				select {
+				case <-done:
+				case <-time.After(5 * time.Second):
+					t.Error("Run did not end after it was asked to stop")
+				}
+			}()
+
+			select {
+			case entry := <-reported:
+				if !strings.Contains(entry.Message, failure.Error()) {
+					t.Errorf("reported %q, want the re-copy's failure", entry.Message)
+				}
+			case err := <-done:
+				t.Fatalf("Run returned %v before the re-copy's failure was reported", err)
+			case <-time.After(5 * time.Second):
+				t.Fatal("the re-copy's failure was not reported while the stream ran")
 			}
 		})
 	}

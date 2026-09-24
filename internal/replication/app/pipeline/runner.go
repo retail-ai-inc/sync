@@ -353,7 +353,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		}
 	}
 
-	resyncErr := r.startResyncs(recopyCtx, queue, &producers)
+	r.startResyncs(recopyCtx, queue, &producers)
 
 	go func() {
 		producers.Wait()
@@ -361,15 +361,6 @@ func (r *Runner) Run(ctx context.Context) error {
 	}()
 
 	applyErr := r.apply(ctx, queue)
-
-	// A re-copy that failed is worth reporting even when the stream ended cleanly.
-	select {
-	case err := <-resyncErr:
-		if err != nil && !errors.Is(err, context.Canceled) {
-			r.log().Errorf(r.tag("A re-copy stopped: %v"), err)
-		}
-	default:
-	}
 
 	// The reader knows why the stream ended, so its error wins: an applier
 	// stopping because its queue closed says nothing about the source.
@@ -388,10 +379,9 @@ func (r *Runner) Run(ctx context.Context) error {
 
 // startResyncs runs each re-copy alongside the stream, on the same queue so the
 // applier orders them against the stream's changes.
-func (r *Runner) startResyncs(ctx context.Context, queue chan<- *domain.Event, producers *sync.WaitGroup) <-chan error {
-	failed := make(chan error, len(r.Resyncs)+1)
+func (r *Runner) startResyncs(ctx context.Context, queue chan<- *domain.Event, producers *sync.WaitGroup) {
 	if len(r.Resyncs) == 0 {
-		return failed
+		return
 	}
 
 	read := func() time.Time {
@@ -410,7 +400,7 @@ func (r *Runner) startResyncs(ctx context.Context, queue chan<- *domain.Event, p
 			defer r.lift(chunks)
 			defer func() {
 				if recovered := recover(); recovered != nil {
-					failed <- resilience.Recovered(recovered)
+					r.log().Errorf(r.tag("A re-copy of %s stopped: %v"), resync.NS, resilience.Recovered(recovered))
 				}
 			}()
 			ordered := *resync
@@ -443,13 +433,16 @@ func (r *Runner) startResyncs(ctx context.Context, queue chan<- *domain.Event, p
 					return ctx.Err()
 				}
 			})
-			if err == nil {
+			// Logged here, not when the run ends: the stream goes on without the
+			// re-copy, and nothing else reports that it stopped.
+			switch {
+			case err == nil:
 				r.log().Infof(r.tag("Finished re-copying %s"), resync.NS)
+			case !errors.Is(err, context.Canceled):
+				r.log().Errorf(r.tag("A re-copy of %s stopped: %v"), resync.NS, err)
 			}
-			failed <- err
 		}()
 	}
-	return failed
 }
 
 // queueChunk queues a re-copy's chunk as one unit. The turn is given back as
