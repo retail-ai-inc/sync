@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/jackc/pglogrepl"
+	"github.com/jackc/pgx/v5"
 	"github.com/sirupsen/logrus"
 
 	"github.com/retail-ai-inc/sync/internal/platform/config"
@@ -16,16 +17,18 @@ import (
 // The first copy, and the position it is taken at.
 //
 // Pin runs before a single row is read. The slot's consistent point is the
-// moment the source promises to keep WAL from, so a copy taken after it and a
-// stream resumed from it meet exactly: every change made while the copy ran is
-// still in the log, and none of them is missed. Reading the position afterwards
-// loses every write made in between, which is the whole reason the pipeline
-// asks for it first.
+// moment the source promises to keep WAL from, so a copy read in the snapshot
+// the slot exported at that point and a stream resumed from it meet exactly:
+// every change made while the copy ran is still in the log, and none of them is
+// missed. Reading the position afterwards loses every write made in between,
+// which is the whole reason the pipeline asks for it first.
 type Snapshotter struct {
 	Schema *schemaWork
-	// ConsistentPoint is where the slot promises WAL from, set when the slot was
-	// created or read. Zero means the slot already existed and the stream picks
-	// up from the stored position instead.
+	// Snapshot reads the source as of ConsistentPoint. A copy read outside it
+	// also holds rows committed after that point, which the stream then repeats.
+	Snapshot pgx.Tx
+	// ConsistentPoint is where the slot promises WAL from, set only when this
+	// start created the slot.
 	ConsistentPoint pglogrepl.LSN
 	Source          string
 
@@ -35,10 +38,9 @@ type Snapshotter struct {
 }
 
 func (s *Snapshotter) Pin(_ context.Context) (domain.Position, error) {
-	if s.ConsistentPoint == 0 {
-		// Nothing to pin: the slot was already there, so its own position is
-		// where the stream resumes and the copy has nothing to align with.
-		return domain.Position{}, nil
+	if s.ConsistentPoint == 0 || s.Snapshot == nil {
+		return domain.Position{}, fmt.Errorf("no snapshot was taken where the " +
+			"replication slot starts, so a copy would overlap its stream")
 	}
 	payload, err := encodeLSN(s.ConsistentPoint, s.Source)
 	if err != nil {
@@ -54,6 +56,9 @@ func (s *Snapshotter) Pin(_ context.Context) (domain.Position, error) {
 // a repair: a table with one row in it is left alone. Putting a table back
 // wholesale is what a re-copy is for.
 func (s *Snapshotter) Copy(ctx context.Context) error {
+	// An open snapshot holds back vacuum on the source for as long as it lasts.
+	defer func() { _ = s.Snapshot.Rollback(ctx) }()
+
 	pairs := s.pairs()
 	if len(pairs) == 0 {
 		s.Logger.Warn("[PostgreSQL] This task names no tables, so there is nothing " +
@@ -76,6 +81,20 @@ func (s *Snapshotter) Copy(ctx context.Context) error {
 	s.Logger.Infof("[PostgreSQL] The first copy is done: %d rows across %d tables",
 		copied, len(pairs))
 	return nil
+}
+
+func readAt(ctx context.Context, source *pgx.Conn, snapshot string) (pgx.Tx, error) {
+	tx, err := source.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return nil, fmt.Errorf("begin the copy's transaction: %w", err)
+	}
+	if _, err := tx.Exec(ctx, "SET TRANSACTION SNAPSHOT '"+
+		strings.ReplaceAll(snapshot, "'", "''")+"'"); err != nil {
+		_ = tx.Rollback(ctx)
+		return nil, fmt.Errorf("read the source at the replication slot's snapshot %s: %w",
+			snapshot, err)
+	}
+	return tx, nil
 }
 
 // tablePair is one table on each side, with the schema it lives in.
@@ -134,7 +153,7 @@ func (s *Snapshotter) copyTable(ctx context.Context, pair tablePair) (int, error
 		return 0, nil
 	}
 
-	rows, err := s.Schema.Source.Query(ctx, "SELECT * FROM "+pair.source())
+	rows, err := s.Snapshot.Query(ctx, "SELECT * FROM "+pair.source())
 	if err != nil {
 		return 0, fmt.Errorf("read %s: %w", pair.source(), err)
 	}

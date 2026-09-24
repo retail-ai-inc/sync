@@ -128,7 +128,7 @@ func (s *Syncer) Start(ctx context.Context) error {
 		return err
 	}
 
-	consistent, err := s.ensureSlot(ctx, stream, slot, plugin, slotSeen)
+	consistent, snapshot, err := s.ensureSlot(ctx, stream, slot, plugin, slotSeen)
 	if err != nil {
 		return fmt.Errorf("prepare the replication slot: %w", err)
 	}
@@ -139,6 +139,14 @@ func (s *Syncer) Start(ctx context.Context) error {
 	work := &schemaWork{Source: source, Target: target, Config: s.cfg, Logger: s.logger}
 	if err := work.prepare(ctx); err != nil {
 		s.logger.Warnf("[PostgreSQL] Could not prepare the target's schema: %v", err)
+	}
+
+	// Before StartReplication: the stream's next command ends the slot's export.
+	var copyRead pgx.Tx
+	if consistent > 0 {
+		if copyRead, err = readAt(ctx, source, snapshot); err != nil {
+			return err
+		}
 	}
 
 	if err := pglogrepl.StartReplication(ctx, stream, slot, from,
@@ -181,6 +189,7 @@ func (s *Syncer) Start(ctx context.Context) error {
 		},
 		Snapshotter: &Snapshotter{
 			Schema:          work,
+			Snapshot:        copyRead,
 			ConsistentPoint: consistent,
 			Source:          dsn.Endpoint("postgresql", s.cfg.SourceConnection),
 			Config:          s.cfg,
@@ -342,46 +351,53 @@ func slotIdentifier(slot string) string {
 
 // ensureSlot creates the replication slot, or reports that it is already there.
 //
-// The consistent point is returned only for a slot this call created. For one
-// that already existed the answer is deliberately not the server's current
-// position: that is where it is writing now, and this is the restart case, so
-// taking it would skip everything committed while the task was down and no
-// later message would ever carry it.
+// The consistent point, and the snapshot exported at it, are returned only for
+// a slot this call created. For one that already existed the answer is
+// deliberately not the server's current position: that is where it is writing
+// now, and this is the restart case, so taking it would skip everything
+// committed while the task was down and no later message would ever carry it.
 //
 // seen skips the create for a slot already found on the source: one dropped
 // since must fail the stream, not be made again at the current end of the WAL.
+// A slot found here without seen is refused: the copy it would need has no
+// snapshot at the slot's position, so it would repeat changes the slot streams.
 func (s *Syncer) ensureSlot(ctx context.Context, stream *pgconn.PgConn, slot, plugin string,
-	seen bool) (pglogrepl.LSN, error) {
+	seen bool) (pglogrepl.LSN, string, error) {
 
 	system, err := pglogrepl.IdentifySystem(ctx, stream)
 	if err != nil {
-		return 0, fmt.Errorf("ask the source to identify itself: %w", err)
+		return 0, "", fmt.Errorf("ask the source to identify itself: %w", err)
 	}
 	s.logger.Infof("[PostgreSQL] Source system %s, timeline %d, at %s",
 		system.SystemID, system.Timeline, system.XLogPos)
 
 	if seen {
 		s.logger.Infof("[PostgreSQL] Replication slot %s is already there", slot)
-		return 0, nil
+		return 0, "", nil
 	}
 
 	created, err := pglogrepl.CreateReplicationSlot(ctx, stream, slot, plugin,
-		pglogrepl.CreateReplicationSlotOptions{Temporary: false})
+		pglogrepl.CreateReplicationSlotOptions{Temporary: false, SnapshotAction: "EXPORT_SNAPSHOT"})
 	if err != nil {
 		if !strings.Contains(err.Error(), "already exists") {
-			return 0, fmt.Errorf("create the replication slot %s: %w", slot, err)
+			return 0, "", fmt.Errorf("create the replication slot %s: %w", slot, err)
 		}
-		s.logger.Infof("[PostgreSQL] Replication slot %s is already there", slot)
-		return 0, nil
+		return 0, "", domain.Unrecoverable("replication slot %s already exists on %s, "+
+			"and this task has no stored position, so it needs a first copy: that copy "+
+			"cannot be read at the point the slot streams from, and the changes it "+
+			"shares with the stream would be written twice. To copy again, drop the "+
+			"slot on the source with SELECT pg_drop_replication_slot('%s') once "+
+			"nothing else reads from it, empty the target tables, and restart sync",
+			slot, endpointOf(s.cfg.SourceConnection), slotIdentifier(slot))
 	}
 
 	lsn, err := pglogrepl.ParseLSN(created.ConsistentPoint)
 	if err != nil {
-		return 0, fmt.Errorf("read the slot's consistent point %q: %w",
+		return 0, "", fmt.Errorf("read the slot's consistent point %q: %w",
 			created.ConsistentPoint, err)
 	}
 	s.logger.Infof("[PostgreSQL] Created replication slot %s at %s", slot, lsn)
-	return lsn, nil
+	return lsn, created.SnapshotName, nil
 }
 
 func (s *Syncer) openSource(ctx context.Context) (*pgx.Conn, error) {
