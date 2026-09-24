@@ -315,13 +315,24 @@ func (r *Runner) Run(ctx context.Context) error {
 	var producers sync.WaitGroup
 
 	readErr := make(chan error, 1)
+	readDone := make(chan struct{})
 	producers.Add(1)
 	go func() {
 		defer producers.Done()
+		defer close(readDone)
 		// A re-copy cannot be ordered against a stream that has stopped, and one
 		// waiting for the turn a stopped reader kept would wait for good.
 		defer stopRecopies()
 		readErr <- resilience.Guard(func() error { return r.read(readCtx, queue) })
+	}()
+	// Runs before the deferred Close: a driver's stream is not safe to close
+	// while its reader is still inside a call on it.
+	defer func() {
+		stopReading()
+		select {
+		case <-readDone:
+		case <-time.After(5 * time.Second):
+		}
 	}()
 
 	stopReporting := r.report(readCtx)

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -524,6 +525,46 @@ func TestAnInterruptedCopyRecordsNoPosition(t *testing.T) {
 	}
 	if got := store.value(""); got != "" {
 		t.Errorf("recorded position %q after a failed copy, want none", got)
+	}
+}
+
+// slowToStopReader returns from Next a moment after its context ends, as a
+// driver finishing a round trip does, and notes a Close that lands during it.
+type slowToStopReader struct {
+	fakeReader
+	inNext       atomic.Bool
+	closedInNext atomic.Bool
+}
+
+func (s *slowToStopReader) Next(ctx context.Context) (*domain.Event, error) {
+	s.inNext.Store(true)
+	defer s.inNext.Store(false)
+	<-ctx.Done()
+	time.Sleep(50 * time.Millisecond)
+	return nil, ctx.Err()
+}
+
+func (s *slowToStopReader) Close() error {
+	if s.inNext.Load() {
+		s.closedInNext.Store(true)
+	}
+	return nil
+}
+
+func TestTheStreamIsNotClosedUnderItsReader(t *testing.T) {
+	reader := &slowToStopReader{}
+	r := newRunner(t, reader, &fakeApplier{}, newStore())
+	r.Snapshotter = &fakeSnapshotter{
+		pinned:  domain.Position{Payload: "pinned"},
+		copyErr: errors.New("connection reset"),
+	}
+
+	if err := runFor(t, r, time.Second); err == nil {
+		t.Fatal("Run returned nil, want the copy's failure")
+	}
+	// A driver's stream is not safe to close while a call on it is in flight.
+	if reader.closedInNext.Load() {
+		t.Error("the stream was closed while its reader was still inside Next")
 	}
 }
 
