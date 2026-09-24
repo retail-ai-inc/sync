@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	goredis "github.com/redis/go-redis/v9"
 	"github.com/retail-ai-inc/sync/internal/platform/config"
 	"github.com/retail-ai-inc/sync/internal/platform/metrics"
 	"github.com/sirupsen/logrus"
@@ -440,5 +441,18 @@ func TestAnEstimateSaysThatItIsOne(t *testing.T) {
 	// And the two are separate series, so a panel can tell them apart.
 	if estimated.Key() == exact.Key() {
 		t.Error("the two methods share one series")
+	}
+}
+
+// An end that connected but could not be counted would otherwise publish zero,
+// which reads as a database that has lost everything.
+func TestAnEndThatCannotBeCountedIsMarkedMinusOne(t *testing.T) {
+	client := goredis.NewClient(&goredis.Options{Addr: "127.0.0.1:1"})
+	_ = client.Close()
+	logger, _ := captureLog()
+
+	count, databases, err := sizeOrMark(context.Background(), client, nil, "target", "REDIS", logger)
+	if count != -1 || databases != nil || err == nil {
+		t.Errorf("sizeOrMark = %d, %v, %v; want -1, nil and the error", count, databases, err)
 	}
 }

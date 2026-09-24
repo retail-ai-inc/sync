@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -907,5 +908,117 @@ func TestLogYesterdayMongoDBVolumeCountsTheDayThatEnded(t *testing.T) {
 	if !strings.Contains(text, `"tgt_yesterday_count":1`) &&
 		!strings.Contains(text, `tgt_yesterday_count=1`) {
 		t.Errorf("summary = %q, want 1 target document inside yesterday", text)
+	}
+}
+
+// writeOwnKeys writes position keys and slot markers named as replication names
+// them, in one pipeline.
+func writeOwnKeys(t *testing.T, client goredis.UniversalClient, task, positions, markers int) []string {
+	t.Helper()
+	var keys []string
+	for i := 0; i < positions; i++ {
+		keys = append(keys, fmt.Sprintf("__sync:pos:%d:%d", task, i))
+	}
+	for i := 0; i < markers; i++ {
+		keys = append(keys, fmt.Sprintf("{tag%d}:__off:%d", i, task))
+	}
+	pipe := client.Pipeline()
+	for _, key := range keys {
+		pipe.Set(t.Context(), key, "x", 0)
+	}
+	if _, err := pipe.Exec(t.Context()); err != nil {
+		t.Fatalf("write this tool's own keys: %v", err)
+	}
+	return keys
+}
+
+// Counted as data, the markers and positions read as a permanent difference on a
+// target that holds exactly what the source does.
+func TestTheTargetsOwnKeysAreLeftOutOfItsPublishedCount(t *testing.T) {
+	useMonitoringDB(t)
+
+	src := openRedis(t, harness.RedisSource, monitorRedisDB)
+	tgt := openRedis(t, harness.RedisTarget, monitorRedisDB)
+	emptyServers(t, src, tgt)
+	for i := 0; i < 5; i++ {
+		for _, end := range []*goredis.Client{src, tgt} {
+			if err := end.Set(t.Context(), fmt.Sprintf("data:%d", i), i, 0).Err(); err != nil {
+				t.Fatalf("seed data: %v", err)
+			}
+		}
+	}
+	// More than one SCAN page of them.
+	writeOwnKeys(t, tgt, 9, 1500, 3)
+
+	id := harness.UniqueTaskID()
+	countAndLogTables(t.Context(), config.SyncConfig{
+		ID: id, Enable: true, Type: "redis",
+		SourceConnection: fmt.Sprintf("redis://%s/%d", harness.RedisSource, monitorRedisDB),
+		TargetConnection: fmt.Sprintf("redis://%s/%d", harness.RedisTarget, monitorRedisDB),
+	}, quietLogger())
+
+	got := publishedCounts(t, id)
+	if len(got) != 1 || got[0].SrcCount != 5 || got[0].TgtCount != 5 {
+		t.Errorf("published %+v, want 5 -> 5", got)
+	}
+}
+
+// On a cluster the markers sit on every master, so each one has to be scanned.
+func TestAClusterTargetsOwnKeysAreLeftOutOfItsPublishedCount(t *testing.T) {
+	sourceAddrs, targetAddrs := os.Getenv("SYNC_REDIS_SOURCE_CLUSTER"), os.Getenv("SYNC_REDIS_TARGET_CLUSTER")
+	if sourceAddrs == "" || targetAddrs == "" {
+		t.Skip("set SYNC_REDIS_SOURCE_CLUSTER and SYNC_REDIS_TARGET_CLUSTER to two Redis clusters")
+	}
+	useMonitoringDB(t)
+	source := goredis.NewClusterClient(&goredis.ClusterOptions{Addrs: strings.Split(sourceAddrs, ",")})
+	target := goredis.NewClusterClient(&goredis.ClusterOptions{Addrs: strings.Split(targetAddrs, ",")})
+	t.Cleanup(func() { _ = source.Close(); _ = target.Close() })
+
+	id := harness.UniqueTaskID()
+	sc := config.SyncConfig{
+		ID: id, Enable: true, Type: "redis",
+		SourceConnection: "redis://" + sourceAddrs + "/0",
+		TargetConnection: "redis://" + targetAddrs + "/0",
+	}
+	measure := func() monitoringRow {
+		t.Helper()
+		countAndLogTables(t.Context(), sc, quietLogger())
+		got := publishedCounts(t, id)
+		if len(got) != 1 || got[0].SrcCount < 0 || got[0].TgtCount < 0 {
+			t.Fatalf("published %+v, want one measured row", got)
+		}
+		return got[0]
+	}
+	before := measure()
+
+	prefix := harness.UniqueName("ownkeys")
+	var data []string
+	for i := 0; i < 5; i++ {
+		data = append(data, fmt.Sprintf("%s:data:%d", prefix, i))
+	}
+	for _, end := range []*goredis.ClusterClient{source, target} {
+		for _, key := range data {
+			if err := end.Set(t.Context(), key, 1, 0).Err(); err != nil {
+				t.Fatalf("seed data: %v", err)
+			}
+		}
+	}
+	own := writeOwnKeys(t, target, id, 1500, 300)
+	t.Cleanup(func() {
+		for _, key := range data {
+			source.Del(context.Background(), key)
+			target.Del(context.Background(), key)
+		}
+		for _, key := range own {
+			target.Del(context.Background(), key)
+		}
+	})
+
+	after := measure()
+	if grown := after.SrcCount - before.SrcCount; grown != 5 {
+		t.Errorf("the source grew by %d, want the 5 data keys", grown)
+	}
+	if grown := after.TgtCount - before.TgtCount; grown != 5 {
+		t.Errorf("the target grew by %d, want the 5 data keys and none of its own", grown)
 	}
 }
