@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -148,7 +149,8 @@ func (s *Syncer) Start(ctx context.Context) error {
 type shard struct {
 	// id is stable across restarts, so a position can be found again. The slot
 	// range serves: a master's address changes when it fails over, but the slots
-	// it owns are what identify it in the cluster.
+	// it owns are what identify it in the cluster. A master owning several ranges
+	// is named by all of them, joined by commas in slot order.
 	id   string
 	addr string
 }
@@ -190,23 +192,47 @@ func shardsOf(ctx context.Context, source goredis.UniversalClient, single string
 	if err != nil {
 		return nil, fmt.Errorf("ask the source which shards it has: %w", err)
 	}
-	seen := make(map[string]bool)
-	var found []shard
-	for _, slot := range slots {
-		if len(slot.Nodes) == 0 {
-			continue
-		}
-		id := strconv.Itoa(int(slot.Start)) + "-" + strconv.Itoa(int(slot.End))
-		if seen[id] {
-			continue
-		}
-		seen[id] = true
-		found = append(found, shard{id: id, addr: slot.Nodes[0].Addr})
-	}
+	found := shardsFromSlots(slots)
 	if len(found) == 0 {
 		return nil, fmt.Errorf("the source reported no shards")
 	}
 	return found, nil
+}
+
+// shardsFromSlots gives each master one shard, however many ranges it owns.
+// Every link to a master receives its whole stream, so a second shard on the
+// same master applies each of its writes a second time.
+func shardsFromSlots(slots []goredis.ClusterSlot) []shard {
+	seen := make(map[string]bool)
+	owned := make(map[string][]goredis.ClusterSlot)
+	var masters []string
+	for _, slot := range slots {
+		if len(slot.Nodes) == 0 {
+			continue
+		}
+		span := strconv.Itoa(int(slot.Start)) + "-" + strconv.Itoa(int(slot.End))
+		if seen[span] {
+			continue
+		}
+		seen[span] = true
+		addr := slot.Nodes[0].Addr
+		if _, known := owned[addr]; !known {
+			masters = append(masters, addr)
+		}
+		owned[addr] = append(owned[addr], slot)
+	}
+
+	found := make([]shard, 0, len(masters))
+	for _, addr := range masters {
+		ranges := owned[addr]
+		sort.Slice(ranges, func(i, j int) bool { return ranges[i].Start < ranges[j].Start })
+		spans := make([]string, len(ranges))
+		for i, slot := range ranges {
+			spans[i] = strconv.Itoa(int(slot.Start)) + "-" + strconv.Itoa(int(slot.End))
+		}
+		found = append(found, shard{id: strings.Join(spans, ","), addr: addr})
+	}
+	return found
 }
 
 func (s *Syncer) runShard(ctx context.Context, sh shard, shards int,

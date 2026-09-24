@@ -204,18 +204,11 @@ func ownership(ctx context.Context, cluster *goredis.ClusterClient) (map[string]
 	if len(slots) == 0 {
 		return nil, fmt.Errorf("the source reported no slots")
 	}
-	shape := make(map[string]string, len(slots))
-	for _, slot := range slots {
-		if len(slot.Nodes) == 0 {
-			continue
-		}
-		shape[fmt.Sprintf("%d-%d", slot.Start, slot.End)] = slot.Nodes[0].Addr
-	}
-	return shape, nil
+	// Keyed as the shards are, or an unchanged cluster reads as a reshard on
+	// every poll.
+	return shapeOf(shardsFromSlots(slots)), nil
 }
 
-// shapeOf must key each shard as ownership does, or an unchanged cluster reads
-// as a reshard on every poll.
 func shapeOf(shards []shard) map[string]string {
 	shape := make(map[string]string, len(shards))
 	for _, sh := range shards {

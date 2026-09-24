@@ -349,3 +349,22 @@ func TestAShardsFlushCoversItsOwnSlotsOnly(t *testing.T) {
 		t.Errorf("slot %d was placed on the wrong side of 0-5460", mine)
 	}
 }
+
+// A failure means a flush or a sweep of a master owning several ranges misses one of them or reaches past them.
+func TestAShardOfSeveralRangesReachesEachOfThem(t *testing.T) {
+	spans, ok := slotRanges("0-100,5461-10922")
+	if !ok {
+		t.Fatal("slotRanges(\"0-100,5461-10922\") reported no range")
+	}
+	for slot, want := range map[int]bool{0: true, 100: true, 101: false, 5460: false,
+		5461: true, 10922: true, 10923: false} {
+		if got := spans.has(slot); got != want {
+			t.Errorf("slot %d in 0-100,5461-10922 = %v, want %v", slot, got, want)
+		}
+	}
+	for _, name := range []string{"0", "", "0-100,", ",0-100", "0-100,x", "0-100,5461-16384"} {
+		if _, ok := slotRanges(name); ok {
+			t.Errorf("slotRanges(%q) reported a range", name)
+		}
+	}
+}

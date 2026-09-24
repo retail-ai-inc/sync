@@ -171,8 +171,8 @@ func TestAFlushOnAClusterOnlyEmptiesTheShardsSlots(t *testing.T) {
 		t.Fatalf("the seed landed entirely on one side of the split (%d/%d)", doomed, kept)
 	}
 
-	if err := deleteSlotRange(ctx, cluster, 0, 8191); err != nil {
-		t.Fatalf("deleteSlotRange: %v", err)
+	if err := deleteSlotRanges(ctx, cluster, slotSpans{{0, 8191}}); err != nil {
+		t.Fatalf("deleteSlotRanges: %v", err)
 	}
 
 	for i := 0; i < 200; i++ {

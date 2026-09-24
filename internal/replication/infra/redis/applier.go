@@ -535,16 +535,18 @@ func (a *Applier) flushTarget(ctx context.Context, f *flush,
 	// target empties the whole key space instead -- the other shards' data
 	// included, which the source still has. Only the keys this shard is
 	// responsible for go.
-	start, end, ranged := slotRange(a.Positions.Shard)
+	spans, ranged := slotRanges(a.Positions.Shard)
 	if !ranged {
 		return fmt.Errorf("shard %q does not name a slot range, so the reach of %s "+
 			"on the target cannot be worked out", a.Positions.Shard, f.name())
 	}
-	if err := a.dropMarkersIn(ctx, start, end); err != nil {
-		return err
+	for _, span := range spans {
+		if err := a.dropMarkersIn(ctx, span.start, span.end); err != nil {
+			return err
+		}
 	}
-	if err := deleteSlotRange(ctx, cluster, start, end); err != nil {
-		return fmt.Errorf("carry %s across slots %d-%d: %w", f.name(), start, end, err)
+	if err := deleteSlotRanges(ctx, cluster, spans); err != nil {
+		return fmt.Errorf("carry %s across slots %s: %w", f.name(), a.Positions.Shard, err)
 	}
 	if a.RestoreState != nil {
 		pipe := a.Target.Pipeline()
@@ -621,7 +623,7 @@ func serverRefused(err error) bool {
 	return errors.As(err, &fromServer)
 }
 
-// slotRange reads the slots a shard owns out of its name. A single server is
+// slotRange reads one slot range out of a shard's name. A single server is
 // named "0" and owns no range, which is what tells the caller its flush covers
 // the whole database rather than a slice of one.
 func slotRange(shard string) (start, end int, ok bool) {
@@ -640,13 +642,41 @@ func slotRange(shard string) (start, end int, ok bool) {
 	return start, end, true
 }
 
-// deleteSlotRange empties the target of the keys one shard is responsible for.
+type slotSpan struct{ start, end int }
+
+type slotSpans []slotSpan
+
+func (spans slotSpans) has(slot int) bool {
+	for _, span := range spans {
+		if slot >= span.start && slot <= span.end {
+			return true
+		}
+	}
+	return false
+}
+
+// slotRanges reads every range a shard owns out of its name, which joins them
+// with commas when its master owns more than one. Every one of them has to
+// parse, or the shard's reach is unknown.
+func slotRanges(shard string) (slotSpans, bool) {
+	var spans slotSpans
+	for _, part := range strings.Split(shard, ",") {
+		start, end, ok := slotRange(part)
+		if !ok {
+			return nil, false
+		}
+		spans = append(spans, slotSpan{start, end})
+	}
+	return spans, true
+}
+
+// deleteSlotRanges empties the target of the keys one shard is responsible for.
 //
 // There is no command for "flush these slots", so the target is walked and the
-// keys whose slot falls in the range are removed. A flush is rare enough to
+// keys whose slot falls in the ranges are removed. A flush is rare enough to
 // afford the walk, and the alternative -- sending the flush to every master --
 // deletes the other shards' data, which the source still has.
-func deleteSlotRange(ctx context.Context, cluster *goredis.ClusterClient, start, end int) error {
+func deleteSlotRanges(ctx context.Context, cluster *goredis.ClusterClient, spans slotSpans) error {
 	return cluster.ForEachMaster(ctx, func(ctx context.Context, node *goredis.Client) error {
 		var cursor uint64
 		for {
@@ -656,7 +686,7 @@ func deleteSlotRange(ctx context.Context, cluster *goredis.ClusterClient, start,
 			}
 			var doomed []string
 			for _, key := range keys {
-				if slot := SlotOf([]byte(key)); slot >= start && slot <= end {
+				if spans.has(SlotOf([]byte(key))) {
 					doomed = append(doomed, key)
 				}
 			}

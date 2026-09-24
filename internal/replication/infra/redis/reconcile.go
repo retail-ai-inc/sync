@@ -3,6 +3,7 @@ package redis
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	goredis "github.com/redis/go-redis/v9"
@@ -415,12 +416,16 @@ func (r *Reconciler) ownedSlots(ctx context.Context) (map[int]bool, error) {
 	if err != nil {
 		return nil, fmt.Errorf("ask which slots shard %s owns: %w", r.Shard, err)
 	}
+	mine := make(map[string]bool)
+	for _, span := range strings.Split(r.Shard, ",") {
+		mine[span] = true
+	}
 	owned := make(map[int]bool)
 	for _, slot := range slots {
 		if len(slot.Nodes) == 0 {
 			continue
 		}
-		if fmt.Sprintf("%d-%d", slot.Start, slot.End) != r.Shard {
+		if !mine[fmt.Sprintf("%d-%d", slot.Start, slot.End)] {
 			continue
 		}
 		for at := int(slot.Start); at <= int(slot.End); at++ {

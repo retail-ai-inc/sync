@@ -77,6 +77,84 @@ func TestASingleServerSourceIsDialledWithoutItsDatabase(t *testing.T) {
 	}
 }
 
+// A failure means a master owning two ranges gets two replica links, so every write on it is applied twice.
+func TestAMasterOwningTwoRangesIsStreamedOnce(t *testing.T) {
+	ctx := context.Background()
+	cluster := clusterAnswering(t, []goredis.ClusterSlot{
+		{Start: 0, End: 100, Nodes: []goredis.ClusterNode{{Addr: "10.0.0.1:6379"}, {Addr: "10.0.0.11:6379"}}},
+		{Start: 101, End: 5460, Nodes: []goredis.ClusterNode{{Addr: "10.0.0.2:6379"}, {Addr: "10.0.0.12:6379"}}},
+		{Start: 5461, End: 10922, Nodes: []goredis.ClusterNode{{Addr: "10.0.0.1:6379"}, {Addr: "10.0.0.11:6379"}}},
+		{Start: 10923, End: 16383, Nodes: []goredis.ClusterNode{{Addr: "10.0.0.3:6379"}, {Addr: "10.0.0.13:6379"}}},
+	})
+
+	shards, err := shardsOf(ctx, cluster, "")
+	if err != nil {
+		t.Fatalf("shardsOf: %v", err)
+	}
+	streamed := make(map[string]string, len(shards))
+	for _, sh := range shards {
+		if other, twice := streamed[sh.addr]; twice {
+			t.Fatalf("%s is streamed by shards %s and %s, so every write on it is "+
+				"applied twice", sh.addr, other, sh.id)
+		}
+		streamed[sh.addr] = sh.id
+	}
+	for addr, want := range map[string]string{
+		"10.0.0.1:6379": "0-100,5461-10922",
+		"10.0.0.2:6379": "101-5460",
+		"10.0.0.3:6379": "10923-16383",
+	} {
+		if got := streamed[addr]; got != want {
+			t.Errorf("the shard of %s is named %q, want %q: its stored position is "+
+				"found by that name", addr, got, want)
+		}
+	}
+
+	shape, err := ownership(ctx, cluster)
+	if err != nil {
+		t.Fatalf("ownership: %v", err)
+	}
+	if added, removed := rangesMoved(shapeOf(shards), shape); added != "" || removed != "" {
+		t.Errorf("the cluster the shards were built from reads as a reshard: %s%s", added, removed)
+	}
+
+	owned, err := (&Reconciler{Source: cluster, Shard: streamed["10.0.0.1:6379"]}).ownedSlots(ctx)
+	if err != nil {
+		t.Fatalf("ownedSlots: %v", err)
+	}
+	if !owned[0] || !owned[100] || !owned[5461] || !owned[10922] || owned[101] || owned[10923] {
+		t.Errorf("the reconciler of 0-100,5461-10922 owns %d slots, not both ranges and nothing else",
+			len(owned))
+	}
+}
+
+// clusterAnswering is a cluster client that answers CLUSTER SLOTS with slots and dials nothing for it.
+func clusterAnswering(t *testing.T, slots []goredis.ClusterSlot) *goredis.ClusterClient {
+	t.Helper()
+	cluster := goredis.NewClusterClient(&goredis.ClusterOptions{Addrs: []string{"127.0.0.1:1"}})
+	cluster.AddHook(slotsReply(slots))
+	t.Cleanup(func() { cluster.Close() })
+	return cluster
+}
+
+type slotsReply []goredis.ClusterSlot
+
+func (r slotsReply) DialHook(next goredis.DialHook) goredis.DialHook { return next }
+
+func (r slotsReply) ProcessPipelineHook(next goredis.ProcessPipelineHook) goredis.ProcessPipelineHook {
+	return next
+}
+
+func (r slotsReply) ProcessHook(next goredis.ProcessHook) goredis.ProcessHook {
+	return func(ctx context.Context, cmd goredis.Cmder) error {
+		if reply, ok := cmd.(*goredis.ClusterSlotsCmd); ok {
+			reply.SetVal(r)
+			return nil
+		}
+		return next(ctx, cmd)
+	}
+}
+
 // TestTheSourceOffsetIsReadFromInfoReplication covers the number the lag alarm
 // should be built on.
 func TestTheSourceOffsetIsReadFromInfoReplication(t *testing.T) {

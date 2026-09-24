@@ -34,8 +34,8 @@ func (s *Snapshotter) SweepStale(ctx context.Context) error {
 	if err := s.sourceHoldsSomething(ctx); err != nil {
 		return err
 	}
-	if start, end, ranged := slotRange(s.Link.shard); ranged {
-		return s.sweepSlots(ctx, start, end)
+	if spans, ranged := slotRanges(s.Link.shard); ranged {
+		return s.sweepSlots(ctx, spans)
 	}
 	return s.sweepDatabases(ctx)
 }
@@ -114,9 +114,9 @@ func (s *Snapshotter) sourceKeys(ctx context.Context) (int64, error) {
 	return int64(len(databases)), nil
 }
 
-// sweepSlots handles a cluster, where one shard owns a range of slots and the
+// sweepSlots handles a cluster, where one shard owns ranges of slots and the
 // target's own shape may divide them differently.
-func (s *Snapshotter) sweepSlots(ctx context.Context, start, end int) error {
+func (s *Snapshotter) sweepSlots(ctx context.Context, spans slotSpans) error {
 	source := s.Node
 	if source == nil {
 		source = s.Source
@@ -125,8 +125,7 @@ func (s *Snapshotter) sweepSlots(ctx context.Context, start, end int) error {
 	removed := 0
 	walk := func(ctx context.Context, node *goredis.Client) error {
 		n, err := s.sweepNode(ctx, node, s.Target, source, func(key string) bool {
-			slot := SlotOf([]byte(key))
-			return slot >= start && slot <= end
+			return spans.has(SlotOf([]byte(key)))
 		})
 		removed += n
 		return err
@@ -140,8 +139,7 @@ func (s *Snapshotter) sweepSlots(ctx context.Context, start, end int) error {
 		// A cluster source replicated into one server: everything it holds for
 		// this shard is on that server.
 		n, err := s.sweepNode(ctx, s.Target, s.Target, source, func(key string) bool {
-			slot := SlotOf([]byte(key))
-			return slot >= start && slot <= end
+			return spans.has(SlotOf([]byte(key)))
 		})
 		if err != nil {
 			return err
