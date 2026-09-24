@@ -496,11 +496,30 @@ func (a *Applier) applyAroundFlush(ctx context.Context, events []*domain.Event,
 		if err := writeSegment(); err != nil {
 			return err
 		}
+		// Only SWAPDB is skipped once landed: applied twice it swaps the databases
+		// back, while a flush is idempotent and replaying it resets the markers.
+		if isSwap(flushed) && everySlotPassed(markers, flushed.offset) {
+			continue
+		}
 		if err := a.flushTarget(ctx, flushed, markers, position); err != nil {
 			return err
 		}
 	}
 	return writeSegment()
+}
+
+func isSwap(f *flush) bool { return strings.EqualFold(f.name(), "swapdb") }
+
+// everySlotPassed reports whether every slot has applied up to offset. Past a
+// flush that holds only once the flush, and the position restored with it,
+// have landed.
+func everySlotPassed(markers []int64, offset int64) bool {
+	for _, at := range markers {
+		if at < offset {
+			return false
+		}
+	}
+	return true
 }
 
 // flushTarget empties the target the way the source was emptied, and puts back

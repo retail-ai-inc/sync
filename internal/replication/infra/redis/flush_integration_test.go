@@ -4,9 +4,11 @@ package redis
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -283,6 +285,78 @@ func TestAFlushOfAnotherDatabaseRestoresThePositionWhereItLives(t *testing.T) {
 	}
 	if n, err := third.Exists(ctx, metaKey(flushRestoreTaskID, "0"), directionlock.RedisKey).Result(); err != nil || n != 0 {
 		t.Errorf("%d of this task's own keys were written into database 3 (%v)", n, err)
+	}
+}
+
+// failFirstWriteOf fails the first pipeline that writes key without sending it,
+// as a connection dropping part way through a batch does.
+type failFirstWriteOf struct {
+	key    string
+	failed atomic.Bool
+}
+
+func (f *failFirstWriteOf) DialHook(next goredis.DialHook) goredis.DialHook { return next }
+
+func (f *failFirstWriteOf) ProcessHook(next goredis.ProcessHook) goredis.ProcessHook { return next }
+
+func (f *failFirstWriteOf) ProcessPipelineHook(next goredis.ProcessPipelineHook) goredis.ProcessPipelineHook {
+	return func(ctx context.Context, cmds []goredis.Cmder) error {
+		for _, cmd := range cmds {
+			args := cmd.Args()
+			if len(args) < 2 {
+				continue
+			}
+			if key, ok := args[1].([]byte); ok && string(key) == f.key && f.failed.CompareAndSwap(false, true) {
+				return errors.New("connection reset by peer")
+			}
+		}
+		return next(ctx, cmds)
+	}
+}
+
+// A failure means retrying a batch whose SWAPDB had landed swaps the databases back.
+func TestASwapdbIsNotReplayedOnRetry(t *testing.T) {
+	targetAddr := addrsFrom(t, "SYNC_REDIS_TARGET")[0]
+	target := oneConnection(t, targetAddr)
+	emptyOne(t, target)
+	ctx := context.Background()
+	home, first, second := onDB(t, targetAddr, 0), onDB(t, targetAddr, 1), onDB(t, targetAddr, 2)
+
+	if err := first.Set(ctx, "swap:one", "1", 0).Err(); err != nil {
+		t.Fatalf("seed database 1: %v", err)
+	}
+	if err := second.Set(ctx, "swap:two", "2", 0).Err(); err != nil {
+		t.Fatalf("seed database 2: %v", err)
+	}
+	applier := restoringApplier(t, target, flushRestoreTaskID, 100)
+	target.AddHook(&failFirstWriteOf{key: "swap:after"})
+	runs := [][]*domain.Event{{
+		streamedFlush(0, 110, "SWAPDB", "1", "2"),
+		streamed(0, 120, "SET", "swap:after", "v"),
+	}}
+
+	if _, err := applier.Apply(ctx, runs, storedPosition(120)); err == nil {
+		t.Fatal("the write after the swap did not fail, so there is nothing to retry")
+	}
+	if err := applier.Positions.Refresh(ctx); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if _, err := applier.Apply(ctx, runs, storedPosition(120)); err != nil {
+		t.Fatalf("the retry: %v", err)
+	}
+
+	for _, want := range []struct {
+		client     *goredis.Client
+		db         int
+		key, value string
+	}{
+		{second, 2, "swap:one", "1"},
+		{first, 1, "swap:two", "2"},
+		{home, 0, "swap:after", "v"},
+	} {
+		if got, err := want.client.Get(ctx, want.key).Result(); err != nil || got != want.value {
+			t.Errorf("%s reads %q (%v) in database %d, want %q", want.key, got, err, want.db, want.value)
+		}
 	}
 }
 
