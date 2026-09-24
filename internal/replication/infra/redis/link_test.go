@@ -2,6 +2,7 @@ package redis
 
 import (
 	"context"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -147,5 +148,47 @@ func TestARefusedResumeIsPositionUnusable(t *testing.T) {
 	}
 	if l.stream != nil || l.pumpErr != nil {
 		t.Error("the refused connection was kept as the link's stream")
+	}
+}
+
+func TestALostReplicationConnectionStopsTheReaderWithItsReason(t *testing.T) {
+	hangUp := make(chan struct{})
+	master := startFakeMasterThatHangsUp(t, []string{"+OK\r\n", "+OK\r\n", "+CONTINUE\r\n"},
+		resp("SET", "k", "v"), hangUp)
+	buffer := newBuffer(t, BufferOptions{})
+	if err := buffer.Reset(100); err != nil {
+		t.Fatalf("Reset: %v", err)
+	}
+	r := &Reader{Shard: "0-16383", Link: linkTo(t, master, buffer), Commands: table()}
+	t.Cleanup(func() { _ = r.Close() })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := r.Open(ctx,
+		encodedPosition(t, streamPosition{ReplID: "abc", Offset: 100, Phase: phaseCommand})); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	first, err := r.Next(ctx)
+	if err != nil {
+		t.Fatalf("first Next: %v", err)
+	}
+	if first.Key != "k" {
+		t.Fatalf("first event is %q, want the SET", first.Key)
+	}
+
+	close(hangUp)
+	stopped := make(chan error, 1)
+	go func() {
+		_, err := r.Next(ctx)
+		stopped <- err
+	}()
+	select {
+	case err := <-stopped:
+		if err == nil || err == io.EOF || !strings.Contains(err.Error(), "read from the source") {
+			t.Errorf("Next returned %v, want the connection's own failure", err)
+		}
+	case <-time.After(5 * time.Second):
+		// Waiting here, the shard stops replicating and nothing restarts it.
+		t.Fatal("the reader is still waiting on a connection that has gone")
 	}
 }

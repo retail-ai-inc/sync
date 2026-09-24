@@ -160,9 +160,9 @@ func (l *link) start(ctx context.Context, from streamPosition) (streamPosition, 
 		err := l.pump(pumpCtx, stream)
 		// Waking the readers matters as much as reporting why: a cursor waiting at
 		// the end of the buffer is woken by an append, and there will not be another
-		// one.
-		l.buffer.Seal()
+		// one. The reason goes first, so a reader the seal wakes finds it.
 		l.pumpErr <- err
+		l.buffer.Seal()
 	}()
 
 	l.pumping.Add(1)

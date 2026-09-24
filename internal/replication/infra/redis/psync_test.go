@@ -22,9 +22,16 @@ type fakeMaster struct {
 	afterHandshake []byte
 	// received collects the commands the replica sent.
 	received chan []string
+	// hangUp, when closed, drops the connection the way a restarted source does.
+	hangUp <-chan struct{}
 }
 
 func startFakeMaster(t *testing.T, replies []string, afterHandshake []byte) *fakeMaster {
+	return startFakeMasterThatHangsUp(t, replies, afterHandshake, nil)
+}
+
+func startFakeMasterThatHangsUp(t *testing.T, replies []string, afterHandshake []byte,
+	hangUp <-chan struct{}) *fakeMaster {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -34,6 +41,7 @@ func startFakeMaster(t *testing.T, replies []string, afterHandshake []byte) *fak
 		t: t, listener: listener, replies: replies,
 		afterHandshake: afterHandshake,
 		received:       make(chan []string, 16),
+		hangUp:         hangUp,
 	}
 	t.Cleanup(func() { listener.Close() })
 
@@ -49,6 +57,15 @@ func (m *fakeMaster) serve() {
 		return
 	}
 	defer conn.Close()
+	served := make(chan struct{})
+	defer close(served)
+	go func() {
+		select {
+		case <-m.hangUp:
+			conn.Close()
+		case <-served:
+		}
+	}()
 
 	for _, reply := range m.replies {
 		args, err := readCommandFrom(conn)
