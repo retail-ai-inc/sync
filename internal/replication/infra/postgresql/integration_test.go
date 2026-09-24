@@ -414,3 +414,47 @@ func TestAStreamedTransactionIsNotReplayedAfterARestart(t *testing.T) {
 		})
 	}
 }
+
+// A failure means a write the target refuses for good was retried for ever instead of stopping the task.
+func TestADuplicateOnTheTargetStopsTheTask(t *testing.T) {
+	table, publication, slot := names(t, "pg_target_duplicate")
+	src, tgt := open(t, harness.PostgresSource, sourceDatabase), open(t, harness.PostgresTarget, targetDatabase)
+	sourceTable(t, src, tgt, table, publication, slot)
+	mustExec(t, src, fmt.Sprintf("INSERT INTO %s (id, name) VALUES (1, 'copied')", table))
+
+	logger := logrus.New()
+	logger.SetLevel(logrus.ErrorLevel)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- NewPostgreSQLSyncer(syncTask(t, table, publication, slot), logger).Start(ctx) }()
+	stopped := false
+	t.Cleanup(func() {
+		cancel()
+		if !stopped {
+			<-done
+		}
+	})
+
+	harness.Eventually(t, 45*time.Second, func() error {
+		if n := countRows(t, tgt, table, "id = 1"); n != 1 {
+			return fmt.Errorf("the initial copy has not landed: %d rows", n)
+		}
+		return nil
+	})
+	mustExec(t, tgt, fmt.Sprintf("INSERT INTO %s (id, name) VALUES (5, 'on the target only')", table))
+	mustExec(t, src, fmt.Sprintf("INSERT INTO %s (id, name) VALUES (5, 'from the source')", table))
+
+	select {
+	case err := <-done:
+		stopped = true
+		if !domain.IsUnrecoverable(err) {
+			t.Fatalf("err = %v, want it marked unrecoverable", err)
+		}
+		if !strings.Contains(err.Error(), "23505") {
+			t.Errorf("the refusal does not carry the target's SQLSTATE 23505: %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the task was still retrying the refused write 30s after it was made")
+	}
+}

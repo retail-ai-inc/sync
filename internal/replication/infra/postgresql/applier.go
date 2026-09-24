@@ -3,10 +3,12 @@ package postgresql
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/jackc/pglogrepl"
+	"github.com/lib/pq"
 	"github.com/sirupsen/logrus"
 
 	"github.com/retail-ai-inc/sync/internal/platform/metrics"
@@ -128,7 +130,7 @@ func (a *Applier) once(ctx context.Context, runs [][]*domain.Event, pos domain.P
 			}
 			trips++
 			if _, err := tx.ExecContext(ctx, stmt.query, stmt.args...); err != nil {
-				return false, trips, 0, fmt.Errorf("%s: %w", stmt.query, err)
+				return false, trips, 0, fmt.Errorf("%s: %w", stmt.query, withSQLState(err))
 			}
 		}
 	}
@@ -137,14 +139,24 @@ func (a *Applier) once(ctx context.Context, runs [][]*domain.Event, pos domain.P
 	if a.Checkpoints != nil && !pos.IsZero() {
 		trips++
 		if err := a.Checkpoints.SaveTx(ctx, tx, a.CheckpointKey, pos.Payload); err != nil {
-			return false, trips, 0, err
+			return false, trips, 0, withSQLState(err)
 		}
 		committed = true
 	}
 
 	startedCommit := time.Now()
 	if err := tx.Commit(); err != nil {
-		return false, trips, 0, err
+		return false, trips, 0, withSQLState(err)
 	}
 	return committed, trips, time.Since(startedCommit), nil
+}
+
+// withSQLState adds the SQLSTATE lib/pq leaves out of an error's text, which is
+// what the pipeline tells a refusal retrying cannot fix by.
+func withSQLState(err error) error {
+	var refused *pq.Error
+	if errors.As(err, &refused) && refused.Code != "" {
+		return fmt.Errorf("%w (%s)", err, refused.Code)
+	}
+	return err
 }
