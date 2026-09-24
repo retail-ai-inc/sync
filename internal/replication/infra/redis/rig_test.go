@@ -17,6 +17,7 @@ import (
 
 	"github.com/retail-ai-inc/sync/internal/platform/metrics"
 	"github.com/retail-ai-inc/sync/internal/replication/app/pipeline"
+	"github.com/retail-ai-inc/sync/internal/replication/domain"
 )
 
 // What the integration tests are built out of.
@@ -35,6 +36,73 @@ func redisAt(t *testing.T, addrs []string) goredis.UniversalClient {
 		t.Fatalf("ping %v: %v", addrs, err)
 	}
 	return client
+}
+
+// oneConnection opens a client that pools a single connection, so a pipeline
+// that leaves it on another database shows in the next command sent on it.
+func oneConnection(t *testing.T, addr string) *goredis.Client {
+	t.Helper()
+	client := goredis.NewClient(&goredis.Options{Addr: addr, PoolSize: 1})
+	t.Cleanup(func() { client.Close() })
+	if err := client.Ping(context.Background()).Err(); err != nil {
+		t.Fatalf("ping %s: %v", addr, err)
+	}
+	return client
+}
+
+// onDB opens a client on one database of a server, to look at it directly.
+func onDB(t *testing.T, addr string, db int) *goredis.Client {
+	t.Helper()
+	client := goredis.NewClient(&goredis.Options{Addr: addr, DB: db})
+	t.Cleanup(func() { client.Close() })
+	return client
+}
+
+// storedPosition is a position in the history the direct applier tests use.
+func storedPosition(offset int64) domain.Position {
+	return domain.Position{Payload: fmt.Sprintf(`{"replid":"h1","offset":%d}`, offset)}
+}
+
+func asArgs(parts []string) [][]byte {
+	args := make([][]byte, len(parts))
+	for i, part := range parts {
+		args[i] = []byte(part)
+	}
+	return args
+}
+
+// streamed is a command event as the reader hands it over, keyed by its first
+// argument after the name.
+func streamed(db int, offset int64, parts ...string) *domain.Event {
+	args := asArgs(parts)
+	cmd := &command{args: args, db: db, slot: SlotOf(args[1]), offset: offset}
+	return commandEvent(cmd, args[1], time.Time{}, true)
+}
+
+func streamedFlush(db int, offset int64, parts ...string) *domain.Event {
+	return flushEvent(&flush{args: asArgs(parts), db: db, offset: offset}, time.Time{})
+}
+
+func streamedRepair(db int, offset int64, key string) *domain.Event {
+	repair := &valueRepair{key: []byte(key), db: db, slot: SlotOf([]byte(key)), offset: offset}
+	return repairEvent(repair, time.Time{}, true)
+}
+
+// standaloneApplier writes into one server, with a position stored first the
+// way the runner loads one before anything is applied.
+func standaloneApplier(t *testing.T, source, target *goredis.Client, taskID int,
+	floor int64) *Applier {
+	t.Helper()
+	positions := &Checkpoints{Target: target, TaskID: taskID, Shard: "0"}
+	if err := positions.Save(context.Background(), "", storedPosition(floor).Payload); err != nil {
+		t.Fatalf("seed a position: %v", err)
+	}
+	t.Cleanup(func() { _ = positions.Purge(context.Background()) })
+	applier := &Applier{Target: target, Positions: positions}
+	if source != nil {
+		applier.Source = source
+	}
+	return applier
 }
 
 func addrsFrom(t *testing.T, variable string) []string {

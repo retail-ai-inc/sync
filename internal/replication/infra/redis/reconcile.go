@@ -61,6 +61,9 @@ type Reconciler struct {
 
 	Logger logrus.FieldLogger
 	Labels metrics.Labels
+
+	// settled waits out Settle before a second look. Nil is the timer.
+	settled func(ctx context.Context) error
 }
 
 const (
@@ -237,12 +240,9 @@ func (r *Reconciler) compare(ctx context.Context, keys []string) (int, error) {
 // confirm re-reads the keys that looked different and reports the ones that
 // still are.
 func (r *Reconciler) confirm(ctx context.Context, keys [][]byte) ([]*repairedValue, error) {
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case <-time.After(r.settle()):
+	if err := r.waitSettle(ctx); err != nil {
+		return nil, err
 	}
-
 	return r.differing(ctx, keys)
 }
 
@@ -306,6 +306,18 @@ func (r *Reconciler) settle() time.Duration {
 		return r.Settle
 	}
 	return defaultReconcileSettle
+}
+
+func (r *Reconciler) waitSettle(ctx context.Context) error {
+	if r.settled != nil {
+		return r.settled(ctx)
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(r.settle()):
+		return nil
+	}
 }
 
 // ghosts finds keys the target has and the source does not.
@@ -377,12 +389,9 @@ func (r *Reconciler) ghosts(ctx context.Context, limit *rateLimiter) (int, error
 }
 
 func (r *Reconciler) confirmGone(ctx context.Context, keys []string) ([]string, error) {
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case <-time.After(r.settle()):
+	if err := r.waitSettle(ctx); err != nil {
+		return nil, err
 	}
-
 	return absentFrom(ctx, r.Source, keys)
 }
 
