@@ -1,10 +1,12 @@
 package app
 
 import (
+	"database/sql"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/retail-ai-inc/sync/internal/backup/domain"
 	"github.com/retail-ai-inc/sync/internal/backup/infra/export"
 	"github.com/retail-ai-inc/sync/internal/platform/metrics"
 )
@@ -138,5 +140,66 @@ func TestAnEmptyRunSaysSoInItsOutcome(t *testing.T) {
 		if !strings.Contains(full, want) {
 			t.Errorf("the description %q does not carry %q", full, want)
 		}
+	}
+}
+
+// insertJobWithOutcome adds a job under a chosen id, carrying its last
+// successful backup and its last run as the control database stores them.
+func insertJobWithOutcome(t *testing.T, db *sql.DB, id int, lastBackup, runAt, runStatus string) {
+	t.Helper()
+
+	if _, err := db.Exec(
+		`INSERT INTO backup_tasks (id, enable, last_update_time, last_backup_time, next_backup_time,
+		   config_json, last_run_time, last_run_status, last_run_message)
+		 VALUES (?, 1, '2026-08-21 00:00:00', NULLIF(?, ''), '', ?, ?, ?, '')`,
+		id, lastBackup, `{"name":"nightly","sourceType":"mysql"}`, runAt, runStatus); err != nil {
+		t.Fatalf("insert backup task %d: %v", id, err)
+	}
+}
+
+// After a restart a failing job had no last success at all, so an alert on its age went silent for exactly those jobs.
+func TestARestartKeepsTheLastSuccessOfAFailingJob(t *testing.T) {
+	db := useTempJobDB(t)
+	const failing, working, garbled, neverWorked = 9301, 9302, 9303, 9304
+	for _, id := range []int{failing, working, garbled, neverWorked} {
+		labels := backupLabels(id)
+		metrics.Default.Forget(labels)
+		t.Cleanup(func() { metrics.Default.Forget(labels) })
+	}
+	insertJobWithOutcome(t, db, failing, "2026-09-20 15:20:00", "2026-09-21 15:20:00", domain.RunFailed)
+	insertJobWithOutcome(t, db, working, "2026-09-21 15:20:00", "2026-09-21 15:20:00", domain.RunCompleted)
+	insertJobWithOutcome(t, db, garbled, "2026-09-20 15:20:00", "not a time", domain.RunFailed)
+	insertJobWithOutcome(t, db, neverWorked, "", "2026-09-21 15:20:00", domain.RunFailed)
+
+	PublishStoredOutcomes(quietBackupLogger())
+
+	stamp := func(text string) float64 {
+		at, err := time.Parse("2006-01-02 15:04:05", text)
+		if err != nil {
+			t.Fatalf("parse %q: %v", text, err)
+		}
+		return float64(at.Unix())
+	}
+	for _, want := range []struct {
+		id     int
+		metric string
+		value  float64
+	}{
+		{failing, metrics.BackupLastStatus, 0},
+		{failing, metrics.BackupLastRunTimestamp, stamp("2026-09-21 15:20:00")},
+		{failing, metrics.BackupLastSuccessTimestamp, stamp("2026-09-20 15:20:00")},
+		{working, metrics.BackupLastStatus, 1},
+		{working, metrics.BackupLastRunTimestamp, stamp("2026-09-21 15:20:00")},
+		{working, metrics.BackupLastSuccessTimestamp, stamp("2026-09-21 15:20:00")},
+		{garbled, metrics.BackupLastStatus, 0},
+		{garbled, metrics.BackupLastSuccessTimestamp, stamp("2026-09-20 15:20:00")},
+		{neverWorked, metrics.BackupLastStatus, 0},
+	} {
+		if got, ok := sampleFor(t, want.metric, backupLabels(want.id)); !ok || got != want.value {
+			t.Errorf("job %d: %s = %v (published %v), want %v", want.id, want.metric, got, ok, want.value)
+		}
+	}
+	if got, ok := sampleFor(t, metrics.BackupLastSuccessTimestamp, backupLabels(neverWorked)); ok {
+		t.Errorf("job %d never worked, yet %s = %v", neverWorked, metrics.BackupLastSuccessTimestamp, got)
 	}
 }

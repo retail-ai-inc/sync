@@ -85,14 +85,21 @@ func PublishStoredOutcomes(log logrus.FieldLogger) {
 		if outcome.Status == "" {
 			continue
 		}
+		ok := outcome.Status == domain.RunCompleted
 		at, err := parseStoredTime(outcome.At)
 		if err != nil {
 			// A run with an unreadable time still says whether it worked.
-			metrics.SetBackupOutcome(labels, outcome.Status == domain.RunCompleted,
-				time.Time{}, 0)
-			continue
+			at = time.Time{}
 		}
-		metrics.SetBackupOutcome(labels, outcome.Status == domain.RunCompleted, at, 0)
+		metrics.SetBackupOutcome(labels, ok, at, 0)
+
+		// A failure leaves the last success where it was, and after a restart
+		// there is nothing there unless it is read back from the job.
+		if !ok {
+			if last, err := parseStoredTime(job.LastBackupTime()); err == nil {
+				metrics.SetBackupLastSuccess(labels, last)
+			}
+		}
 	}
 }
 

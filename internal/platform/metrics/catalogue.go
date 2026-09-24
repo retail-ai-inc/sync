@@ -763,8 +763,14 @@ func SetBackupOutcome(labels Labels, ok bool, at time.Time, took time.Duration) 
 		Default.SetGauge(BackupLastDurationSeconds, helpBackupDuration, labels, took.Seconds())
 	}
 	if ok {
-		Default.SetGauge(BackupLastSuccessTimestamp, helpBackupLastOK, labels, float64(at.Unix()))
+		SetBackupLastSuccess(labels, at)
 	}
+}
+
+// SetBackupLastSuccess records when a job last finished successfully, whatever
+// its last run did.
+func SetBackupLastSuccess(labels Labels, at time.Time) {
+	Default.SetGauge(BackupLastSuccessTimestamp, helpBackupLastOK, labels, float64(at.Unix()))
 }
 
 // SetBackupContents records what a run wrote out. Only a run that finished
