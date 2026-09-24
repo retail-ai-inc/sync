@@ -72,6 +72,14 @@ func (s *Syncer) Start(ctx context.Context) error {
 	}
 	defer func() { _ = source.Close(ctx) }()
 
+	// The reader looks keys up while the copy streams a table on source, and a
+	// pgx.Conn refuses a second query while one is open.
+	keySource, err := s.openSource(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = keySource.Close(ctx) }()
+
 	stream, err := s.openStream(ctx)
 	if err != nil {
 		return err
@@ -140,7 +148,7 @@ func (s *Syncer) Start(ctx context.Context) error {
 
 	reader := &Reader{
 		Source: stream,
-		Keys:   s.keyLookup(ctx, work),
+		Keys:   s.keyLookup(ctx, &schemaWork{Source: keySource, Logger: s.logger}),
 		Config: s.cfg,
 		Logger: s.logger,
 		Labels: labels,
@@ -243,22 +251,23 @@ func (s *Syncer) pluginArgs() []string {
 // keyLookup reads a table's primary key, once per table.
 //
 // Cached because it reads through the source connection, and one DELETE per row
-// asking the source for the same answer is a round trip per row.
-func (s *Syncer) keyLookup(ctx context.Context, work *schemaWork) func(string, string) []string {
+// asking the source for the same answer is a round trip per row. Only answers
+// are cached: a failure kept as "no key" addresses every later row by every
+// column, which a key-only old row or an unchanged-key update never matches.
+func (s *Syncer) keyLookup(ctx context.Context, work *schemaWork) func(string, string) ([]string, error) {
 	known := map[string][]string{}
-	return func(schema, table string) []string {
+	return func(schema, table string) ([]string, error) {
 		name := schema + "." + table
 		if keys, seen := known[name]; seen {
-			return keys
+			return keys, nil
 		}
 		keys, err := work.primaryKey(schema, table)
 		if err != nil {
-			s.logger.Warnf("[PostgreSQL] Could not read the primary key of %s, so it "+
-				"is addressed by every column: %v", name, err)
-			keys = nil
+			return nil, fmt.Errorf("read the primary key of %s, which its rows are "+
+				"addressed by: %w", name, err)
 		}
 		known[name] = keys
-		return keys
+		return keys, nil
 	}
 }
 

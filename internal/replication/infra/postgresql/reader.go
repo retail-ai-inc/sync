@@ -52,7 +52,7 @@ type Reader struct {
 	Source walSource
 	// Keys reports a table's primary key columns, so a row can be addressed by
 	// its key rather than by every column it holds.
-	Keys func(schema, table string) []string
+	Keys func(schema, table string) ([]string, error)
 	// Confirm tells the source how far this task has got. Called on a keepalive
 	// that asks for a reply, and by the applier as positions are recorded.
 	Confirm func(ctx context.Context) error
@@ -304,11 +304,13 @@ func (r *Reader) row(relationID uint32, op operation, newTuple, oldTuple *pglogr
 	}
 
 	policy := security.FindTableSecurityFromMappings(rel.RelationName, r.Config.Mappings)
-	keys := r.keyColumns(rel)
+	keys, err := r.keyColumns(rel)
+	if err != nil {
+		return err
+	}
 
 	var query string
 	var args []interface{}
-	var err error
 	switch op {
 	case insert:
 		if newTuple == nil {
@@ -376,11 +378,11 @@ func (r *Reader) commit(message *pglogrepl.CommitMessage) error {
 }
 
 // keyColumns reports the columns a row is addressed by, empty when the table
-// has no key or the source cannot be asked. Addressing by every column still
-// finds the row; it is slower and it cannot tell two identical rows apart.
-func (r *Reader) keyColumns(rel *pglogrepl.RelationMessageV2) []string {
+// has no key. Addressing by every column still finds the row; it is slower and
+// it cannot tell two identical rows apart.
+func (r *Reader) keyColumns(rel *pglogrepl.RelationMessageV2) ([]string, error) {
 	if r.Keys == nil {
-		return nil
+		return nil, nil
 	}
 	return r.Keys(rel.Namespace, rel.RelationName)
 }

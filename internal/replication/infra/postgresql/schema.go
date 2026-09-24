@@ -270,11 +270,12 @@ func (s *schemaWork) copyIndexes(ctx context.Context, srcSchema, srcTable, tgtSc
 }
 
 func (s *schemaWork) primaryKey(schema, tableName string) ([]string, error) {
+	// Quoted, or a mixed-case name folds to lower case and names no table.
 	query := `
 		SELECT a.attname
 		FROM pg_index i
 		JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
-		WHERE i.indrelid = ($1 || '.' || $2)::regclass
+		WHERE i.indrelid = (quote_ident($1) || '.' || quote_ident($2))::regclass
 		AND i.indisprimary
 	`
 
