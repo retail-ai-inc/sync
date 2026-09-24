@@ -124,6 +124,12 @@ func isDestructive(stmt ast.StmtNode) (bool, string) {
 				return true, "drops the primary key the replicated updates and deletes are addressed by"
 			case ast.AlterTableDropPartition:
 				return true, "drops a partition"
+			case ast.AlterTableTruncatePartition:
+				return true, "truncates a partition"
+			case ast.AlterTableExchangePartition:
+				return true, "exchanges a partition with another table, which moves its rows out of the replicated one"
+			case ast.AlterTableRenameTable:
+				return true, "renames a replicated table, which the task's mappings still address by its old name"
 			}
 		}
 	}

@@ -263,6 +263,10 @@ func TestDestructiveStatementsAreBlocked(t *testing.T) {
 		{"ALTER TABLE orders DROP COLUMN email", "drops a column"},
 		{"ALTER TABLE orders DROP PRIMARY KEY", "primary key"},
 		{"RENAME TABLE orders TO orders_old", "renames a replicated table"},
+		{"ALTER TABLE orders DROP PARTITION p0", "drops a partition"},
+		{"ALTER TABLE orders TRUNCATE PARTITION p0", "truncates a partition"},
+		{"ALTER TABLE orders EXCHANGE PARTITION p0 WITH TABLE orders_old", "exchanges a partition"},
+		{"ALTER TABLE orders RENAME TO orders_old", "renames a replicated table"},
 	}
 
 	for _, tt := range tests {
