@@ -247,6 +247,14 @@ func (s *MongoDBSyncer) copyIndexes(ctx context.Context, sourceColl, targetColl 
 				indexOptions.SetUnique(true)
 			}
 		}
+		// Without these a unique index covers the documents the source's leaves
+		// out, and the target refuses the second of them the source accepted.
+		if sparse, isBool := idx["sparse"].(bool); isBool && sparse {
+			indexOptions.SetSparse(true)
+		}
+		if partial, hasPartial := idx["partialFilterExpression"]; hasPartial {
+			indexOptions.SetPartialFilterExpression(partial)
+		}
 
 		if nameVal, hasName := idx["name"]; hasName {
 			if nameStr, ok := nameVal.(string); ok {

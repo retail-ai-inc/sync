@@ -11,6 +11,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/retail-ai-inc/sync/internal/platform/config"
 	"github.com/retail-ai-inc/sync/internal/platform/metrics"
@@ -121,6 +122,97 @@ func TestTheCopyCreatesTheSourceIndexes(t *testing.T) {
 			if !have[name] {
 				return fmt.Errorf("the target is missing index %q", name)
 			}
+		}
+		return nil
+	})
+}
+
+// indexSpecsOn reports the indexes a collection carries, by name, as the server
+// describes them.
+func indexSpecsOn(t *testing.T, client *mongo.Client, db, coll string) map[string]bson.M {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cursor, err := client.Database(db).Collection(coll).Indexes().List(ctx)
+	if err != nil {
+		t.Fatalf("list indexes of %s.%s: %v", db, coll, err)
+	}
+	var docs []bson.M
+	if err := cursor.All(ctx, &docs); err != nil {
+		t.Fatalf("read indexes of %s.%s: %v", db, coll, err)
+	}
+	specs := map[string]bson.M{}
+	for _, d := range docs {
+		if name, ok := d["name"].(string); ok {
+			specs[name] = d
+		}
+	}
+	return specs
+}
+
+func TestACopiedIndexKeepsItsOptionsAndAcceptsWhatTheSourceAccepts(t *testing.T) {
+	ctx := context.Background()
+	collection := harness.UniqueName("indexoptions")
+	src, tgt := connect(t, harness.MongoSource), connect(t, harness.MongoTarget)
+	srcColl := src.Database(sourceDB).Collection(collection)
+	t.Cleanup(func() {
+		_ = srcColl.Drop(context.Background())
+		_ = tgt.Database(targetDB).Collection(collection).Drop(context.Background())
+	})
+
+	if _, err := srcColl.InsertMany(ctx, []interface{}{
+		bson.M{"sku": "a", "email": "a@example.com", "code": "c-a", "title": "red shoe"},
+		bson.M{"sku": "b", "title": "blue hat"},
+	}); err != nil {
+		t.Fatalf("seed source: %v", err)
+	}
+	if _, err := srcColl.Indexes().CreateMany(ctx, []mongo.IndexModel{
+		{Keys: bson.D{{Key: "sku", Value: 1}}, Options: options.Index().SetUnique(true)},
+		{Keys: bson.D{{Key: "email", Value: 1}}, Options: options.Index().SetUnique(true).SetSparse(true)},
+		{Keys: bson.D{{Key: "code", Value: 1}}, Options: options.Index().SetUnique(true).
+			SetPartialFilterExpression(bson.D{{Key: "code", Value: bson.D{{Key: "$exists", Value: true}}}})},
+		{Keys: bson.D{{Key: "title", Value: "text"}}, Options: options.Index().
+			SetWeights(bson.D{{Key: "title", Value: 3}}).SetDefaultLanguage("spanish")},
+	}); err != nil {
+		t.Fatalf("create source indexes: %v", err)
+	}
+
+	startSyncer(t, syncTask(t, collection, config.TableMapping{
+		SourceTable:      collection,
+		TargetTable:      collection,
+		AdvancedSettings: config.AdvancedSettings{SyncIndexes: true},
+	}))
+
+	want := indexSpecsOn(t, src, sourceDB, collection)
+	fields := []string{"key", "unique", "sparse", "partialFilterExpression",
+		"weights", "default_language", "language_override"}
+	harness.Eventually(t, 60*time.Second, func() error {
+		have := indexSpecsOn(t, tgt, targetDB, collection)
+		for _, name := range []string{"sku_1", "email_1", "code_1", "title_text"} {
+			if _, ok := have[name]; !ok {
+				return fmt.Errorf("the target is missing index %q", name)
+			}
+			for _, field := range fields {
+				if got, wanted := fmt.Sprint(have[name][field]), fmt.Sprint(want[name][field]); got != wanted {
+					return fmt.Errorf("index %s has %s = %s on the target, want %s", name, field, got, wanted)
+				}
+			}
+		}
+		return nil
+	})
+
+	// A plain unique index on the target refuses the second document without the field, and the stream stalls on it.
+	if _, err := srcColl.InsertMany(ctx, []interface{}{
+		bson.M{"sku": "c", "title": "green scarf"},
+		bson.M{"sku": "d", "title": "grey sock"},
+	}); err != nil {
+		t.Fatalf("insert documents without the sparse and partial fields: %v", err)
+	}
+	harness.Eventually(t, 60*time.Second, func() error {
+		if n := countIn(t, tgt, targetDB, collection, bson.M{}); n != 4 {
+			return fmt.Errorf("the target holds %d of 4 documents", n)
 		}
 		return nil
 	})
