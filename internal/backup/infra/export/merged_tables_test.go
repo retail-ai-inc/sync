@@ -424,3 +424,22 @@ func TestTheMergedMongoFileHoldsEveryDocument(t *testing.T) {
 		t.Errorf("merged file = %q, want one document from each collection in order", data)
 	}
 }
+
+// Counting each shard and then the merged file again reported twice the documents the backup holds.
+func TestAMergedMongoBackupCountsEachDocumentOnce(t *testing.T) {
+	binDir := stubPATH(t)
+	stubBin(t, binDir, "mongoexport", mongoexportWritesItsCollection, 0)
+	stubBin(t, binDir, "zip", zipThatKeeps(filepath.Join(binDir, "merged.captured")), 0)
+	stubBin(t, binDir, "gsutil", gsutilThatStoresSeven, 0)
+
+	e := newExecutor()
+	if err := e.exportMongoDBMergedTables(context.Background(), "mongodb://host/", "shop",
+		[]string{"orders_202607", "orders_202608"}, t.TempDir(),
+		mongoMergedConfig("gs://bucket/backups")); err != nil {
+		t.Fatalf("exportMongoDBMergedTables: %v", err)
+	}
+
+	if got, want := e.Uploaded(), (Tally{Files: 1, Bytes: 7, Records: 2}); got != want {
+		t.Errorf("Uploaded() = %+v, want %+v", got, want)
+	}
+}

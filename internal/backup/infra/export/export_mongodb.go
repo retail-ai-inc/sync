@@ -243,8 +243,8 @@ func (e *BackupExecutor) exportMongoDBMergedTables(ctx context.Context, connStr,
 
 		if recordCount, fileSize, countErr := e.countRecordsInFile(mergedJsonPath); countErr == nil {
 			logrus.Infof("[BackupExecutor] 🔍 Merged file contains %d records, %.2f MB", recordCount, fileSize)
+			// Not counted again: each table's export has already counted its documents.
 			reportIfEmpty("MongoDB", baseCollectionName, int64(recordCount), "the merged tables' own filters")
-			e.countRecords(int64(recordCount))
 		} else {
 			logrus.Warnf("[BackupExecutor] ⚠️  Failed to count records: %v", countErr)
 		}
