@@ -5,6 +5,7 @@ package mongodb
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"sync"
@@ -78,6 +79,56 @@ func TestChunksWalkTheCollectionInIDOrderWithoutRepeating(t *testing.T) {
 	}
 	if len(last.Events) != 0 {
 		t.Errorf("reading past the end returned %d documents", len(last.Events))
+	}
+}
+
+func TestAWalkCrossesIDTypes(t *testing.T) {
+	client := connect(t, harness.MongoSource)
+	database := harness.UniqueName("chunks-types")
+	ctx := context.Background()
+	t.Cleanup(func() { _ = client.Database(database).Drop(context.Background()) })
+
+	ids := []interface{}{
+		int32(1), int32(2), "$a", "b", bson.D{{Key: "x", Value: int32(1)}},
+		bson.NewObjectIDFromTimestamp(time.Unix(1700000000, 0)),
+		bson.NewObjectIDFromTimestamp(time.Unix(1700000001, 0)),
+	}
+	coll := client.Database(database).Collection("documents")
+	for _, id := range ids {
+		if _, err := coll.InsertOne(ctx, bson.M{"_id": id}); err != nil {
+			t.Fatalf("seed %v: %v", id, err)
+		}
+	}
+
+	chunks := &Chunks{Client: client, Database: database, Masker: &MongoDBSyncer{}}
+	ns := domain.Namespace{Object: "documents"}
+	var seen []string
+	after := ""
+	for round := 0; ; round++ {
+		if round > len(ids) {
+			t.Fatalf("the walk had not finished after %d chunks: %v", round, seen)
+		}
+		chunk, err := chunks.NextChunk(ctx, ns, after, 2)
+		if err != nil {
+			t.Fatalf("NextChunk: %v", err)
+		}
+		for _, event := range chunk.Events {
+			id := event.Payload.(*mongo.ReplaceOneModel).Replacement.(bson.M)["_id"]
+			seen = append(seen, fmt.Sprintf("%T %v", id, id))
+		}
+		if chunk.Done {
+			break
+		}
+		after = chunk.After
+	}
+
+	// Short means a re-copy stops at the end of one BSON type and reports done without the rest.
+	want := make([]string, len(ids))
+	for i, id := range ids {
+		want[i] = fmt.Sprintf("%T %v", id, id)
+	}
+	if fmt.Sprint(seen) != fmt.Sprint(want) {
+		t.Errorf("the walk read %v, want %v", seen, want)
 	}
 }
 

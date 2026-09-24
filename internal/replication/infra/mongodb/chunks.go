@@ -62,7 +62,9 @@ func (c *Chunks) NextChunk(ctx context.Context, ns domain.Namespace, after strin
 			if err != nil {
 				return err
 			}
-			filter["_id"] = bson.M{"$gt": id}
+			// An aggregation comparison, because a query $gt only matches its own
+			// BSON type; $literal keeps a "$"-string or document _id a value.
+			filter["$expr"] = bson.M{"$gt": bson.A{"$_id", bson.M{"$literal": id}}}
 		}
 
 		cursor, err := c.Client.Database(c.Database).Collection(ns.Object).Find(sc, filter,
