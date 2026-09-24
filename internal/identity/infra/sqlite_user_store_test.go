@@ -258,6 +258,33 @@ func TestGetAllUsersEmpty(t *testing.T) {
 	}
 }
 
+// Two accounts sharing a userId are promoted, deactivated and deleted together.
+func TestTwoNewGoogleUsersGetDistinctUserIds(t *testing.T) {
+	db := useTempDB(t)
+
+	for _, email := range []string{"a@example.com", "b@example.com"} {
+		if _, _, err := SaveGoogleUser(email, "User"); err != nil {
+			t.Fatalf("SaveGoogleUser(%q): %v", email, err)
+		}
+	}
+
+	var first, second string
+	if err := db.QueryRow(`SELECT userId FROM users WHERE email = 'a@example.com'`).Scan(&first); err != nil {
+		t.Fatalf("read the first userId: %v", err)
+	}
+	if err := db.QueryRow(`SELECT userId FROM users WHERE email = 'b@example.com'`).Scan(&second); err != nil {
+		t.Fatalf("read the second userId: %v", err)
+	}
+	if first == second {
+		t.Errorf("both new Google users got userId %q", first)
+	}
+	for _, userID := range []string{first, second} {
+		if !strings.HasPrefix(userID, "g_") {
+			t.Errorf("userId = %q, want a g_ prefix", userID)
+		}
+	}
+}
+
 func TestSaveGoogleUserCreatesAndUpdates(t *testing.T) {
 	db := useTempDB(t)
 

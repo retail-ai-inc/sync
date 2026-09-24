@@ -1,10 +1,10 @@
 package infra
 
 import (
+	"crypto/rand"
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"time"
 
 	_ "github.com/mattn/go-sqlite3" // SQLite driver
 	"github.com/retail-ai-inc/sync/internal/identity/domain"
@@ -181,8 +181,9 @@ func SaveGoogleUser(email, name string) (string, string, error) {
 			return "", "", err
 		}
 
-		// Generate a default userId
-		defaultUserId := "g_" + fmt.Sprintf("%d", time.Now().Unix())
+		// Random, not the current second: the access and delete writes key on
+		// userId, and the column has no UNIQUE constraint.
+		defaultUserId := "g_" + rand.Text()
 
 		// Use email as username
 		_, err = db.Exec(`
