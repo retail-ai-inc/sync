@@ -201,3 +201,23 @@ func TestTheCreatedTableTakesTheMappedNameHoweverTheSourceQuotesIt(t *testing.T)
 		})
 	}
 }
+
+// A failure means a mapping that names no target table is copied into a table with no name, while the stream writes the source's.
+func TestAnUnnamedTargetIsCopiedUnderTheSourceName(t *testing.T) {
+	source := &fakeDB{replies: []reply{
+		showColumns("SHOW COLUMNS FROM `shop`.`orders`", "id"),
+		{match: "SELECT `id` FROM `shop`.`orders`", columns: []string{"id"},
+			rows: [][]driver.Value{{int64(1)}}},
+	}}
+	target := &fakeDB{replies: []reply{targetHolds(1), {match: "INSERT INTO"}}}
+
+	if err := firstCopy(t, source, target, mapTable("orders", "")); err != nil {
+		t.Fatalf("the first copy failed: %v", err)
+	}
+	if !target.wasAsked("INSERT INTO `shop_bk`.`orders`") {
+		t.Errorf("no row reached shop_bk.orders; the target was asked %q", target.statements())
+	}
+	if target.wasAsked("``") {
+		t.Errorf("a statement names a table with no name: %q", target.statements())
+	}
+}

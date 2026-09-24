@@ -164,6 +164,10 @@ func (s *MySQLSyncer) doInitialSync(ctx context.Context, sourceDB *sql.Conn, tar
 
 	for _, mapping := range mappings {
 		for _, tableMap := range mapping.Tables {
+			// An unnamed target is the source's name, as the stream writes it.
+			if tableMap.TargetTable == "" {
+				tableMap.TargetTable = tableMap.SourceTable
+			}
 			exists, errExist := s.targetTableExists(ctx, targetDB, targetDBName, tableMap.TargetTable)
 			if errExist != nil {
 				fail("could not check whether %s.%s exists: %v", targetDBName, tableMap.TargetTable, errExist)

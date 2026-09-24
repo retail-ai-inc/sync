@@ -68,6 +68,20 @@ func TestTheTargetNameFromTheMappingIsUsed(t *testing.T) {
 	}
 }
 
+// A failure means a schema change on a table mapped with no target name is rewritten for a table with no name.
+func TestAnUnnamedTargetTakesTheSchemaChangeUnderTheSourceName(t *testing.T) {
+	h := newHandler(t, nil, mapTable("orders", ""))
+
+	got := plan(t, h, "ALTER TABLE orders ADD COLUMN email VARCHAR(100)")
+
+	if got.action != ddlApply {
+		t.Fatalf("action = %v, want apply (%s)", got.action, got.reason)
+	}
+	if !strings.Contains(got.query, "`main`.`orders`") {
+		t.Errorf("statement = %q, want the source's name on the target", got.query)
+	}
+}
+
 // The parser needs a driver registered before it can build a literal value,
 // and without one every literal restored as nothing at all: a column declared
 // DEFAULT 'new' was rewritten as "DEFAULT" with no value.

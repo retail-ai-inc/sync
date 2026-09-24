@@ -156,6 +156,10 @@ func (h *MyEventHandler) targetTableFor(source string) (string, bool) {
 	for _, mapping := range h.mappings {
 		for _, table := range mapping.Tables {
 			if strings.EqualFold(table.SourceTable, source) {
+				// An unnamed target is the source's name, as the stream writes it.
+				if table.TargetTable == "" {
+					return table.SourceTable, true
+				}
 				return table.TargetTable, true
 			}
 		}
