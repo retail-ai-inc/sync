@@ -7,8 +7,10 @@ import (
 	"encoding/base64"
 	"errors"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/retail-ai-inc/sync/internal/platform/config"
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -99,6 +101,66 @@ func TestProcessValueMasked(t *testing.T) {
 				t.Errorf("ProcessValue(%#v) = %#v, want %#v", tt.value, got, tt.want)
 			}
 		})
+	}
+}
+
+// A type that came back as it went in would reach the target in the clear, and verify masks through the same function.
+func TestEveryOtherTypeIsMaskedToo(t *testing.T) {
+	cfg := enabled(FieldSecurityConfig{Field: "secret", SecurityType: "masked"})
+	born := time.Date(1990, 4, 1, 9, 30, 0, 0, time.UTC)
+	price, err := bson.ParseDecimal128("12.50")
+	if err != nil {
+		t.Fatalf("ParseDecimal128: %v", err)
+	}
+
+	tests := []struct {
+		name  string
+		value interface{}
+		want  interface{}
+	}{
+		{"int8", int8(5), int8(0)},
+		{"int16", int16(5), int16(0)},
+		{"int32", int32(5), int32(0)},
+		{"uint", uint(5), uint(0)},
+		{"uint8", uint8(5), uint8(0)},
+		{"uint16", uint16(5), uint16(0)},
+		{"uint32", uint32(5), uint32(0)},
+		{"uint64", uint64(5), uint64(0)},
+		{"float32", float32(1.5), float32(0)},
+		{"bytes", []byte("090-1234"), []byte("********")},
+		{"time", born, time.Time{}},
+		{"array", bson.A{"090-1234", "080-5678"}, "****"},
+		{"datetime", bson.NewDateTimeFromTime(born), "****"},
+		{"decimal", price, "****"},
+		{"object id", bson.NewObjectIDFromTimestamp(born), "****"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ProcessValue(tt.value, "secret", cfg); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("ProcessValue(%#v) = %#v, want %#v", tt.value, got, tt.want)
+			}
+		})
+	}
+}
+
+// An array inside a document is masked whole, or every phone number in it reaches the target.
+func TestAMaskedArrayInsideADocumentIsReplacedWhole(t *testing.T) {
+	cfg := enabled(FieldSecurityConfig{Field: "contact.phones", SecurityType: "masked"})
+
+	processed, ok := ProcessValue(bson.M{
+		"contact": bson.M{"phones": bson.A{"090-1234", "080-5678"}, "city": "Tokyo"},
+	}, "", cfg).(map[string]interface{})
+	if !ok {
+		t.Fatal("ProcessValue did not return a document")
+	}
+
+	contact := processed["contact"].(map[string]interface{})
+	if got := contact["phones"]; !reflect.DeepEqual(got, "****") {
+		t.Errorf("phones = %#v, want the whole array replaced", got)
+	}
+	if got := contact["city"]; got != "Tokyo" {
+		t.Errorf("city = %#v, want it left alone", got)
 	}
 }
 
