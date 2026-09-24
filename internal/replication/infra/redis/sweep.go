@@ -3,6 +3,7 @@ package redis
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	goredis "github.com/redis/go-redis/v9"
 
@@ -84,13 +85,19 @@ func (s *Snapshotter) sourceHoldsSomething(ctx context.Context) error {
 // indistinguishable from a connection pointing elsewhere.
 func (s *Snapshotter) sourceKeys(ctx context.Context) (int64, error) {
 	if cluster, ok := s.Source.(*goredis.ClusterClient); ok {
-		var total int64
+		var (
+			mu    sync.Mutex
+			total int64
+		)
+		// ForEachMaster visits the masters concurrently.
 		err := cluster.ForEachMaster(ctx, func(ctx context.Context, node *goredis.Client) error {
 			keys, err := node.DBSize(ctx).Result()
 			if err != nil {
 				return err
 			}
+			mu.Lock()
 			total += keys
+			mu.Unlock()
 			return nil
 		})
 		return total, err
@@ -122,12 +129,16 @@ func (s *Snapshotter) sweepSlots(ctx context.Context, spans slotSpans) error {
 		source = s.Source
 	}
 
+	var mu sync.Mutex
 	removed := 0
+	// ForEachMaster runs walk on every master at once.
 	walk := func(ctx context.Context, node *goredis.Client) error {
 		n, err := s.sweepNode(ctx, node, s.Target, source, func(key string) bool {
 			return spans.has(SlotOf([]byte(key)))
 		})
+		mu.Lock()
 		removed += n
+		mu.Unlock()
 		return err
 	}
 

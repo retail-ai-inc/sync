@@ -208,6 +208,33 @@ func TestProgressStillAnswersWhenTokyoIsGone(t *testing.T) {
 	}
 }
 
+func TestProgressReadsEveryShardAClusterTargetHoldsWhenTokyoIsGone(t *testing.T) {
+	target := targetCluster(t)
+	defer target.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	const taskID = 8809
+	shards := []string{"0-5460", "5461-10922", "10923-16383", "0-100,200-300"}
+	for i, id := range shards {
+		writeStoredPosition(t, target, taskID, id, int64(1000+i))
+		defer target.Del(context.Background(), metaKey(taskID, id))
+	}
+
+	report, err := Progress(ctx, config.SyncConfig{
+		ID: taskID, Type: "redis",
+		SourceConnection: "redis://127.0.0.1:1/0",
+		TargetConnection: "redis://" + strings.Join(addrsFrom(t, "SYNC_REDIS_TARGET_CLUSTER"), ",") + "/0",
+	})
+	if err != nil {
+		t.Fatalf("Progress refused to answer with the source unreachable: %v", err)
+	}
+	if len(report.Shards) != len(shards) {
+		t.Fatalf("report covers %d shards, want the %d the target holds positions for",
+			len(report.Shards), len(shards))
+	}
+}
+
 // And the other half: a target that cannot be read is still a failed request,
 // because then there is no answer at all.
 func TestProgressFailsWhenTheTargetCannotBeRead(t *testing.T) {

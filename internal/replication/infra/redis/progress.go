@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 
 	goredis "github.com/redis/go-redis/v9"
 
@@ -202,9 +203,13 @@ func storedShards(ctx context.Context, cfg config.SyncConfig) ([]shard, error) {
 	defer target.Close()
 
 	prefix := positionKeyPrefix + strconv.Itoa(cfg.ID) + ":"
-	var found []shard
+	var (
+		mu    sync.Mutex
+		found []shard
+	)
 	seen := map[string]bool{}
 
+	// ForEachMaster runs this on every master at once.
 	scan := func(ctx context.Context, client goredis.UniversalClient) error {
 		var cursor uint64
 		for {
@@ -212,6 +217,7 @@ func storedShards(ctx context.Context, cfg config.SyncConfig) ([]shard, error) {
 			if err != nil {
 				return err
 			}
+			mu.Lock()
 			for _, key := range keys {
 				id := strings.TrimPrefix(key, prefix)
 				if id == "" || seen[id] {
@@ -220,6 +226,7 @@ func storedShards(ctx context.Context, cfg config.SyncConfig) ([]shard, error) {
 				seen[id] = true
 				found = append(found, shard{id: id})
 			}
+			mu.Unlock()
 			if next == 0 {
 				return nil
 			}
