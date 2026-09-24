@@ -74,7 +74,8 @@ func CountAndLogMongoDB(ctx context.Context, sc config.SyncConfig, log *logrus.L
 			srcCount, srcOK = -1, false
 		}
 
-		tgtCount, err = queryCounter.CountMongoDBDocuments(ctx, tgtClient, tgtDBName, tblMap.TargetTable, countQuery)
+		tgtCount, err = queryCounter.CountMongoDBDocuments(ctx, tgtClient, tgtDBName, tblMap.TargetTable,
+			forTarget(countQuery, tblMap.SourceTable, tblMap.TargetTable))
 		if err != nil {
 			log.WithError(err).WithFields(logrus.Fields{
 				"db_type":   dbType,
@@ -339,7 +340,8 @@ func LogYesterdayMongoDBVolume(ctx context.Context, sc config.SyncConfig, log *l
 				srcCount = -1
 			}
 
-			tgtCount, err := queryCounter.CountMongoDBDocuments(ctx, tgtClient, tgtDBName, tblMap.TargetTable, yesterdayQuery)
+			tgtCount, err := queryCounter.CountMongoDBDocuments(ctx, tgtClient, tgtDBName, tblMap.TargetTable,
+				forTarget(yesterdayQuery, tblMap.SourceTable, tblMap.TargetTable))
 			if err != nil {
 				log.WithError(err).WithFields(logrus.Fields{
 					"sync_task_id": sc.ID,
@@ -385,6 +387,22 @@ func LogYesterdayMongoDBVolume(ctx context.Context, sc config.SyncConfig, log *l
 				srcCount, tgtCount, yesterdayStart, log)
 		}
 	}
+}
+
+// forTarget restates a count query for a renamed target. Its conditions name the
+// source collection, and without this the target is counted with no filter at all.
+func forTarget(query *domain.CountQuery, source, target string) *domain.CountQuery {
+	if query == nil || source == target {
+		return query
+	}
+	conditions := make([]domain.CountCondition, len(query.Conditions))
+	for i, condition := range query.Conditions {
+		if condition.Table == source {
+			condition.Table = target
+		}
+		conditions[i] = condition
+	}
+	return &domain.CountQuery{Conditions: conditions}
 }
 
 // connectBothMongo opens the task's two MongoDB connections and returns the

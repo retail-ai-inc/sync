@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	goredis "github.com/redis/go-redis/v9"
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -578,5 +579,90 @@ func TestTheToolsOwnKeysAreNotCountedAsData(t *testing.T) {
 	if total-own != 5 {
 		t.Errorf("the target holds %d keys of which %d are this tool's, leaving %d; "+
 			"want the 5 that were replicated", total, own, total-own)
+	}
+}
+
+// seedCompanies writes three documents of company 1 and two of company 2, each
+// created inside the given day.
+func seedCompanies(t *testing.T, endpoint, database, collection string, day time.Time) {
+	t.Helper()
+	client, err := mongo.Connect(options.Client().ApplyURI(mongoTestURI(t, endpoint, database)))
+	if err != nil {
+		t.Fatalf("connect to %s: %v", endpoint, err)
+	}
+	t.Cleanup(func() {
+		_ = client.Database(database).Drop(context.Background())
+		_ = client.Disconnect(context.Background())
+	})
+	var docs []interface{}
+	for i, company := range []int{1, 1, 1, 2, 2} {
+		docs = append(docs, bson.M{"_id": i, "companyId": company,
+			"created_at": day.Add(time.Duration(i+1) * time.Hour)})
+	}
+	if _, err := client.Database(database).Collection(collection).InsertMany(t.Context(), docs); err != nil {
+		t.Fatalf("seed %s.%s: %v", database, collection, err)
+	}
+}
+
+// A renamed target counted without its query is the whole collection, published
+// as an exact count beside the source's filtered one.
+func TestARenamedCollectionIsCountedWithItsQuery(t *testing.T) {
+	useMonitoringDB(t)
+	logger, _ := captureLog()
+
+	database := harness.UniqueName("renamed")
+	seedCompanies(t, harness.MongoSource, database, "orders", time.Now())
+	seedCompanies(t, harness.MongoTarget, database, "orders_dr", time.Now())
+
+	id := harness.UniqueTaskID()
+	CountAndLogMongoDB(context.Background(), config.SyncConfig{
+		ID: id, Type: "mongodb",
+		SourceConnection: mongoTestURI(t, harness.MongoSource, database),
+		TargetConnection: mongoTestURI(t, harness.MongoTarget, database),
+		Mappings: []config.DatabaseMapping{{Tables: []config.TableMapping{{
+			SourceTable: "orders", TargetTable: "orders_dr",
+			CountQuery: map[string]interface{}{"conditions": []map[string]interface{}{
+				{"table": "orders", "field": "companyId", "operator": "=", "value": "1"},
+			}},
+		}}}},
+	}, logger)
+
+	rows := publishedRows(t, id)
+	if len(rows) != 1 || rows[0].Source != 3 || rows[0].Target != 3 {
+		t.Errorf("counted %+v, want orders at 3/3", rows)
+	}
+}
+
+// The daily summary compares a renamed target on the same terms as its source.
+func TestTheDailySummaryCountsARenamedCollectionWithItsQuery(t *testing.T) {
+	useMonitoringDB(t)
+	logger, out := captureLog()
+
+	jst, err := time.LoadLocation("Asia/Tokyo")
+	if err != nil {
+		t.Fatalf("load JST: %v", err)
+	}
+	start := time.Date(2026, 1, 10, 0, 0, 0, 0, jst)
+	end := time.Date(2026, 1, 10, 23, 59, 59, 999999999, jst)
+	database := harness.UniqueName("renamed_daily")
+	seedCompanies(t, harness.MongoSource, database, "orders", start)
+	seedCompanies(t, harness.MongoTarget, database, "orders_dr", start)
+
+	LogYesterdayMongoDBVolume(context.Background(), config.SyncConfig{
+		ID: harness.UniqueTaskID(), Type: "mongodb",
+		SourceConnection: mongoTestURI(t, harness.MongoSource, database),
+		TargetConnection: mongoTestURI(t, harness.MongoTarget, database),
+		Mappings: []config.DatabaseMapping{{Tables: []config.TableMapping{{
+			SourceTable: "orders", TargetTable: "orders_dr",
+			CountQuery: map[string]interface{}{"conditions": []map[string]interface{}{
+				{"table": "orders", "field": "companyId", "operator": "=", "value": "1"},
+				{"table": "orders", "field": "created_at", "operator": "dateRange", "value": "daily"},
+			}},
+		}}}},
+	}, logger, start, end)
+
+	text := out.String()
+	if !strings.Contains(text, "src_yesterday_count=3") || !strings.Contains(text, "tgt_yesterday_count=3") {
+		t.Errorf("the summary did not count 3 on both ends: %s", text)
 	}
 }
