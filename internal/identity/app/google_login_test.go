@@ -1,9 +1,12 @@
 package app
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/retail-ai-inc/sync/internal/identity/domain"
+	"github.com/retail-ai-inc/sync/internal/identity/infra"
 )
 
 func storeGoogleConfig(t *testing.T, cfg string) {
@@ -124,4 +127,185 @@ func TestAnEmptyGoogleIdentityStillReachesTheStore(t *testing.T) {
 	}
 }
 
-// The exchange itself is covered in internal/identity/infra.
+const completeGoogleConfig = `{"clientId":"id","clientSecret":"secret","redirectUri":"https://sync.test/callback"}`
+
+// googleAnswers stands in for Google; the exchange itself is covered in internal/identity/infra.
+func googleAnswers(t *testing.T,
+	exchange func(clientID, clientSecret, redirectURI, code string) (string, error),
+	fetch func(accessToken string) (email, name string, err error)) {
+	t.Helper()
+
+	previousExchange, previousFetch := exchangeGoogleCode, fetchGoogleUser
+	exchangeGoogleCode, fetchGoogleUser = exchange, fetch
+	t.Cleanup(func() { exchangeGoogleCode, fetchGoogleUser = previousExchange, previousFetch })
+}
+
+func googleKnows(t *testing.T, email, name string) {
+	t.Helper()
+
+	googleAnswers(t,
+		func(clientID, clientSecret, redirectURI, code string) (string, error) {
+			if clientID != "id" || clientSecret != "secret" ||
+				redirectURI != "https://sync.test/callback" || code != "a-code" {
+				t.Errorf("exchanged %q/%q/%q/%q, want the stored credentials and the caller's code",
+					clientID, clientSecret, redirectURI, code)
+			}
+			return "google-token", nil
+		},
+		func(accessToken string) (string, string, error) {
+			if accessToken != "google-token" {
+				t.Errorf("asked for the user with %q, want the exchanged token", accessToken)
+			}
+			return email, name, nil
+		})
+}
+
+func insertGoogleUser(t *testing.T, username, email, access, status string) {
+	t.Helper()
+
+	if _, err := currentDB(t).Exec(
+		`INSERT INTO users (username, password, name, email, access, status) VALUES (?, 'x', ?, ?, ?, ?)`,
+		username, username, email, access, status); err != nil {
+		t.Fatalf("insert user %q: %v", username, err)
+	}
+}
+
+func countUsers(t *testing.T) int {
+	t.Helper()
+
+	var n int
+	if err := currentDB(t).QueryRow(`SELECT COUNT(*) FROM users`).Scan(&n); err != nil {
+		t.Fatalf("count users: %v", err)
+	}
+	return n
+}
+
+// A first Google sign-in that is not a guest, or whose token does not validate, is a wrong or broken account.
+func TestAFirstGoogleSignInCreatesAGuestWithAWorkingToken(t *testing.T) {
+	useTempDB(t)
+	storeGoogleConfig(t, completeGoogleConfig)
+	googleKnows(t, "a@x.test", "A")
+
+	authority, token, msg := GoogleLogin("a-code")
+
+	if msg != "" || authority != domain.AccessGuest {
+		t.Fatalf("GoogleLogin = %q/%q, want a guest sign-in", authority, msg)
+	}
+	if valid, username, access := ValidateUserToken(token); !valid || username != "a@x.test" || access != domain.AccessGuest {
+		t.Errorf("ValidateUserToken = %v/%q/%q, want the new guest", valid, username, access)
+	}
+	if n := countUsers(t); n != 1 {
+		t.Errorf("%d users after the first sign-in, want 1", n)
+	}
+}
+
+// Signing in as a new guest instead of the account the email belongs to strands its owner at the wrong access.
+func TestGoogleLoginLinksAnExistingAdminByEmail(t *testing.T) {
+	useTempDB(t)
+	storeGoogleConfig(t, completeGoogleConfig)
+	insertGoogleUser(t, "alice", "a@x.test", domain.AccessAdmin, domain.StatusActive)
+	googleKnows(t, "a@x.test", "Alice")
+
+	authority, token, msg := GoogleLogin("a-code")
+
+	if msg != "" || authority != domain.AccessAdmin {
+		t.Fatalf("GoogleLogin = %q/%q, want the linked administrator", authority, msg)
+	}
+	if valid, username, access := ValidateUserToken(token); !valid || username != "alice" || access != domain.AccessAdmin {
+		t.Errorf("ValidateUserToken = %v/%q/%q, want alice as admin", valid, username, access)
+	}
+	if n := countUsers(t); n != 1 {
+		t.Errorf("%d users, want the existing one and no other", n)
+	}
+}
+
+// A deactivated account given a token by Google sign-in is let back in.
+func TestGoogleLoginRefusesADeactivatedAccount(t *testing.T) {
+	useTempDB(t)
+	storeGoogleConfig(t, completeGoogleConfig)
+	insertGoogleUser(t, "alice", "a@x.test", domain.AccessAdmin, domain.StatusInactive)
+	googleKnows(t, "a@x.test", "Alice")
+
+	authority, token, msg := GoogleLogin("a-code")
+
+	if msg != msgAccountInactive {
+		t.Errorf("message = %q, want %q", msg, msgAccountInactive)
+	}
+	if authority != "" || token != "" {
+		t.Errorf("authority/token = %q/%q for a deactivated account", authority, token)
+	}
+}
+
+// A failure answered with another stage's message, or with a token, misleads whoever is signing in.
+func TestGoogleLoginAnswersEachExchangeFailureWithItsOwnMessage(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		exchangeErr error
+		fetchErr    error
+		want        string
+	}{
+		{"token refused", fmt.Errorf("%w: 400 Bad Request", infra.ErrTokenRequest), nil, msgTokenRequest},
+		{"token unreadable", fmt.Errorf("%w: no access token", infra.ErrTokenDecode), nil, msgTokenDecode},
+		{"user info refused", nil, fmt.Errorf("%w: 401 Unauthorized", infra.ErrUserInfoRequest), msgUserInfoRequest},
+		{"user info unreadable", nil, fmt.Errorf("%w: no email", infra.ErrUserInfoDecode), msgUserInfoDecode},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			useTempDB(t)
+			storeGoogleConfig(t, completeGoogleConfig)
+			googleAnswers(t,
+				func(string, string, string, string) (string, error) { return "google-token", tt.exchangeErr },
+				func(string) (string, string, error) { return "a@x.test", "A", tt.fetchErr })
+
+			authority, token, msg := GoogleLogin("a-code")
+
+			if msg != tt.want {
+				t.Errorf("message = %q, want %q", msg, tt.want)
+			}
+			if authority != "" || token != "" {
+				t.Errorf("authority/token = %q/%q for a failed exchange", authority, token)
+			}
+			if n := countUsers(t); n != 0 {
+				t.Errorf("%d users were created by a failed exchange", n)
+			}
+		})
+	}
+}
+
+// A store failure while saving the user must refuse the sign-in rather than mint a token for nobody.
+func TestGoogleLoginReportsAStoreFailureWhileSavingTheUser(t *testing.T) {
+	db := useTempDB(t)
+	storeGoogleConfig(t, completeGoogleConfig)
+	if _, err := db.Exec(`ALTER TABLE users RENAME TO gone`); err != nil {
+		t.Fatalf("rename users: %v", err)
+	}
+	googleKnows(t, "a@x.test", "A")
+
+	authority, token, msg := GoogleLogin("a-code")
+
+	if !strings.HasPrefix(msg, msgSaveUserPrefix) {
+		t.Errorf("message = %q, want it to start with %q", msg, msgSaveUserPrefix)
+	}
+	if authority != "" || token != "" {
+		t.Errorf("authority/token = %q/%q after a store failure", authority, token)
+	}
+}
+
+// A user saved but not found again must be refused, not handed a token for a row that is not there.
+func TestGoogleLoginRefusesAUserItCannotReadBack(t *testing.T) {
+	db := useTempDB(t)
+	storeGoogleConfig(t, completeGoogleConfig)
+	if _, err := db.Exec(`CREATE TRIGGER vanish AFTER INSERT ON users
+		BEGIN DELETE FROM users WHERE id = NEW.id; END`); err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+	googleKnows(t, "a@x.test", "A")
+
+	authority, token, msg := GoogleLogin("a-code")
+
+	if msg != msgVerifyAccount {
+		t.Errorf("message = %q, want %q", msg, msgVerifyAccount)
+	}
+	if authority != "" || token != "" {
+		t.Errorf("authority/token = %q/%q for a user that cannot be read back", authority, token)
+	}
+}

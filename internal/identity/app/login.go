@@ -122,6 +122,12 @@ const (
 	msgSaveUserPrefix  = "Failed to save user information: "
 )
 
+// The calls that reach Google, replaced in tests.
+var (
+	exchangeGoogleCode = infra.ExchangeGoogleCode
+	fetchGoogleUser    = infra.FetchGoogleUser
+)
+
 // GoogleLogin exchanges a Google authorization code for an identity, returning
 // the access level and a freshly minted token, or the message the caller should
 // answer with. Like Login it records nothing process-wide.
@@ -145,7 +151,7 @@ func GoogleLogin(code string) (authority, token, errorMessage string) {
 		return "", "", msgNoRedirectURI
 	}
 
-	accessToken, err := infra.ExchangeGoogleCode(creds.ClientID, creds.ClientSecret, creds.RedirectURI, code)
+	accessToken, err := exchangeGoogleCode(creds.ClientID, creds.ClientSecret, creds.RedirectURI, code)
 	if err != nil {
 		if errors.Is(err, infra.ErrTokenDecode) {
 			return "", "", msgTokenDecode
@@ -153,7 +159,7 @@ func GoogleLogin(code string) (authority, token, errorMessage string) {
 		return "", "", msgTokenRequest
 	}
 
-	email, name, err := infra.FetchGoogleUser(accessToken)
+	email, name, err := fetchGoogleUser(accessToken)
 	if err != nil {
 		if errors.Is(err, infra.ErrUserInfoDecode) {
 			return "", "", msgUserInfoDecode

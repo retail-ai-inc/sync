@@ -209,6 +209,9 @@ func UpdateAdminPasswordHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// googleLogin is replaced in tests: the real one exchanges the code with Google.
+var googleLogin = app.GoogleLogin
+
 // AuthGoogleCallbackHandler POST /api/login/google/callback
 func AuthGoogleCallbackHandler(w http.ResponseWriter, r *http.Request) {
 	var req struct {
@@ -221,7 +224,7 @@ func AuthGoogleCallbackHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	authority, token, errorMessage := app.GoogleLogin(req.Code)
+	authority, token, errorMessage := googleLogin(req.Code)
 
 	var resp map[string]interface{}
 	if errorMessage != "" {

@@ -676,6 +676,33 @@ func TestEveryGoogleFailureAnswersHTTP200WithTheGuestShape(t *testing.T) {
 	}
 }
 
+// A sign-in answered without the token or with the wrong authority leaves the UI signed out or mis-privileged.
+func TestASuccessfulGoogleSignInAnswersWithTheTokenAndTheAuthority(t *testing.T) {
+	previous := googleLogin
+	googleLogin = func(code string) (string, string, string) {
+		if code != "a-code" {
+			t.Errorf("GoogleLogin got code %q, want the caller's", code)
+		}
+		return domain.AccessAdmin, "signed-token", ""
+	}
+	t.Cleanup(func() { googleLogin = previous })
+
+	rec := postJSON(AuthGoogleCallbackHandler, http.MethodPost, "/login/google/callback",
+		`{"code":"a-code"}`)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	resp := envelope(t, rec)
+	if resp["status"] != "ok" || resp["type"] != "google" || resp["currentAuthority"] != domain.AccessAdmin ||
+		resp["accessToken"] != "signed-token" {
+		t.Errorf("resp = %v", resp)
+	}
+	if _, ok := resp["errorMessage"]; ok {
+		t.Errorf("a successful sign-in carries an errorMessage: %v", resp["errorMessage"])
+	}
+}
+
 // TestTheAdminPasswordEndpointFollowsTheToken covers an endpoint that used to
 // change the literal "admin" row whoever asked.
 func TestTheAdminPasswordEndpointFollowsTheToken(t *testing.T) {
