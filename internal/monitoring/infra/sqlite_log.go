@@ -30,18 +30,29 @@ var qualifiedName = regexp.MustCompile("^[A-Za-z_][A-Za-z0-9_$]*(\\.[A-Za-z_][A-
 // a cancelled context were indistinguishable from each other and, once stored,
 // from a real measurement.
 func getRowCountWithContext(ctx context.Context, db *sql.DB, table string) (int64, error) {
+	return countQuoted(ctx, db, table, nil)
+}
+
+// countQuoted is getRowCountWithContext with each part of the name passed through
+// quote when one is given: PostgreSQL folds an unquoted name, so a mixed-case
+// table cannot be reached without it.
+func countQuoted(ctx context.Context, db *sql.DB, table string, quote func(string) string) (int64, error) {
 	if !qualifiedName.MatchString(table) {
 		return 0, fmt.Errorf("%q is not a table name", table)
 	}
+	name := table
+	if quote != nil {
+		parts := strings.Split(table, ".")
+		for i, part := range parts {
+			parts[i] = quote(part)
+		}
+		name = strings.Join(parts, ".")
+	}
 
-	// The name goes into the statement unquoted: the four engines quote
-	// identifiers differently — backticks for MySQL, double quotes for
-	// PostgreSQL — and this function does not know which it is talking to. What
-	// makes that safe is the check above, which admits nothing but an
-	// identifier. The cost is that a table named after a reserved word cannot be
-	// counted, which is a better trade than a name that can carry a clause.
+	// Unquoted unless the caller says how, since the engines quote differently;
+	// the check above is what keeps either form to a bare identifier.
 	var cnt int64
-	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+table).Scan(&cnt); err != nil {
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+name).Scan(&cnt); err != nil {
 		return 0, err
 	}
 	return cnt, nil
@@ -50,8 +61,9 @@ func getRowCountWithContext(ctx context.Context, db *sql.DB, table string) (int6
 // countOrMark reports a row count and the action to record it under, so that a
 // measurement and a failure to measure are two different rows rather than one
 // number nobody can interpret.
-func countOrMark(ctx context.Context, db *sql.DB, table string, log *logrus.Logger) (int64, bool) {
-	count, err := getRowCountWithContext(ctx, db, table)
+func countOrMark(ctx context.Context, db *sql.DB, table string, quote func(string) string,
+	log *logrus.Logger) (int64, bool) {
+	count, err := countQuoted(ctx, db, table, quote)
 	if err != nil {
 		log.WithError(err).WithField("table", table).
 			Error("[Monitor] Could not count the rows")
@@ -223,18 +235,18 @@ ON CONFLICT(task_id, collection_name) DO UPDATE SET
 // exact count over a whole table, which is the expensive part of a pass. Asking
 // them one after the other doubled how long a pass took for no reason.
 func countBothEnds(ctx context.Context, source *sql.DB, sourceTable string,
-	target *sql.DB, targetTable string, log *logrus.Logger) (
+	target *sql.DB, targetTable string, quote func(string) string, log *logrus.Logger) (
 	sourceCount int64, sourceOK bool, targetCount int64, targetOK bool) {
 
 	var wait sync.WaitGroup
 	wait.Add(2)
 	go func() {
 		defer wait.Done()
-		sourceCount, sourceOK = countOrMark(ctx, source, sourceTable, log)
+		sourceCount, sourceOK = countOrMark(ctx, source, sourceTable, quote, log)
 	}()
 	go func() {
 		defer wait.Done()
-		targetCount, targetOK = countOrMark(ctx, target, targetTable, log)
+		targetCount, targetOK = countOrMark(ctx, target, targetTable, quote, log)
 	}()
 	wait.Wait()
 	return sourceCount, sourceOK, targetCount, targetOK

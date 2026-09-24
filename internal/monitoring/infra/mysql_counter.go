@@ -69,7 +69,7 @@ func CountAndLogMySQLOrMariaDB(ctx context.Context, sc config.SyncConfig, log *l
 		// table, so asking them together halves the wall time a pass takes.
 		srcCount, srcOK, tgtCount, tgtOK := countBothEnds(ctx,
 			db, fmt.Sprintf("%s.%s", srcDBName, srcName),
-			db2, fmt.Sprintf("%s.%s", tgtDBName, tgtName), log)
+			db2, fmt.Sprintf("%s.%s", tgtDBName, tgtName), nil, log)
 		action := rowCountAction(srcOK, tgtOK)
 
 		log.WithFields(logrus.Fields{

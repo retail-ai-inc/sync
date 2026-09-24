@@ -666,3 +666,48 @@ func TestTheDailySummaryCountsARenamedCollectionWithItsQuery(t *testing.T) {
 		t.Errorf("the summary did not count 3 on both ends: %s", text)
 	}
 }
+
+// pgSchema creates a schema of its own on one end and drops it afterwards.
+func pgSchema(t *testing.T, dataSource, schema string, statements ...string) {
+	t.Helper()
+	db, err := sql.Open("postgres", dataSource)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = db.Exec(`DROP SCHEMA IF EXISTS "` + schema + `" CASCADE`)
+		_ = db.Close()
+	})
+	for _, statement := range append([]string{`CREATE SCHEMA "` + schema + `"`}, statements...) {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatalf("%s: %v", statement, err)
+		}
+	}
+}
+
+// PostgreSQL folds an unquoted name, so a table created as "Orders" -- as an ORM
+// creates it -- could not be counted while replication copied it.
+func TestAMixedCaseTableIsCounted(t *testing.T) {
+	useMonitoringDB(t)
+	logger, _ := captureLog()
+
+	schema := harness.UniqueName("mixed")
+	sourceDSN := fmt.Sprintf("postgres://root:root@%s/source_db?sslmode=disable", harness.PostgresSource)
+	targetDSN := fmt.Sprintf("postgres://root:root@%s/target_db?sslmode=disable", harness.PostgresTarget)
+	pgSchema(t, sourceDSN, schema, `CREATE TABLE "`+schema+`"."Orders" (id INT PRIMARY KEY)`,
+		`INSERT INTO "`+schema+`"."Orders" VALUES (1), (2), (3)`)
+	pgSchema(t, targetDSN, schema, `CREATE TABLE "`+schema+`"."Orders" (id INT PRIMARY KEY)`,
+		`INSERT INTO "`+schema+`"."Orders" VALUES (1), (2)`)
+
+	id := harness.UniqueTaskID()
+	CountAndLogPostgreSQL(context.Background(), config.SyncConfig{
+		ID: id, Type: "postgresql",
+		SourceConnection: sourceDSN, TargetConnection: targetDSN,
+		Mappings: []config.DatabaseMapping{{SourceSchema: schema, TargetSchema: schema}},
+	}, logger)
+
+	rows := publishedRows(t, id)
+	if len(rows) != 1 || rows[0].Object != "Orders" || rows[0].Source != 3 || rows[0].Target != 2 {
+		t.Errorf("counted %+v, want Orders at 3/2", rows)
+	}
+}

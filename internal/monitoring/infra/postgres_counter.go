@@ -8,7 +8,7 @@ import (
 
 	"context"
 
-	_ "github.com/lib/pq" // this package opens PostgreSQL itself
+	"github.com/lib/pq"
 	"github.com/retail-ai-inc/sync/internal/platform/config"
 	"github.com/retail-ai-inc/sync/internal/platform/dsn"
 	"github.com/sirupsen/logrus"
@@ -85,7 +85,7 @@ func CountAndLogPostgreSQL(ctx context.Context, sc config.SyncConfig, log *logru
 			fullSrc := fmt.Sprintf("%s.%s", srcSchema, srcName)
 			fullTgt := fmt.Sprintf("%s.%s", tgtSchema, tgtName)
 
-			srcCount, srcOK, tgtCount, tgtOK := countBothEnds(ctx, db, fullSrc, db2, fullTgt, log)
+			srcCount, srcOK, tgtCount, tgtOK := countBothEnds(ctx, db, fullSrc, db2, fullTgt, pq.QuoteIdentifier, log)
 			action := rowCountAction(srcOK, tgtOK)
 
 			log.WithFields(logrus.Fields{
