@@ -4,6 +4,7 @@ package mongodb
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 
 	"github.com/retail-ai-inc/sync/internal/platform/config"
 	"github.com/retail-ai-inc/sync/internal/platform/dsn"
+	"github.com/retail-ai-inc/sync/internal/replication/infra/checkpoint"
 	"github.com/retail-ai-inc/sync/test/harness"
 )
 
@@ -151,6 +153,52 @@ func TestProgressComparesTheSourceClockAgainstWhatWasStored(t *testing.T) {
 		t.Errorf("a task that never ran was reported as comparable: %+v", shard)
 	} else if shard.Note == "" {
 		t.Error("a shard that cannot be compared gave no reason")
+	}
+}
+
+func TestProgressWithTheSourceGoneReportsWhatTheTargetHolds(t *testing.T) {
+	database := harness.UniqueName("progress-gone")
+	target := connect(t, harness.MongoTarget)
+	ctx := context.Background()
+	t.Cleanup(func() { _ = target.Database(database).Drop(context.Background()) })
+
+	token, err := bson.Marshal(bson.D{{Key: "_data", Value: "8263E0A1B2000000012B"}})
+	if err != nil {
+		t.Fatalf("marshal a resume token: %v", err)
+	}
+	applied := time.Date(2026, 9, 17, 4, 5, 6, 0, time.UTC)
+	payload, err := encodeTokenAt(token, applied)
+	if err != nil {
+		t.Fatalf("encode the position: %v", err)
+	}
+	const taskID = 9105
+	store := &checkpoint.MongoStore{Database: target.Database(database), TaskID: taskID}
+	if err := store.Save(ctx, "", payload); err != nil {
+		t.Fatalf("store the position: %v", err)
+	}
+
+	report, err := Progress(ctx, config.SyncConfig{
+		ID: taskID, Type: "mongodb",
+		SourceConnection: "mongodb://127.0.0.1:1/x?directConnection=true&serverSelectionTimeoutMS=500",
+		TargetConnection: mongoURI(t, harness.MongoTarget, database),
+	})
+	if err != nil {
+		t.Fatalf("Progress with the source gone: %v", err)
+	}
+	if len(report.Shards) != 1 {
+		t.Fatalf("reported %d shards, want the one the target holds", len(report.Shards))
+	}
+	shard := report.Shards[0]
+	// Caught up here would tell whoever is promoting Osaka that nothing is missing, with no source to ask.
+	if shard.CaughtUp || shard.Comparable || shard.Source != "" {
+		t.Errorf("a shard with no source to compare against reported %+v", shard)
+	}
+	if shard.Applied != applied.Format(time.RFC3339) {
+		t.Errorf("Applied = %q, want what the target holds, %s", shard.Applied,
+			applied.Format(time.RFC3339))
+	}
+	if !strings.Contains(shard.Note, "could not be reached") {
+		t.Errorf("Note = %q, want it to say the source could not be reached", shard.Note)
 	}
 }
 
