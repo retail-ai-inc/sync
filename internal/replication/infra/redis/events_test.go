@@ -3,6 +3,7 @@ package redis
 import (
 	"context"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/directionlock"
+	"math"
 	"strconv"
 	"testing"
 
@@ -88,6 +89,49 @@ func TestEachWriteCarriesTheDatabaseItBelongsTo(t *testing.T) {
 	}
 	if r.streamDB != 1 {
 		t.Errorf("stream database = %d, want 1", r.streamDB)
+	}
+}
+
+// A failure means a change made during the first copy is replayed over a copy that may already hold it, or re-read from the wrong database.
+func TestAChangeMadeDuringTheCopyIsReReadFromItsOwnDatabase(t *testing.T) {
+	r := readerOverBuffer(t)
+	r.Commands = table()
+	r.position = streamPosition{ReplID: "h1", Phase: phaseValue, ValueUntil: math.MaxInt64}
+	cursor, err := r.Link.cursor(0)
+	if err != nil {
+		t.Fatalf("cursor: %v", err)
+	}
+	r.cursor = cursor
+
+	ctx := context.Background()
+	takeAll := func(frames ...[]byte) {
+		for _, frame := range frames {
+			if err := r.Link.buffer.Append(frame); err != nil {
+				t.Fatalf("append: %v", err)
+			}
+			if err := r.take(ctx); err != nil {
+				t.Fatalf("take: %v", err)
+			}
+		}
+	}
+	takeAll(resp("SELECT", "3"), resp("SET", "during", "v"), resp("PING"))
+	r.CopyFinished()
+	takeAll(resp("SET", "after", "v"))
+
+	repairs, commands := map[string]int{}, map[string]int{}
+	for _, e := range r.ready {
+		switch payload := e.Payload.(type) {
+		case *valueRepair:
+			repairs[string(payload.key)] = payload.db
+		case *command:
+			commands[e.Key] = payload.db
+		}
+	}
+	if len(repairs) != 1 || repairs["during"] != 3 {
+		t.Errorf("re-read by value %v, want only the change made during the copy, in database 3", repairs)
+	}
+	if len(commands) != 1 || commands["after"] != 3 {
+		t.Errorf("replayed %v, want only the change made after the copy, in database 3", commands)
 	}
 }
 
