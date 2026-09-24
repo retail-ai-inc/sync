@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -340,4 +341,76 @@ func TestAForeignPositionResumesFromTheSlotHere(t *testing.T) {
 		}
 		return nil
 	})
+}
+
+// slotReleased waits until no connection holds slot, so a restart can take it.
+func slotReleased(t *testing.T, src *sql.DB, slot string) {
+	t.Helper()
+
+	harness.Eventually(t, 20*time.Second, func() error {
+		if n := countRows(t, src, "pg_replication_slots", "slot_name = $1 AND NOT active", slot); n != 1 {
+			return fmt.Errorf("replication slot %s is still held", slot)
+		}
+		return nil
+	})
+}
+
+// A failure means a restart applied again the transaction its stored position ends at.
+func TestAStreamedTransactionIsNotReplayedAfterARestart(t *testing.T) {
+	for _, tt := range []struct {
+		name, columns string
+		fullIdentity  bool
+	}{
+		{"with a primary key", "id INT PRIMARY KEY, name TEXT", false},
+		{"with no primary key", "id INT, name TEXT", true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			table, publication, slot := names(t, "pg_replay")
+			src, tgt := open(t, harness.PostgresSource, sourceDatabase), open(t, harness.PostgresTarget, targetDatabase)
+
+			mustExec(t, src, fmt.Sprintf("CREATE TABLE %s (%s)", table, tt.columns))
+			if tt.fullIdentity {
+				mustExec(t, src, fmt.Sprintf("ALTER TABLE %s REPLICA IDENTITY FULL", table))
+			}
+			mustExec(t, src, fmt.Sprintf("CREATE PUBLICATION %s FOR TABLE %s", publication, table))
+			t.Cleanup(func() {
+				_, _ = src.Exec("DROP PUBLICATION IF EXISTS " + publication)
+				_, _ = src.Exec("DROP TABLE IF EXISTS " + table)
+				_, _ = tgt.Exec("DROP TABLE IF EXISTS " + table)
+				_, _ = src.Exec(`SELECT pg_drop_replication_slot($1)
+					WHERE EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = $1)`, slot)
+			})
+			mustExec(t, src, fmt.Sprintf("INSERT INTO %s (id, name) VALUES (1, 'copied')", table))
+
+			cfg := syncTask(t, table, publication, slot)
+			stop := startSyncer(t, cfg)
+			harness.Eventually(t, 45*time.Second, func() error {
+				if n := countRows(t, tgt, table, "id = 1"); n != 1 {
+					return fmt.Errorf("the initial copy has not landed: %d rows", n)
+				}
+				return nil
+			})
+			mustExec(t, src, fmt.Sprintf("INSERT INTO %s (id, name) VALUES (2, 'streamed')", table))
+			harness.Eventually(t, 20*time.Second, func() error {
+				if n := countRows(t, tgt, table, "id = 2"); n != 1 {
+					return fmt.Errorf("the streamed insert has not arrived")
+				}
+				return nil
+			})
+			stop()
+			slotReleased(t, src, slot)
+
+			startSyncer(t, cfg)
+			mustExec(t, src, fmt.Sprintf("INSERT INTO %s (id, name) VALUES (3, 'after the restart')", table))
+			harness.Eventually(t, 45*time.Second, func() error {
+				if n := countRows(t, tgt, table, "id = 3"); n != 1 {
+					return fmt.Errorf("the insert made after the restart has not arrived, so the stream stopped")
+				}
+				return nil
+			})
+			if want, got := rowsOf(t, src, table), rowsOf(t, tgt, table); !reflect.DeepEqual(got, want) {
+				t.Errorf("target holds %v, source holds %v", got, want)
+			}
+		})
+	}
 }
