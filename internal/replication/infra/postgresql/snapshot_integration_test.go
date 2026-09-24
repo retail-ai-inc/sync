@@ -108,6 +108,9 @@ func TestASlotLeftWithoutAStoredPositionStopsTheTask(t *testing.T) {
 	if n := countRows(t, src, "pg_replication_slots", "slot_name = $1", slot); n != 1 {
 		t.Errorf("the refused start left %d replication slot(s) %s, want the one it found", n, slot)
 	}
+	if n := countRows(t, tgt, table, ""); n > 0 {
+		t.Errorf("the refused start copied %d row(s) to the target before refusing", n)
+	}
 }
 
 // A failure means the first copy wrote a protected field to the target as the source holds it.

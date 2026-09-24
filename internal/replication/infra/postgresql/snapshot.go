@@ -2,6 +2,7 @@ package postgresql
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -27,7 +28,7 @@ type Snapshotter struct {
 	Schema *schemaWork
 	// Snapshot reads the source as of ConsistentPoint. A copy read outside it
 	// also holds rows committed after that point, which the stream then repeats.
-	Snapshot pgx.Tx
+	Snapshot sourceSnapshot
 	// ConsistentPoint is where the slot promises WAL from, set only when this
 	// start created the slot.
 	ConsistentPoint pglogrepl.LSN
@@ -38,10 +39,18 @@ type Snapshotter struct {
 	Labels metrics.Labels
 }
 
+// sourceSnapshot is the source as the slot exported it, open until rolled back.
+type sourceSnapshot interface {
+	sourceQuerier
+	Rollback(ctx context.Context) error
+}
+
+var errNoSnapshot = errors.New("no snapshot was taken where the replication " +
+	"slot starts, so a copy would overlap its stream")
+
 func (s *Snapshotter) Pin(_ context.Context) (domain.Position, error) {
 	if s.ConsistentPoint == 0 || s.Snapshot == nil {
-		return domain.Position{}, fmt.Errorf("no snapshot was taken where the " +
-			"replication slot starts, so a copy would overlap its stream")
+		return domain.Position{}, errNoSnapshot
 	}
 	payload, err := encodeLSN(s.ConsistentPoint, s.Source)
 	if err != nil {
@@ -57,6 +66,10 @@ func (s *Snapshotter) Pin(_ context.Context) (domain.Position, error) {
 // a repair: a table with one row in it is left alone. Putting a table back
 // wholesale is what a re-copy is for.
 func (s *Snapshotter) Copy(ctx context.Context) error {
+	// Reading the source's own connection instead brings the overlap back.
+	if s.Snapshot == nil {
+		return errNoSnapshot
+	}
 	// An open snapshot holds back vacuum on the source for as long as it lasts.
 	defer func() { _ = s.Snapshot.Rollback(ctx) }()
 

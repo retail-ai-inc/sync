@@ -328,7 +328,7 @@ func TestAMappingWithNoSchemaMeansPublic(t *testing.T) {
 // TestPinIsTheSlotsConsistentPoint: the copy and the stream meet there, so
 // every change made while the copy ran is still in the log.
 func TestPinIsTheSlotsConsistentPoint(t *testing.T) {
-	snap := &Snapshotter{ConsistentPoint: 1 << 32, Source: "tokyo:5432/shop"}
+	snap := &Snapshotter{ConsistentPoint: 1 << 32, Snapshot: snapshotRead{}, Source: "tokyo:5432/shop"}
 
 	pos, err := snap.Pin(context.Background())
 	if err != nil {
@@ -343,16 +343,32 @@ func TestPinIsTheSlotsConsistentPoint(t *testing.T) {
 	}
 }
 
-// TestAnExistingSlotPinsNothing. Its own position is where the stream resumes,
-// and taking the server's current one instead would skip everything committed
-// while the task was down.
-func TestAnExistingSlotPinsNothing(t *testing.T) {
-	pos, err := (&Snapshotter{}).Pin(context.Background())
-	if err != nil {
-		t.Fatalf("Pin: %v", err)
+// A failure means a first copy could start without the slot's snapshot, so it would overlap the stream.
+func TestAPinWithoutTheSlotsSnapshotFails(t *testing.T) {
+	for name, snap := range map[string]*Snapshotter{
+		"no consistent point": {Snapshot: snapshotRead{}},
+		"no snapshot":         {ConsistentPoint: 1 << 32},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if pos, err := snap.Pin(context.Background()); err == nil {
+				t.Errorf("Pin = %v, want an error", pos)
+			}
+		})
 	}
-	if !pos.IsZero() {
-		t.Errorf("Pin returned %v for a slot that was already there", pos)
+}
+
+// A failure means a copy without the slot's snapshot read the source anyway, or panicked.
+func TestACopyWithoutTheSlotsSnapshotFails(t *testing.T) {
+	target := schemaTargetDB(t)
+	source := &answering{}
+	snap := snapshotOver(source, target, [2]string{"orders", "orders"})
+	snap.Snapshot = nil
+
+	if err := snap.Copy(context.Background()); err == nil {
+		t.Error("Copy with no snapshot reported success")
+	}
+	if len(source.asked) != 0 {
+		t.Errorf("the source was read outside the slot's snapshot: %v", source.asked)
 	}
 }
 
@@ -410,7 +426,6 @@ func opened(sealed string) (string, error) {
 
 // snapshotRead answers the copy's reads from source, as the slot's snapshot would.
 type snapshotRead struct {
-	pgx.Tx
 	source sourceQuerier
 }
 
