@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/retail-ai-inc/sync/internal/platform/config"
+	"github.com/retail-ai-inc/sync/internal/platform/sqlite/sqlitetest"
+	"github.com/retail-ai-inc/sync/internal/replication/app/pipeline"
 )
 
 func cfgWith(tasks ...config.SyncConfig) *config.Config {
@@ -155,5 +157,61 @@ func TestAFirstRunCanBeDeclared(t *testing.T) {
 
 	if err := controlPlaneReady(); err != nil {
 		t.Errorf("a declared first run reported not ready: %v", err)
+	}
+}
+
+// A failure means a setting an operator stored does not reach the pipeline field it is meant to set.
+func TestStoredTuningCarriesEverySetting(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		recopy bool
+	}{{"recopy on", true}, {"recopy off", false}} {
+		recopy := c.recopy
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("SYNC_DB_PATH", filepath.Join(t.TempDir(), "sync.db"))
+			if err := config.SaveSettings(config.Settings{
+				BatchMaxEvents:           101,
+				BatchMaxBytes:            202,
+				QueueMaxEvents:           303,
+				QueueMaxBytes:            404,
+				SnapshotQueueMaxEvents:   505,
+				FlushInterval:            606 * time.Millisecond,
+				CopyBatchRows:            707,
+				MongoStreamAwait:         808 * time.Millisecond,
+				MongoWholeDocuments:      true,
+				RecopyOnUnusablePosition: recopy,
+				RedisBufferMaxBytes:      909,
+			}); err != nil {
+				t.Fatalf("SaveSettings: %v", err)
+			}
+
+			want := pipeline.Tuning{
+				Limits:                   pipeline.Limits{MaxEvents: 101, MaxBytes: 202},
+				QueueCapacity:            303,
+				QueueBytes:               404,
+				SnapshotQueueCapacity:    505,
+				FlushInterval:            606 * time.Millisecond,
+				CopyBatchRows:            707,
+				StreamAwait:              808 * time.Millisecond,
+				WholeDocuments:           true,
+				RecopyOnUnusablePosition: recopy,
+				RedisBufferBytes:         909,
+			}
+			if got := storedTuning(); got != want {
+				t.Errorf("storedTuning() = %+v, want %+v", got, want)
+			}
+		})
+	}
+}
+
+// A failure means unreadable settings are guessed at, and a guess may rebuild a target.
+func TestStoredTuningIsOffWhenSettingsCannotBeRead(t *testing.T) {
+	sqlitetest.Tableless(t)
+	if _, err := config.LoadSettings(); err == nil {
+		t.Fatal("the settings were readable, so this does not reach the failure")
+	}
+
+	if got := storedTuning(); got != (pipeline.Tuning{}) {
+		t.Errorf("storedTuning() = %+v, want every field at zero and recopy off", got)
 	}
 }
