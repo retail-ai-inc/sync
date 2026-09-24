@@ -1,11 +1,15 @@
 package app
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/retail-ai-inc/sync/internal/backup/domain"
+	"github.com/retail-ai-inc/sync/internal/platform/metrics"
 )
 
 // settled waits for a run to reach an outcome, so a test does not depend on how
@@ -244,5 +248,95 @@ func TestAFailedRunIsRecordedInTheDatabase(t *testing.T) {
 	}
 	if lastBackup != "2026-08-20 18:00:00" {
 		t.Errorf("last_backup_time = %q, want it untouched by a failed run", lastBackup)
+	}
+}
+
+// gsutilThatKeeps puts a gsutil on PATH that copies what it is asked to upload
+// to kept, and answers the size check with that copy's size.
+func gsutilThatKeeps(t *testing.T, kept string) {
+	t.Helper()
+
+	dir := t.TempDir()
+	script := `#!/bin/sh
+PATH=/usr/bin:/bin
+case "$1" in
+  cp) cp "$2" ` + kept + `;;
+  stat) echo "Content-Length: $(wc -c < ` + kept + `)";;
+esac
+`
+	if err := os.WriteFile(filepath.Join(dir, "gsutil"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write the gsutil stub: %v", err)
+	}
+	t.Setenv("PATH", dir)
+}
+
+// No run reached the success tail, so a checkpoint written wrongly or not at all would turn every restart into catch-up runs.
+func TestASuccessfulRunStampsItsCheckpointAndOutcome(t *testing.T) {
+	db := useTempJobDB(t)
+	gsutilThatKeeps(t, filepath.Join(t.TempDir(), "uploaded.db"))
+	ForgetRuns()
+	t.Cleanup(ForgetRuns)
+
+	const id = 9401
+	labels := backupLabels(id)
+	metrics.Default.Forget(labels)
+	t.Cleanup(func() { metrics.Default.Forget(labels) })
+
+	config := fmt.Sprintf(`{"name":"control","sourceType":"sqlite","compressionType":"none",
+		"database":{"database":%q},"destination":{"gcsPath":"gs://bucket/control"}}`,
+		os.Getenv("SYNC_DB_PATH"))
+	if _, err := db.Exec(
+		`INSERT INTO backup_tasks (id, enable, last_update_time, last_backup_time, next_backup_time, config_json)
+		 VALUES (?, 1, '2026-08-21 00:00:00', '2026-08-20 18:00:00', '', ?)`, id, config); err != nil {
+		t.Fatalf("insert backup task: %v", err)
+	}
+	const taskID = "backup_9401_test"
+	RecordRun(taskID, &domain.Run{TaskID: taskID, BackupID: id, Status: domain.RunPending, CreatedAt: time.Now()})
+
+	before := time.Now().UTC().Truncate(time.Second)
+	execute(taskID, id)
+	after := time.Now().UTC()
+
+	if run, ok := LookupRun(taskID); !ok || run.Status != domain.RunCompleted {
+		t.Fatalf("run = %+v, want it completed", run)
+	}
+
+	var lastBackup, status, message string
+	if err := db.QueryRow(
+		`SELECT COALESCE(last_backup_time,''), COALESCE(last_run_status,''), COALESCE(last_run_message,'')
+		 FROM backup_tasks WHERE id = ?`, id).Scan(&lastBackup, &status, &message); err != nil {
+		t.Fatalf("read the recorded outcome: %v", err)
+	}
+	stamped, err := time.Parse("2006-01-02 15:04:05", lastBackup)
+	if err != nil || stamped.Before(before) || stamped.After(after) {
+		t.Errorf("last_backup_time = %q, want this run's time in UTC, between %s and %s",
+			lastBackup, before.Format(time.DateTime), after.Format(time.DateTime))
+	}
+	if status != domain.RunCompleted {
+		t.Errorf("last_run_status = %q, want %q", status, domain.RunCompleted)
+	}
+	if !strings.Contains(message, "1 file(s)") {
+		t.Errorf("last_run_message = %q, want what the run wrote out", message)
+	}
+
+	for _, want := range []struct {
+		name   string
+		labels metrics.Labels
+		value  float64
+	}{
+		{metrics.BackupLastStatus, labels, 1},
+		{metrics.BackupLastFiles, labels, 1},
+		{metrics.BackupRunsTotal, metrics.Labels{"backup": "9401", "result": domain.RunCompleted}, 1},
+	} {
+		if got, ok := sampleFor(t, want.name, want.labels); !ok || got != want.value {
+			t.Errorf("%s = %v (published %v), want %v", want.name, got, ok, want.value)
+		}
+	}
+	if got, ok := sampleFor(t, metrics.BackupLastBytes, labels); !ok || got <= 0 {
+		t.Errorf("%s = %v (published %v), want the size of the snapshot", metrics.BackupLastBytes, got, ok)
+	}
+	if got, ok := sampleFor(t, metrics.BackupLastSuccessTimestamp, labels); !ok ||
+		got < float64(before.Unix()) || got > float64(after.Unix()) {
+		t.Errorf("%s = %v (published %v), want this run's time", metrics.BackupLastSuccessTimestamp, got, ok)
 	}
 }
