@@ -86,13 +86,14 @@ func (c *Chunks) NextChunk(ctx context.Context, ns domain.Namespace, after strin
 		return chunk, err
 	}
 
-	query := fmt.Sprintf("SELECT %s FROM %s.%s", strings.Join(columns, ","), c.Database, ns.Object)
+	query := fmt.Sprintf("SELECT %s FROM %s.%s", strings.Join(quoteAll(columns), ","),
+		quoteName(c.Database), quoteName(ns.Object))
 	args := []interface{}{}
 	if after != "" {
-		query += fmt.Sprintf(" WHERE %s > ?", key)
+		query += fmt.Sprintf(" WHERE %s > ?", quoteName(key))
 		args = append(args, after)
 	}
-	query += fmt.Sprintf(" ORDER BY %s LIMIT %d", key, size)
+	query += fmt.Sprintf(" ORDER BY %s LIMIT %d", quoteName(key), size)
 
 	rows, err := c.Source.QueryContext(ctx, query, args...)
 	if err != nil {

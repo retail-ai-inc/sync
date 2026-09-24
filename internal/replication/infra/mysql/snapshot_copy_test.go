@@ -16,13 +16,13 @@ func TestAnInitialCopyCutShortMidTableIsAnError(t *testing.T) {
 	// A failure means the rows after the cut are never copied: the stream starts after the snapshot.
 	dropped := errors.New("invalid connection")
 	source := &fakeDB{replies: []reply{
-		{match: "SHOW COLUMNS FROM shop.orders",
+		{match: "SHOW COLUMNS FROM `shop`.`orders`",
 			columns: []string{"Field", "Type", "Null", "Key", "Default", "Extra"},
 			rows: [][]driver.Value{
 				{"id", "int", "NO", "PRI", nil, ""},
 				{"amount", "int", "YES", "", nil, ""},
 			}},
-		{match: "SELECT id,amount FROM shop.orders",
+		{match: "SELECT `id`,`amount` FROM `shop`.`orders`",
 			columns: []string{"id", "amount"},
 			rows: [][]driver.Value{
 				{int64(1), int64(10)}, {int64(2), int64(20)}, {int64(3), int64(30)},
@@ -60,5 +60,73 @@ func TestAnInitialCopyCutShortMidTableIsAnError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "shop.orders") || !strings.Contains(err.Error(), dropped.Error()) {
 		t.Errorf("error = %v, want it to name shop.orders and the read's error", err)
+	}
+}
+
+// firstCopy runs the first copy of shop into shop_bk between two fakes.
+func firstCopy(t *testing.T, source, target *fakeDB, mappings []config.DatabaseMapping) error {
+	t.Helper()
+
+	s := &MySQLSyncer{logger: quietLogger(), cfg: config.SyncConfig{
+		ID:               1,
+		Type:             "mysql",
+		SourceConnection: "user:pass@tcp(source:3306)/shop",
+		TargetConnection: "user:pass@tcp(target:3306)/shop_bk",
+		Mappings:         mappings,
+	}}
+
+	ctx := context.Background()
+	conn, err := source.open(t).Conn(ctx)
+	if err != nil {
+		t.Fatalf("conn: %v", err)
+	}
+	defer conn.Close()
+	return s.doInitialSync(ctx, conn, target.open(t))
+}
+
+// showColumns answers SHOW COLUMNS with plain, stored columns.
+func showColumns(match string, names ...string) reply {
+	rows := make([][]driver.Value, 0, len(names))
+	for _, name := range names {
+		rows = append(rows, []driver.Value{name, "int", "YES", "", nil, ""})
+	}
+	return reply{match: match,
+		columns: []string{"Field", "Type", "Null", "Key", "Default", "Extra"}, rows: rows}
+}
+
+// targetHolds answers the target's check for whether a table exists.
+func targetHolds(count int64) reply {
+	return reply{match: "information_schema.tables", columns: []string{"COUNT(*)"},
+		rows: [][]driver.Value{{count}}}
+}
+
+// A failure means a table with a reserved-word column or a hyphen in its name can never finish its first copy.
+func TestTheFirstCopyQuotesTheNamesItReads(t *testing.T) {
+	source := &fakeDB{replies: []reply{
+		{match: "SHOW CREATE TABLE `shop`.`order-items`",
+			columns: []string{"Table", "Create Table"},
+			rows: [][]driver.Value{{"order-items",
+				"CREATE TABLE `order-items` (`id` int NOT NULL, `rank` int, PRIMARY KEY (`id`))"}}},
+		showColumns("SHOW COLUMNS FROM `shop`.`order-items`", "id", "rank"),
+		{match: "SELECT `id`,`rank` FROM `shop`.`order-items`",
+			columns: []string{"id", "rank"},
+			rows:    [][]driver.Value{{int64(1), int64(7)}}},
+	}}
+	target := &fakeDB{replies: []reply{
+		targetHolds(0),
+		{match: "CREATE TABLE"},
+		{match: "INSERT INTO"},
+	}}
+
+	if err := firstCopy(t, source, target, mapTable("order-items", "order-items")); err != nil {
+		t.Fatalf("the first copy failed: %v", err)
+	}
+	if !target.wasAsked("INSERT INTO `shop_bk`.`order-items`") {
+		t.Errorf("no row reached the target; it was asked %q", target.statements())
+	}
+	for _, asked := range append(source.statements(), target.statements()...) {
+		if strings.Contains(asked, "order-items") && !strings.Contains(asked, "`order-items`") {
+			t.Errorf("a statement names the table unquoted: %q", asked)
+		}
 	}
 }

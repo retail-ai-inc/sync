@@ -170,7 +170,7 @@ func (s *MySQLSyncer) doInitialSync(ctx context.Context, sourceDB *sql.Conn, tar
 				continue
 			}
 			if !exists {
-				countQuery := fmt.Sprintf("SHOW INDEX FROM %s.%s", sourceDBName, tableMap.SourceTable)
+				countQuery := fmt.Sprintf("SHOW INDEX FROM %s.%s", quoteName(sourceDBName), quoteName(tableMap.SourceTable))
 				rows, err := sourceDB.QueryContext(ctx, countQuery)
 				var indexCount int
 				if err == nil {
@@ -185,7 +185,7 @@ func (s *MySQLSyncer) doInitialSync(ctx context.Context, sourceDB *sql.Conn, tar
 					continue
 				}
 
-				countQuery = fmt.Sprintf("SHOW INDEX FROM %s.%s", targetDBName, tableMap.TargetTable)
+				countQuery = fmt.Sprintf("SHOW INDEX FROM %s.%s", quoteName(targetDBName), quoteName(tableMap.TargetTable))
 				rows, err = targetDB.QueryContext(ctx, countQuery)
 				var createdCount int
 				if err == nil {
@@ -218,7 +218,8 @@ func (s *MySQLSyncer) doInitialSync(ctx context.Context, sourceDB *sql.Conn, tar
 				continue
 			}
 
-			selectSQL := fmt.Sprintf("SELECT %s FROM %s.%s", strings.Join(cols, ","), sourceDBName, tableMap.SourceTable)
+			selectSQL := fmt.Sprintf("SELECT %s FROM %s.%s", strings.Join(quoteAll(cols), ","),
+				quoteName(sourceDBName), quoteName(tableMap.SourceTable))
 			srcRows, errQ := sourceDB.QueryContext(ctx, selectSQL)
 			if errQ != nil {
 				fail("could not read %s.%s: %v", sourceDBName, tableMap.SourceTable, errQ)
@@ -343,7 +344,7 @@ func (s *MySQLSyncer) generateCreateTableSQL(
 	srcDBName, srcTableName, tgtDBName, tgtTableName string,
 ) (string, []string, error) {
 	var tableName, createSQL string
-	showQuery := fmt.Sprintf("SHOW CREATE TABLE %s.%s", srcDBName, srcTableName)
+	showQuery := fmt.Sprintf("SHOW CREATE TABLE %s.%s", quoteName(srcDBName), quoteName(srcTableName))
 	row := sourceDB.QueryRowContext(ctx, showQuery)
 	if err := row.Scan(&tableName, &createSQL); err != nil {
 		return "", nil, fmt.Errorf("SHOW CREATE TABLE fail: %w", err)
@@ -466,6 +467,16 @@ func upsertStatement(d dialect, dbName, table string, cols []string, rowCount in
 		strings.Join(assignments, ", "))
 }
 
+// quoteAll quotes a column list. The read side has to quote as the write side
+// does: a reserved word or a hyphen is a legal name at the source.
+func quoteAll(names []string) []string {
+	quoted := make([]string, len(names))
+	for i, name := range names {
+		quoted[i] = quoteName(name)
+	}
+	return quoted
+}
+
 func makeQuestionMarks(n int) []string {
 	res := make([]string, n)
 	for i := 0; i < n; i++ {
@@ -527,7 +538,7 @@ func generatedColumn(extra string) bool {
 }
 
 func (s *MySQLSyncer) getTableColumns(ctx context.Context, db *sql.Conn, database, table string) ([]string, error) {
-	query := fmt.Sprintf("SHOW COLUMNS FROM %s.%s", database, table)
+	query := fmt.Sprintf("SHOW COLUMNS FROM %s.%s", quoteName(database), quoteName(table))
 	rows, err := db.QueryContext(ctx, query)
 	if err != nil {
 		return nil, err

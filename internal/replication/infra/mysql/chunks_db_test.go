@@ -57,7 +57,7 @@ func TestTheSourcesClockIsReadBeforeTheRows(t *testing.T) {
 		clockReply(1757000000),
 		oneColumn("KEY_COLUMN_USAGE", "id"),
 		twoColumn("information_schema.COLUMNS", [][2]string{{"id", ""}, {"amount", ""}}),
-		reply{match: "FROM tenant_trial_naviee.orders",
+		reply{match: "FROM `tenant_trial_naviee`.`orders`",
 			columns: []string{"id", "amount"},
 			rows:    [][]driver.Value{{int64(1), int64(100)}}},
 	)
@@ -77,7 +77,7 @@ func TestTheSourcesClockIsReadBeforeTheRows(t *testing.T) {
 		if strings.Contains(statement, "UNIX_TIMESTAMP") {
 			clockAt = i
 		}
-		if strings.Contains(statement, "FROM tenant_trial_naviee.orders") {
+		if strings.Contains(statement, "FROM `tenant_trial_naviee`.`orders`") {
 			rowsAt = i
 		}
 	}
@@ -95,7 +95,7 @@ func TestAChunkCarriesTheRowsAsUpserts(t *testing.T) {
 		clockReply(1757000000),
 		oneColumn("KEY_COLUMN_USAGE", "id"),
 		twoColumn("information_schema.COLUMNS", [][2]string{{"id", ""}, {"amount", ""}}),
-		reply{match: "FROM tenant_trial_naviee.orders",
+		reply{match: "FROM `tenant_trial_naviee`.`orders`",
 			columns: []string{"id", "amount"},
 			rows: [][]driver.Value{
 				{int64(1), int64(100)},
@@ -135,7 +135,7 @@ func TestAFullChunkIsNotTheLast(t *testing.T) {
 		clockReply(1),
 		oneColumn("KEY_COLUMN_USAGE", "id"),
 		twoColumn("information_schema.COLUMNS", [][2]string{{"id", ""}}),
-		reply{match: "FROM tenant_trial_naviee.orders", columns: []string{"id"},
+		reply{match: "FROM `tenant_trial_naviee`.`orders`", columns: []string{"id"},
 			rows: [][]driver.Value{{int64(1)}, {int64(2)}}},
 	)
 
@@ -154,7 +154,7 @@ func TestAShortChunkIsTheLast(t *testing.T) {
 		clockReply(1),
 		oneColumn("KEY_COLUMN_USAGE", "id"),
 		twoColumn("information_schema.COLUMNS", [][2]string{{"id", ""}}),
-		reply{match: "FROM tenant_trial_naviee.orders", columns: []string{"id"},
+		reply{match: "FROM `tenant_trial_naviee`.`orders`", columns: []string{"id"},
 			rows: [][]driver.Value{{int64(1)}}},
 	)
 
@@ -175,7 +175,7 @@ func TestTheKeyIsBoundNotInterpolated(t *testing.T) {
 		clockReply(1),
 		oneColumn("KEY_COLUMN_USAGE", "id"),
 		twoColumn("information_schema.COLUMNS", [][2]string{{"id", ""}}),
-		reply{match: "FROM tenant_trial_naviee.orders", columns: []string{"id"}},
+		reply{match: "FROM `tenant_trial_naviee`.`orders`", columns: []string{"id"}},
 	)
 
 	if _, err := chunks.NextChunk(context.Background(),
@@ -184,7 +184,7 @@ func TestTheKeyIsBoundNotInterpolated(t *testing.T) {
 	}
 
 	for _, statement := range fake.statements() {
-		if strings.Contains(statement, "FROM tenant_trial_naviee.orders") {
+		if strings.Contains(statement, "FROM `tenant_trial_naviee`.`orders`") {
 			if strings.Contains(statement, "1000") {
 				t.Errorf("the resume key was interpolated: %q", statement)
 			}
@@ -249,7 +249,7 @@ func TestTheTargetTableIsResolved(t *testing.T) {
 		clockReply(1),
 		oneColumn("KEY_COLUMN_USAGE", "id"),
 		twoColumn("information_schema.COLUMNS", [][2]string{{"id", ""}}),
-		reply{match: "FROM tenant_trial_naviee.orders", columns: []string{"id"},
+		reply{match: "FROM `tenant_trial_naviee`.`orders`", columns: []string{"id"},
 			rows: [][]driver.Value{{int64(1)}}},
 	)
 	chunks.TargetOf = func(string) string { return "orders_archive" }
@@ -361,7 +361,7 @@ func TestTheWalkContinuesFromAStringKey(t *testing.T) {
 		clockReply(1),
 		oneColumn("KEY_COLUMN_USAGE", "code"),
 		twoColumn("information_schema.COLUMNS", [][2]string{{"code", ""}}),
-		reply{match: "FROM tenant_trial_naviee.orders", columns: []string{"code"},
+		reply{match: "FROM `tenant_trial_naviee`.`orders`", columns: []string{"code"},
 			rows: [][]driver.Value{{[]byte("abc")}, {[]byte("abd")}}},
 	)
 
@@ -393,7 +393,7 @@ func TestGeneratedColumnsAreLeftOutOfTheRecopy(t *testing.T) {
 			{"tax", "STORED GENERATED"},
 			{"created_at", "DEFAULT_GENERATED"},
 		}),
-		reply{match: "FROM tenant_trial_naviee.orders",
+		reply{match: "FROM `tenant_trial_naviee`.`orders`",
 			columns: []string{"id", "amount", "created_at"},
 			rows:    [][]driver.Value{{int64(1), int64(100), "2026-09-05"}}},
 	)
@@ -425,7 +425,7 @@ func TestARecopyMasksWhatTheStreamMasks(t *testing.T) {
 		clockReply(1),
 		oneColumn("KEY_COLUMN_USAGE", "id"),
 		twoColumn("information_schema.COLUMNS", [][2]string{{"id", ""}, {"card_number", ""}}),
-		reply{match: "FROM tenant_trial_naviee.orders",
+		reply{match: "FROM `tenant_trial_naviee`.`orders`",
 			columns: []string{"id", "card_number"},
 			rows:    [][]driver.Value{{int64(1), card}}},
 	)
@@ -459,7 +459,7 @@ func TestARecopyTakesThePolicyOfItsOwnDatabase(t *testing.T) {
 		clockReply(1),
 		oneColumn("KEY_COLUMN_USAGE", "id"),
 		twoColumn("information_schema.COLUMNS", [][2]string{{"id", ""}, {"card_number", ""}}),
-		reply{match: "FROM tenant_trial_naviee.orders",
+		reply{match: "FROM `tenant_trial_naviee`.`orders`",
 			columns: []string{"id", "card_number"},
 			rows:    [][]driver.Value{{int64(1), card}}},
 	)
@@ -489,7 +489,7 @@ func TestARecopyLeavesAnUnprotectedTableAlone(t *testing.T) {
 		clockReply(1),
 		oneColumn("KEY_COLUMN_USAGE", "id"),
 		twoColumn("information_schema.COLUMNS", [][2]string{{"id", ""}, {"amount", ""}}),
-		reply{match: "FROM tenant_trial_naviee.orders",
+		reply{match: "FROM `tenant_trial_naviee`.`orders`",
 			columns: []string{"id", "amount"},
 			rows:    [][]driver.Value{{int64(1), int64(100)}}},
 	)
@@ -502,5 +502,36 @@ func TestARecopyLeavesAnUnprotectedTableAlone(t *testing.T) {
 	written := chunk.Events[0].Payload.(statement)
 	if got := written.args[1]; got != int64(100) {
 		t.Errorf("an unprotected value was changed to %v", got)
+	}
+}
+
+// A failure means a table whose key or columns are reserved words, or whose name has a hyphen, can never be re-copied.
+func TestTheRecopyQuotesTheNamesItReads(t *testing.T) {
+	chunks, fake := chunkSource(t,
+		clockReply(1),
+		oneColumn("KEY_COLUMN_USAGE", "key"),
+		twoColumn("information_schema.COLUMNS", [][2]string{{"key", ""}, {"rank", ""}}),
+		reply{match: "LIMIT", columns: []string{"key", "rank"}},
+	)
+
+	if _, err := chunks.NextChunk(context.Background(),
+		domain.Namespace{Object: "order-items"}, "5", 10); err != nil {
+		t.Fatalf("NextChunk: %v", err)
+	}
+
+	var read string
+	for _, asked := range fake.statements() {
+		if strings.Contains(asked, "LIMIT") {
+			read = asked
+		}
+	}
+	for _, want := range []string{
+		"SELECT `key`,`rank` FROM `tenant_trial_naviee`.`order-items`",
+		"WHERE `key` > ?",
+		"ORDER BY `key` LIMIT",
+	} {
+		if !strings.Contains(read, want) {
+			t.Errorf("the re-copy reads with %q, want %q in it", read, want)
+		}
 	}
 }
