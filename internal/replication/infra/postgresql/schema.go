@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/lib/pq"
 	"github.com/sirupsen/logrus"
 
 	"github.com/retail-ai-inc/sync/internal/platform/config"
@@ -127,7 +128,8 @@ ORDER BY ordinal_position
 			return "", nil, fmt.Errorf("scan column info fail: %w", errScan)
 		}
 
-		colDef := fmt.Sprintf("%s %s", columnName, dataType)
+		// Quoted as the stream names it, or a mixed-case name folds and a keyword fails.
+		colDef := fmt.Sprintf("%s %s", pq.QuoteIdentifier(columnName), dataType)
 
 		if (dataType == "character varying" || dataType == "varchar" ||
 			dataType == "character" || dataType == "char") && charMaxLen.Valid {
@@ -164,7 +166,8 @@ ORDER BY ordinal_position
 
 	var seqSlice []string
 	for seqName := range sequencesMap {
-		seq := fmt.Sprintf(`CREATE SEQUENCE IF NOT EXISTS "%s"`, seqName)
+		// Verbatim: the default prints the name already quoted and qualified as it resolves.
+		seq := fmt.Sprintf(`CREATE SEQUENCE IF NOT EXISTS %s`, seqName)
 		seqSlice = append(seqSlice, seq)
 	}
 	return createSQL, seqSlice, nil

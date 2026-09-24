@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pglogrepl"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/lib/pq"
 	"github.com/sirupsen/logrus"
 
 	"github.com/retail-ai-inc/sync/internal/platform/config"
@@ -180,15 +181,17 @@ func (s *Snapshotter) copyTable(ctx context.Context, pair tablePair) (int, error
 
 	fields := rows.FieldDescriptions()
 	names := make([]string, len(fields))
+	quoted := make([]string, len(fields))
 	placeholders := make([]string, len(fields))
 	for i, field := range fields {
 		names[i] = string(field.Name)
+		quoted[i] = pq.QuoteIdentifier(names[i])
 		placeholders[i] = fmt.Sprintf("$%d", i+1)
 	}
 	// ON CONFLICT DO NOTHING so a re-run over a partly filled table adds what is
 	// missing rather than failing on the first row that is already there.
 	insert := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s) ON CONFLICT DO NOTHING",
-		pair.target(), strings.Join(names, ", "), strings.Join(placeholders, ", "))
+		pair.target(), strings.Join(quoted, ", "), strings.Join(placeholders, ", "))
 
 	// The copied rows must carry the protection the stream gives later changes to them.
 	policy := security.FindTableSecurityFromMappings(security.TableRef{

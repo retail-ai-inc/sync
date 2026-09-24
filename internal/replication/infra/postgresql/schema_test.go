@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"testing"
 
@@ -189,7 +190,7 @@ func TestTheCreateStatementCarriesTheColumnTypes(t *testing.T) {
 		t.Fatalf("createTableSQL: %v", err)
 	}
 
-	for _, want := range []string{`"public"."orders"`, "id integer", "name character varying", "amount numeric"} {
+	for _, want := range []string{`"public"."orders"`, `"id" integer`, `"name" character varying`, `"amount" numeric`} {
 		if !strings.Contains(create, want) {
 			t.Errorf("the statement is missing %q: %s", want, create)
 		}
@@ -201,6 +202,51 @@ func TestTheCreateStatementCarriesTheColumnTypes(t *testing.T) {
 		t.Errorf("sequences = %v, want the one the default draws from -- without it "+
 			"the create fails on a column whose default names a sequence that is "+
 			"not there", sequences)
+	}
+}
+
+// A failure means a created table folds or rejects a column the stream names exactly, or its sequence is not the one its default draws from.
+func TestTheCreateStatementQuotesEachColumnAndCreatesTheSequenceItsDefaultNames(t *testing.T) {
+	source := &answering{replies: []sourceReply{{
+		match:   "information_schema.columns",
+		columns: []string{"column_name", "data_type", "is_nullable", "column_default", "character_maximum_length", "numeric_precision", "numeric_scale"},
+		rows: [][]any{
+			{"userId", "text", "YES", nil, nil, nil, nil},
+			{"order", "integer", "NO", nil, nil, nil, nil},
+			{"amount", "numeric", "YES", nil, nil, int64(12), int64(2)},
+			{"rate", "numeric", "YES", nil, nil, int64(5), nil},
+			{"code", "character varying", "YES", nil, int64(8), nil, nil},
+			{"id", "integer", "NO", "nextval('sales.orders_id_seq'::regclass)", nil, nil, nil},
+			{"ref", "bigint", "NO", `nextval('"Sales"."Refs_seq"'::regclass)`, nil, nil, nil},
+		},
+	}}}
+	work := &schemaWork{Source: source, Logger: quiet()}
+
+	create, sequences, err := work.createTableSQL(context.Background(),
+		"sales", "orders", "sales", "orders")
+	if err != nil {
+		t.Fatalf("createTableSQL: %v", err)
+	}
+
+	for _, want := range []string{
+		`"userId" text,`,
+		`"order" integer NOT NULL,`,
+		`"amount" numeric(12,2),`,
+		`"rate" numeric(5),`,
+		`"code" character varying(8),`,
+		`"id" integer DEFAULT nextval('sales.orders_id_seq'::regclass) NOT NULL,`,
+	} {
+		if !strings.Contains(create, want) {
+			t.Errorf("the statement is missing %q: %s", want, create)
+		}
+	}
+	sort.Strings(sequences)
+	want := []string{
+		`CREATE SEQUENCE IF NOT EXISTS "Sales"."Refs_seq"`,
+		`CREATE SEQUENCE IF NOT EXISTS sales.orders_id_seq`,
+	}
+	if strings.Join(sequences, "\n") != strings.Join(want, "\n") {
+		t.Errorf("sequences = %q, want %q", sequences, want)
 	}
 }
 
@@ -256,6 +302,31 @@ func TestTheCopyFillsAnEmptyTable(t *testing.T) {
 	}
 	if count != 2 {
 		t.Errorf("%d rows were copied, want 2", count)
+	}
+}
+
+// A failure means the copy names a column unquoted, so a keyword or mixed-case name fails or folds.
+func TestTheCopyWritesAColumnWhoseNameIsAKeyword(t *testing.T) {
+	target := schemaTargetDB(t)
+	if _, err := target.Exec(`CREATE TABLE public.lines ("id" TEXT, "order" TEXT)`); err != nil {
+		t.Fatalf("create the table: %v", err)
+	}
+	source := &answering{replies: []sourceReply{{
+		match:   "SELECT * FROM public.lines",
+		columns: []string{"id", "order"},
+		rows:    [][]any{{"1", "o-7"}},
+	}}}
+
+	if err := snapshotOver(source, target, [2]string{"lines", "lines"}).
+		Copy(context.Background()); err != nil {
+		t.Fatalf("Copy: %v", err)
+	}
+	var order string
+	if err := target.QueryRow(`SELECT "order" FROM public.lines WHERE id = '1'`).Scan(&order); err != nil {
+		t.Fatalf("read the copied row: %v", err)
+	}
+	if order != "o-7" {
+		t.Errorf("order = %q, want o-7", order)
 	}
 }
 
