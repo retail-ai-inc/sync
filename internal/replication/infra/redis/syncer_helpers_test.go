@@ -126,3 +126,24 @@ func TestCredentialsComeOutOfTheDSN(t *testing.T) {
 		}
 	}
 }
+
+// A failure means the bookkeeping or the source's home database is taken from the wrong part of the DSN.
+func TestTheDatabaseIndexIsReadOutOfTheDSN(t *testing.T) {
+	for _, c := range []struct {
+		dsn  string
+		want int
+		bad  bool
+	}{
+		{"redis://h:1/3", 3, false},
+		{"redis://h:1/0", 0, false},
+		{"redis://h:1", 0, false},
+		{"redis://user:pw@h:1/15", 15, false},
+		{"redis://h:1/abc", 0, true},
+		{"redis://h:1/-1", 0, true},
+	} {
+		got, err := databaseIndex(c.dsn)
+		if (err != nil) != c.bad || got != c.want {
+			t.Errorf("databaseIndex(%q) = %d, %v; want %d, error %v", c.dsn, got, err, c.want, c.bad)
+		}
+	}
+}
