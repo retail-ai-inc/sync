@@ -20,6 +20,7 @@ import (
 	"github.com/retail-ai-inc/sync/internal/replication/app/pipeline"
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
 	"github.com/retail-ai-inc/sync/internal/replication/infra/checkpoint"
+	"github.com/retail-ai-inc/sync/internal/replication/infra/discovery"
 )
 
 // Reader turns one MongoDB deployment's change stream into a stream of events,
@@ -557,7 +558,9 @@ func (r *Reader) replicates(ns domain.Namespace) bool {
 	if len(r.mapped) == 0 {
 		// The task lists no collections, so every collection of a mapped database is
 		// replicated under its own name, apart from the syncer's own bookkeeping.
-		return !isInternal(ns.Object)
+		// The snapshot skips by discovery's rule; any other rule here lets the stream
+		// copy the source's direction claim over the target's.
+		return !discovery.IsInternal(ns.Object)
 	}
 	return r.mapped[strings.ToLower(ns.Object)]
 }
@@ -738,15 +741,4 @@ func decodePosition(pos domain.Position) (streamPosition, error) {
 		return streamPosition{}, fmt.Errorf("read the stored position: %w", err)
 	}
 	return stored, nil
-}
-
-// isInternal reports whether a collection is the syncer's own bookkeeping,
-// which must never be replicated: it would write the target's checkpoint back
-// over itself.
-func isInternal(collection string) bool {
-	switch collection {
-	case "_sync_checkpoint", "_sync_direction", "_sync_dead_letter":
-		return true
-	}
-	return strings.HasPrefix(collection, "system.")
 }

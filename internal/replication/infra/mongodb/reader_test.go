@@ -12,6 +12,7 @@ import (
 
 	"github.com/retail-ai-inc/sync/internal/platform/config"
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
+	"github.com/retail-ai-inc/sync/internal/replication/infra/discovery"
 )
 
 func rawEvent(t *testing.T, doc bson.D) bson.Raw {
@@ -239,6 +240,27 @@ func TestATaskThatNamesNothingReplicatesEverythingInItsDatabase(t *testing.T) {
 		if r.replicates(ns("shop", internal)) {
 			t.Errorf("%s was let through; it is the syncer's own bookkeeping", internal)
 		}
+	}
+}
+
+// A failure means the stream copies a collection the snapshot skips, such as the source's direction claim over the target's.
+func TestTheSyncersOwnCollectionsAreNeverReplicated(t *testing.T) {
+	r := bufferingReader(t)
+
+	for _, name := range []string{"orders", "_sync_checkpoint", "_sync_direction_lock", "_sync_anything_new", "system.views"} {
+		if got, want := r.replicates(ns("shop", name)), !discovery.IsInternal(name); got != want {
+			t.Errorf("the stream replicates %s: %v, but discovery says %v", name, got, want)
+		}
+	}
+
+	claim := rawEvent(t, append(
+		changeDoc("shop", "_sync_direction_lock", "replace", bson.D{{Key: "_id", Value: "task"}}),
+		bson.E{Key: "fullDocument", Value: bson.D{{Key: "_id", Value: "task"}, {Key: "role", Value: "source"}}}))
+	if err := r.take(claim); err != nil {
+		t.Fatalf("take: %v", err)
+	}
+	if len(r.ready) != 0 || len(r.open) != 0 {
+		t.Errorf("the source's direction claim was queued for the target: %d ready, %d open", len(r.ready), len(r.open))
 	}
 }
 
