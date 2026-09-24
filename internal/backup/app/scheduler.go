@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"time"
@@ -31,6 +32,8 @@ import (
 // scheduleEvery is how often the job table is re-read, so a job added or paused
 // through the API is picked up without a restart — the part SyncCrontab was for.
 const scheduleEvery = 30 * time.Second
+
+var errNeverDue = errors.New("it names no time that ever comes round")
 
 // StartBackupScheduler runs each enabled job on its own schedule until the
 // context is cancelled. The returned function waits for it to stop.
@@ -116,6 +119,11 @@ func (s *scheduler) tick(ctx context.Context) {
 			continue
 		}
 		schedule, err := domain.ParseSchedule(config.Schedule)
+		// Next answers the zero time for a date that never comes (30 February),
+		// and every moment is after that, so the job would run on every tick.
+		if err == nil && schedule.Next(now).IsZero() {
+			err = errNeverDue
+		}
 		if err != nil {
 			s.log.Errorf("[Backup] Job %d has an unusable schedule %q, so it has NO "+
 				"SCHEDULED BACKUP: %v", job.ID(), config.Schedule, err)

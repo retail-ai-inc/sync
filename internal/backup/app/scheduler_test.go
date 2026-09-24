@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/retail-ai-inc/sync/internal/platform/metrics"
 )
 
 // schedulerFor builds a scheduler whose clock and run function the test owns,
@@ -317,5 +319,31 @@ func TestAJobThatHasNeverRunIsNotMadeUp(t *testing.T) {
 
 	if len(*fired) != 0 {
 		t.Errorf("the scheduler ran %v for a job that has never run", *fired)
+	}
+}
+
+// A schedule with no next occurrence answers the zero time, which every tick is after, so it ran every thirty seconds.
+func TestAScheduleThatNeverComesIsNeverRun(t *testing.T) {
+	db := useTempJobDB(t)
+	ran := insertJobLastRun(t, db, 1, `{"name":"feb30","schedule":"0 0 30 2 *","sourceType":"mysql"}`,
+		"2026-09-01 15:00:00")
+	insertJob(t, db, 1, `{"name":"apr31","schedule":"0 0 31 4 *","sourceType":"mysql"}`)
+	missed := func() float64 {
+		got, _ := sampleFor(t, metrics.BackupMissedWindows, backupLabels(int(ran)))
+		return got
+	}
+	before := missed()
+
+	s, fired := schedulerFor(t, at(t, "2026-09-02 09:00:00"))
+	for _, when := range []string{"2026-09-02 09:00:00", "2026-09-02 09:00:30", "2026-09-02 09:01:00"} {
+		s.now = func() time.Time { return at(t, when) }
+		s.tick(context.Background())
+	}
+
+	if len(*fired) != 0 {
+		t.Errorf("the scheduler ran %v for schedules that never come round", *fired)
+	}
+	if after := missed(); after != before {
+		t.Errorf("missed windows went from %v to %v for a schedule with no window", before, after)
 	}
 }
