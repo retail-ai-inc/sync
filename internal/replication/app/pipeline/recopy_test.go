@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -17,13 +18,14 @@ import (
 // holds and the source does not, which is what makes a recovering copy safe.
 type sweepingSnapshotter struct {
 	fakeSnapshotter
-	swept int
+	swept    int
+	sweepErr error
 }
 
 func (s *sweepingSnapshotter) SweepStale(context.Context) error {
 	s.calls = append(s.calls, "sweep")
 	s.swept++
-	return nil
+	return s.sweepErr
 }
 
 // openFailsOnce is a reader that refuses the stored position the first time and
@@ -180,5 +182,90 @@ func TestAFirstCopyDoesNotSweep(t *testing.T) {
 	}
 	if snap.swept != 0 {
 		t.Errorf("a first copy swept the target %d times", snap.swept)
+	}
+}
+
+// savingStore records each save among the snapshot's calls, and ends the run
+// once one lands: nothing after the copy's own save matters to these tests.
+type savingStore struct {
+	*fakeStore
+	snap *sweepingSnapshotter
+	stop context.CancelFunc
+}
+
+func (s *savingStore) Save(ctx context.Context, key, payload string) error {
+	s.snap.calls = append(s.snap.calls, "save")
+	err := s.fakeStore.Save(ctx, key, payload)
+	s.stop()
+	return err
+}
+
+// recovering runs a task whose stored position "stale" the source refuses, so
+// it copies again from "fresh", and reports what Run returned.
+func recovering(t *testing.T, snap *sweepingSnapshotter) (*fakeStore, error) {
+	t.Helper()
+	withStored(t, Tuning{RecopyOnUnusablePosition: true})
+
+	snap.pinned = domain.Position{Payload: "fresh"}
+	reader := &openFailsOnce{refuse: domain.PositionUnusable("the history that offset belongs to is gone")}
+	store := newStore()
+	storedPosition(t, store, "stale")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r := newRunner(t, reader, &fakeApplier{}, &savingStore{fakeStore: store, snap: snap, stop: cancel})
+	r.Snapshotter = snap
+
+	done := make(chan error, 1)
+	go func() { done <- r.Run(ctx) }()
+	select {
+	case err := <-done:
+		return store, err
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run neither failed nor saved a position")
+		return nil, nil
+	}
+}
+
+// Saving the new position before the sweep lands means no later start sweeps, and what the source deleted stays on the target.
+func TestTheRecoveredPositionIsSavedOnlyAfterTheSweep(t *testing.T) {
+	snap := &sweepingSnapshotter{}
+
+	store, err := recovering(t, snap)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	want := []string{"pin", "copy", "sweep", "save"}
+	if len(snap.calls) != len(want) {
+		t.Fatalf("the recovery did %v, want %v", snap.calls, want)
+	}
+	for i, call := range want {
+		if snap.calls[i] != call {
+			t.Fatalf("the recovery did %v, want %v", snap.calls, want)
+		}
+	}
+	if got := store.value(""); got != "fresh" {
+		t.Errorf("recorded position %q, want the point the new copy was pinned at", got)
+	}
+}
+
+// A sweep that failed must leave the old position, so the next start recovers and sweeps again.
+func TestASweepThatFailsLeavesTheOldPositionStored(t *testing.T) {
+	snap := &sweepingSnapshotter{sweepErr: errors.New("the target went away mid-scan")}
+
+	store, err := recovering(t, snap)
+	if !errors.Is(err, snap.sweepErr) {
+		t.Fatalf("Run returned %v, want the sweep's failure", err)
+	}
+
+	if got := store.value(""); got != "stale" {
+		t.Errorf("recorded position %q, want the stale one left for the next start to recover", got)
+	}
+	store.mu.Lock()
+	saves := store.saves
+	store.mu.Unlock()
+	if saves != 1 {
+		t.Errorf("the store was saved %d times, want only the stale position put there beforehand", saves)
 	}
 }
