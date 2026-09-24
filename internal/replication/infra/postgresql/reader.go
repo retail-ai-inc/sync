@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pglogrepl"
@@ -83,9 +84,10 @@ type Reader struct {
 	// applied is the position everything up to has been written at, and received
 	// the furthest the source has sent. They are different numbers and reporting
 	// one for the other is what let the server recycle WAL carrying changes the
-	// target had not seen.
-	applied  pglogrepl.LSN
-	received pglogrepl.LSN
+	// target had not seen. Atomic: the applier and the confirmer touch them from
+	// their own goroutines.
+	applied  atomic.Uint64
+	received atomic.Uint64
 
 	lastHeard time.Time
 }
@@ -182,9 +184,7 @@ func (r *Reader) keepalive(ctx context.Context, payload []byte) error {
 		r.Logger.Warnf("[PostgreSQL] Could not read a keepalive: %v", err)
 		return nil
 	}
-	if message.ServerWALEnd > r.received {
-		r.received = message.ServerWALEnd
-	}
+	raise(&r.received, message.ServerWALEnd)
 	if message.ReplyRequested && r.Confirm != nil {
 		if err := r.Confirm(ctx); err != nil {
 			r.Logger.Warnf("[PostgreSQL] Could not answer a keepalive: %v", err)
@@ -215,9 +215,7 @@ func (r *Reader) wal(payload []byte) error {
 	if err != nil {
 		return fmt.Errorf("read a WAL record: %w", err)
 	}
-	if data.ServerWALEnd > r.received {
-		r.received = data.ServerWALEnd
-	}
+	raise(&r.received, data.ServerWALEnd)
 
 	message, err := pglogrepl.ParseV2(data.WALData, false)
 	if err != nil {
@@ -238,7 +236,7 @@ func (r *Reader) decode(message pglogrepl.Message) error {
 		// already on the target in full. Replaying it re-inserts rows that are
 		// there and re-deletes rows that are not, so the comparison is >= and
 		// not >.
-		if r.applied >= typed.FinalLSN {
+		if pglogrepl.LSN(r.applied.Load()) >= typed.FinalLSN {
 			r.inTransaction = false
 			r.open = nil
 			return nil
@@ -395,8 +393,15 @@ func (r *Reader) sourceEndpoint() string {
 // Applied records how far the target has been written, which is what the reader
 // reports to the source and what decides whether a resumed transaction is stale.
 func (r *Reader) Applied(lsn pglogrepl.LSN) {
-	if lsn > r.applied {
-		r.applied = lsn
+	raise(&r.applied, lsn)
+}
+
+func raise(position *atomic.Uint64, lsn pglogrepl.LSN) {
+	for {
+		current := position.Load()
+		if uint64(lsn) <= current || position.CompareAndSwap(current, uint64(lsn)) {
+			return
+		}
 	}
 }
 
@@ -406,11 +411,12 @@ func (r *Reader) Applied(lsn pglogrepl.LSN) {
 // received would let it recycle segments carrying changes the target has not
 // seen.
 func (r *Reader) Positions() (received, applied pglogrepl.LSN) {
-	applied = r.applied
-	if applied > r.received {
-		applied = r.received
+	received = pglogrepl.LSN(r.received.Load())
+	applied = pglogrepl.LSN(r.applied.Load())
+	if applied > received {
+		applied = received
 	}
-	return r.received, applied
+	return received, applied
 }
 
 func opOf(op operation) domain.Op {

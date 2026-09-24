@@ -217,7 +217,7 @@ func TestAQuietStreamStillReportsItIsAlive(t *testing.T) {
 // recycle segments the target has not been given.
 func TestTheAppliedPositionIsNeverAheadOfWhatArrived(t *testing.T) {
 	r := readerFor(t, config.SyncConfig{})
-	r.received = pglogrepl.LSN(100)
+	r.received.Store(100)
 	r.Applied(pglogrepl.LSN(200))
 
 	received, applied := r.Positions()
@@ -231,7 +231,7 @@ func TestTheAppliedPositionIsNeverAheadOfWhatArrived(t *testing.T) {
 
 func TestTheAppliedPositionOnlyMovesForward(t *testing.T) {
 	r := readerFor(t, config.SyncConfig{})
-	r.received = pglogrepl.LSN(1000)
+	r.received.Store(1000)
 
 	r.Applied(pglogrepl.LSN(500))
 	r.Applied(pglogrepl.LSN(200))
@@ -239,6 +239,25 @@ func TestTheAppliedPositionOnlyMovesForward(t *testing.T) {
 	if _, applied := r.Positions(); applied != 500 {
 		t.Errorf("applied = %s, want it left at the furthest point reached", applied)
 	}
+}
+
+func TestPositionsCanBeReadAndAppliedWhileTheStreamIsDecoded(t *testing.T) {
+	r := readerFor(t, config.SyncConfig{})
+	// Applied runs on the applier's goroutine and Positions on the confirmer's.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for lsn := pglogrepl.LSN(1); lsn <= 100; lsn++ {
+			r.Applied(lsn)
+			r.Positions()
+		}
+	}()
+	for lsn := pglogrepl.LSN(1); lsn <= 100; lsn++ {
+		if err := r.decode(&pglogrepl.BeginMessage{FinalLSN: lsn}); err != nil {
+			t.Fatalf("decode a begin: %v", err)
+		}
+	}
+	<-done
 }
 
 // TestAKeepaliveIsAnswvered covers the reply the source asks for. Without it the
