@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/go-mysql-org/go-mysql/canal"
+
+	"github.com/retail-ai-inc/sync/internal/replication/infra/security"
 )
 
 // keyedSchema has the primary key the production target has.
@@ -135,10 +137,10 @@ func TestAResumedSnapshotDoesNotLoseRows(t *testing.T) {
 	cols := []string{"id", "customer", "email"}
 	batch := [][]interface{}{{"1", "Ada", "a@x"}, {"2", "Grace", "g@x"}}
 
-	if err := s.batchInsert(context.Background(), db, "main", "orders", cols, batch); err != nil {
+	if err := s.batchInsert(context.Background(), db, "main", "orders", security.TableSecurity{}, cols, batch); err != nil {
 		t.Fatalf("first copy: %v", err)
 	}
-	if err := s.batchInsert(context.Background(), db, "main", "orders", cols, batch); err != nil {
+	if err := s.batchInsert(context.Background(), db, "main", "orders", security.TableSecurity{}, cols, batch); err != nil {
 		t.Fatalf("resumed copy: %v", err)
 	}
 

@@ -121,7 +121,7 @@ func (a *Applier) resolveFullDocuments(ctx context.Context, run []*domain.Event)
 
 		event.Payload = mongo.NewReplaceOneModel().
 			SetFilter(want.filter).
-			SetReplacement(a.mask(event.NS.Object, document)).
+			SetReplacement(a.mask(event.NS.DB, event.NS.Object, document)).
 			SetUpsert(true)
 		read++
 		byReason[want.reason]++
@@ -143,11 +143,11 @@ func (a *Applier) resolveFullDocuments(ctx context.Context, run []*domain.Event)
 // mask applies the task's field security to a document read here, so a
 // document that came back the long way is treated exactly as one that arrived
 // on the stream.
-func (a *Applier) mask(collection string, document bson.M) bson.M {
+func (a *Applier) mask(database, collection string, document bson.M) bson.M {
 	if a.Mask == nil {
 		return document
 	}
-	masked, ok := a.Mask(collection, document).(bson.M)
+	masked, ok := a.Mask(database, collection, document).(bson.M)
 	if !ok {
 		return document
 	}

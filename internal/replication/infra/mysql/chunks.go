@@ -39,8 +39,10 @@ type Chunks struct {
 //
 // A copy, not the row: the caller's slice is the scan buffer and is reused, and
 // the stream path builds a new slice for the same reason.
-func (c *Chunks) mask(table string, columns []string, values []interface{}) []interface{} {
-	policy := security.FindTableSecurityFromMappings(table, c.Mappings)
+func (c *Chunks) mask(table, target string, columns []string, values []interface{}) []interface{} {
+	policy := security.FindTableSecurityFromMappings(security.TableRef{
+		Database: c.Database, Table: table, Target: target,
+	}, c.Mappings)
 	if !policy.SecurityEnabled || len(policy.FieldSecurity) == 0 {
 		return values
 	}
@@ -121,7 +123,7 @@ func (c *Chunks) NextChunk(ctx context.Context, ns domain.Namespace, after strin
 			Key: key + "\x00",
 			Payload: statement{
 				query: upsertStatement(c.Dialect, c.TargetDatabase, target, columns, 1),
-				args:  c.mask(ns.Object, columns, values),
+				args:  c.mask(ns.Object, target, columns, values),
 			},
 		})
 		chunk.After = key

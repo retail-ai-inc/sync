@@ -190,7 +190,7 @@ func maskingSyncer(collection string, fields ...string) *MongoDBSyncer {
 func TestAMaskedFieldIsNotSentInTheClear(t *testing.T) {
 	syncer := maskingSyncer("orders", "card_number")
 
-	masked := syncer.maskDocument("orders", bson.M{
+	masked := syncer.maskDocument("shop", "orders", bson.M{
 		"_id":         "1",
 		"card_number": "4111111111111111",
 		"amount":      100,
@@ -211,7 +211,7 @@ func TestACollectionWithNoPolicyIsUntouched(t *testing.T) {
 	syncer := maskingSyncer("orders", "card_number")
 
 	document := bson.M{"card_number": "4111111111111111"}
-	untouched := syncer.maskDocument("payments", document)
+	untouched := syncer.maskDocument("shop", "payments", document)
 
 	if untouched["card_number"] != "4111111111111111" {
 		t.Error("a collection with no policy was masked anyway")
@@ -229,7 +229,7 @@ func TestMaskValueLeavesANonDocumentAlone(t *testing.T) {
 		"number": 42,
 	} {
 		t.Run(name, func(t *testing.T) {
-			if got := syncer.maskValue("orders", value); got != value {
+			if got := syncer.maskValue("shop", "orders", value); got != value {
 				t.Errorf("maskValue changed %v to %v", value, got)
 			}
 		})
@@ -239,7 +239,7 @@ func TestMaskValueLeavesANonDocumentAlone(t *testing.T) {
 func TestMaskValueMasksADocument(t *testing.T) {
 	syncer := maskingSyncer("orders", "card_number")
 
-	got := syncer.maskValue("orders", bson.M{"card_number": "4111111111111111"})
+	got := syncer.maskValue("shop", "orders", bson.M{"card_number": "4111111111111111"})
 
 	rendered := bsonToString(t, got)
 	if strings.Contains(rendered, "4111111111111111") {

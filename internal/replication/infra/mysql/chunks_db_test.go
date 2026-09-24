@@ -452,6 +452,38 @@ func TestARecopyMasksWhatTheStreamMasks(t *testing.T) {
 	}
 }
 
+// A failure means a re-copy wrote one database's rows under another database's policy.
+func TestARecopyTakesThePolicyOfItsOwnDatabase(t *testing.T) {
+	const card = "4111111111111111"
+	chunks, _ := chunkSource(t,
+		clockReply(1),
+		oneColumn("KEY_COLUMN_USAGE", "id"),
+		twoColumn("information_schema.COLUMNS", [][2]string{{"id", ""}, {"card_number", ""}}),
+		reply{match: "FROM tenant_trial_naviee.orders",
+			columns: []string{"id", "card_number"},
+			rows:    [][]driver.Value{{int64(1), card}}},
+	)
+	chunks.Mappings = []config.DatabaseMapping{
+		{SourceDatabase: "another_tenant", Tables: []config.TableMapping{{SourceTable: "orders"}}},
+		{SourceDatabase: "tenant_trial_naviee", Tables: []config.TableMapping{{
+			SourceTable:     "orders",
+			SecurityEnabled: true,
+			FieldSecurity: []interface{}{
+				map[string]interface{}{"field": "card_number", "securityType": "masked"},
+			},
+		}}},
+	}
+
+	chunk, err := chunks.NextChunk(context.Background(),
+		domain.Namespace{Object: "orders"}, "", 10)
+	if err != nil {
+		t.Fatalf("NextChunk: %v", err)
+	}
+	if got := chunk.Events[0].Payload.(statement).args[1]; got == card {
+		t.Error("the re-copy sent the card number in the clear")
+	}
+}
+
 func TestARecopyLeavesAnUnprotectedTableAlone(t *testing.T) {
 	chunks, _ := chunkSource(t,
 		clockReply(1),

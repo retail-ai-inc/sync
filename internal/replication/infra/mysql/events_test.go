@@ -13,6 +13,7 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/retail-ai-inc/sync/internal/platform/config"
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
+	"github.com/retail-ai-inc/sync/internal/replication/infra/security"
 	"github.com/sirupsen/logrus"
 )
 
@@ -245,6 +246,58 @@ func TestAMappingThatNamesItsDatabaseIsHeldToIt(t *testing.T) {
 	}
 	if got := rows(t, db); len(got) != 0 {
 		t.Errorf("rows = %v, want the other database's table left alone", got)
+	}
+}
+
+// A failure means one database's rows were written under another database's policy.
+func TestTheSameTableInTwoDatabasesIsMaskedByItsOwnMapping(t *testing.T) {
+	db := sqliteTarget(t, ordersSchema)
+	ledgerMapping := securedTable("orders", "orders", "email")[0]
+	ledgerMapping.SourceDatabase = "ledger"
+	h := newHandler(t, db, []config.DatabaseMapping{
+		{SourceDatabase: "shop", Tables: []config.TableMapping{{SourceTable: "orders", TargetTable: "orders"}}},
+		ledgerMapping,
+	})
+
+	ledger := sourceTable("orders", "id", "customer", "email")
+	ledger.Schema = "ledger"
+	for _, e := range []*canal.RowsEvent{
+		insertEvent("1", "Ada", "ada@example.com"),
+		{Table: ledger, Action: canal.InsertAction, Rows: [][]interface{}{{"2", "Grace", "grace@example.com"}}},
+	} {
+		if err := apply(db, h, e); err != nil {
+			t.Fatalf("OnRow: %v", err)
+		}
+	}
+
+	got := rows(t, db)
+	if len(got) != 2 {
+		t.Fatalf("rows = %v", got)
+	}
+	if got[0] != "1|Ada|ada@example.com" {
+		t.Errorf("shop's row = %q, want it untouched", got[0])
+	}
+	if strings.Contains(got[1], "grace@example.com") {
+		t.Errorf("ledger's row = %q, want the address masked", got[1])
+	}
+}
+
+// A failure means a target named like another entry's source took that entry's policy.
+func TestATargetNamedLikeAnotherSourceKeepsItsOwnPolicy(t *testing.T) {
+	db := sqliteTarget(t, ordersSchema)
+	h := newHandler(t, db, append(mapTable("orders", "orders_archive"),
+		securedTable("customers", "orders", "email")...))
+
+	if err := apply(db, h, &canal.RowsEvent{
+		Table:  sourceTable("customers", "id", "customer", "email"),
+		Action: canal.InsertAction,
+		Rows:   [][]interface{}{{"1", "Ada", "ada@example.com"}},
+	}); err != nil {
+		t.Fatalf("OnRow: %v", err)
+	}
+
+	if got := rows(t, db); len(got) != 1 || strings.Contains(got[0], "ada@example.com") {
+		t.Errorf("rows = %v, want the address masked", got)
 	}
 }
 
@@ -675,7 +728,7 @@ func TestBatchInsertWritesEveryRow(t *testing.T) {
 	db := sqliteTarget(t, ordersSchema)
 	s := newSyncer(t)
 
-	err := s.batchInsert(context.Background(), db, "main", "orders",
+	err := s.batchInsert(context.Background(), db, "main", "orders", security.TableSecurity{},
 		[]string{"id", "customer", "email"},
 		[][]interface{}{{"1", "Ada", "x"}, {"2", "Grace", "y"}})
 	if err != nil {
@@ -690,7 +743,7 @@ func TestBatchInsertOnAnEmptyBatchIsANoOp(t *testing.T) {
 	s := newSyncer(t)
 
 	// A nil database proves nothing is executed.
-	if err := s.batchInsert(context.Background(), nil, "main", "orders",
+	if err := s.batchInsert(context.Background(), nil, "main", "orders", security.TableSecurity{},
 		[]string{"id"}, nil); err != nil {
 		t.Fatalf("batchInsert on an empty batch: %v", err)
 	}
@@ -700,7 +753,7 @@ func TestBatchInsertReportsAFailingStatement(t *testing.T) {
 	db := sqliteTarget(t, ordersSchema)
 	s := newSyncer(t)
 
-	err := s.batchInsert(context.Background(), db, "main", "orders",
+	err := s.batchInsert(context.Background(), db, "main", "orders", security.TableSecurity{},
 		[]string{"id", "missing_column"}, [][]interface{}{{"1", "x"}})
 	if err == nil || !strings.Contains(err.Error(), "batchInsert Exec") {
 		t.Fatalf("err = %v, want an exec failure", err)
@@ -712,10 +765,11 @@ func TestBatchInsertReportsAFailingStatement(t *testing.T) {
 func TestBatchInsertLeavesTheCallersRowsAlone(t *testing.T) {
 	db := sqliteTarget(t, ordersSchema)
 	s := newSyncer(t)
-	s.cfg = config.SyncConfig{Mappings: securedTable("orders", "orders", "email")}
+	policy := security.FindTableSecurityFromMappings(security.TableRef{Table: "orders"},
+		securedTable("orders", "orders", "email"))
 
 	batch := [][]interface{}{{"1", "Ada", "ada@example.com"}}
-	if err := s.batchInsert(context.Background(), db, "main", "orders",
+	if err := s.batchInsert(context.Background(), db, "main", "orders", policy,
 		[]string{"id", "customer", "email"}, batch); err != nil {
 		t.Fatalf("batchInsert: %v", err)
 	}

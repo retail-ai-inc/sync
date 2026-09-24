@@ -228,6 +228,26 @@ func TestHandleInsertMasksASecuredField(t *testing.T) {
 	}
 }
 
+// A failure means one schema's rows were written under another schema's policy.
+func TestTheSameTableInTwoSchemasIsMaskedByItsOwnMapping(t *testing.T) {
+	db := targetDB(t, ordersSchema)
+	masked := mappingWithSecurity("orders", "email")
+	masked[0].SourceSchema = "main"
+	cfg := config.SyncConfig{Mappings: append([]config.DatabaseMapping{{
+		SourceSchema: "archive",
+		Tables:       []config.TableMapping{{SourceTable: "orders", TargetTable: "orders"}},
+	}}, masked...)}
+	st := withConfig(t, cfg, db, relation(1, "main", "orders", "id", "customer", "email"))
+
+	if _, err := st.handleInsert(
+		insertMessage(1, tuple(text("1"), text("Ada"), text("ada@example.com")))); err != nil {
+		t.Fatalf("handleInsert: %v", err)
+	}
+	if got := rows(t, db); len(got) != 1 || strings.Contains(got[0], "ada@example.com") {
+		t.Errorf("rows = %v, want the address masked", got)
+	}
+}
+
 // TestMaskingIsNotAppliedToANullColumn records that a NULL stays NULL: the
 // masking call sits inside the text branch only, so a secured field that is
 // null is replicated as null rather than as the masked form of the empty
@@ -381,7 +401,7 @@ func TestAnUpdateMasksTheSameFieldsAnInsertDoes(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 	rel := relation(1, "main", "orders", "id", "customer", "email")
-	table := security.FindTableSecurityFromMappings("orders", mappingWithSecurity("orders", "email"))
+	table := security.FindTableSecurityFromMappings(security.TableRef{Table: "orders"}, mappingWithSecurity("orders", "email"))
 
 	query, args, err := buildUpdate(rel,
 		tuple(text("1"), text("Ada"), text("masked")),

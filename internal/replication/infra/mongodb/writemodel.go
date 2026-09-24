@@ -40,7 +40,7 @@ func (s *MongoDBSyncer) convertRawBSONToWriteModel(rawData bson.Raw, sourceDB, c
 			return nil, fmt.Errorf("an insert event for %s.%s carries no document",
 				sourceDB, collectionName)
 		}
-		fullDoc = s.maskValue(collectionName, fullDoc)
+		fullDoc = s.maskValue(sourceDB, collectionName, fullDoc)
 		filter := filterOf(event)
 		if filter == nil {
 			if id := idOf(fullDoc); id != nil {
@@ -69,7 +69,7 @@ func (s *MongoDBSyncer) convertRawBSONToWriteModel(rawData bson.Raw, sourceDB, c
 		if fullDoc, ok := event["fullDocument"]; ok && fullDoc != nil {
 			return mongo.NewReplaceOneModel().
 				SetFilter(filter).
-				SetReplacement(s.maskValue(collectionName, fullDoc)).
+				SetReplacement(s.maskValue(sourceDB, collectionName, fullDoc)).
 				SetUpsert(true), nil
 		}
 
@@ -89,7 +89,7 @@ func (s *MongoDBSyncer) convertRawBSONToWriteModel(rawData bson.Raw, sourceDB, c
 			}, nil
 		}
 		if set, ok := update["$set"].(bson.M); ok {
-			if masked, ok := s.maskValue(collectionName, set).(bson.M); ok {
+			if masked, ok := s.maskValue(sourceDB, collectionName, set).(bson.M); ok {
 				update["$set"] = masked
 			}
 		}

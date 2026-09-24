@@ -303,7 +303,8 @@ func (r *Reader) row(relationID uint32, op operation, newTuple, oldTuple *pglogr
 			"Clear this task's position to copy the source again.", relationID)
 	}
 
-	policy := security.FindTableSecurityFromMappings(rel.RelationName, r.Config.Mappings)
+	policy := security.FindTableSecurityFromMappings(
+		security.TableRef{Schema: rel.Namespace, Table: rel.RelationName}, r.Config.Mappings)
 	keys, err := r.keyColumns(rel)
 	if err != nil {
 		return err

@@ -7,6 +7,7 @@ import (
 
 	"github.com/sirupsen/logrus"
 	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
 
 	"github.com/retail-ai-inc/sync/internal/platform/config"
 )
@@ -25,7 +26,7 @@ func TestMaskingReachesADocumentTheDriverDecodedAsABsonD(t *testing.T) {
 		}}}},
 	}}
 
-	masked := syncer.maskValue("customers", bson.D{
+	masked := syncer.maskValue("shop", "customers", bson.D{
 		{Key: "_id", Value: 1},
 		{Key: "card", Value: "4111111111111111"},
 	})
@@ -54,10 +55,43 @@ func TestMaskingABsonMStillWorks(t *testing.T) {
 		}}}},
 	}}
 
-	masked := syncer.maskValue("customers", bson.M{"_id": 1, "card": "4111"})
+	masked := syncer.maskValue("shop", "customers", bson.M{"_id": 1, "card": "4111"})
 	document := documentOf(masked)
 	if document["card"] != "****" {
 		t.Errorf("card = %v, want it masked", document["card"])
+	}
+}
+
+// A failure means one database's documents were written under another database's policy.
+func TestTheSameCollectionInTwoDatabasesIsMaskedByItsOwnMapping(t *testing.T) {
+	syncer := &MongoDBSyncer{logger: logrus.New(), cfg: config.SyncConfig{
+		Mappings: []config.DatabaseMapping{
+			{SourceDatabase: "shop", Tables: []config.TableMapping{{SourceTable: "customers"}}},
+			{SourceDatabase: "ledger", Tables: []config.TableMapping{{
+				SourceTable:     "customers",
+				SecurityEnabled: true,
+				FieldSecurity: []interface{}{
+					map[string]interface{}{"field": "card", "securityType": "masked"},
+				},
+			}}},
+		},
+	}}
+
+	for database, want := range map[string]string{"shop": "4111", "ledger": "****"} {
+		raw := rawEvent(t, append(changeDoc(database, "customers", "insert", bson.D{{Key: "_id", Value: 1}}),
+			bson.E{Key: "fullDocument", Value: bson.D{{Key: "_id", Value: 1}, {Key: "card", Value: "4111"}}}))
+
+		model, err := syncer.convertRawBSONToWriteModel(raw, database, "customers")
+		if err != nil {
+			t.Fatalf("convert %s: %v", database, err)
+		}
+		replace, ok := model.(*mongo.ReplaceOneModel)
+		if !ok {
+			t.Fatalf("%s: model is a %T, want a replace", database, model)
+		}
+		if got := documentOf(replace.Replacement)["card"]; got != want {
+			t.Errorf("%s.customers card = %v, want %q", database, got, want)
+		}
 	}
 }
 

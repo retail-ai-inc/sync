@@ -225,6 +225,16 @@ func (s *MySQLSyncer) doInitialSync(ctx context.Context, sourceDB *sql.Conn, tar
 				continue
 			}
 
+			// Resolved as includeTables resolves it, so a copied row and a streamed one
+			// take the same policy.
+			database := mapping.SourceDatabase
+			if database == "" {
+				database = sourceDBName
+			}
+			policy := security.FindTableSecurityFromMappings(security.TableRef{
+				Database: database, Table: tableMap.SourceTable, Target: tableMap.TargetTable,
+			}, s.cfg.Mappings)
+
 			insertedCount := 0
 			batchRows := make([][]interface{}, 0, batchSize)
 
@@ -240,7 +250,7 @@ func (s *MySQLSyncer) doInitialSync(ctx context.Context, sourceDB *sql.Conn, tar
 				}
 				batchRows = append(batchRows, rowValues)
 				if len(batchRows) == batchSize {
-					if errB := s.batchInsert(ctx, targetDB, targetDBName, tableMap.TargetTable, cols, batchRows); errB != nil {
+					if errB := s.batchInsert(ctx, targetDB, targetDBName, tableMap.TargetTable, policy, cols, batchRows); errB != nil {
 						fail("could not write a batch of %s.%s: %v", targetDBName, tableMap.TargetTable, errB)
 					} else {
 						insertedCount += len(batchRows)
@@ -256,7 +266,7 @@ func (s *MySQLSyncer) doInitialSync(ctx context.Context, sourceDB *sql.Conn, tar
 			srcRows.Close()
 
 			if len(batchRows) > 0 {
-				if errB2 := s.batchInsert(ctx, targetDB, targetDBName, tableMap.TargetTable, cols, batchRows); errB2 != nil {
+				if errB2 := s.batchInsert(ctx, targetDB, targetDBName, tableMap.TargetTable, policy, cols, batchRows); errB2 != nil {
 					fail("could not write the last batch of %s.%s: %v", targetDBName, tableMap.TargetTable, errB2)
 				} else {
 					insertedCount += len(batchRows)
@@ -349,14 +359,13 @@ func (s *MySQLSyncer) batchInsert(
 	ctx context.Context,
 	db *sql.DB,
 	dbName, tableName string,
+	tableSecurity security.TableSecurity,
 	cols []string,
 	rows [][]interface{},
 ) error {
 	if len(rows) == 0 {
 		return nil
 	}
-
-	tableSecurity := security.FindTableSecurityFromMappings(tableName, s.cfg.Mappings)
 
 	s.logger.Debugf("[MySQL] Table=%s security configuration: enabled=%v, rules=%d",
 		tableName, tableSecurity.SecurityEnabled, len(tableSecurity.FieldSecurity))
@@ -735,7 +744,9 @@ func (h *MyEventHandler) buildStatement(
 	newRow []interface{},
 	oldRow []interface{},
 ) (*statement, error) {
-	tableSecurity := security.FindTableSecurityFromMappings(tgtTable, h.mappings)
+	tableSecurity := security.FindTableSecurityFromMappings(security.TableRef{
+		Database: table.Schema, Table: table.Name, Target: tgtTable,
+	}, h.mappings)
 	secured := tableSecurity.SecurityEnabled && len(tableSecurity.FieldSecurity) > 0
 
 	// process applies the field security policy to a row, leaving it alone when

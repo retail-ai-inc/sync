@@ -283,9 +283,12 @@ func TestFindTableSecurityFromMappings(t *testing.T) {
 		}},
 	}}
 
-	for _, name := range []string{"users", "users_copy"} {
-		t.Run("matches "+name, func(t *testing.T) {
-			got := FindTableSecurityFromMappings(name, mappings)
+	for name, ref := range map[string]TableRef{
+		"by its source":            {Table: "users"},
+		"by its source and target": {Table: "users", Target: "users_copy"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := FindTableSecurityFromMappings(ref, mappings)
 
 			if !got.SecurityEnabled {
 				t.Error("SecurityEnabled = false, want true")
@@ -308,13 +311,13 @@ func TestFindTableSecurityFromMappingsNotFound(t *testing.T) {
 		Tables: []config.TableMapping{{SourceTable: "users", TargetTable: "users", SecurityEnabled: true}},
 	}}
 
-	got := FindTableSecurityFromMappings("orders", mappings)
+	got := FindTableSecurityFromMappings(TableRef{Table: "orders"}, mappings)
 
 	// A miss must yield a disabled config, never a partially filled one.
 	if got.SecurityEnabled || len(got.FieldSecurity) != 0 {
 		t.Errorf("miss returned %+v, want the zero value", got)
 	}
-	if got := FindTableSecurityFromMappings("users", nil); got.SecurityEnabled {
+	if got := FindTableSecurityFromMappings(TableRef{Table: "users"}, nil); got.SecurityEnabled {
 		t.Errorf("nil mappings returned %+v, want the zero value", got)
 	}
 }
@@ -335,7 +338,7 @@ func TestFindTableSecurityFromMappingsSkipsIncompleteEntries(t *testing.T) {
 		}},
 	}}
 
-	got := FindTableSecurityFromMappings("users", mappings)
+	got := FindTableSecurityFromMappings(TableRef{Table: "users"}, mappings)
 
 	// Only the complete entry survives; the rest are dropped without a trace in
 	// the returned config, which is why a mistyped UI entry looks like it worked.
@@ -344,6 +347,56 @@ func TestFindTableSecurityFromMappingsSkipsIncompleteEntries(t *testing.T) {
 	}
 	if got.FieldSecurity[0].Field != "email" {
 		t.Errorf("surviving entry = %+v, want the email rule", got.FieldSecurity[0])
+	}
+}
+
+// A failure means a table was protected, or left in the clear, by the policy of another table sharing its name.
+func TestTheSameTableInTwoDatabasesKeepsItsOwnPolicy(t *testing.T) {
+	masked := []interface{}{map[string]interface{}{"field": "email", "securityType": "masked"}}
+	secured := func(source, target string) config.TableMapping {
+		return config.TableMapping{SourceTable: source, TargetTable: target, SecurityEnabled: true, FieldSecurity: masked}
+	}
+	mappings := []config.DatabaseMapping{
+		{SourceDatabase: "db1", Tables: []config.TableMapping{
+			{SourceTable: "users", TargetTable: "users"},
+			{SourceTable: "accounts", TargetTable: "members"},
+		}},
+		{SourceDatabase: "db2", Tables: []config.TableMapping{
+			secured("users", "users"),
+			secured("members", "members_dr"),
+		}},
+		{SourceDatabase: "db3", Tables: []config.TableMapping{
+			{SourceTable: "orders", TargetTable: "orders"},
+			secured("orders", "orders_masked"),
+		}},
+		{Tables: []config.TableMapping{{SourceTable: "payments"}}},
+		{SourceDatabase: "db4", Tables: []config.TableMapping{secured("payments", "")}},
+		{SourceSchema: "archive", Tables: []config.TableMapping{{SourceTable: "invoices"}}},
+		{SourceSchema: "sales", Tables: []config.TableMapping{secured("invoices", "")}},
+	}
+
+	for name, tc := range map[string]struct {
+		ref  TableRef
+		want bool
+	}{
+		"db1.users":                              {TableRef{Database: "db1", Table: "users"}, false},
+		"db2.users":                              {TableRef{Database: "db2", Table: "users"}, true},
+		"db2.members, another entry's target":    {TableRef{Database: "db2", Table: "members"}, true},
+		"members with no database":               {TableRef{Table: "members"}, true},
+		"db1.accounts":                           {TableRef{Database: "db1", Table: "accounts", Target: "members"}, false},
+		"db3.orders to orders":                   {TableRef{Database: "db3", Table: "orders", Target: "orders"}, false},
+		"db3.orders to orders_masked":            {TableRef{Database: "db3", Table: "orders", Target: "orders_masked"}, true},
+		"db4.payments, named over unnamed":       {TableRef{Database: "db4", Table: "payments"}, true},
+		"db5.payments, only the unnamed matches": {TableRef{Database: "db5", Table: "payments"}, false},
+		"sales.invoices":                         {TableRef{Schema: "sales", Table: "invoices"}, true},
+		"archive.invoices":                       {TableRef{Schema: "archive", Table: "invoices"}, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := FindTableSecurityFromMappings(tc.ref, mappings)
+			if protected := got.SecurityEnabled && len(got.FieldSecurity) == 1; protected != tc.want {
+				t.Errorf("got %+v, want protected=%v", got, tc.want)
+			}
+		})
 	}
 }
 

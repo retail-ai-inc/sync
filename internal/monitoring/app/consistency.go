@@ -251,8 +251,10 @@ func checkSQLTask(ctx context.Context, task config.SyncConfig, n notifier, log *
 // the table's field security is applied to the source as replication applies it.
 func sqlComparison(task config.SyncConfig, pair discovery.Pair, source, target *sql.DB,
 	sourceDB, targetDB string, keys, columns []string) (*verify.SQLEnd, *verify.SQLEnd, *verify.SQLRepairer, error) {
-	// By the target's name, as the stream and the first copy look it up.
-	protection := verify.ProtectionOf(security.FindTableSecurityFromMappings(pair.Target, task.Mappings))
+	// By the source table and its target, as the stream and the first copy look it up.
+	protection := verify.ProtectionOf(security.FindTableSecurityFromMappings(security.TableRef{
+		Database: sourceDB, Table: pair.Source, Target: pair.Target,
+	}, task.Mappings))
 	if protected := protection.Protected(keys); len(protected) > 0 {
 		return nil, nil, nil, fmt.Errorf("its key column %s has field security, so its rows "+
 			"cannot be matched with the target's", strings.Join(protected, ", "))
@@ -385,8 +387,10 @@ func checkMongoTask(ctx context.Context, task config.SyncConfig, n notifier, log
 // replication applies it.
 func mongoComparison(task config.SyncConfig, pair discovery.Pair, source, target *mongo.Collection) (
 	*verify.MongoEnd, *verify.MongoEnd, *verify.MongoRepairer, error) {
-	// By the source's name, as the MongoDB syncer looks it up.
-	protection := verify.ProtectionOf(security.FindTableSecurityFromMappings(pair.Source, task.Mappings))
+	// By the source's database and name, as the MongoDB syncer looks it up.
+	protection := verify.ProtectionOf(security.FindTableSecurityFromMappings(security.TableRef{
+		Database: dsn.GetDatabaseName(task.Type, task.SourceConnection), Table: pair.Source,
+	}, task.Mappings))
 	if protection.ProtectsID() {
 		return nil, nil, nil, fmt.Errorf("its _id has field security, so its documents " +
 			"cannot be matched with the target's")

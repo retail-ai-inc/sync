@@ -35,7 +35,7 @@ type Applier struct {
 	Source *mongo.Client
 	// Mask applies the task's field security to a document read that way, so it
 	// is treated exactly as one that arrived on the stream. Nil masks nothing.
-	Mask func(collection string, value interface{}) interface{}
+	Mask func(database, collection string, value interface{}) interface{}
 	// TargetDatabase is the database the events are written to.
 	TargetDatabase string
 	// Mappings resolve a source collection to its target name.

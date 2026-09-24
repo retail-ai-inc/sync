@@ -14,8 +14,9 @@ import (
 
 // maskDocument applies a collection's field security to one document, returning
 // a copy. A collection with no policy is returned as it is.
-func (s *MongoDBSyncer) maskDocument(collectionName string, document bson.M) bson.M {
-	policy := security.FindTableSecurityFromMappings(collectionName, s.cfg.Mappings)
+func (s *MongoDBSyncer) maskDocument(database, collectionName string, document bson.M) bson.M {
+	policy := security.FindTableSecurityFromMappings(
+		security.TableRef{Database: database, Table: collectionName}, s.cfg.Mappings)
 	if !policy.SecurityEnabled || len(policy.FieldSecurity) == 0 {
 		return document
 	}
@@ -29,8 +30,9 @@ func (s *MongoDBSyncer) maskDocument(collectionName string, document bson.M) bso
 
 // maskValue applies the policy to a value that may or may not be a document,
 // which is what a change stream event's fullDocument is.
-func (s *MongoDBSyncer) maskValue(collectionName string, value interface{}) interface{} {
-	policy := security.FindTableSecurityFromMappings(collectionName, s.cfg.Mappings)
+func (s *MongoDBSyncer) maskValue(database, collectionName string, value interface{}) interface{} {
+	policy := security.FindTableSecurityFromMappings(
+		security.TableRef{Database: database, Table: collectionName}, s.cfg.Mappings)
 	if !policy.SecurityEnabled || len(policy.FieldSecurity) == 0 {
 		return value
 	}

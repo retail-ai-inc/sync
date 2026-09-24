@@ -76,7 +76,7 @@ func (c *Chunks) NextChunk(ctx context.Context, ns domain.Namespace, after strin
 				return fmt.Errorf("a document of %s cannot be addressed on the target: %w",
 					ns, err)
 			}
-			masked := c.Masker.maskDocument(ns.Object, document)
+			masked := c.Masker.maskDocument(c.Database, ns.Object, document)
 
 			chunk.Events = append(chunk.Events, &domain.Event{
 				NS:  ns,

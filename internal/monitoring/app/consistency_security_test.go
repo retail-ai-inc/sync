@@ -147,15 +147,40 @@ func TestThePolicyIsFoundByTheNameReplicationFindsItBy(t *testing.T) {
 		t.Fatalf("sqlComparison: %v", err)
 	}
 	if table.Protect == nil {
-		t.Error("a table's policy was not found by its target name, as the stream finds it")
+		t.Error("a table's policy was not found by its source and target, as the stream finds it")
 	}
 
 	collection, _, _, err := mongoComparison(task, usersPair, nil, nil)
 	if err != nil {
 		t.Fatalf("mongoComparison: %v", err)
 	}
-	if collection.Protect != nil {
-		t.Error("a collection's policy was not found by its source name, as the MongoDB syncer finds it")
+	if collection.Protect == nil {
+		t.Error("a collection took the policy of the entry whose target shares its name")
+	}
+}
+
+// A failure means the check compares and repairs one database's table under another's policy.
+func TestThePolicyIsTheOneOfTheDatabaseCompared(t *testing.T) {
+	task := securedTask("email", "masked")
+	task.Mappings[0].SourceDatabase = "ledger"
+	task.Mappings = append([]config.DatabaseMapping{{SourceDatabase: "shop",
+		Tables: []config.TableMapping{{SourceTable: "users", TargetTable: "users_dr"}}}}, task.Mappings...)
+
+	table, _, _, err := sqlComparison(task, usersPair, nil, nil, "ledger", "", []string{"id"}, []string{"id", "email"})
+	if err != nil {
+		t.Fatalf("sqlComparison: %v", err)
+	}
+	if table.Protect == nil {
+		t.Error("ledger.users was compared under shop.users' policy")
+	}
+
+	task.Type, task.SourceConnection = "mongodb", "mongodb://127.0.0.1:27017/ledger"
+	collection, _, _, err := mongoComparison(task, usersPair, nil, nil)
+	if err != nil {
+		t.Fatalf("mongoComparison: %v", err)
+	}
+	if collection.Protect == nil {
+		t.Error("ledger.users was compared under shop.users' policy")
 	}
 }
 

@@ -341,47 +341,105 @@ func applyRule(value interface{}, key string, fc FieldSecurityConfig, config Tab
 	})
 }
 
-func FindTableSecurityFromMappings(tableName string, mappings []config.DatabaseMapping) TableSecurity {
-	var result TableSecurity
+// TableRef names a table as the source holds it. Only the source side
+// identifies an entry: one entry's target may share another entry's source name.
+type TableRef struct {
+	Database string
+	// Schema is PostgreSQL's namespace; other engines leave it empty.
+	Schema string
+	Table  string
+	// Target picks one entry when a table is replicated to several; empty takes
+	// the first.
+	Target string
+}
 
-	logging.Log.Debugf("[Security] Searching table security configuration: tableName=%s, mappingsCount=%d", tableName, len(mappings))
+// FindTableSecurityFromMappings returns the policy of the entry that replicates
+// ref. A mapping that leaves ref's database or schema unnamed matches any, but
+// one that names it wins, or a table would take a same-named table's policy.
+func FindTableSecurityFromMappings(ref TableRef, mappings []config.DatabaseMapping) TableSecurity {
+	logging.Log.Debugf("[Security] Searching table security configuration: table=%+v, mappingsCount=%d", ref, len(mappings))
 
-	for i, mapping := range mappings {
-		logging.Log.Debugf("[Security] Checking mapping[%d]: contains %d tables", i, len(mapping.Tables))
-
-		for j, table := range mapping.Tables {
-			logging.Log.Debugf("[Security] Checking table[%d-%d]: sourceTable=%s, targetTable=%s",
-				i, j, table.SourceTable, table.TargetTable)
-
-			if table.SourceTable == tableName || table.TargetTable == tableName {
-				result.SecurityEnabled = table.SecurityEnabled
-				logging.Log.Debugf("[Security] Table found! SecurityEnabled=%v, FieldSecurityCount=%d",
-					result.SecurityEnabled, len(table.FieldSecurity))
-
-				for k, field := range table.FieldSecurity {
-					logging.Log.Debugf("[Security] Field security config[%d]: %v", k, field)
-
-					if fieldMap, ok := field.(map[string]interface{}); ok {
-						fieldName, _ := fieldMap["field"].(string)
-						secType, _ := fieldMap["securityType"].(string)
-
-						logging.Log.Debugf("[Security] Parsing field: field=%s, securityType=%s", fieldName, secType)
-
-						if fieldName != "" && secType != "" {
-							result.FieldSecurity = append(result.FieldSecurity, FieldSecurityConfig{
-								Field:        fieldName,
-								SecurityType: secType,
-							})
-						}
-					}
-				}
-
-				return result
+	var fallback *config.TableMapping
+	for _, mapping := range mappings {
+		matches, named := ref.within(mapping)
+		if !matches {
+			continue
+		}
+		for i := range mapping.Tables {
+			if !ref.names(mapping.Tables[i]) {
+				continue
+			}
+			if named {
+				return policyOf(mapping.Tables[i])
+			}
+			if fallback == nil {
+				fallback = &mapping.Tables[i]
 			}
 		}
 	}
+	if fallback != nil {
+		return policyOf(*fallback)
+	}
 
 	logging.Log.Debugf("[Security] Table security configuration not found")
+	return TableSecurity{}
+}
+
+// within reports whether mapping can hold ref's table, and whether it names
+// every namespace ref gives rather than leaving one unnamed.
+func (r TableRef) within(mapping config.DatabaseMapping) (matches, named bool) {
+	named = true
+	for _, level := range [][2]string{{r.Database, mapping.SourceDatabase}, {r.Schema, mapping.SourceSchema}} {
+		want, have := level[0], level[1]
+		switch {
+		case want == "":
+		case have == "":
+			named = false
+		case !strings.EqualFold(want, have):
+			return false, false
+		}
+	}
+	return true, named
+}
+
+// names compares case-insensitively because routing does: a row routed to an
+// entry has to find that entry's policy.
+func (r TableRef) names(table config.TableMapping) bool {
+	if !strings.EqualFold(table.SourceTable, r.Table) {
+		return false
+	}
+	if r.Target == "" {
+		return true
+	}
+	target := table.TargetTable
+	if target == "" {
+		target = table.SourceTable
+	}
+	return strings.EqualFold(target, r.Target)
+}
+
+func policyOf(table config.TableMapping) TableSecurity {
+	result := TableSecurity{SecurityEnabled: table.SecurityEnabled}
+	logging.Log.Debugf("[Security] Table found! SecurityEnabled=%v, FieldSecurityCount=%d",
+		result.SecurityEnabled, len(table.FieldSecurity))
+
+	for k, field := range table.FieldSecurity {
+		logging.Log.Debugf("[Security] Field security config[%d]: %v", k, field)
+
+		if fieldMap, ok := field.(map[string]interface{}); ok {
+			fieldName, _ := fieldMap["field"].(string)
+			secType, _ := fieldMap["securityType"].(string)
+
+			logging.Log.Debugf("[Security] Parsing field: field=%s, securityType=%s", fieldName, secType)
+
+			if fieldName != "" && secType != "" {
+				result.FieldSecurity = append(result.FieldSecurity, FieldSecurityConfig{
+					Field:        fieldName,
+					SecurityType: secType,
+				})
+			}
+		}
+	}
 	return result
 }
 
