@@ -89,9 +89,7 @@ func (s *MongoDBSyncer) convertRawBSONToWriteModel(rawData bson.Raw, sourceDB, c
 			}, nil
 		}
 		if set, ok := update["$set"].(bson.M); ok {
-			if masked, ok := s.maskValue(sourceDB, collectionName, set).(bson.M); ok {
-				update["$set"] = masked
-			}
+			update["$set"] = s.maskFields(sourceDB, collectionName, set)
 		}
 		return mongo.NewUpdateOneModel().
 			SetFilter(filter).

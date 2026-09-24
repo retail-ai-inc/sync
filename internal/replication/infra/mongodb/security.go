@@ -1,6 +1,8 @@
 package mongodb
 
 import (
+	"strings"
+
 	"github.com/retail-ai-inc/sync/internal/replication/infra/security"
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
@@ -26,6 +28,36 @@ func (s *MongoDBSyncer) maskDocument(database, collectionName string, document b
 		return document
 	}
 	return bson.M(processed)
+}
+
+// maskFields applies the policy to an update's $set. Its keys are dotted paths,
+// so each value is processed as the field its key names, not as a top-level one.
+func (s *MongoDBSyncer) maskFields(database, collectionName string, set bson.M) bson.M {
+	policy := security.FindTableSecurityFromMappings(
+		security.TableRef{Database: database, Table: collectionName}, s.cfg.Mappings)
+	if !policy.SecurityEnabled || len(policy.FieldSecurity) == 0 {
+		return set
+	}
+
+	masked := make(bson.M, len(set))
+	for path, value := range set {
+		masked[path] = value
+		// Processing a subdocument rebuilds it as a map, losing its field order,
+		// so only one a rule reaches is processed.
+		if namesOrReaches(policy, path) {
+			masked[path] = security.ProcessValue(value, path, policy)
+		}
+	}
+	return masked
+}
+
+func namesOrReaches(policy security.TableSecurity, path string) bool {
+	for _, field := range policy.FieldSecurity {
+		if strings.EqualFold(field.Field, path) || strings.HasPrefix(field.Field, path+".") {
+			return true
+		}
+	}
+	return false
 }
 
 // maskValue applies the policy to a value that may or may not be a document,
