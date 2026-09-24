@@ -65,10 +65,18 @@ func (e *BackupExecutor) Execute(ctx context.Context, taskID int) error {
 	logrus.Debugf("[BackupExecutor] Starting backup for task %d (%s, type: %s)",
 		taskID, config.Name, config.SourceType)
 
-	// Expand regex patterns and group tables for merging
-	tableGroups, err := e.ExpandAndGroupTables(ctx, &config)
-	if err != nil {
-		return fmt.Errorf("failed to expand table patterns: %w", err)
+	var tableGroups map[string][]string
+	switch config.SourceType {
+	case "sqlite", "sqlite3":
+		// The control database is one file whatever tables the job lists, so it
+		// is one group, and a job listing none is not a job that selected nothing.
+		tableGroups = map[string][]string{"control-database": nil}
+	default:
+		// Expand regex patterns and group tables for merging
+		tableGroups, err = e.ExpandAndGroupTables(ctx, &config)
+		if err != nil {
+			return fmt.Errorf("failed to expand table patterns: %w", err)
+		}
 	}
 
 	// A job that selected nothing used to return nil, so an empty table list and

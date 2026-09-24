@@ -3,6 +3,7 @@ package export
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -539,5 +540,73 @@ func TestExecuteMergesMongoShardsIntoOneUpload(t *testing.T) {
 		if !strings.Contains(string(data), `"from":"`+shard+`"`) {
 			t.Errorf("merged file = %q, want the document from %s", data, shard)
 		}
+	}
+}
+
+// gsutilThatKeeps copies what it is asked to upload to kept, and answers the size
+// check with that copy's size.
+func gsutilThatKeeps(kept string) string {
+	return `case "$1" in
+  cp) cp "$2" ` + kept + `;;
+  stat) echo "Content-Length: $(wc -c < ` + kept + `)";;
+esac`
+}
+
+// A control-database job names a file, not tables, and the table gate refused it before the SQLite branch ran.
+func TestExecuteBacksUpTheControlDatabase(t *testing.T) {
+	dir := stubPATH(t)
+	kept := filepath.Join(dir, "uploaded.db")
+	stubBin(t, dir, "gsutil", gsutilThatKeeps(kept), 0)
+
+	db := taskDB(t)
+	id := insertBackupTask(t, db, 1, fmt.Sprintf(`{
+		"name":"control","sourceType":"sqlite","compressionType":"none",
+		"database":{"database":%q},
+		"destination":{"gcsPath":"gs://bucket/control"}
+	}`, controlDatabase(t)))
+
+	e := NewBackupExecutor(db)
+	if err := e.Execute(context.Background(), id); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	objects := uploadedObjects(t, dir)
+	if len(objects) != 1 || !strings.HasPrefix(objects[0], "gs://bucket/control/sync_") {
+		t.Fatalf("uploaded objects = %v, want one snapshot of sync.db", objects)
+	}
+	snapshot, err := sql.Open("sqlite3", kept)
+	if err != nil {
+		t.Fatalf("open the uploaded snapshot: %v", err)
+	}
+	defer snapshot.Close()
+	var rows int
+	if err := snapshot.QueryRow(`SELECT COUNT(*) FROM tasks`).Scan(&rows); err != nil {
+		t.Fatalf("read the uploaded snapshot: %v", err)
+	}
+	if rows != 50 {
+		t.Errorf("the uploaded snapshot holds %d rows, want 50", rows)
+	}
+	if got := e.Uploaded(); got.Files != 1 || got.Bytes == 0 {
+		t.Errorf("Uploaded() = %+v, want one file with something in it", got)
+	}
+}
+
+// Each listed table became a group of its own, so the same snapshot was taken and uploaded once per table.
+func TestAControlDatabaseJobIsBackedUpOnceWhateverTablesItLists(t *testing.T) {
+	dir := stubPATH(t)
+	stubBin(t, dir, "gsutil", gsutilThatKeeps(filepath.Join(dir, "uploaded.db")), 0)
+
+	db := taskDB(t)
+	id := insertBackupTask(t, db, 1, fmt.Sprintf(`{
+		"name":"control","sourceType":"sqlite","compressionType":"none",
+		"database":{"database":%q,"tables":["tasks","backup_tasks"]},
+		"destination":{"gcsPath":"gs://bucket/control"}
+	}`, controlDatabase(t)))
+
+	if err := NewBackupExecutor(db).Execute(context.Background(), id); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if objects := uploadedObjects(t, dir); len(objects) != 1 {
+		t.Errorf("uploaded objects = %v, want the control database once", objects)
 	}
 }
