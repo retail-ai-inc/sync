@@ -167,7 +167,7 @@ func (r *Reconciler) pass(ctx context.Context) (int, error) {
 func (r *Reconciler) compare(ctx context.Context, keys []string) (int, error) {
 	wanted := make([][]byte, 0, len(keys))
 	for _, key := range keys {
-		if IsOffsetKey(key) || isMetaKey(key) {
+		if internalKey(key) {
 			continue
 		}
 		wanted = append(wanted, []byte(key))
@@ -338,7 +338,7 @@ func (r *Reconciler) ghosts(ctx context.Context, limit *rateLimiter) (int, error
 		}
 		var mine []string
 		for _, key := range keys {
-			if IsOffsetKey(key) || isMetaKey(key) {
+			if internalKey(key) {
 				continue
 			}
 			if owned != nil && !owned[SlotOf([]byte(key))] {

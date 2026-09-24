@@ -4,6 +4,7 @@ package redis
 
 import (
 	"context"
+	"maps"
 	"testing"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/retail-ai-inc/sync/internal/platform/metrics"
+	"github.com/retail-ai-inc/sync/internal/replication/infra/directionlock"
 )
 
 // standaloneReconciler compares one source server with one target server.
@@ -141,3 +143,66 @@ func TestASecondLookThatAgreesIsNotADifference(t *testing.T) {
 	}
 }
 
+// claimOn writes a claim the way the guard's heartbeat does.
+func claimOn(t *testing.T, client goredis.UniversalClient, taskID int, role directionlock.Role) {
+	t.Helper()
+	store := &directionlock.RedisStore{Client: client}
+	claim := directionlock.Claim{TaskID: taskID, Role: role, Owner: "tokyo", UpdatedAt: time.Now().UTC()}
+	if err := store.Put(context.Background(), claim); err != nil {
+		t.Fatalf("claim the %s: %v", role, err)
+	}
+}
+
+// A failure means the comparison copies the source's claims over the target's and erases a promotion.
+func TestTheComparisonLeavesThisToolsOwnKeysAlone(t *testing.T) {
+	sourceAddr := addrsFrom(t, "SYNC_REDIS_SOURCE")[0]
+	source := redisAt(t, []string{sourceAddr})
+	target := redisAt(t, addrsFrom(t, "SYNC_REDIS_TARGET"))
+	emptyBoth(t, source, target)
+	ensureABacklog(t, sourceAddr, source)
+	ctx := context.Background()
+
+	claimOn(t, source, 7, directionlock.RoleSource)
+	claimOn(t, target, 7, directionlock.RoleTarget)
+	if err := directionlock.Promote(ctx, &directionlock.RedisStore{Client: target}, "operator"); err != nil {
+		t.Fatalf("promote the target: %v", err)
+	}
+	for _, key := range []string{OffsetKey(12, 7), metaKey(7, "0")} {
+		if err := source.Set(ctx, key, `{"replid":"another-task","offset":1}`, 0).Err(); err != nil {
+			t.Fatalf("seed %s on the source: %v", key, err)
+		}
+	}
+	before, err := target.HGetAll(ctx, directionlock.RedisKey).Result()
+	if err != nil {
+		t.Fatalf("read the target's claims: %v", err)
+	}
+
+	reconciler := standaloneReconciler(t, source, target, func() int64 {
+		head, _ := masterOffset(ctx, source)
+		return head
+	})
+	headOf(t, source)
+	for _, pass := range []string{"with the source's claims", "without them"} {
+		found, err := reconciler.pass(ctx)
+		if err != nil {
+			t.Fatalf("pass %s: %v", pass, err)
+		}
+		if found != 0 {
+			t.Errorf("the pass %s found %d differences among this tool's own keys", pass, found)
+		}
+		after, err := target.HGetAll(ctx, directionlock.RedisKey).Result()
+		if err != nil {
+			t.Fatalf("read the target's claims: %v", err)
+		}
+		if !maps.Equal(before, after) {
+			t.Errorf("the pass %s rewrote the target's claims:\n  before %v\n  after  %v",
+				pass, before, after)
+		}
+		if err := source.Del(ctx, directionlock.RedisKey).Err(); err != nil {
+			t.Fatalf("drop the source's claims: %v", err)
+		}
+	}
+	if n, err := target.Exists(ctx, OffsetKey(12, 7), metaKey(7, "0")).Result(); err != nil || n != 0 {
+		t.Errorf("the source's own marker or position was copied to the target (%d, %v)", n, err)
+	}
+}

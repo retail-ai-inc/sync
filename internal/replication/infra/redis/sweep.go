@@ -233,7 +233,7 @@ func (s *Snapshotter) sweepNode(ctx context.Context, scan, remove,
 
 		candidates := make([]string, 0, len(keys))
 		for _, key := range keys {
-			if IsOffsetKey(key) || isPositionKey(key) {
+			if internalKey(key) {
 				continue
 			}
 			if mine != nil && !mine(key) {
@@ -292,12 +292,6 @@ func (s *Snapshotter) removeMissing(ctx context.Context, remove,
 		return 0, fmt.Errorf("remove keys the source no longer has: %w", err)
 	}
 	return doomed, nil
-}
-
-// isPositionKey reports whether a key is the one this package writes the
-// stream's position into, which the source has never heard of.
-func isPositionKey(key string) bool {
-	return len(key) > len(positionKeyPrefix) && key[:len(positionKeyPrefix)] == positionKeyPrefix
 }
 
 const positionKeyPrefix = "__sync:pos:"

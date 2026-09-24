@@ -5,6 +5,7 @@ package redis
 import (
 	"context"
 	"fmt"
+	"maps"
 	"slices"
 	"testing"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
+	"github.com/retail-ai-inc/sync/internal/replication/infra/directionlock"
 )
 
 // Removing what the target holds and the source does not.
@@ -228,6 +230,54 @@ func TestTheSweepReachesEveryDatabaseOfAStandaloneTarget(t *testing.T) {
 	if n, err := third.Exists(ctx, "stale:third").Result(); err != nil || n != 0 {
 		t.Error("a key the source does not have in database 3 is still on the target, " +
 			"which is a database the copy never opens")
+	}
+}
+
+// A failure means the sweep deletes the target's claims whenever they live in a database the source's claims do not.
+func TestTheSweepLeavesTheDirectionLockAlone(t *testing.T) {
+	sourceAddr := addrsFrom(t, "SYNC_REDIS_SOURCE")[0]
+	targetAddr := addrsFrom(t, "SYNC_REDIS_TARGET")[0]
+	source := redisAt(t, []string{sourceAddr})
+	target := redisAt(t, []string{targetAddr})
+	emptyBoth(t, source, target)
+	ctx := context.Background()
+
+	targetConn := "redis://" + targetAddr + "/2"
+	second, err := clientOnDB(targetConn, 2)
+	if err != nil {
+		t.Fatalf("open the target on database 2: %v", err)
+	}
+	defer second.Close()
+
+	claimOn(t, source, 7, directionlock.RoleSource)
+	claimOn(t, second, 7, directionlock.RoleTarget)
+	if err := directionlock.Promote(ctx, &directionlock.RedisStore{Client: second}, "operator"); err != nil {
+		t.Fatalf("promote the target: %v", err)
+	}
+	if err := second.Set(ctx, "stale:second", 1, 0).Err(); err != nil {
+		t.Fatalf("seed the target's second database: %v", err)
+	}
+	before, err := second.HGetAll(ctx, directionlock.RedisKey).Result()
+	if err != nil {
+		t.Fatalf("read the target's claims: %v", err)
+	}
+
+	sweep := sweeper(t, source, second, "standalone")
+	sweep.SourceConn = "redis://" + sourceAddr + "/0"
+	sweep.TargetConn = targetConn
+	if err := sweep.SweepStale(ctx); err != nil {
+		t.Fatalf("SweepStale: %v", err)
+	}
+
+	if n, err := second.Exists(ctx, "stale:second").Result(); err != nil || n != 0 {
+		t.Fatal("the sweep never reached database 2, so this proves nothing about the claims there")
+	}
+	after, err := second.HGetAll(ctx, directionlock.RedisKey).Result()
+	if err != nil {
+		t.Fatalf("read the target's claims: %v", err)
+	}
+	if !maps.Equal(before, after) {
+		t.Errorf("the sweep changed the target's claims:\n  before %v\n  after  %v", before, after)
 	}
 }
 
