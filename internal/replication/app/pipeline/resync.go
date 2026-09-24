@@ -113,9 +113,9 @@ func (r *Resync) run(ctx context.Context, read streamClock, emit func([]*domain.
 
 // waitForStream blocks until the stream has been read past a moment.
 //
-// This is the whole of the correctness argument. Once the stream has passed the
-// point the chunk was read at, every change older than the chunk is already
-// ahead of it in the queue.
+// Once the stream has passed the point the chunk was read at, every change older
+// than the chunk is already ahead of it in the queue. The runner holds back every
+// newer one (orderedChunks), which is the other half of the ordering.
 func waitForStream(ctx context.Context, read streamClock, readAt time.Time) error {
 	if readAt.IsZero() || read == nil {
 		// Nothing to compare against. Waiting for ever would be worse than the

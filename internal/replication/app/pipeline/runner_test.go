@@ -1821,3 +1821,95 @@ func keysIn(events []*domain.Event) []string {
 	}
 	return keys
 }
+
+// chunkFunc lets a test act while a re-copy reads its chunk.
+type chunkFunc func() (Chunk, error)
+
+func (f chunkFunc) NextChunk(context.Context, domain.Namespace, string, int) (Chunk, error) {
+	return f()
+}
+
+func flattened(batches [][][]*domain.Event) []*domain.Event {
+	var events []*domain.Event
+	for _, runs := range batches {
+		for _, run := range runs {
+			events = append(events, run...)
+		}
+	}
+	return events
+}
+
+func TestAChangeReadAfterTheChunkIsNotOverwrittenByIt(t *testing.T) {
+	for _, when := range []string{"while the chunk is read", "while the chunk waits for the stream"} {
+		t.Run(when, func(t *testing.T) {
+			readAt := time.Now().Truncate(time.Second)
+			row := chunkRow("7")
+			change := event("orders", "7", "p1", func(e *domain.Event) {
+				e.SourceTime = readAt.Add(time.Second)
+			})
+
+			changeLanded, bothLanded := make(chan struct{}), make(chan struct{})
+			var changeOnce, bothOnce sync.Once
+			applier := &fakeApplier{}
+			applier.onApply = func() {
+				applied := flattened(applier.batches)
+				if holds(applied, change) {
+					changeOnce.Do(func() { close(changeLanded) })
+					if holds(applied, row) {
+						bothOnce.Do(func() { close(bothLanded) })
+					}
+				}
+			}
+
+			stream := &scriptedReader{steps: make(chan scriptedStep)}
+			read := make(chan struct{})
+			chunks := chunkFunc(func() (Chunk, error) {
+				if when == "while the chunk is read" {
+					stream.send(change)
+					select {
+					case <-changeLanded:
+					case <-time.After(300 * time.Millisecond):
+					}
+				}
+				close(read)
+				return Chunk{Events: []*domain.Event{row}, After: "7", ReadAt: readAt, Done: true}, nil
+			})
+
+			r := newRunner(t, stream, applier, newStore())
+			r.Resyncs = []*Resync{{NS: domain.Namespace{DB: "shop", Object: "orders"}, Reader: chunks}}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			go func() { done <- r.Run(ctx) }()
+			defer func() {
+				cancel()
+				select {
+				case <-done:
+				case <-time.After(5 * time.Second):
+					t.Error("Run did not end after it was asked to stop")
+				}
+			}()
+
+			<-read
+			if when == "while the chunk waits for the stream" {
+				stream.send(change)
+			}
+			select {
+			case <-bothLanded:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the chunk's row and the stream's change did not both reach the target")
+			}
+
+			var last *domain.Event
+			for _, e := range flattened(applier.applied()) {
+				if e.Key == "7" {
+					last = e
+				}
+			}
+			// The chunk's row is older than the change, so writing it last leaves the target stale.
+			if last != change {
+				t.Errorf("the re-copy's row was written over a newer change the stream read after it")
+			}
+		})
+	}
+}

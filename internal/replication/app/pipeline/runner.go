@@ -158,6 +158,11 @@ type Runner struct {
 	// lastReadAt is the source's time of the newest change read. A re-copy holds
 	// each chunk until this passes it, which is what orders the two.
 	lastReadAt time.Time
+	// holds is the ReadAt of each re-copy chunk read and not yet queued. A stream
+	// unit at or after one waits for it, or the chunk's older rows land over it.
+	holds map[*orderedChunks]time.Time
+	// lifted is closed when a hold is removed, waking a reader waiting on it.
+	lifted chan struct{}
 	// queue is the channel between the reader and the applier, held so the
 	// health reporter can read its depth directly. It used to be cached on a
 	// dequeue, which meant the gauge froze at its last value the moment the
@@ -183,7 +188,8 @@ type Runner struct {
 	// queue's own capacity does not: it counts events, and an event has no fixed
 	// size.
 	held *budget
-	// turn is held by whichever producer is queuing a unit, made once per run.
+	// turn is held by whichever producer is queuing a unit, or by a re-copy
+	// reading a chunk, made once per run.
 	turn turn
 }
 
@@ -383,13 +389,18 @@ func (r *Runner) startResyncs(ctx context.Context, queue chan<- *domain.Event, p
 		producers.Add(1)
 		go func() {
 			defer producers.Done()
+			chunks := &orderedChunks{runner: r, reader: resync.Reader}
+			// A hold left by a re-copy that has stopped would stop the stream too.
+			defer r.lift(chunks)
 			defer func() {
 				if recovered := recover(); recovered != nil {
 					failed <- resilience.Recovered(recovered)
 				}
 			}()
+			ordered := *resync
+			ordered.Reader = chunks
 			r.log().Infof(r.tag("Re-copying %s alongside the stream"), resync.NS)
-			err := resync.run(ctx, read, func(events []*domain.Event) error {
+			err := ordered.run(ctx, read, func(events []*domain.Event) error {
 				if len(events) == 0 {
 					return nil
 				}
@@ -398,7 +409,9 @@ func (r *Runner) startResyncs(ctx context.Context, queue chan<- *domain.Event, p
 				// recording its progress.
 				landed := make(chan struct{})
 				events[len(events)-1].Landed = landed
-				if err := r.queueChunk(ctx, queue, events); err != nil {
+				err := r.queueChunk(ctx, queue, events)
+				r.lift(chunks)
+				if err != nil {
 					return err
 				}
 
@@ -463,6 +476,86 @@ func (r *Runner) queueChunk(ctx context.Context, queue chan<- *domain.Event, eve
 		}
 	}
 	return nil
+}
+
+// orderedChunks reads a re-copy's chunks so that no change the source made after
+// a chunk was read is queued ahead of it.
+type orderedChunks struct {
+	runner *Runner
+	reader ChunkReader
+}
+
+// NextChunk reads with the turn held, so nothing is queued during the read, and
+// holds the stream at the chunk's ReadAt before giving the turn back.
+func (o *orderedChunks) NextChunk(ctx context.Context, ns domain.Namespace, after string, size int) (Chunk, error) {
+	r := o.runner
+	if err := r.turn.take(ctx); err != nil {
+		return Chunk{}, err
+	}
+	defer r.turn.give()
+
+	chunk, err := o.reader.NextChunk(ctx, ns, after, size)
+	if err == nil && len(chunk.Events) > 0 && !chunk.ReadAt.IsZero() {
+		r.mu.Lock()
+		if r.holds == nil {
+			r.holds = map[*orderedChunks]time.Time{}
+		}
+		r.holds[o] = chunk.ReadAt
+		r.mu.Unlock()
+	}
+	return chunk, err
+}
+
+func (r *Runner) lift(o *orderedChunks) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.holds[o]; !ok {
+		return
+	}
+	delete(r.holds, o)
+	if r.lifted != nil {
+		close(r.lifted)
+		r.lifted = nil
+	}
+}
+
+// heldBack reports a channel closed when a hold is lifted, or nil when no chunk
+// read at or before the moment is still to be queued.
+func (r *Runner) heldBack(at time.Time) <-chan struct{} {
+	if at.IsZero() {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, readAt := range r.holds {
+		if !at.Before(readAt) {
+			if r.lifted == nil {
+				r.lifted = make(chan struct{})
+			}
+			return r.lifted
+		}
+	}
+	return nil
+}
+
+// takeTurnAt checks the holds with the turn held, as a chunk sets its hold only
+// while holding it, and gives the turn back to wait, or the chunk is never queued.
+func (r *Runner) takeTurnAt(ctx context.Context, at time.Time) error {
+	for {
+		if err := r.turn.take(ctx); err != nil {
+			return err
+		}
+		lifted := r.heldBack(at)
+		if lifted == nil {
+			return nil
+		}
+		r.turn.give()
+		select {
+		case <-lifted:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 }
 
 // recoverPosition decides what to do about a stored position the source cannot
@@ -682,7 +775,7 @@ func (r *Runner) read(ctx context.Context, queue chan<- *domain.Event) error {
 		if holding {
 			r.held.admit(int64(event.Bytes))
 		} else {
-			if err := r.turn.take(ctx); err != nil {
+			if err := r.takeTurnAt(ctx, event.SourceTime); err != nil {
 				return nil
 			}
 			holding = true
