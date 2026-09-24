@@ -28,6 +28,30 @@ func targetCluster(t *testing.T) goredis.UniversalClient {
 	return redisAt(t, addrsFrom(t, "SYNC_REDIS_TARGET_CLUSTER"))
 }
 
+func TestAnUnchangedClusterIsNotAReshard(t *testing.T) {
+	source := sourceCluster(t)
+	cluster, ok := source.(*goredis.ClusterClient)
+	if !ok {
+		t.Skip("SYNC_REDIS_SOURCE_CLUSTER names a single server")
+	}
+	ctx := context.Background()
+	shards, err := shardsOf(ctx, source, "")
+	if err != nil {
+		t.Fatalf("find the source's shards: %v", err)
+	}
+	polls := make([]map[string]string, reshardPollsToConfirm+1)
+	for i := range polls {
+		if polls[i], err = ownership(ctx, cluster); err != nil {
+			t.Fatalf("read the source's shape: %v", err)
+		}
+	}
+
+	// A stop here would restart every cluster task, each with a first copy, for ever.
+	if stopped, err := watchShapes(t, &topologyWatcher{Baseline: shapeOf(shards)}, polls...); stopped {
+		t.Fatalf("an unchanged cluster stopped the task: %v", err)
+	}
+}
+
 // If a cluster allowed one transaction to span slots, none of the per-slot
 // machinery would be needed: a batch could be committed with its position in a
 // single unit, exactly as it is for MySQL and MongoDB.

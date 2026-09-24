@@ -98,8 +98,9 @@ func (s *Syncer) Start(ctx context.Context) error {
 		triggers[i] = make(chan string, 1)
 	}
 	watcher := &topologyWatcher{
-		Source: source,
-		Logger: s.logger,
+		Source:   source,
+		Baseline: shapeOf(shards),
+		Logger:   s.logger,
 		OnChange: func(what string) {
 			for _, trigger := range triggers {
 				// Never block: a comparison already queued is as good as two.

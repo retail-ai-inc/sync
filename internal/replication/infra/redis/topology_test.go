@@ -5,10 +5,12 @@ import (
 	"net"
 	"strings"
 	"testing"
+	"time"
 
 	goredis "github.com/redis/go-redis/v9"
 	"github.com/retail-ai-inc/sync/internal/platform/config"
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
+	"github.com/sirupsen/logrus"
 )
 
 // TestAFailoverIsReportedAsAMovedMaster covers the harmless change: the slots
@@ -153,5 +155,97 @@ func TestAReshardStopsTheTaskWithoutBlockingIt(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the reshard error does not mention %q: %v", want, err)
 		}
+	}
+}
+
+var (
+	threeShards = map[string]string{"0-5460": "10.0.0.1:6379",
+		"5461-10922": "10.0.0.2:6379", "10923-16383": "10.0.0.3:6379"}
+	firstShardSplit = map[string]string{"0-2730": "10.0.0.1:6379",
+		"2731-5460": "10.0.0.4:6379", "5461-10922": "10.0.0.2:6379",
+		"10923-16383": "10.0.0.3:6379"}
+	middleMasterMissing = map[string]string{"0-5460": "10.0.0.1:6379",
+		"10923-16383": "10.0.0.3:6379"}
+)
+
+// watchShapes runs w with the source answering shapes in order, and reports
+// whether Run stopped before asking for one past the last.
+func watchShapes(t *testing.T, w *topologyWatcher, shapes ...map[string]string) (stopped bool, err error) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	exhausted := make(chan struct{})
+	next := 0
+	quiet := logrus.New()
+	quiet.SetLevel(logrus.ErrorLevel)
+	w.Every, w.Logger = time.Millisecond, quiet
+	w.shape = func(ctx context.Context) (map[string]string, error) {
+		if next < len(shapes) {
+			next++
+			return shapes[next-1], nil
+		}
+		close(exhausted)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+
+	result := make(chan error, 1)
+	go func() { result <- w.Run(ctx) }()
+	select {
+	case err := <-result:
+		return true, err
+	case <-exhausted:
+		cancel()
+		return false, <-result
+	case <-time.After(5 * time.Second):
+		t.Fatal("the watcher neither stopped nor read every shape")
+		return false, nil
+	}
+}
+
+func TestAReshardThatHoldsForThreePollsStopsTheTask(t *testing.T) {
+	changes := 0
+	w := &topologyWatcher{OnChange: func(string) { changes++ }}
+
+	stopped, err := watchShapes(t, w, threeShards,
+		firstShardSplit, firstShardSplit, firstShardSplit)
+	if !stopped || err == nil {
+		t.Fatal("a confirmed reshard left the task running, so slots 2731-5460 have no reader")
+	}
+	if domain.IsUnrecoverable(err) {
+		t.Errorf("the reshard stopped the task as unrecoverable, so nothing restarts it: %v", err)
+	}
+	if !strings.Contains(err.Error(), "2731-5460") {
+		t.Errorf("the reshard error does not name the range that appeared: %v", err)
+	}
+	if changes != 1 {
+		t.Errorf("OnChange ran %d times for one change, want 1", changes)
+	}
+}
+
+func TestAReshardBeforeTheWatcherStartsStillStopsTheTask(t *testing.T) {
+	w := &topologyWatcher{Baseline: threeShards}
+
+	stopped, err := watchShapes(t, w, firstShardSplit, firstShardSplit, firstShardSplit)
+	if !stopped || err == nil {
+		t.Fatal("a reshard between building the shards and the first poll went unnoticed")
+	}
+}
+
+func TestAMasterBrieflyMissingDoesNotStopTheTask(t *testing.T) {
+	stopped, err := watchShapes(t, &topologyWatcher{}, threeShards,
+		middleMasterMissing, threeShards, threeShards)
+	if stopped {
+		t.Fatalf("a master missing for one poll stopped the task: %v", err)
+	}
+}
+
+func TestAShapeThatFlapsDoesNotStopTheTask(t *testing.T) {
+	stopped, err := watchShapes(t, &topologyWatcher{}, threeShards,
+		firstShardSplit, threeShards, firstShardSplit)
+	if stopped {
+		t.Fatalf("a shape that never held for %d polls stopped the task: %v",
+			reshardPollsToConfirm, err)
 	}
 }

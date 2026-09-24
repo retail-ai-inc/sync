@@ -20,8 +20,16 @@ type topologyWatcher struct {
 	Every time.Duration
 	// OnChange is called with a description of what moved.
 	OnChange func(what string)
+	// Baseline is the shape the shards were built from. A reshard is judged
+	// against it, not the last poll: a range it lacks has no reader however long
+	// ago it appeared. Nil means the first shape Run reads.
+	Baseline map[string]string
 
 	Logger logrus.FieldLogger
+
+	// shape reads the source's slot ranges and their masters. Nil means
+	// ownership of Source.
+	shape func(ctx context.Context) (map[string]string, error)
 }
 
 const defaultTopologyInterval = 30 * time.Second
@@ -45,20 +53,30 @@ func (w *topologyWatcher) logger() logrus.FieldLogger { return orDefault(w.Logge
 // the task cannot carry on through one and a restart is what covers the ranges
 // that appeared.
 func (w *topologyWatcher) Run(ctx context.Context) error {
-	cluster, ok := w.Source.(*goredis.ClusterClient)
-	if !ok {
-		// One server owns everything; there is nothing for a slot to move to.
-		<-ctx.Done()
-		return nil
+	shape := w.shape
+	if shape == nil {
+		cluster, ok := w.Source.(*goredis.ClusterClient)
+		if !ok {
+			// One server owns everything; there is nothing for a slot to move to.
+			<-ctx.Done()
+			return nil
+		}
+		shape = func(ctx context.Context) (map[string]string, error) {
+			return ownership(ctx, cluster)
+		}
 	}
 
 	ticker := time.NewTicker(w.every())
 	defer ticker.Stop()
 
-	previous, err := ownership(ctx, cluster)
-	if err != nil {
-		w.logger().Warnf("[Redis] Could not read the source's shape: %v", err)
+	baseline := w.Baseline
+	if baseline == nil {
+		var err error
+		if baseline, err = shape(ctx); err != nil {
+			w.logger().Warnf("[Redis] Could not read the source's shape: %v", err)
+		}
 	}
+	previous := baseline
 
 	// pending is the changed shape awaiting confirmation, and settled counts how
 	// many consecutive polls have agreed with it.
@@ -72,7 +90,7 @@ func (w *topologyWatcher) Run(ctx context.Context) error {
 		case <-ticker.C:
 		}
 
-		current, err := ownership(ctx, cluster)
+		current, err := shape(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
@@ -80,8 +98,8 @@ func (w *topologyWatcher) Run(ctx context.Context) error {
 			w.logger().Warnf("[Redis] Could not read the source's shape: %v", err)
 			continue
 		}
-		if previous == nil {
-			previous = current
+		if baseline == nil {
+			baseline, previous = current, current
 			continue
 		}
 
@@ -92,7 +110,7 @@ func (w *topologyWatcher) Run(ctx context.Context) error {
 		// appeared have no reader at all. Nothing here can add one -- the readers
 		// were built at start -- so carrying on would replicate part of the
 		// cluster and say nothing about the rest.
-		added, removed := rangesMoved(previous, current)
+		added, removed := rangesMoved(baseline, current)
 		if added == "" && removed == "" {
 			settled = 0
 		} else {
@@ -194,6 +212,16 @@ func ownership(ctx context.Context, cluster *goredis.ClusterClient) (map[string]
 		shape[fmt.Sprintf("%d-%d", slot.Start, slot.End)] = slot.Nodes[0].Addr
 	}
 	return shape, nil
+}
+
+// shapeOf must key each shard as ownership does, or an unchanged cluster reads
+// as a reshard on every poll.
+func shapeOf(shards []shard) map[string]string {
+	shape := make(map[string]string, len(shards))
+	for _, sh := range shards {
+		shape[sh.id] = sh.addr
+	}
+	return shape
 }
 
 func describe(before, after map[string]string) string {
