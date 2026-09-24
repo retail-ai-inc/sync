@@ -212,7 +212,14 @@ func (r *Reader) take(ctx context.Context) error {
 		return nil
 
 	case classFlush:
-		r.hand(flushEvent(&flush{args: args, db: r.streamDB, offset: end}, at))
+		event := flushEvent(&flush{args: args, db: r.streamDB, offset: end}, at)
+		if r.inMulti {
+			// Held with its block: handed over now, it overtakes the members read before it.
+			event.EndsTransaction = false
+			r.pending = append(r.pending, event)
+			return nil
+		}
+		r.hand(event)
 		return nil
 
 	case classIgnored:

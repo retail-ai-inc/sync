@@ -97,8 +97,8 @@ func (f *flush) name() string {
 	return string(f.args[0])
 }
 
-// flushEvent wraps one for the pipeline. It always ends its block: a batch cut
-// here is a batch the applier can order around.
+// flushEvent wraps one for the pipeline. It ends its block unless a MULTI block
+// holds it: a batch cut here is a batch the applier can order around.
 func flushEvent(f *flush, at time.Time) *domain.Event {
 	return &domain.Event{
 		NS:         domain.Namespace{DB: strconv.Itoa(f.db)},
@@ -107,7 +107,7 @@ func flushEvent(f *flush, at time.Time) *domain.Event {
 		Payload:    f,
 		Bytes:      len(f.args),
 		SourceTime: at,
-		// A flush is a barrier, so it is never in the middle of anything.
+		// A flush is a barrier; the reader clears this inside a MULTI block.
 		EndsTransaction: true,
 	}
 }

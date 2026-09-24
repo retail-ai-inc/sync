@@ -81,6 +81,29 @@ func TestABatchCanOnlyBeCutAtTheEndOfAMultiBlock(t *testing.T) {
 	}
 }
 
+func TestAFlushInsideAMultiBlockKeepsItsPlaceInTheBlock(t *testing.T) {
+	r := commandReader(t)
+	takeFrames(t, r, resp("MULTI"), resp("SET", "a", "1"), resp("FLUSHDB"), resp("SET", "b", "2"))
+	// A flush handed over before EXEC overtakes a, leaving a on the target when the source has none.
+	if len(r.ready) != 0 {
+		t.Fatalf("%d events were handed over before EXEC, first %s", len(r.ready), r.ready[0].Key)
+	}
+
+	takeFrames(t, r, resp("EXEC"))
+	var got []string
+	for _, e := range r.ready {
+		got = append(got, e.Key)
+	}
+	if len(got) != 3 || got[0] != "a" || got[1] != "FLUSHDB" || got[2] != "b" {
+		t.Fatalf("handed over %v, want [a FLUSHDB b] in stream order", got)
+	}
+	for i, e := range r.ready {
+		if e.EndsTransaction != (i == 2) {
+			t.Errorf("%s ends a transaction: %v, want only the block's last event to", e.Key, e.EndsTransaction)
+		}
+	}
+}
+
 func TestACommandReadWhileTheFirstCopyRunsIsAppliedByValue(t *testing.T) {
 	r := readerOverBuffer(t)
 	r.Commands = table()
