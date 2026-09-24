@@ -181,9 +181,14 @@ func (s *Syncer) Start(ctx context.Context) error {
 		},
 		Checkpoints: store,
 		Opts: pipeline.Options{
-			Labels: labels,
-			Logger: s.logger,
-			Engine: "PostgreSQL",
+			// The statements of a batch go to the target in the order the WAL held
+			// them. The applier runs every run one after another in one transaction,
+			// so splitting buys nothing and can move a key-changing UPDATE ahead of
+			// an earlier change to its old key.
+			StreamOrder: true,
+			Labels:      labels,
+			Logger:      s.logger,
+			Engine:      "PostgreSQL",
 		},
 	}
 	return runner.Run(ctx)
