@@ -62,6 +62,20 @@ type standbyStatus struct{ write, flush, apply pglogrepl.LSN }
 func confirmOverPipe(t *testing.T, reader *Reader) standbyStatus {
 	t.Helper()
 
+	data := sentOverPipe(t, func(stream *pgconn.PgConn) error {
+		return confirmer(stream, reader)(context.Background())
+	})
+	if len(data) < 25 || data[0] != pglogrepl.StandbyStatusUpdateByteID {
+		t.Fatalf("the source was sent %x, want a standby status update", data)
+	}
+	at := func(i int) pglogrepl.LSN { return pglogrepl.LSN(binary.BigEndian.Uint64(data[1+8*i:])) }
+	return standbyStatus{write: at(0), flush: at(1), apply: at(2)}
+}
+
+// sentOverPipe runs send against a stream whose far end is the test, and returns the copy data it sent.
+func sentOverPipe(t *testing.T, send func(*pgconn.PgConn) error) []byte {
+	t.Helper()
+
 	client, server := net.Pipe()
 	t.Cleanup(func() { client.Close(); server.Close() })
 	config, err := pgconn.ParseConfig("host=localhost user=sync")
@@ -74,21 +88,20 @@ func confirmOverPipe(t *testing.T, reader *Reader) standbyStatus {
 	}
 
 	sent := make(chan error, 1)
-	go func() { sent <- confirmer(stream, reader)(context.Background()) }()
+	go func() { sent <- send(stream) }()
 
 	message, err := pgproto3.NewBackend(server, server).Receive()
 	if err != nil {
 		t.Fatalf("read what the source was sent: %v", err)
 	}
 	if err := <-sent; err != nil {
-		t.Fatalf("confirm: %v", err)
+		t.Fatalf("send: %v", err)
 	}
 	data, ok := message.(*pgproto3.CopyData)
-	if !ok || len(data.Data) < 25 || data.Data[0] != pglogrepl.StandbyStatusUpdateByteID {
-		t.Fatalf("the source was sent %#v, want a standby status update", message)
+	if !ok {
+		t.Fatalf("the source was sent %#v, want copy data", message)
 	}
-	at := func(i int) pglogrepl.LSN { return pglogrepl.LSN(binary.BigEndian.Uint64(data.Data[1+8*i:])) }
-	return standbyStatus{write: at(0), flush: at(1), apply: at(2)}
+	return append([]byte(nil), data.Data...)
 }
 
 // A failure means the source was told the target holds changes it has only received, so a crash loses them.
@@ -122,5 +135,33 @@ func TestProgressIsReportedOnATimerAndAFailedReportDoesNotEndIt(t *testing.T) {
 		case <-time.After(10 * time.Second):
 			t.Fatalf("%d reports reached the source, want 2", i)
 		}
+	}
+}
+
+// A failure means a task resuming from the slot's own position confirmed everything received before writing any of it.
+func TestNothingAppliedIsReportedAsNothingFlushed(t *testing.T) {
+	reader := &Reader{Logger: quiet()}
+	raise(&reader.received, 200)
+
+	got := confirmOverPipe(t, reader)
+	if want := (standbyStatus{write: 200}); got != want {
+		t.Errorf("the source was told write/flush/apply %s/%s/%s, want %s/%s/%s",
+			got.write, got.flush, got.apply, want.write, want.flush, want.apply)
+	}
+}
+
+// A failure means the status update no longer reads as the one the driver sends, so the server misreads it.
+func TestTheStandbyStatusIsWhatTheDriverWouldSendForTheSamePositions(t *testing.T) {
+	now := time.Date(2026, 9, 24, 12, 0, 0, 123456000, time.UTC)
+	ours := sentOverPipe(t, func(stream *pgconn.PgConn) error {
+		return sendStandbyStatus(stream, 200, 100, now)
+	})
+	driver := sentOverPipe(t, func(stream *pgconn.PgConn) error {
+		return pglogrepl.SendStandbyStatusUpdate(context.Background(), stream, pglogrepl.StandbyStatusUpdate{
+			WALWritePosition: 200, WALFlushPosition: 100, WALApplyPosition: 100, ClientTime: now,
+		})
+	})
+	if string(ours) != string(driver) {
+		t.Errorf("sent %x, the driver sends %x", ours, driver)
 	}
 }

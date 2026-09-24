@@ -3,6 +3,7 @@ package postgresql
 import (
 	"context"
 	"database/sql"
+	"encoding/binary"
 	"fmt"
 	"net/url"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"github.com/jackc/pglogrepl"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/sirupsen/logrus"
 
 	"github.com/retail-ai-inc/sync/internal/platform/config"
@@ -235,15 +237,32 @@ func (s *Syncer) confirmPeriodically(ctx context.Context, reader *Reader, every 
 
 // confirmer reports the reader's positions to the source over stream.
 func confirmer(stream *pgconn.PgConn, reader *Reader) func(context.Context) error {
-	return func(ctx context.Context) error {
+	return func(context.Context) error {
 		received, applied := reader.Positions()
-		return pglogrepl.SendStandbyStatusUpdate(ctx, stream, pglogrepl.StandbyStatusUpdate{
-			WALWritePosition: received,
-			WALFlushPosition: applied,
-			WALApplyPosition: applied,
-		})
+		return sendStandbyStatus(stream, received, applied, time.Now())
 	}
 }
+
+// sendStandbyStatus is pglogrepl.SendStandbyStatusUpdate without its swap of a
+// zero flush for the write position: the server ignores a zero flush.
+func sendStandbyStatus(stream *pgconn.PgConn, received, applied pglogrepl.LSN, now time.Time) error {
+	data := make([]byte, 0, 34)
+	data = append(data, pglogrepl.StandbyStatusUpdateByteID)
+	data = binary.BigEndian.AppendUint64(data, uint64(received))
+	data = binary.BigEndian.AppendUint64(data, uint64(applied))
+	data = binary.BigEndian.AppendUint64(data, uint64(applied))
+	data = binary.BigEndian.AppendUint64(data, uint64(now.UnixMicro()-postgresEpochMicros))
+	data = append(data, 0) // no reply requested
+	message, err := (&pgproto3.CopyData{Data: data}).Encode(nil)
+	if err != nil {
+		return err
+	}
+	return stream.Frontend().SendUnbufferedEncodedCopyData(message)
+}
+
+// postgresEpochMicros is 2000-01-01 UTC in Unix microseconds, the zero of a
+// replication message's clock.
+const postgresEpochMicros = 946684800 * 1000000
 
 // confirmEvery is how often the source is told where this task has got to. The
 // server keeps WAL until it is told otherwise, so a long gap here is disk on
