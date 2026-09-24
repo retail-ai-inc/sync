@@ -57,30 +57,27 @@ func TestTheFirstCopyWalksEveryDatabase(t *testing.T) {
 		t.Fatalf("Copy: %v", err)
 	}
 
+	if n, err := onDB(t, targetAddr, 0).Exists(ctx, directionlock.RedisKey).Result(); err != nil || n != 0 {
+		t.Errorf("target database 0 holds the source's direction lock (%d, %v)", n, err)
+	}
 	for _, c := range []struct {
-		db     *goredis.Client
-		name   int
-		key    string
-		want   string
-		absent string
+		db   *goredis.Client
+		name int
+		key  string
+		want string
 	}{
-		{onDB(t, targetAddr, 0), 0, "a", "0", "b"},
-		{targetThird, 3, "b", "3", "a"},
+		{onDB(t, targetAddr, 0), 0, "a", "0"},
+		{targetThird, 3, "b", "3"},
 	} {
 		if got, err := c.db.Get(ctx, c.key).Result(); err != nil || got != c.want {
 			t.Errorf("target database %d: %s = %q (%v), want %q", c.name, c.key, got, err, c.want)
-		}
-		if n, _ := c.db.Exists(ctx, c.absent).Result(); n != 0 {
-			t.Errorf("target database %d holds %s, which the source keeps elsewhere", c.name, c.absent)
 		}
 		keys, err := c.db.Keys(ctx, "*").Result()
 		if err != nil {
 			t.Fatalf("list target database %d: %v", c.name, err)
 		}
-		for _, key := range keys {
-			if internalKey(key) {
-				t.Errorf("target database %d holds the source's own key %s", c.name, key)
-			}
+		if len(keys) != 1 || keys[0] != c.key {
+			t.Errorf("target database %d holds %q, want only %q", c.name, keys, c.key)
 		}
 	}
 	if n, err := targetFifth.DBSize(ctx).Result(); err != nil || n != 0 {
@@ -88,8 +85,8 @@ func TestTheFirstCopyWalksEveryDatabase(t *testing.T) {
 	}
 }
 
-// refuseRestore reports a refusal on the RESTORE of one key, the way a plain
-// client's pipeline reports a Redis error: on the command, not from Exec.
+// refuseRestore leaves Exec returning nil and puts the error on one RESTORE
+// only, so only the per-command check can catch it.
 type refuseRestore struct{ key string }
 
 func (refuseRestore) DialHook(next goredis.DialHook) goredis.DialHook          { return next }
