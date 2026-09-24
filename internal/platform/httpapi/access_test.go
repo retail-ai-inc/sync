@@ -52,6 +52,7 @@ var readRoutes = []struct{ method, path string }{
 	{http.MethodGet, "/sync"},
 	{http.MethodGet, "/sync/1/position"},
 	{http.MethodGet, "/sync/1/rowcounts"},
+	{http.MethodGet, "/sync/1/ddl-acknowledgements"},
 	{http.MethodGet, "/changestreams/status"},
 	{http.MethodGet, "/settings"},
 	{http.MethodGet, "/backup"},
@@ -69,6 +70,9 @@ var adminRoutes = []struct{ method, path string }{
 	// promotion lets them write again: both are decisions, not readings.
 	{http.MethodPost, "/sync/1/promotion"},
 	{http.MethodDelete, "/sync/1/promotion"},
+	// An acknowledgement lets a halted task pass over a schema change it refused.
+	{http.MethodPost, "/sync/1/ddl-acknowledgements"},
+	{http.MethodDelete, "/sync/1/ddl-acknowledgements/1"},
 	{http.MethodGet, "/users"},
 	{http.MethodPut, "/users/access"},
 	{http.MethodDelete, "/users"},

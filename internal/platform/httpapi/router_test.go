@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -138,6 +139,13 @@ func TestRouterReturns405ForTheWrongMethod(t *testing.T) {
 	}
 }
 
+var publicRoutes = map[string]bool{
+	"POST /login":                  true,
+	"POST /logout":                 true,
+	"POST /login/google/callback":  true,
+	"GET /oauth/{provider}/config": true,
+}
+
 // NewRouter registers no middleware at all: there is no authentication.
 func TestEveryRouteIsCoveredByTheAccessRules(t *testing.T) {
 	r, ok := NewRouter().(chi.Routes)
@@ -145,17 +153,10 @@ func TestEveryRouteIsCoveredByTheAccessRules(t *testing.T) {
 		t.Fatal("NewRouter did not return a chi.Routes")
 	}
 
-	public := map[string]bool{
-		"POST /login":                  true,
-		"POST /logout":                 true,
-		"POST /login/google/callback":  true,
-		"GET /oauth/{provider}/config": true,
-	}
-
 	var uncovered []string
 	err := chi.Walk(r, func(method, route string, _ http.Handler, mw ...func(http.Handler) http.Handler) error {
 		name := method + " " + route
-		if public[name] {
+		if publicRoutes[name] {
 			if len(mw) > 0 {
 				uncovered = append(uncovered, fmt.Sprintf("%s is public but carries %d middleware", name, len(mw)))
 			}
@@ -171,6 +172,49 @@ func TestEveryRouteIsCoveredByTheAccessRules(t *testing.T) {
 	}
 	if len(uncovered) > 0 {
 		t.Errorf("routes outside the access rules: %s", strings.Join(uncovered, ", "))
+	}
+}
+
+var routeParam = regexp.MustCompile(`\{[^}]+\}`)
+
+// A route in neither access table is never tried without a token or as a guest.
+func TestEveryRouteIsInAnAccessTableWithItsGroupsMiddleware(t *testing.T) {
+	r, ok := NewRouter().(chi.Routes)
+	if !ok {
+		t.Fatal("NewRouter did not return a chi.Routes")
+	}
+
+	middleware := map[string]int{}
+	for _, route := range readRoutes {
+		middleware[route.method+" "+route.path] = 1
+	}
+	for _, route := range adminRoutes {
+		middleware[route.method+" "+route.path] = 3
+	}
+
+	err := chi.Walk(r, func(method, route string, _ http.Handler, mw ...func(http.Handler) http.Handler) error {
+		name := method + " " + route
+		if publicRoutes[name] {
+			return nil
+		}
+		concrete := routeParam.ReplaceAllStringFunc(route, func(param string) string {
+			if param == "{provider}" {
+				return "google"
+			}
+			return "1"
+		})
+		want, listed := middleware[method+" "+concrete]
+		if !listed {
+			t.Errorf("%s is in neither readRoutes nor adminRoutes", name)
+			return nil
+		}
+		if len(mw) != want {
+			t.Errorf("%s carries %d middleware, want %d", name, len(mw), want)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk routes: %v", err)
 	}
 }
 
