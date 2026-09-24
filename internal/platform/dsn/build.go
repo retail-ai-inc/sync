@@ -180,6 +180,12 @@ func buildPostgresDSN(c map[string]string) string {
 	return u.String()
 }
 
+// escapeMongoCredential percent-encodes a user name or password. The driver
+// reads them back with PathUnescape, which keeps QueryEscape's '+' for a space.
+func escapeMongoCredential(s string) string {
+	return strings.ReplaceAll(url.QueryEscape(s), "+", "%20")
+}
+
 // buildMongoDSN renders a MongoDB URI.  directConnection is no longer forced.
 // It pins the driver to one node, which means it neither discovers the rest of
 // the replica set nor follows an election — against a cluster it stops writing
@@ -212,9 +218,9 @@ func buildMongoDSN(c map[string]string) string {
 
 	var credentials string
 	if user := c["user"]; user != "" {
-		credentials = url.QueryEscape(user)
+		credentials = escapeMongoCredential(user)
 		if password := c["password"]; password != "" {
-			credentials += ":" + url.QueryEscape(password)
+			credentials += ":" + escapeMongoCredential(password)
 		}
 		credentials += "@"
 

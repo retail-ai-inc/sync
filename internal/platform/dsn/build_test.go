@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	_ "github.com/mattn/go-sqlite3"
+	"go.mongodb.org/mongo-driver/v2/x/mongo/driver/connstring"
 )
 
 func conn(user, password, host, port, database string) map[string]string {
@@ -361,5 +362,22 @@ func TestBuildDSNByTypeIsExportedUnchanged(t *testing.T) {
 	c := conn("root", "root", "localhost", "3306", "source_db")
 	if got, want := BuildDSNByType("mysql", c), buildDSNByType("mysql", c); got != want {
 		t.Errorf("BuildDSNByType = %q, buildDSNByType = %q; they must agree", got, want)
+	}
+}
+
+// A space escaped as '+' comes back from the driver as '+', so the source refuses the credential.
+func TestAMongoCredentialIsReadBackByTheDriverAsItWasGiven(t *testing.T) {
+	for _, password := range []string{"p@ss:w/rd%+x", "correct horse+battery"} {
+		const user = "back up"
+		built := buildDSNByType("mongodb", conn(user, password, "h", "27017", "db"))
+
+		parsed, err := connstring.ParseAndValidate(built)
+		if err != nil {
+			t.Fatalf("the driver cannot read %q: %v", built, err)
+		}
+		if parsed.Username != user || parsed.Password != password {
+			t.Errorf("the driver read %q / %q out of %q, want %q / %q",
+				parsed.Username, parsed.Password, built, user, password)
+		}
 	}
 }

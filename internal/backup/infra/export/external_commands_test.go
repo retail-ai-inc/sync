@@ -970,3 +970,27 @@ func TestAFieldListNarrowsTheMongoExportAndAllLeavesItWhole(t *testing.T) {
 		})
 	}
 }
+
+// The builder escaped a space as '+', which url.Parse keeps, so mongoexport was handed the wrong password.
+func TestAMongoPasswordWithASpaceReachesMongoexportIntact(t *testing.T) {
+	binDir := stubPATH(t)
+	kept := filepath.Join(binDir, "config.captured")
+	stubBin(t, binDir, "mongoexport", mongoexportThatKeepsItsConfig(kept), 0)
+
+	const password = "correct horse+battery"
+	connStr := buildMongoDBConnectionString("mongos:27017", "svc", password)
+
+	e := newExecutor()
+	if err := e.executeExternalMongoExportWithOptions(context.Background(), connStr, "shop",
+		"orders", filepath.Join(t.TempDir(), "orders.json"), mongoBackupConfig("")); err != nil {
+		t.Fatalf("executeExternalMongoExportWithOptions: %v", err)
+	}
+
+	data, err := os.ReadFile(kept)
+	if err != nil {
+		t.Fatalf("no credentials file reached mongoexport: %v", err)
+	}
+	if got, want := string(data), `password: "`+password+`"`+"\n"; got != want {
+		t.Errorf("credentials file = %q, want %q", got, want)
+	}
+}
