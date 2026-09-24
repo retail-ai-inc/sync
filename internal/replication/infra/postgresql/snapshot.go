@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 
 	"github.com/jackc/pglogrepl"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/sirupsen/logrus"
 
 	"github.com/retail-ai-inc/sync/internal/platform/config"
@@ -167,7 +169,10 @@ func (s *Snapshotter) copyTable(ctx context.Context, pair tablePair) (int, error
 		return 0, nil
 	}
 
-	rows, err := s.Snapshot.Query(ctx, "SELECT * FROM "+pair.source())
+	// As text, which the target parses back for any type; bytea in binary, since
+	// lib/pq encodes a bytea parameter itself and must be handed the bytes.
+	rows, err := s.Snapshot.Query(ctx, "SELECT * FROM "+pair.source(),
+		pgx.QueryResultFormatsByOID{pgtype.ByteaOID: pgx.BinaryFormatCode})
 	if err != nil {
 		return 0, fmt.Errorf("read %s: %w", pair.source(), err)
 	}
@@ -199,15 +204,24 @@ func (s *Snapshotter) copyTable(ctx context.Context, pair tablePair) (int, error
 
 	written := 0
 	for rows.Next() {
-		values, err := rows.Values()
+		decoded, err := rows.Values()
 		if err != nil {
 			return 0, err
 		}
+		values := make([]any, len(decoded))
+		for i, raw := range rows.RawValues() {
+			values[i] = decoded[i]
+			if raw != nil && fields[i].DataTypeOID != pgtype.ByteaOID {
+				values[i] = string(raw)
+			}
+		}
 		if secured {
-			// Every value, not only strings: these are decoded, so an int or a
-			// timestamp field would otherwise pass through in the clear.
-			for i := range values {
-				values[i] = security.ProcessValue(values[i], names[i], policy)
+			// Decoded, so an int or a timestamp field is protected too. A value the
+			// policy leaves as it was keeps the source's text.
+			for i := range decoded {
+				if processed := security.ProcessValue(decoded[i], names[i], policy); !reflect.DeepEqual(processed, decoded[i]) {
+					values[i] = processed
+				}
 			}
 		}
 		result, err := tx.ExecContext(ctx, insert, values...)

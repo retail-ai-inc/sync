@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -34,8 +35,19 @@ type cannedRows struct {
 func (c *cannedRows) Close()                        {}
 func (c *cannedRows) Err() error                    { return c.err }
 func (c *cannedRows) CommandTag() pgconn.CommandTag { return pgconn.CommandTag{} }
-func (c *cannedRows) RawValues() [][]byte           { return nil }
 func (c *cannedRows) Conn() *pgx.Conn               { return nil }
+
+// RawValues prints the row as a text-format result carries it.
+func (c *cannedRows) RawValues() [][]byte {
+	row := c.rows[c.at-1]
+	raw := make([][]byte, len(row))
+	for i, value := range row {
+		if value != nil {
+			raw[i] = []byte(fmt.Sprint(value))
+		}
+	}
+	return raw
+}
 
 func (c *cannedRows) FieldDescriptions() []pgconn.FieldDescription {
 	fields := make([]pgconn.FieldDescription, len(c.columns))

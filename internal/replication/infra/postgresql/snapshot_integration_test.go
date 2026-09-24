@@ -172,3 +172,72 @@ func TestTheFirstCopyMasksAndEncryptsTheFieldsATableProtects(t *testing.T) {
 		t.Errorf("email = %v, card = %v, score = %v, want all NULL", email, card, score)
 	}
 }
+
+// A failure means the first copy could not carry a column type the stream carries.
+func TestTheCopyCarriesNonTextTypes(t *testing.T) {
+	table, publication, slot := names(t, "pg_copy_types")
+	src, tgt := open(t, harness.PostgresSource, sourceDatabase), open(t, harness.PostgresTarget, targetDatabase)
+
+	const columns = "u, j, s, a, ip, m, b, n"
+	shape := fmt.Sprintf(`CREATE TABLE %s (id INT PRIMARY KEY, u UUID, j JSONB, s JSONB,
+		a INT[], ip INET, m MACADDR, b BYTEA, n NUMERIC)`, table)
+	mustExec(t, src, shape)
+	mustExec(t, src, fmt.Sprintf("CREATE PUBLICATION %s FOR TABLE %s", publication, table))
+	mustExec(t, tgt, shape)
+	t.Cleanup(func() {
+		_, _ = src.Exec("DROP PUBLICATION IF EXISTS " + publication)
+		_, _ = src.Exec("DROP TABLE IF EXISTS " + table)
+		_, _ = tgt.Exec("DROP TABLE IF EXISTS " + table)
+		_, _ = src.Exec(`SELECT pg_drop_replication_slot($1)
+			WHERE EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = $1)`, slot)
+	})
+	mustExec(t, src, fmt.Sprintf(`INSERT INTO %s (id, %s) VALUES
+		(1, 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11', '{"k": [1, 2], "big": 12345678901234567890}',
+			'"a json string"', '{1,NULL,3}', '192.168.0.1/24', '08:00:2b:01:02:03', '\x00ff', 1.10),
+		(2, NULL, 'null', NULL, '{}', NULL, NULL, NULL, NULL)`, table, columns))
+
+	startSyncer(t, syncTask(t, table, publication, slot))
+	harness.Eventually(t, 45*time.Second, func() error {
+		if n := countRows(t, tgt, table, ""); n != 2 {
+			return fmt.Errorf("target holds %d rows, want 2", n)
+		}
+		return nil
+	})
+
+	if want, got := textRowsOf(t, src, table, columns), textRowsOf(t, tgt, table, columns); !reflect.DeepEqual(got, want) {
+		t.Errorf("target holds %v, source holds %v", got, want)
+	}
+}
+
+// textRowsOf reads columns of table as PostgreSQL prints them, NULL apart from any text.
+func textRowsOf(t *testing.T, db *sql.DB, table, columns string) []string {
+	t.Helper()
+
+	names := strings.Split(columns, ", ")
+	casts := make([]string, len(names))
+	for i, name := range names {
+		casts[i] = fmt.Sprintf("COALESCE(%s::text, '<NULL>')", name)
+	}
+	rows, err := db.Query(fmt.Sprintf("SELECT id, %s FROM %s ORDER BY id", strings.Join(casts, ", "), table))
+	if err != nil {
+		t.Fatalf("read %s: %v", table, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []string
+	for rows.Next() {
+		values := make([]string, len(names)+1)
+		dest := make([]any, len(values))
+		for i := range values {
+			dest[i] = &values[i]
+		}
+		if err := rows.Scan(dest...); err != nil {
+			t.Fatalf("scan %s: %v", table, err)
+		}
+		out = append(out, strings.Join(values, " | "))
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read %s: %v", table, err)
+	}
+	return out
+}
