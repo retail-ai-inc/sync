@@ -358,8 +358,9 @@ type streamTarget struct {
 }
 
 // targetsOf reports every table the task's mappings send rel to, a mapping with
-// no schema meaning public as it does for the copy. A relation no mapping names
-// keeps its own name.
+// no schema meaning public as it does for the copy. The copy writes a mapped
+// name unquoted, so it is folded here to address the table the copy filled.
+// A relation no mapping names keeps its own name.
 func (r *Reader) targetsOf(rel *pglogrepl.RelationMessageV2) []streamTarget {
 	var targets []streamTarget
 	for _, mapping := range r.Config.Mappings {
@@ -370,10 +371,10 @@ func (r *Reader) targetsOf(rel *pglogrepl.RelationMessageV2) []streamTarget {
 			if table.SourceTable == "" || !strings.EqualFold(table.SourceTable, rel.RelationName) {
 				continue
 			}
-			target := streamTarget{schema: orPublic(mapping.TargetSchema),
+			target := streamTarget{schema: foldUnquoted(orPublic(mapping.TargetSchema)),
 				table: rel.RelationName, name: table.SourceTable}
 			if table.TargetTable != "" {
-				target.table, target.name = table.TargetTable, table.TargetTable
+				target.table, target.name = foldUnquoted(table.TargetTable), table.TargetTable
 			}
 			targets = append(targets, target)
 		}

@@ -336,17 +336,23 @@ func slotIdentifier(slot string) string {
 	if len(name) >= 2 && name[0] == '"' && name[len(name)-1] == '"' {
 		name = strings.ReplaceAll(name[1:len(name)-1], `""`, `"`)
 	} else {
-		name = strings.Map(func(r rune) rune {
-			if r >= 'A' && r <= 'Z' {
-				return r + ('a' - 'A')
-			}
-			return r
-		}, name)
+		name = foldUnquoted(name)
 	}
 	if len(name) > maxIdentifierBytes {
 		name = name[:maxIdentifierBytes]
 	}
 	return name
+}
+
+// foldUnquoted is the name the server reads for an unquoted identifier: ASCII
+// letters lower-cased, every other byte kept.
+func foldUnquoted(name string) string {
+	return strings.Map(func(r rune) rune {
+		if r >= 'A' && r <= 'Z' {
+			return r + ('a' - 'A')
+		}
+		return r
+	}, name)
 }
 
 // ensureSlot creates the replication slot, or reports that it is already there.

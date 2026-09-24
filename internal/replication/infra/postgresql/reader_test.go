@@ -118,6 +118,7 @@ func TestARowIsWrittenToEveryTableItsMappingsName(t *testing.T) {
 		{TargetSchema: "dr", Tables: []config.TableMapping{{SourceTable: "orders", TargetTable: "orders_dr"}}},
 		{SourceSchema: "archive", Tables: []config.TableMapping{{SourceTable: "orders", TargetTable: "archived"}}},
 		{Tables: []config.TableMapping{{SourceTable: "Orders"}}},
+		{TargetSchema: "Ledger", Tables: []config.TableMapping{{SourceTable: "orders", TargetTable: "ORDERS"}}},
 	}},
 		wal(10, relationBytes(1, "public", "orders", "id", "amount")),
 		wal(11, beginBytes(40)),
@@ -132,13 +133,13 @@ func TestARowIsWrittenToEveryTableItsMappingsName(t *testing.T) {
 
 	addressed := regexp.MustCompile(`^(INSERT INTO|UPDATE|DELETE FROM) "[^"]*"\."[^"]*"`)
 	var got []string
-	for _, event := range readAll(t, r, 6) {
+	for _, event := range readAll(t, r, 9) {
 		got = append(got, addressed.FindString(event.Payload.(statement).query))
 	}
 	want := []string{
-		`INSERT INTO "dr"."orders_dr"`, `INSERT INTO "public"."orders"`,
-		`UPDATE "dr"."orders_dr"`, `UPDATE "public"."orders"`,
-		`DELETE FROM "dr"."orders_dr"`, `DELETE FROM "public"."orders"`,
+		`INSERT INTO "dr"."orders_dr"`, `INSERT INTO "public"."orders"`, `INSERT INTO "ledger"."orders"`,
+		`UPDATE "dr"."orders_dr"`, `UPDATE "public"."orders"`, `UPDATE "ledger"."orders"`,
+		`DELETE FROM "dr"."orders_dr"`, `DELETE FROM "public"."orders"`, `DELETE FROM "ledger"."orders"`,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("statements address %q, want %q", got, want)
