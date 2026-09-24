@@ -71,8 +71,9 @@ func peakHeap(tb testing.TB, merge func(*bufio.Writer) error) uint64 {
 	runtime.ReadMemStats(&before)
 
 	var peak uint64
-	done := make(chan struct{})
+	done, stopped := make(chan struct{}), make(chan struct{})
 	go func() {
+		defer close(stopped)
 		var stats runtime.MemStats
 		for {
 			select {
@@ -94,6 +95,7 @@ func peakHeap(tb testing.TB, merge func(*bufio.Writer) error) uint64 {
 	}
 	writer.Flush()
 	close(done)
+	<-stopped
 
 	if peak < before.HeapAlloc {
 		return 0
