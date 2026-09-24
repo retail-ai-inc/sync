@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pglogrepl"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgproto3"
+	"github.com/lib/pq"
 	"github.com/sirupsen/logrus"
 
 	"github.com/retail-ai-inc/sync/internal/platform/config"
@@ -301,49 +302,86 @@ func (r *Reader) row(relationID uint32, op operation, newTuple, oldTuple *pglogr
 			"Clear this task's position to copy the source again.", relationID)
 	}
 
-	policy := security.FindTableSecurityFromMappings(
-		security.TableRef{Schema: rel.Namespace, Table: rel.RelationName}, r.Config.Mappings)
 	keys, err := r.keyColumns(rel)
 	if err != nil {
 		return err
 	}
-
-	var query string
-	var args []interface{}
-	switch op {
-	case insert:
-		if newTuple == nil {
-			return nil
-		}
-		query, args, err = buildInsert(rel, newTuple, policy)
-	case update:
-		if newTuple == nil {
-			return nil
-		}
-		query, args, err = buildUpdate(rel, oldTuple, newTuple, keys, policy)
-	case remove:
-		if oldTuple == nil {
-			// Without REPLICA IDENTITY FULL or a key, the source sends no old
-			// row and the delete cannot be addressed at all.
-			return domain.Unrecoverable("the source sent a delete for %s with no "+
-				"old row, so there is nothing to identify what to delete. Set "+
-				"REPLICA IDENTITY on the table, or the delete cannot be carried.",
-				qualified(rel))
-		}
-		query, args, err = buildDelete(rel, oldTuple, keys)
+	if (op == insert || op == update) && newTuple == nil {
+		return nil
 	}
-	if err != nil {
-		return err
+	if op == remove && oldTuple == nil {
+		// Without REPLICA IDENTITY FULL or a key, the source sends no old
+		// row and the delete cannot be addressed at all.
+		return domain.Unrecoverable("the source sent a delete for %s with no "+
+			"old row, so there is nothing to identify what to delete. Set "+
+			"REPLICA IDENTITY on the table, or the delete cannot be carried.",
+			qualified(rel))
 	}
 
-	r.open = append(r.open, &domain.Event{
-		NS:      domain.Namespace{DB: rel.Namespace, Object: rel.RelationName},
-		Op:      opOf(op),
-		Key:     rowKey(rel, keys, newTuple, oldTuple),
-		Payload: statement{query: query, args: args},
-		Bytes:   len(query) + argBytes(args),
-	})
+	key := rowKey(rel, keys, newTuple, oldTuple)
+	for _, target := range r.targetsOf(rel) {
+		policy := security.FindTableSecurityFromMappings(security.TableRef{
+			Schema: rel.Namespace, Table: rel.RelationName, Target: target.name,
+		}, r.Config.Mappings)
+		into := pq.QuoteIdentifier(target.schema) + "." + pq.QuoteIdentifier(target.table)
+
+		var query string
+		var args []interface{}
+		switch op {
+		case insert:
+			query, args, err = buildInsert(rel, into, newTuple, policy)
+		case update:
+			query, args, err = buildUpdate(rel, into, oldTuple, newTuple, keys, policy)
+		case remove:
+			query, args, err = buildDelete(rel, into, oldTuple, keys)
+		}
+		if err != nil {
+			return err
+		}
+
+		r.open = append(r.open, &domain.Event{
+			NS:      domain.Namespace{DB: rel.Namespace, Object: rel.RelationName},
+			Op:      opOf(op),
+			Key:     key,
+			Payload: statement{query: query, args: args},
+			Bytes:   len(query) + argBytes(args),
+		})
+	}
 	return nil
+}
+
+// streamTarget is a table a relation's changes are written to. name is the
+// target as its mapping spells it, which picks that mapping's field security;
+// empty for a relation no mapping names.
+type streamTarget struct {
+	schema, table, name string
+}
+
+// targetsOf reports every table the task's mappings send rel to, a mapping with
+// no schema meaning public as it does for the copy. A relation no mapping names
+// keeps its own name.
+func (r *Reader) targetsOf(rel *pglogrepl.RelationMessageV2) []streamTarget {
+	var targets []streamTarget
+	for _, mapping := range r.Config.Mappings {
+		if !strings.EqualFold(orPublic(mapping.SourceSchema), rel.Namespace) {
+			continue
+		}
+		for _, table := range mapping.Tables {
+			if table.SourceTable == "" || !strings.EqualFold(table.SourceTable, rel.RelationName) {
+				continue
+			}
+			target := streamTarget{schema: orPublic(mapping.TargetSchema),
+				table: rel.RelationName, name: table.SourceTable}
+			if table.TargetTable != "" {
+				target.table, target.name = table.TargetTable, table.TargetTable
+			}
+			targets = append(targets, target)
+		}
+	}
+	if len(targets) == 0 {
+		return []streamTarget{{schema: rel.Namespace, table: rel.RelationName}}
+	}
+	return targets
 }
 
 // commit releases the transaction's events, carrying the position on the last

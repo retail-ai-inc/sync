@@ -232,7 +232,7 @@ func TestHandleInsertMasksASecuredField(t *testing.T) {
 func TestTheSameTableInTwoSchemasIsMaskedByItsOwnMapping(t *testing.T) {
 	db := targetDB(t, ordersSchema)
 	masked := mappingWithSecurity("orders", "email")
-	masked[0].SourceSchema = "main"
+	masked[0].SourceSchema, masked[0].TargetSchema = "main", "main"
 	cfg := config.SyncConfig{Mappings: append([]config.DatabaseMapping{{
 		SourceSchema: "archive",
 		Tables:       []config.TableMapping{{SourceTable: "orders", TargetTable: "orders"}},
@@ -299,7 +299,7 @@ func TestAnUpdateAddressesTheRowByItsKey(t *testing.T) {
 	}
 	rel := relation(1, "main", "orders", "id", "customer", "email")
 
-	query, args, err := buildUpdate(rel,
+	query, args, err := buildUpdate(rel, qualified(rel),
 		tuple(text("1"), text("Ada"), text("ada@example.com")),
 		tuple(text("1"), text("Grace"), text("grace@example.com")),
 		[]string{"id"}, security.TableSecurity{})
@@ -329,7 +329,7 @@ func TestAnUpdateWithNoOldTupleUsesTheKeyFromTheNewOne(t *testing.T) {
 	}
 	rel := relation(1, "main", "orders", "id", "customer", "email")
 
-	query, args, err := buildUpdate(rel, nil,
+	query, args, err := buildUpdate(rel, qualified(rel), nil,
 		tuple(text("1"), text("Grace"), text("grace@example.com")),
 		[]string{"id"}, security.TableSecurity{})
 	if err != nil {
@@ -403,7 +403,7 @@ func TestAnUpdateMasksTheSameFieldsAnInsertDoes(t *testing.T) {
 	rel := relation(1, "main", "orders", "id", "customer", "email")
 	table := security.FindTableSecurityFromMappings(security.TableRef{Table: "orders"}, mappingWithSecurity("orders", "email"))
 
-	query, args, err := buildUpdate(rel,
+	query, args, err := buildUpdate(rel, qualified(rel),
 		tuple(text("1"), text("Ada"), text("masked")),
 		tuple(text("1"), text("Ada"), text("grace@example.com")),
 		[]string{"id"}, table)
@@ -435,7 +435,7 @@ func TestADeleteWithNoKeyMatchesOnEveryColumn(t *testing.T) {
 	}
 	rel := relation(1, "main", "orders", "id", "customer", "email")
 
-	query, args, err := buildDelete(rel, tuple(text("1"), text("Ada"), text("x")), nil)
+	query, args, err := buildDelete(rel, qualified(rel), tuple(text("1"), text("Ada"), text("x")), nil)
 	if err != nil {
 		t.Fatalf("buildDelete: %v", err)
 	}
@@ -462,7 +462,7 @@ func TestADeleteAddressesTheRowByItsKey(t *testing.T) {
 	}
 	rel := relation(1, "main", "orders", "id", "customer", "email")
 
-	query, args, err := buildDelete(rel, tuple(text("1"), text("Ada"), text("x")), []string{"id"})
+	query, args, err := buildDelete(rel, qualified(rel), tuple(text("1"), text("Ada"), text("x")), []string{"id"})
 	if err != nil {
 		t.Fatalf("buildDelete: %v", err)
 	}
@@ -487,7 +487,7 @@ func TestTheAllColumnsDeleteMatchesNullsToo(t *testing.T) {
 	}
 	rel := relation(1, "main", "orders", "id", "customer", "email")
 
-	query, args, err := buildDelete(rel, tuple(text("1"), nil, text("x")), nil)
+	query, args, err := buildDelete(rel, qualified(rel), tuple(text("1"), nil, text("x")), nil)
 	if err != nil {
 		t.Fatalf("buildDelete: %v", err)
 	}
@@ -510,7 +510,7 @@ func TestTheAllColumnsDeleteMatchesNullsToo(t *testing.T) {
 func TestADeleteWithNothingToMatchOnIsRefused(t *testing.T) {
 	rel := relation(1, "main", "orders") // no columns described
 
-	if _, _, err := buildDelete(rel, tuple(), nil); err == nil {
+	if _, _, err := buildDelete(rel, qualified(rel), tuple(), nil); err == nil {
 		t.Error("buildDelete produced a statement with no WHERE clause")
 	}
 }
@@ -521,7 +521,7 @@ func TestAnUpdateWithNothingToMatchOnIsRefused(t *testing.T) {
 	rel := relation(1, "main", "orders", "id", "customer")
 
 	// The key names a column the row does not carry.
-	if _, _, err := buildUpdate(rel,
+	if _, _, err := buildUpdate(rel, qualified(rel),
 		tuple(text("1"), text("Ada")), tuple(text("1"), text("Grace")),
 		[]string{"missing"}, security.TableSecurity{}); err == nil {
 		t.Error("buildUpdate produced a statement with no WHERE clause")
@@ -585,7 +585,7 @@ func TestADeleteWithNoOldRowStopsTheTask(t *testing.T) {
 func TestTheClauseBindsItsValues(t *testing.T) {
 	rel := relation(1, "main", "orders", "id", "customer")
 
-	query, args, err := buildDelete(rel, tuple(text("1"), text("O'Brien")), nil)
+	query, args, err := buildDelete(rel, qualified(rel), tuple(text("1"), text("O'Brien")), nil)
 	if err != nil {
 		t.Fatalf("buildDelete: %v", err)
 	}
@@ -607,7 +607,7 @@ func TestAnUnchangedColumnIsNotMatchedAsNull(t *testing.T) {
 	tup := tuple(text("1"), text("large"))
 	tup.Columns[1] = &pglogrepl.TupleDataColumn{DataType: 'u'}
 
-	query, args, err := buildDelete(rel, tup, nil)
+	query, args, err := buildDelete(rel, qualified(rel), tup, nil)
 	if err != nil {
 		t.Fatalf("buildDelete: %v", err)
 	}
@@ -624,7 +624,7 @@ func TestAnUnchangedColumnIsNotMatchedAsNull(t *testing.T) {
 func TestAKeyThatIsNullIsMatchedAsNull(t *testing.T) {
 	rel := relation(1, "main", "orders", "id", "customer")
 
-	query, _, err := buildDelete(rel, tuple(text("1"), nil), nil)
+	query, _, err := buildDelete(rel, qualified(rel), tuple(text("1"), nil), nil)
 	if err != nil {
 		t.Fatalf("buildDelete: %v", err)
 	}

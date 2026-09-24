@@ -3,6 +3,8 @@ package postgresql
 import (
 	"context"
 	"errors"
+	"reflect"
+	"regexp"
 	"testing"
 	"time"
 
@@ -107,6 +109,39 @@ func TestEachOperationIsNamed(t *testing.T) {
 		if _, ok := events[i].Payload.(statement); !ok {
 			t.Errorf("event %d carries a %T rather than a statement", i, events[i].Payload)
 		}
+	}
+}
+
+// A failure means a streamed row was addressed to the source's table rather than to the ones its mappings name.
+func TestARowIsWrittenToEveryTableItsMappingsName(t *testing.T) {
+	r := readerFor(t, config.SyncConfig{Mappings: []config.DatabaseMapping{
+		{TargetSchema: "dr", Tables: []config.TableMapping{{SourceTable: "orders", TargetTable: "orders_dr"}}},
+		{SourceSchema: "archive", Tables: []config.TableMapping{{SourceTable: "orders", TargetTable: "archived"}}},
+		{Tables: []config.TableMapping{{SourceTable: "Orders"}}},
+	}},
+		wal(10, relationBytes(1, "public", "orders", "id", "amount")),
+		wal(11, beginBytes(40)),
+		wal(12, insertBytes(1, text("1"), text("100"))),
+		wal(13, updateBytes(1, nil, []*string{text("1"), text("150")})),
+		wal(14, deleteBytes(1, text("1"), text("150"))),
+		wal(15, commitBytes(40, 41)),
+	)
+	if err := r.Open(context.Background(), domain.Position{}); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	addressed := regexp.MustCompile(`^(INSERT INTO|UPDATE|DELETE FROM) "[^"]*"\."[^"]*"`)
+	var got []string
+	for _, event := range readAll(t, r, 6) {
+		got = append(got, addressed.FindString(event.Payload.(statement).query))
+	}
+	want := []string{
+		`INSERT INTO "dr"."orders_dr"`, `INSERT INTO "public"."orders"`,
+		`UPDATE "dr"."orders_dr"`, `UPDATE "public"."orders"`,
+		`DELETE FROM "dr"."orders_dr"`, `DELETE FROM "public"."orders"`,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("statements address %q, want %q", got, want)
 	}
 }
 

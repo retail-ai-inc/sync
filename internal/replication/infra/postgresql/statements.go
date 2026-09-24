@@ -81,7 +81,8 @@ func qualified(rel *pglogrepl.RelationMessageV2) string {
 	return pq.QuoteIdentifier(rel.Namespace) + "." + pq.QuoteIdentifier(rel.RelationName)
 }
 
-func buildInsert(rel *pglogrepl.RelationMessageV2, tuple *pglogrepl.TupleData,
+// into is the quoted target table the statement writes to.
+func buildInsert(rel *pglogrepl.RelationMessageV2, into string, tuple *pglogrepl.TupleData,
 	table security.TableSecurity) (string, []interface{}, error) {
 
 	cols, err := readTuple(rel, tuple.Columns)
@@ -103,7 +104,7 @@ func buildInsert(rel *pglogrepl.RelationMessageV2, tuple *pglogrepl.TupleData,
 	}
 
 	return fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)",
-		qualified(rel), strings.Join(names, ", "), strings.Join(holders, ", ")), args, nil
+		into, strings.Join(names, ", "), strings.Join(holders, ", ")), args, nil
 }
 
 // buildUpdate renders an UPDATE for one row.
@@ -112,7 +113,7 @@ func buildInsert(rel *pglogrepl.RelationMessageV2, tuple *pglogrepl.TupleData,
 // every column of the old tuple, so a target row that differed anywhere — drifted
 // once, missed an earlier update, or had a field masked on the way in — matched
 // nothing and the update was silently a no-op.
-func buildUpdate(rel *pglogrepl.RelationMessageV2, oldTuple, newTuple *pglogrepl.TupleData,
+func buildUpdate(rel *pglogrepl.RelationMessageV2, into string, oldTuple, newTuple *pglogrepl.TupleData,
 	keys []string, table security.TableSecurity) (string, []interface{}, error) {
 
 	setCols, err := readTuple(rel, newTuple.Columns)
@@ -149,11 +150,11 @@ func buildUpdate(rel *pglogrepl.RelationMessageV2, oldTuple, newTuple *pglogrepl
 	clauses, args := whereClause(whereCols, args)
 
 	return fmt.Sprintf("UPDATE %s SET %s WHERE %s",
-		qualified(rel), strings.Join(assignments, ", "), strings.Join(clauses, " AND ")), args, nil
+		into, strings.Join(assignments, ", "), strings.Join(clauses, " AND ")), args, nil
 }
 
 // buildDelete renders a DELETE for one row.
-func buildDelete(rel *pglogrepl.RelationMessageV2, oldTuple *pglogrepl.TupleData,
+func buildDelete(rel *pglogrepl.RelationMessageV2, into string, oldTuple *pglogrepl.TupleData,
 	keys []string) (string, []interface{}, error) {
 
 	cols, err := readTuple(rel, oldTuple.Columns)
@@ -168,7 +169,7 @@ func buildDelete(rel *pglogrepl.RelationMessageV2, oldTuple *pglogrepl.TupleData
 	clauses, args := whereClause(cols, nil)
 
 	return fmt.Sprintf("DELETE FROM %s WHERE %s",
-		qualified(rel), strings.Join(clauses, " AND ")), args, nil
+		into, strings.Join(clauses, " AND ")), args, nil
 }
 
 // keyed narrows a row to the columns named as its key. An empty key list leaves

@@ -458,3 +458,66 @@ func TestADuplicateOnTheTargetStopsTheTask(t *testing.T) {
 		t.Fatal("the task was still retrying the refused write 30s after it was made")
 	}
 }
+
+// A failure means a streamed change went to a table named after the source rather than the one its mapping names.
+func TestAStreamedRowLandsInTheMappedTargetTable(t *testing.T) {
+	for _, tt := range []struct {
+		name         string
+		targetSchema string
+		targets      []string
+	}{
+		{"renamed", "", []string{"_dr"}},
+		{"in another schema", "dr", []string{"_dr"}},
+		{"to two tables", "", []string{"_a", "_b"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			table, publication, slot := names(t, "pg_mapped")
+			src, tgt := open(t, harness.PostgresSource, sourceDatabase), open(t, harness.PostgresTarget, targetDatabase)
+			sourceTable(t, src, tgt, table, publication, slot)
+
+			schema := "public"
+			if tt.targetSchema != "" {
+				schema = tt.targetSchema + "_" + table
+				mustExec(t, tgt, "CREATE SCHEMA "+schema)
+				t.Cleanup(func() { _, _ = tgt.Exec("DROP SCHEMA IF EXISTS " + schema + " CASCADE") })
+			}
+			var mapped []config.TableMapping
+			var targets []string
+			for _, suffix := range tt.targets {
+				target := table + suffix
+				mapped = append(mapped, config.TableMapping{SourceTable: table, TargetTable: target})
+				targets = append(targets, schema+"."+target)
+				t.Cleanup(func() { _, _ = tgt.Exec("DROP TABLE IF EXISTS " + schema + "." + target) })
+			}
+			mustExec(t, src, fmt.Sprintf("INSERT INTO %s (id, name) VALUES (1, 'copied')", table))
+
+			cfg := syncTask(t, table, publication, slot, mapped...)
+			if tt.targetSchema != "" {
+				cfg.Mappings[0].TargetSchema = schema
+			}
+			startSyncer(t, cfg)
+			harness.Eventually(t, 45*time.Second, func() error {
+				for _, target := range targets {
+					if n := countRows(t, tgt, target, "id = 1"); n != 1 {
+						return fmt.Errorf("the initial copy has not landed in %s: %d rows", target, n)
+					}
+				}
+				return nil
+			})
+
+			mustExec(t, src, fmt.Sprintf("INSERT INTO %s (id, name) VALUES (2, 'streamed')", table))
+			mustExec(t, src, fmt.Sprintf("UPDATE %s SET name = 'updated' WHERE id = 1", table))
+			harness.Eventually(t, 20*time.Second, func() error {
+				for _, target := range targets {
+					if n := countRows(t, tgt, target, "(id = 1 AND name = 'updated') OR id = 2"); n != 2 {
+						return fmt.Errorf("the streamed changes have not arrived in %s", target)
+					}
+				}
+				return nil
+			})
+			if n := countRows(t, tgt, "information_schema.tables", "table_name = $1", table); n != 0 {
+				t.Errorf("the target has %d table(s) named after the source table %s", n, table)
+			}
+		})
+	}
+}
