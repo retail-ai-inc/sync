@@ -539,3 +539,92 @@ func TestATargetTableThatCannotBeCountedStopsTheCopy(t *testing.T) {
 		t.Errorf("the error does not name the table: %v", err)
 	}
 }
+
+// byTable answers a question about a table with that table's columns, and says it has no indexes.
+type byTable struct {
+	columns map[string][][]any
+	asked   []string
+}
+
+func (b *byTable) Query(_ context.Context, sql string, args ...any) (pgx.Rows, error) {
+	table := args[1].(string)
+	b.asked = append(b.asked, table)
+	if strings.Contains(sql, "pg_indexes") {
+		return &cannedRows{columns: []string{"indexname", "indexdef"}}, nil
+	}
+	rows, known := b.columns[table]
+	if !known {
+		return nil, errors.New("permission denied for table " + table)
+	}
+	return &cannedRows{rows: rows}, nil
+}
+
+// A failure means one table the target could not be given stopped the rest, or one it already held was rebuilt.
+func TestPreparingTheTargetCreatesEachMissingTableAndGoesPastOneThatFails(t *testing.T) {
+	target := schemaTargetDB(t)
+	for _, statement := range []string{
+		`ATTACH DATABASE ':memory:' AS information_schema`,
+		`CREATE TABLE information_schema.tables (table_schema TEXT, table_name TEXT)`,
+		`INSERT INTO information_schema.tables VALUES ('public', 'orders')`,
+	} {
+		if _, err := target.Exec(statement); err != nil {
+			t.Fatalf("%s: %v", statement, err)
+		}
+	}
+	source := &byTable{columns: map[string][][]any{
+		// SQLite takes neither the sequence nor the default, so this create fails on the target.
+		"serial": {{"id", "integer", "NO", "nextval('serial_id_seq'::regclass)", nil, nil, nil}},
+		"lines": {
+			{"id", "integer", "NO", nil, nil, nil, nil},
+			{"amount", "numeric", "YES", nil, nil, int64(12), int64(2)},
+		},
+	}}
+	work := &schemaWork{Source: source, Target: target, Logger: quiet(), Config: config.SyncConfig{
+		Mappings: []config.DatabaseMapping{{}, {Tables: []config.TableMapping{
+			{SourceTable: "orders", TargetTable: "orders"},
+			{SourceTable: "unreadable", TargetTable: "unreadable"},
+			{SourceTable: "serial", TargetTable: "serial"},
+			{SourceTable: "lines", TargetTable: "lines"},
+		}}},
+	}}
+
+	if err := work.prepare(context.Background()); err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+
+	if got := strings.Join(source.asked, ","); got != "unreadable,serial,lines,lines" {
+		t.Errorf("the source was asked about %s, want each missing table once and the "+
+			"created one's indexes", got)
+	}
+	var columns []string
+	listed, err := target.Query(`SELECT name, type FROM pragma_table_info('lines', 'public')`)
+	if err != nil {
+		t.Fatalf("list the created table's columns: %v", err)
+	}
+	defer listed.Close()
+	for listed.Next() {
+		var name, kind string
+		if err := listed.Scan(&name, &kind); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		columns = append(columns, name+" "+strings.ToLower(kind))
+	}
+	if got := strings.Join(columns, ", "); got != "id integer, amount numeric(12,2)" {
+		t.Errorf("public.lines has columns %q, want the source's with their precision", got)
+	}
+}
+
+// A failure means a target that cannot say which tables it holds was given tables anyway.
+func TestATargetThatCannotListItsTablesIsNotGivenAny(t *testing.T) {
+	source := &byTable{}
+	work := &schemaWork{Source: source, Target: targetDB(t, ""), Logger: quiet(), Config: config.SyncConfig{
+		Mappings: []config.DatabaseMapping{{Tables: []config.TableMapping{{SourceTable: "orders", TargetTable: "orders"}}}},
+	}}
+
+	if err := work.prepare(context.Background()); err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if len(source.asked) != 0 {
+		t.Errorf("the source was asked about %v", source.asked)
+	}
+}
