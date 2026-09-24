@@ -5,10 +5,15 @@ package redis
 import (
 	"context"
 	"fmt"
+	"slices"
+	"strconv"
 	"testing"
 	"time"
 
 	goredis "github.com/redis/go-redis/v9"
+
+	"github.com/retail-ai-inc/sync/internal/replication/domain"
+	"github.com/retail-ai-inc/sync/internal/replication/infra/directionlock"
 )
 
 // A flush is the one command that destroys data on the target rather than
@@ -184,6 +189,143 @@ func TestAFlushOnAClusterOnlyEmptiesTheShardsSlots(t *testing.T) {
 			}
 		} else if err != nil {
 			t.Fatalf("%s in slot %d was deleted with the other half (%v)", key, slot, err)
+		}
+	}
+}
+
+const flushRestoreTaskID = 8823
+
+// restoringApplier puts back the position and a claim after a flush, as the
+// syncer's RestoreState does.
+func restoringApplier(t *testing.T, target *goredis.Client, taskID int, floor int64) *Applier {
+	t.Helper()
+	applier := standaloneApplier(t, nil, target, taskID, floor)
+	applier.RestoreState = func(ctx context.Context, pipe goredis.Pipeliner, position string) {
+		pipe.Set(ctx, metaKey(taskID, "0"), position, 0)
+		pipe.HSet(ctx, directionlock.RedisKey, strconv.Itoa(taskID), "target-claim")
+	}
+	return applier
+}
+
+func restoredOffset(t *testing.T, client goredis.UniversalClient, taskID int) int64 {
+	t.Helper()
+	offset, err := storedOffset(context.Background(), client, taskID, "0")
+	if err != nil {
+		t.Fatalf("read the stored position: %v", err)
+	}
+	return offset
+}
+
+// A failure means the flush erases the position and the claim it restores.
+func TestAFlushRestoresThePositionInsideItsTransaction(t *testing.T) {
+	target := oneConnection(t, addrsFrom(t, "SYNC_REDIS_TARGET")[0])
+	emptyOne(t, target)
+	ctx := context.Background()
+
+	applier := restoringApplier(t, target, flushRestoreTaskID, 100)
+	if err := target.Set(ctx, "flushed:data", 1, 0).Err(); err != nil {
+		t.Fatalf("seed the target: %v", err)
+	}
+	all := streamedFlush(0, 110, "FLUSHALL").Payload.(*flush)
+	err := applier.flushTarget(ctx, all, applier.Positions.markersFor(100), storedPosition(200).Payload)
+	if err != nil {
+		t.Fatalf("flushTarget: %v", err)
+	}
+
+	if n, err := target.Exists(ctx, "flushed:data").Result(); err != nil || n != 0 {
+		t.Fatalf("the flush never reached the target (%v)", err)
+	}
+	if got := restoredOffset(t, target, flushRestoreTaskID); got != 110 {
+		t.Errorf("the position after the flush names offset %d, want the flush's 110", got)
+	}
+	claim, err := target.HGet(ctx, directionlock.RedisKey, strconv.Itoa(flushRestoreTaskID)).Result()
+	if err != nil || claim != "target-claim" {
+		t.Errorf("the claim after the flush reads %q (%v), want it restored", claim, err)
+	}
+}
+
+// A failure means a flush of one database empties another or moves this task's bookkeeping into it.
+func TestAFlushOfAnotherDatabaseRestoresThePositionWhereItLives(t *testing.T) {
+	targetAddr := addrsFrom(t, "SYNC_REDIS_TARGET")[0]
+	target := oneConnection(t, targetAddr)
+	emptyOne(t, target)
+	ctx := context.Background()
+	home, third := onDB(t, targetAddr, 0), onDB(t, targetAddr, 3)
+
+	applier := restoringApplier(t, target, flushRestoreTaskID, 100)
+	marker := OffsetKey(5, flushRestoreTaskID)
+	for _, seed := range []*goredis.StatusCmd{
+		third.Set(ctx, "flushed:third", 1, 0),
+		home.Set(ctx, "kept:home", 1, 0),
+		home.Set(ctx, marker, markerValue("h1", 100), 0),
+	} {
+		if err := seed.Err(); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+	flushThird := streamedFlush(3, 110, "FLUSHDB").Payload.(*flush)
+	err := applier.flushTarget(ctx, flushThird, applier.Positions.markersFor(100), storedPosition(200).Payload)
+	if err != nil {
+		t.Fatalf("flushTarget: %v", err)
+	}
+
+	if n, err := third.DBSize(ctx).Result(); err != nil || n != 0 {
+		t.Errorf("database 3 of the target holds %d keys (%v), want it emptied", n, err)
+	}
+	if n, err := home.Exists(ctx, "kept:home").Result(); err != nil || n != 1 {
+		t.Errorf("the flush of database 3 emptied database 0 (%v)", err)
+	}
+	if n, err := home.Exists(ctx, marker).Result(); err != nil || n != 0 {
+		t.Errorf("the slot marker in the bookkeeping database survived the flush (%v)", err)
+	}
+	if got := restoredOffset(t, home, flushRestoreTaskID); got != 110 {
+		t.Errorf("the position in the bookkeeping database names offset %d, want the flush's 110", got)
+	}
+	if n, err := third.Exists(ctx, metaKey(flushRestoreTaskID, "0"), directionlock.RedisKey).Result(); err != nil || n != 0 {
+		t.Errorf("%d of this task's own keys were written into database 3 (%v)", n, err)
+	}
+}
+
+// A failure means a write on either side of a flush in the same batch is kept, lost or applied twice.
+func TestAFlushInTheMiddleOfABatchKeepsTheStreamOrder(t *testing.T) {
+	target := oneConnection(t, addrsFrom(t, "SYNC_REDIS_TARGET")[0])
+	emptyOne(t, target)
+	ctx := context.Background()
+
+	applier := standaloneApplier(t, nil, target, flushRestoreTaskID, 90)
+	runs := [][]*domain.Event{{
+		streamed(0, 100, "RPUSH", "mixed:queue", "x"),
+		streamed(0, 105, "SET", "mixed:before", "1"),
+		streamedFlush(0, 110, "FLUSHALL"),
+		streamed(0, 120, "RPUSH", "mixed:queue", "y"),
+		streamed(0, 130, "SET", "mixed:after", "1"),
+	}}
+	marker := OffsetKey(SlotOf([]byte("mixed:queue")), flushRestoreTaskID)
+
+	for _, attempt := range []string{"the batch", "the batch again"} {
+		if _, err := applier.Apply(ctx, runs, storedPosition(130)); err != nil {
+			t.Fatalf("applying %s: %v", attempt, err)
+		}
+		if attempt == "the batch" && applier.Skipped() != 0 {
+			t.Errorf("%d commands were skipped on the way to being applied at all", applier.Skipped())
+		}
+		if queue, err := target.LRange(ctx, "mixed:queue", 0, -1).Result(); err != nil ||
+			!slices.Equal(queue, []string{"y"}) {
+			t.Errorf("after %s the queue holds %v (%v), want only what followed the flush",
+				attempt, queue, err)
+		}
+		if n, err := target.Exists(ctx, "mixed:before").Result(); err != nil || n != 0 {
+			t.Errorf("after %s the write before the flush survived it (%v)", attempt, err)
+		}
+		if n, err := target.Exists(ctx, "mixed:after").Result(); err != nil || n != 1 {
+			t.Errorf("after %s the write after the flush is missing (%v)", attempt, err)
+		}
+		if got, err := target.Get(ctx, marker).Result(); err != nil || got != markerValue("h1", 130) {
+			t.Errorf("after %s the queue's slot marker reads %q (%v), want the segment's end",
+				attempt, got, err)
+		}
+		if err := applier.Positions.Refresh(ctx); err != nil {
+			t.Fatalf("Refresh: %v", err)
 		}
 	}
 }
