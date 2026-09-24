@@ -79,6 +79,17 @@ type Guard struct {
 	Now func() time.Time
 	// Owner overrides the process name; empty means the hostname.
 	Owner string
+
+	// newTicker overrides the heartbeat's ticker, for tests.
+	newTicker func(time.Duration) (<-chan time.Time, func())
+}
+
+func (g *Guard) ticker(interval time.Duration) (<-chan time.Time, func()) {
+	if g.newTicker != nil {
+		return g.newTicker(interval)
+	}
+	t := time.NewTicker(interval)
+	return t.C, t.Stop
 }
 
 func (g *Guard) now() time.Time {
@@ -343,14 +354,14 @@ func claimFailure(endpoint string, err error) error {
 // evidence the direction changed, and the claim outlives several missed
 // heartbeats.
 func (g *Guard) KeepAlive(ctx context.Context, onError func(error)) {
-	ticker := time.NewTicker(HeartbeatInterval)
-	defer ticker.Stop()
+	ticks, stop := g.ticker(HeartbeatInterval)
+	defer stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-ticks:
 			if err := g.Heartbeat(ctx); err != nil && onError != nil {
 				onError(err)
 			}

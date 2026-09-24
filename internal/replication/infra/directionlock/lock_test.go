@@ -817,3 +817,201 @@ func TestAPromotionIsOnlyClearedDeliberately(t *testing.T) {
 		t.Error("the promotion survived being cleared")
 	}
 }
+
+// put is one claim a store was asked to write, and what came of it.
+type put struct {
+	claim Claim
+	err   error
+}
+
+// reportingStore hands every write to the test, which waits on a heartbeat rather than on time.
+type reportingStore struct {
+	*memoryStore
+	puts chan<- put
+}
+
+func (s *reportingStore) Put(ctx context.Context, c Claim) error {
+	err := ctx.Err()
+	if err == nil {
+		err = s.memoryStore.Put(ctx, c)
+	}
+	s.puts <- put{claim: c, err: err}
+	return err
+}
+
+// handTicked ticks the heartbeat only when the test sends, and reports the interval it asked for.
+func handTicked(g *Guard) (chan<- time.Time, <-chan time.Duration) {
+	ticks := make(chan time.Time)
+	asked := make(chan time.Duration, 1)
+	g.newTicker = func(interval time.Duration) (<-chan time.Time, func()) {
+		asked <- interval
+		return ticks, func() {}
+	}
+	return ticks, asked
+}
+
+func reporting(source, target *memoryStore) (*reportingStore, *reportingStore, <-chan put) {
+	puts := make(chan put, 2)
+	return &reportingStore{source, puts}, &reportingStore{target, puts}, puts
+}
+
+func nextPut(t *testing.T, puts <-chan put) put {
+	t.Helper()
+	select {
+	case p := <-puts:
+		return p
+	case <-time.After(5 * time.Second):
+		t.Fatal("the heartbeat wrote no claim after a tick")
+		return put{}
+	}
+}
+
+func tick(t *testing.T, ticks chan<- time.Time, at time.Time) {
+	t.Helper()
+	select {
+	case ticks <- at:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the heartbeat is no longer waiting for its next tick")
+	}
+}
+
+func keepingAlive(t *testing.T, g *Guard, onError func(error)) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		g.KeepAlive(ctx, onError)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+}
+
+// A heartbeat that stops refreshing lets a second process take the task once the claim goes stale.
+func TestKeepAliveRefreshesBothClaimsOnEveryTick(t *testing.T) {
+	source, target := newStore("tokyo:3306/shop"), newStore("osaka:3306/shop")
+	reportingSource, reportingTarget, puts := reporting(source, target)
+	now := fixedNow
+	g := &Guard{TaskID: 1, Source: reportingSource, Target: reportingTarget,
+		Now: func() time.Time { return now }, Owner: "syncer-osaka-0"}
+	ticks, asked := handTicked(g)
+
+	keepingAlive(t, g, func(err error) { t.Errorf("a refresh failed: %v", err) })
+
+	for minute := 1; minute <= 3; minute++ {
+		now = fixedNow.Add(time.Duration(minute) * time.Minute)
+		tick(t, ticks, now)
+		for _, want := range []Role{RoleSource, RoleTarget} {
+			if p := nextPut(t, puts); p.err != nil || p.claim.Role != want {
+				t.Fatalf("tick %d wrote %+v (%v), want the %s claim written", minute, p.claim, p.err, want)
+			}
+		}
+		if got := source.claims[1].UpdatedAt; !got.Equal(now) {
+			t.Errorf("after tick %d the source claim was refreshed at %v, want %v", minute, got, now)
+		}
+		if got := target.claims[1].UpdatedAt; !got.Equal(now) {
+			t.Errorf("after tick %d the target claim was refreshed at %v, want %v", minute, got, now)
+		}
+	}
+	if got := <-asked; got != HeartbeatInterval {
+		t.Errorf("the heartbeat ticks every %v, want %v", got, HeartbeatInterval)
+	}
+}
+
+// A refresh refused because another process holds the claim must reach the caller as the retryable conflict it is.
+func TestARefreshThatFindsTheClaimTakenIsReportedAsConcurrent(t *testing.T) {
+	source, target := newStore("tokyo:3306/shop"), newStore("osaka:3306/shop")
+	reportingSource, reportingTarget, puts := reporting(source, target)
+	g := guardFor(source, target)
+	g.Source, g.Target = reportingSource, reportingTarget
+	ticks, _ := handTicked(g)
+
+	failures := make(chan error, 1)
+	keepingAlive(t, g, func(err error) { failures <- err })
+
+	target.putErr = fmt.Errorf("%w: task 1 on osaka:3306/shop", ErrClaimHeld)
+	tick(t, ticks, fixedNow)
+	nextPut(t, puts)
+	nextPut(t, puts)
+
+	var err error
+	select {
+	case err = <-failures:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a refresh that found the claim taken was not reported")
+	}
+	if !IsConcurrent(err) || IsBlocking(err) {
+		t.Errorf("error = %v, want it reported as another process running the task", err)
+	}
+	if !strings.Contains(err.Error(), "osaka:3306/shop") {
+		t.Errorf("error = %v, want the endpoint whose claim was taken named", err)
+	}
+}
+
+// A refresh that fails once must not end the heartbeat, or one blip leaves the claim to go stale under a live task.
+func TestAFailedRefreshDoesNotStopTheHeartbeat(t *testing.T) {
+	source, target := newStore("tokyo:3306/shop"), newStore("osaka:3306/shop")
+	reportingSource, reportingTarget, puts := reporting(source, target)
+	now := fixedNow
+	g := &Guard{TaskID: 1, Source: reportingSource, Target: reportingTarget,
+		Now: func() time.Time { return now }, Owner: "syncer-osaka-0"}
+	ticks, _ := handTicked(g)
+
+	failures := make(chan error, 1)
+	keepingAlive(t, g, func(err error) { failures <- err })
+
+	source.putErr = errors.New("connection refused")
+	tick(t, ticks, now)
+	if p := nextPut(t, puts); p.err == nil {
+		t.Fatalf("the unreachable source accepted %+v", p.claim)
+	}
+	<-failures
+
+	source.putErr = nil
+	now = fixedNow.Add(time.Minute)
+	tick(t, ticks, now)
+	nextPut(t, puts)
+	nextPut(t, puts)
+	if got := source.claims[1].UpdatedAt; !got.Equal(now) {
+		t.Errorf("the source claim was refreshed at %v after the endpoint came back, want %v", got, now)
+	}
+	if got := target.claims[1].UpdatedAt; !got.Equal(now) {
+		t.Errorf("the target claim was refreshed at %v after the endpoint came back, want %v", got, now)
+	}
+}
+
+// channelWarner hands each warning to the test as it is logged.
+type channelWarner chan string
+
+func (w channelWarner) Warnf(format string, args ...interface{}) {
+	w <- fmt.Sprintf(format, args...)
+}
+
+// A task whose claim could not be refreshed must say so, or it goes stale with nothing in the log.
+func TestHoldWarnsWhenARefreshFails(t *testing.T) {
+	source, target := newStore("tokyo:27017"), newStore("osaka:27017")
+	guard := guardFor(source, target)
+	ticks, _ := handTicked(guard)
+
+	warnings := make(channelWarner, 4)
+	release, err := Hold(context.Background(), guard, warnings, "MongoDB")
+	if err != nil {
+		t.Fatalf("Hold: %v", err)
+	}
+	defer release()
+
+	target.putErr = fmt.Errorf("%w: task 1 on osaka:27017", ErrClaimHeld)
+	tick(t, ticks, fixedNow)
+
+	select {
+	case message := <-warnings:
+		if !strings.Contains(message, "[MongoDB]") || !strings.Contains(message, "refresh") ||
+			!strings.Contains(message, "another process") {
+			t.Errorf("warning = %q, want the engine, the failed refresh and its cause", message)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a failed refresh under Hold was not reported")
+	}
+}
