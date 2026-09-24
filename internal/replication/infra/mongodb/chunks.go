@@ -14,10 +14,9 @@ import (
 )
 
 // Chunks reads a collection in _id order, for a re-copy that runs alongside the
-// stream. It reads inside a session so the read's operation time comes from the
-// server rather than this machine's clock: the pipeline holds each chunk against
-// that timestamp, because applying it before the stream has been read past it
-// could put a record back to an older value.
+// stream. A chunk's ReadAt is the server's operation time from before the read,
+// not this machine's clock: the pipeline orders the chunk against the stream by
+// it, so it has to be in the source's terms.
 type Chunks struct {
 	Client *mongo.Client
 	// Database is the source database.
@@ -44,6 +43,19 @@ func (c *Chunks) NextChunk(ctx context.Context, ns domain.Namespace, after strin
 
 	var chunk pipeline.Chunk
 	err = mongo.WithSession(ctx, session, func(sc context.Context) error {
+		// Taken before the Find: ReadAt must not be later than any document was
+		// read, and the session's time moves on with every getMore of the cursor.
+		if err := c.Client.Database(c.Database).RunCommand(sc,
+			bson.D{{Key: "ping", Value: 1}}).Err(); err != nil {
+			return fmt.Errorf("read the source's clock before reading %s: %w", ns, err)
+		}
+		at := session.OperationTime()
+		if at == nil {
+			return fmt.Errorf("the server reported no operation time before the read "+
+				"of %s, so the chunk cannot be ordered against the stream", ns)
+		}
+		chunk.ReadAt = time.Unix(int64(at.T), 0)
+
 		filter := bson.M{}
 		if after != "" {
 			id, err := decodeID(after)
@@ -100,16 +112,6 @@ func (c *Chunks) NextChunk(ctx context.Context, ns domain.Namespace, after strin
 			}
 		}
 		chunk.Done = len(chunk.Events) < size
-
-		// The server's own clock at the moment of the read. Taken here rather
-		// than from this process's clock because the two can differ, and the
-		// comparison the pipeline makes has to be in the source's terms.
-		if at := session.OperationTime(); at != nil {
-			chunk.ReadAt = time.Unix(int64(at.T), 0)
-		} else {
-			return fmt.Errorf("the server reported no operation time for the read of "+
-				"%s, so the chunk cannot be ordered against the stream", ns)
-		}
 		return nil
 	})
 	if err != nil {

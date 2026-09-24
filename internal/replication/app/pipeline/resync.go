@@ -17,8 +17,8 @@ type Chunk struct {
 	Events []*domain.Event
 	// After is the key to resume from, which is the last key in this chunk.
 	After string
-	// ReadAt is the source's own clock at the moment the chunk was read.
-	// Nothing is applied until the stream has been read past it.
+	// ReadAt is the source's own clock, no later than any record here was read,
+	// or a change the read missed is dated before it and the chunk overwrites it.
 	ReadAt time.Time
 	// Done reports that the object has been read to the end.
 	Done bool

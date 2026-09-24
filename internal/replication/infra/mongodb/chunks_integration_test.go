@@ -4,11 +4,17 @@ package mongodb
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
+	driverevent "go.mongodb.org/mongo-driver/v2/event"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/retail-ai-inc/sync/internal/replication/domain"
 	"github.com/retail-ai-inc/sync/test/harness"
@@ -119,4 +125,95 @@ func TestTheOplogEdgesBracketTheWindow(t *testing.T) {
 	if oldest.T > newest.T || (oldest.T == newest.T && oldest.I > newest.I) {
 		t.Errorf("the oldest oplog entry (%v) is after the newest (%v)", oldest, newest)
 	}
+}
+
+func TestAChunkIsDatedNoLaterThanItsFirstDocumentWasRead(t *testing.T) {
+	writer := connect(t, harness.MongoSource)
+	database := harness.UniqueName("chunks-readat")
+	ctx := context.Background()
+	t.Cleanup(func() { _ = writer.Database(database).Drop(context.Background()) })
+
+	const total = 150
+	coll := writer.Database(database).Collection("documents")
+	documents := make([]interface{}, total)
+	for i := range documents {
+		documents[i] = bson.M{"_id": i, "n": 0}
+	}
+	if _, err := coll.InsertMany(ctx, documents); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	var changed bson.Timestamp
+	var changeErr error
+	var once sync.Once
+	changeBetweenBatches := func() {
+		changed, changeErr = writtenAt(ctx, writer, func(sc context.Context) error {
+			_, err := coll.UpdateOne(sc, bson.M{"_id": 0}, bson.M{"$set": bson.M{"n": 1}})
+			return err
+		})
+		deadline := time.Now().Add(5 * time.Second)
+		for changeErr == nil {
+			var later bson.Timestamp
+			later, changeErr = writtenAt(ctx, writer, func(sc context.Context) error {
+				_, err := writer.Database(database).Collection("clock").InsertOne(sc, bson.M{})
+				return err
+			})
+			if later.T > changed.T {
+				return
+			}
+			if time.Now().After(deadline) {
+				changeErr = errors.New("the source's clock did not reach the next second")
+				return
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+	reader := connect(t, harness.MongoSource, options.Client().SetMonitor(&driverevent.CommandMonitor{
+		Started: func(_ context.Context, e *driverevent.CommandStartedEvent) {
+			if e.CommandName == "getMore" {
+				once.Do(changeBetweenBatches)
+			}
+		},
+	}))
+
+	chunks := &Chunks{Client: reader, Database: database, Masker: &MongoDBSyncer{}}
+	chunk, err := chunks.NextChunk(ctx, domain.Namespace{Object: "documents"}, "", total+1)
+	if err != nil {
+		t.Fatalf("NextChunk: %v", err)
+	}
+	if changeErr != nil {
+		t.Fatalf("change a document between the batches: %v", changeErr)
+	}
+	if changed.T == 0 {
+		t.Fatal("the chunk was read without a getMore, so no document changed during the read")
+	}
+	if len(chunk.Events) != total {
+		t.Fatalf("the chunk holds %d of %d documents", len(chunk.Events), total)
+	}
+	first := chunk.Events[0].Payload.(*mongo.ReplaceOneModel).Replacement.(bson.M)
+	if first["_id"] != int32(0) || first["n"] != int32(0) {
+		t.Fatalf("the chunk's first document is %v, want _id 0 as it was before the change", first)
+	}
+
+	// Dated before ReadAt, the change is queued ahead of the chunk, whose older copy then overwrites it.
+	if at := time.Unix(int64(changed.T), 0); at.Before(chunk.ReadAt) {
+		t.Errorf("a change made after the chunk read the document is dated %v, before the "+
+			"chunk's ReadAt %v", at, chunk.ReadAt)
+	}
+}
+
+func writtenAt(ctx context.Context, client *mongo.Client, write func(context.Context) error) (bson.Timestamp, error) {
+	session, err := client.StartSession()
+	if err != nil {
+		return bson.Timestamp{}, err
+	}
+	defer session.EndSession(ctx)
+	if err := mongo.WithSession(ctx, session, write); err != nil {
+		return bson.Timestamp{}, err
+	}
+	at := session.OperationTime()
+	if at == nil {
+		return bson.Timestamp{}, errors.New("the server reported no operation time for a write")
+	}
+	return *at, nil
 }

@@ -1767,13 +1767,7 @@ func TestATightBudgetStallsNeitherTheStreamNorAReCopy(t *testing.T) {
 	var once sync.Once
 	applier := &fakeApplier{}
 	applier.onApply = func() {
-		n := 0
-		for _, runs := range applier.batches {
-			for _, run := range runs {
-				n += len(run)
-			}
-		}
-		if n >= want {
+		if len(flattened(applier.batches)) >= want {
 			once.Do(func() { close(all) })
 		}
 	}

@@ -25,7 +25,7 @@ const (
 	targetDB = "target_db"
 )
 
-func connect(t *testing.T, endpoint string) *mongo.Client {
+func connect(t *testing.T, endpoint string, extra ...*options.ClientOptions) *mongo.Client {
 	t.Helper()
 
 	host, port := harness.SplitHostPort(t, endpoint)
@@ -40,7 +40,7 @@ func connect(t *testing.T, endpoint string) *mongo.Client {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	client, err := mongo.Connect(options.Client().ApplyURI(uri))
+	client, err := mongo.Connect(append([]*options.ClientOptions{options.Client().ApplyURI(uri)}, extra...)...)
 	if err != nil {
 		t.Fatalf("connect to %s: %v", endpoint, err)
 	}
