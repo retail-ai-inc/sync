@@ -72,10 +72,9 @@ func TestTheSyncerReplicatesThroughStart(t *testing.T) {
 			t.Fatalf("seed source database %d: %v", db, err)
 		}
 	}
-	// At one key a second, database 2 is still being copied for seconds after database 0 lands.
 	for i := 0; i < 4; i++ {
-		if err := sourceDB[2].Set(ctx, fmt.Sprintf("filler:%d", i), i, 0).Err(); err != nil {
-			t.Fatalf("seed source database 2: %v", err)
+		if err := sourceDB[2].Set(ctx, fmt.Sprintf("slows-the-copy:%d", i), i, 0).Err(); err != nil {
+			t.Fatalf("seed source database 2 to slow its copy: %v", err)
 		}
 	}
 
@@ -113,7 +112,6 @@ func TestTheSyncerReplicatesThroughStart(t *testing.T) {
 		got, err := targetDB[0].Get(ctx, "copied").Int()
 		return err == nil && got == 0
 	})
-	// Written inside the copy's window, so it arrives by being re-read from its own database.
 	if err := sourceDB[0].Set(ctx, "during", 0, 0).Err(); err != nil {
 		t.Fatalf("write to source database 0 during the copy: %v", err)
 	}
