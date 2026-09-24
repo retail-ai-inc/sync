@@ -683,3 +683,33 @@ func TestTheWholeDatabaseSwitchesShapeTakesEverything(t *testing.T) {
 		t.Errorf("include list = %v, want every table of shop", includes)
 	}
 }
+
+// A failure means a task that lists no tables drops every streamed row as unmapped.
+func TestATaskThatListsNoTablesStreamsEveryTable(t *testing.T) {
+	r := readerWithMappings(t, []config.DatabaseMapping{{Tables: []config.TableMapping{}}})
+
+	if err := r.OnRow(insertEvent("1", "Ada", "a@x")); err != nil {
+		t.Fatalf("OnRow: %v", err)
+	}
+	if len(r.tx) != 1 {
+		t.Fatalf("the reader holds %d statements for a row of an unlisted table, want 1", len(r.tx))
+	}
+	if r.tx[0].NS != (domain.Namespace{DB: "shop", Object: "orders"}) {
+		t.Errorf("namespace = %v, want shop.orders", r.tx[0].NS)
+	}
+	if query := r.tx[0].Payload.(statement).query; !strings.Contains(query, "`orders`") {
+		t.Errorf("statement = %q, want the row written under its own name", query)
+	}
+}
+
+// A failure means a task that names its tables replicates tables it did not name.
+func TestATaskThatListsItsTablesStreamsOnlyThose(t *testing.T) {
+	r := readerWithMappings(t, mapTable("customers", "customers"))
+
+	if err := r.OnRow(insertEvent("1", "Ada", "a@x")); err != nil {
+		t.Fatalf("OnRow: %v", err)
+	}
+	if len(r.tx) != 0 {
+		t.Errorf("the reader holds %d statements for a table the task does not name", len(r.tx))
+	}
+}

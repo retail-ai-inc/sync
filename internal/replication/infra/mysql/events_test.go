@@ -887,3 +887,16 @@ func TestARowNarrowerThanTheSchemaIsRefused(t *testing.T) {
 		t.Errorf("error = %v, want it to say how wide the row was", err)
 	}
 }
+
+// A failure means a row of a table mapped with no target name is written to a table with no name.
+func TestAnUnnamedTargetIsStreamedUnderTheSourceName(t *testing.T) {
+	db := sqliteTarget(t, ordersSchema)
+	h := newHandler(t, db, mapTable("orders", ""))
+
+	if err := apply(db, h, insertEvent("1", "Ada", "a@x")); err != nil {
+		t.Fatalf("OnRow: %v", err)
+	}
+	if got := rows(t, db); len(got) != 1 {
+		t.Errorf("target holds %v, want the row under the source's name", got)
+	}
+}

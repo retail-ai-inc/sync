@@ -221,3 +221,47 @@ func TestAnUnnamedTargetIsCopiedUnderTheSourceName(t *testing.T) {
 		t.Errorf("a statement names a table with no name: %q", target.statements())
 	}
 }
+
+// wholeDatabase is the mapping the configuration loader gives a task that lists no tables.
+var wholeDatabase = []config.DatabaseMapping{{Tables: []config.TableMapping{}}}
+
+// A failure means a task that lists no tables copies nothing and reports success, so the stream starts after rows that were never copied.
+func TestAWholeDatabaseCopyCopiesEveryTableItFinds(t *testing.T) {
+	source := &fakeDB{replies: []reply{
+		oneColumn("information_schema.tables", "orders", "_sync_direction_lock", "users"),
+		showColumns("SHOW COLUMNS FROM `shop`.`orders`", "id"),
+		showColumns("SHOW COLUMNS FROM `shop`.`users`", "id"),
+		{match: "FROM `shop`.`orders`", columns: []string{"id"}, rows: [][]driver.Value{{int64(1)}}},
+		{match: "FROM `shop`.`users`", columns: []string{"id"}, rows: [][]driver.Value{{int64(2)}}},
+	}}
+	target := &fakeDB{replies: []reply{targetHolds(1), {match: "INSERT INTO"}}}
+
+	if err := firstCopy(t, source, target, wholeDatabase); err != nil {
+		t.Fatalf("the first copy failed: %v", err)
+	}
+	for _, table := range []string{"orders", "users"} {
+		if !target.wasAsked("INSERT INTO `shop_bk`.`" + table + "`") {
+			t.Errorf("%s was not copied; the target was asked %q", table, target.statements())
+		}
+	}
+	for _, asked := range append(source.statements(), target.statements()...) {
+		if strings.Contains(asked, "_sync_direction_lock") {
+			t.Errorf("the copy reached the syncer's own table: %q", asked)
+		}
+	}
+}
+
+// A failure means a task that lists no tables reports a copy that never ran as complete.
+func TestAWholeDatabaseCopyThatCannotListTheTablesFails(t *testing.T) {
+	denied := errors.New("SELECT command denied")
+	source := &fakeDB{replies: []reply{{match: "information_schema.tables", err: denied}}}
+	target := &fakeDB{replies: []reply{targetHolds(1), {match: "INSERT INTO"}}}
+
+	err := firstCopy(t, source, target, wholeDatabase)
+	if err == nil {
+		t.Fatal("a copy that could not list the source's tables reported success")
+	}
+	if !strings.Contains(err.Error(), denied.Error()) {
+		t.Errorf("error = %v, want the listing's error", err)
+	}
+}
