@@ -521,3 +521,58 @@ func TestAStreamedRowLandsInTheMappedTargetTable(t *testing.T) {
 		})
 	}
 }
+
+// A failure means a row shaped by a column the target lacks was retried, or skipped, instead of stopping the task.
+func TestAColumnAddedOnTheSourceStopsTheTask(t *testing.T) {
+	table, publication, slot := names(t, "pg_added_column")
+	src, tgt := open(t, harness.PostgresSource, sourceDatabase), open(t, harness.PostgresTarget, targetDatabase)
+	sourceTable(t, src, tgt, table, publication, slot)
+	mustExec(t, src, fmt.Sprintf("INSERT INTO %s (id, name) VALUES (1, 'copied')", table))
+
+	logger := logrus.New()
+	logger.SetLevel(logrus.PanicLevel)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- NewPostgreSQLSyncer(syncTask(t, table, publication, slot), logger).Start(ctx) }()
+	stopped := false
+	t.Cleanup(func() {
+		cancel()
+		if !stopped {
+			<-done
+		}
+	})
+
+	harness.Eventually(t, 45*time.Second, func() error {
+		if n := countRows(t, tgt, table, "id = 1"); n != 1 {
+			return fmt.Errorf("the initial copy has not landed: %d rows", n)
+		}
+		return nil
+	})
+	mustExec(t, src, fmt.Sprintf("INSERT INTO %s (id, name) VALUES (2, 'streamed')", table))
+	harness.Eventually(t, 20*time.Second, func() error {
+		if n := countRows(t, tgt, table, "id = 2"); n != 1 {
+			return fmt.Errorf("the stream has not carried a row before the change")
+		}
+		return nil
+	})
+
+	mustExec(t, src, fmt.Sprintf("ALTER TABLE %s ADD COLUMN note TEXT", table))
+	mustExec(t, src, fmt.Sprintf("INSERT INTO %s (id, name, note) VALUES (3, 'after', 'new')", table))
+
+	select {
+	case err := <-done:
+		stopped = true
+		if !domain.IsUnrecoverable(err) {
+			t.Fatalf("err = %v, want it marked unrecoverable", err)
+		}
+		if !strings.Contains(err.Error(), "42703") {
+			t.Errorf("the refusal does not carry the target's SQLSTATE 42703: %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the task was still running 30s after a row with a column the target lacks")
+	}
+	if n := countRows(t, tgt, table, "id = 3"); n != 0 {
+		t.Errorf("the row with the added column reached the target without it")
+	}
+}
