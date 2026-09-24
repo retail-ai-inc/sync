@@ -162,16 +162,9 @@ func (s *Syncer) Start(ctx context.Context) error {
 		Labels: labels,
 	}
 	reader.Applied(from)
-	reader.Confirm = func(ctx context.Context) error {
-		received, applied := reader.Positions()
-		return pglogrepl.SendStandbyStatusUpdate(ctx, stream, pglogrepl.StandbyStatusUpdate{
-			WALWritePosition: received,
-			WALFlushPosition: applied,
-			WALApplyPosition: applied,
-		})
-	}
+	reader.Confirm = confirmer(stream, reader)
 
-	stop := s.confirmPeriodically(ctx, reader)
+	stop := s.confirmPeriodically(ctx, reader, confirmEvery)
 	defer stop()
 
 	runner := &pipeline.Runner{
@@ -218,10 +211,10 @@ func (s *Syncer) Start(ctx context.Context) error {
 // of them is what made them dangerous: the server discards WAL the standby says
 // it has flushed, so confirming everything received let it recycle segments
 // carrying changes the target had not been given yet.
-func (s *Syncer) confirmPeriodically(ctx context.Context, reader *Reader) func() {
+func (s *Syncer) confirmPeriodically(ctx context.Context, reader *Reader, every time.Duration) func() {
 	done := make(chan struct{})
 	go func() {
-		ticker := time.NewTicker(confirmEvery)
+		ticker := time.NewTicker(every)
 		defer ticker.Stop()
 		for {
 			select {
@@ -238,6 +231,18 @@ func (s *Syncer) confirmPeriodically(ctx context.Context, reader *Reader) func()
 		}
 	}()
 	return func() { close(done) }
+}
+
+// confirmer reports the reader's positions to the source over stream.
+func confirmer(stream *pgconn.PgConn, reader *Reader) func(context.Context) error {
+	return func(ctx context.Context) error {
+		received, applied := reader.Positions()
+		return pglogrepl.SendStandbyStatusUpdate(ctx, stream, pglogrepl.StandbyStatusUpdate{
+			WALWritePosition: received,
+			WALFlushPosition: applied,
+			WALApplyPosition: applied,
+		})
+	}
 }
 
 // confirmEvery is how often the source is told where this task has got to. The
