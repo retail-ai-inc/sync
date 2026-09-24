@@ -436,3 +436,163 @@ func TestATaskWhosePasswordCannotBeOpenedIsNotStarted(t *testing.T) {
 		t.Errorf("loaded task %d, want the readable one", got[0].ID)
 	}
 }
+
+func twoByTwoSecurityTask(securityEnabled bool) string {
+	enabled := "false"
+	if securityEnabled {
+		enabled = "true"
+	}
+	return `{
+	  "type": "mysql",
+	  "securityEnabled": ` + enabled + `,
+	  "sourceConn": {"host":"tokyo","port":"3306","database":"shop"},
+	  "mappings": [
+	    {"sourceDatabase": "shop", "targetDatabase": "shop", "tables": [
+	      {"sourceTable": "users", "targetTable": "users",
+	       "fieldSecurity": [{"field": "email", "securityType": "masked"}]},
+	      {"sourceTable": "orders", "targetTable": "orders"}
+	    ]},
+	    {"sourceDatabase": "pay", "targetDatabase": "pay", "tables": [
+	      {"sourceTable": "ledger", "targetTable": "ledger"},
+	      {"sourceTable": "cards", "targetTable": "cards",
+	       "fieldSecurity": [{"field": "card_no", "securityType": "encrypted"}]}
+	    ]}
+	  ]
+	}`
+}
+
+func loadOneTask(t *testing.T, taskJSON string) SyncConfig {
+	t.Helper()
+
+	db := newConfigDB(t)
+	if _, err := db.Exec(`INSERT INTO sync_tasks (id, enable, config_json) VALUES (1, 1, ?)`, taskJSON); err != nil {
+		t.Fatalf("seed sync_tasks: %v", err)
+	}
+	got, err := loadSyncTasks(db)
+	if err != nil {
+		t.Fatalf("loadSyncTasks: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("loaded %d tasks, want 1", len(got))
+	}
+	return got[0]
+}
+
+func securedFields(table TableMapping) []string {
+	var fields []string
+	for _, rule := range table.FieldSecurity {
+		field, _ := rule.(map[string]interface{})["field"].(string)
+		fields = append(fields, field)
+	}
+	return fields
+}
+
+// A table given another table's rules, or none, replicates its protected columns in the clear.
+func TestEveryTableGetsItsOwnFieldSecurity(t *testing.T) {
+	sc := loadOneTask(t, twoByTwoSecurityTask(true))
+
+	if len(sc.Mappings) != 2 || len(sc.Mappings[0].Tables) != 2 || len(sc.Mappings[1].Tables) != 2 {
+		t.Fatalf("mappings shape = %+v, want 2 mappings of 2 tables", sc.Mappings)
+	}
+	want := map[string][]string{
+		"users":  {"email"},
+		"orders": nil,
+		"ledger": nil,
+		"cards":  {"card_no"},
+	}
+	for i, mapping := range sc.Mappings {
+		for j, table := range mapping.Tables {
+			if !table.SecurityEnabled {
+				t.Errorf("mappings[%d].tables[%d] (%s) has SecurityEnabled = false", i, j, table.SourceTable)
+			}
+			if got := securedFields(table); strings.Join(got, ",") != strings.Join(want[table.SourceTable], ",") {
+				t.Errorf("mappings[%d].tables[%d] (%s) protects %v, want %v",
+					i, j, table.SourceTable, got, want[table.SourceTable])
+			}
+		}
+	}
+	if rule := sc.Mappings[1].Tables[1].FieldSecurity[0].(map[string]interface{}); rule["securityType"] != "encrypted" {
+		t.Errorf("cards.card_no securityType = %v, want encrypted", rule["securityType"])
+	}
+}
+
+// Masking switched off at the root must be off for every table, whatever rules they carry.
+func TestSecurityDisabledAtTheRootIsDisabledOnEveryTable(t *testing.T) {
+	sc := loadOneTask(t, twoByTwoSecurityTask(false))
+
+	tables := 0
+	for i, mapping := range sc.Mappings {
+		for j, table := range mapping.Tables {
+			tables++
+			if table.SecurityEnabled {
+				t.Errorf("mappings[%d].tables[%d] (%s) has SecurityEnabled = true", i, j, table.SourceTable)
+			}
+		}
+	}
+	if tables != 4 {
+		t.Errorf("loaded %d tables, want 4", tables)
+	}
+}
+
+// A Redis setting read into the wrong field, or not at all, runs the task on a default or a guessed retention.
+func TestLoadSyncTasksReadsTheRedisSettings(t *testing.T) {
+	sc := loadOneTask(t, `{
+	  "type": "redis",
+	  "sourceConn": {"host":"tokyo","port":"6379"},
+	  "dump_execution_path": "/usr/bin",
+	  "redis_position_path": "/data/pos",
+	  "retention_window": "36h",
+	  "redis_reconcile_interval": "15m",
+	  "redis_buffer_dir": "/data/buf",
+	  "redis_buffer_bytes": 1073741824,
+	  "redis_batch_window": "250ms",
+	  "redis_source_read_rate": 5000
+	}`)
+
+	if sc.Type != "redis" {
+		t.Errorf("Type = %q", sc.Type)
+	}
+	if sc.DumpExecutionPath != "/usr/bin" {
+		t.Errorf("DumpExecutionPath = %q", sc.DumpExecutionPath)
+	}
+	if sc.RedisPositionPath != "/data/pos" {
+		t.Errorf("RedisPositionPath = %q", sc.RedisPositionPath)
+	}
+	if sc.RetentionWindow != 36*time.Hour {
+		t.Errorf("RetentionWindow = %v, want 36h", sc.RetentionWindow)
+	}
+	if sc.RedisReconcileInterval != 15*time.Minute {
+		t.Errorf("RedisReconcileInterval = %v, want 15m", sc.RedisReconcileInterval)
+	}
+	if sc.RedisBufferDir != "/data/buf" {
+		t.Errorf("RedisBufferDir = %q", sc.RedisBufferDir)
+	}
+	if sc.RedisBufferBytes != 1<<30 {
+		t.Errorf("RedisBufferBytes = %d, want %d", sc.RedisBufferBytes, int64(1<<30))
+	}
+	if sc.RedisBatchWindow != 250*time.Millisecond {
+		t.Errorf("RedisBatchWindow = %v, want 250ms", sc.RedisBatchWindow)
+	}
+	if sc.RedisSourceReadRate != 5000 {
+		t.Errorf("RedisSourceReadRate = %d, want 5000", sc.RedisSourceReadRate)
+	}
+}
+
+// A duration that does not parse must leave the setting at zero without dropping the task or its other settings.
+func TestAnUnreadableRedisDurationIsLeftAtZeroAndTheTaskStillLoads(t *testing.T) {
+	sc := loadOneTask(t, `{
+	  "type": "redis",
+	  "retention_window": "36 hours",
+	  "redis_reconcile_interval": "soon",
+	  "redis_batch_window": "fast",
+	  "redis_buffer_dir": "/data/buf"
+	}`)
+
+	if sc.Type != "redis" || sc.RedisBufferDir != "/data/buf" {
+		t.Errorf("Type/RedisBufferDir = %q/%q, want the task loaded", sc.Type, sc.RedisBufferDir)
+	}
+	if sc.RetentionWindow != 0 || sc.RedisReconcileInterval != 0 || sc.RedisBatchWindow != 0 {
+		t.Errorf("RetentionWindow/RedisReconcileInterval/RedisBatchWindow = %v/%v/%v, want all zero",
+			sc.RetentionWindow, sc.RedisReconcileInterval, sc.RedisBatchWindow)
+	}
+}
