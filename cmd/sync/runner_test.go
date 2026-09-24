@@ -5,11 +5,13 @@ import (
 	"database/sql"
 	"io"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/retail-ai-inc/sync/internal/platform/config"
+	"github.com/retail-ai-inc/sync/internal/platform/sqlite"
 	"github.com/sirupsen/logrus"
 )
 
@@ -109,32 +111,138 @@ func TestRunSyncTasksStartsMonitoringWhenEnabled(t *testing.T) {
 	}
 }
 
-// TestTheConfigurationIsRereadEveryTenSeconds records the reload cadence, and
-// that a change is only acted on when configsEqual says the tasks differ.
-func TestTheConfigurationIsRereadEveryTenSeconds(t *testing.T) {
-	db := useTempConfigDB(t)
+// useControlDB points SYNC_DB_PATH at a fresh control database with the real
+// schema, and returns a handle to edit it with.
+func useControlDB(t *testing.T) *sql.DB {
+	t.Helper()
 
-	cfg := &config.Config{SyncConfigs: nil}
+	t.Setenv("SYNC_DB_PATH", filepath.Join(t.TempDir(), "sync.db"))
+	db, err := sqlite.OpenSQLiteDB()
+	if err != nil {
+		t.Fatalf("open the control database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return db
+}
 
+func execOrFail(t *testing.T, db *sql.DB, statement string) {
+	t.Helper()
+
+	if _, err := db.Exec(statement); err != nil {
+		t.Fatalf("%s: %v", statement, err)
+	}
+}
+
+// reloadFailures receives each "could not re-read" the reload loop logs.
+type reloadFailures chan string
+
+func (reloadFailures) Levels() []logrus.Level { return []logrus.Level{logrus.ErrorLevel} }
+
+func (r reloadFailures) Fire(entry *logrus.Entry) error {
+	if strings.HasPrefix(entry.Message, "Could not re-read the configuration") {
+		select {
+		case r <- entry.Message:
+		default:
+		}
+	}
+	return nil
+}
+
+// superviseStoredTasks runs the reload loop over the control database every few
+// milliseconds. Each task is a stub that hands its context to started.
+func superviseStoredTasks(t *testing.T, started chan<- context.Context) reloadFailures {
+	t.Helper()
+
+	failures := make(reloadFailures, 16)
+	log := quietLogger()
+	log.AddHook(failures)
+
+	s := newSupervisor(log)
+	s.reloadEvery = 5 * time.Millisecond
+	s.build = func(config.SyncConfig, *config.Config, *logrus.Logger) func(context.Context) error {
+		return func(ctx context.Context) error {
+			started <- ctx
+			<-ctx.Done()
+			return nil
+		}
+	}
+
+	cfg, err := config.NewConfig()
+	if err != nil {
+		t.Fatalf("read the configuration: %v", err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		runSyncTasks(ctx, quietLogger(), cfg)
+		s.run(ctx, cfg)
 	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+	return failures
+}
 
-	// A task appears in the database.
-	if _, err := db.Exec(
-		`INSERT INTO sync_tasks (enable, config_json) VALUES (1, '{"type":"cassandra"}')`); err != nil {
-		t.Fatalf("insert task: %v", err)
-	}
-	time.Sleep(200 * time.Millisecond)
+func startedTask(t *testing.T, started <-chan context.Context) context.Context {
+	t.Helper()
 
-	cancel()
 	select {
-	case <-done:
-	case <-time.After(15 * time.Second):
-		t.Fatal("runSyncTasks did not return")
+	case ctx := <-started:
+		return ctx
+	case <-time.After(5 * time.Second):
+		t.Fatal("the stored task was never started")
+		return nil
+	}
+}
+
+// A failure means a stop written to the database, promotion's included, never reaches the running task.
+func TestADisabledTaskIsStoppedAtTheNextReload(t *testing.T) {
+	db := useControlDB(t)
+	execOrFail(t, db, `INSERT INTO sync_tasks (enable, config_json) VALUES (1, '{"type":"mysql"}')`)
+	started := make(chan context.Context, 8)
+	superviseStoredTasks(t, started)
+	task := startedTask(t, started)
+
+	execOrFail(t, db, `UPDATE sync_tasks SET enable = 0`)
+
+	select {
+	case <-task.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("the task was still running five seconds after it was disabled")
+	}
+}
+
+// A failure means one unreadable read stops replication, or stops the reloads that come after it.
+func TestAnUnreadableReloadKeepsTasksRunning(t *testing.T) {
+	db := useControlDB(t)
+	execOrFail(t, db, `INSERT INTO sync_tasks (enable, config_json) VALUES (1, '{"type":"mysql"}')`)
+	started := make(chan context.Context, 8)
+	failures := superviseStoredTasks(t, started)
+	task := startedTask(t, started)
+
+	execOrFail(t, db, `ALTER TABLE config_global RENAME TO config_global_aside`)
+	for i := 0; i < 3; i++ {
+		select {
+		case <-failures:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%d reloads failed and then none: the loop stopped re-reading", i)
+		}
+	}
+	if task.Err() != nil {
+		t.Fatal("a reload that could not read the configuration stopped the task")
+	}
+	select {
+	case <-started:
+		t.Fatal("a reload that could not read the configuration restarted the task")
+	default:
+	}
+
+	execOrFail(t, db, `ALTER TABLE config_global_aside RENAME TO config_global`)
+	execOrFail(t, db, `UPDATE sync_tasks SET enable = 0`)
+	select {
+	case <-task.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("once the configuration was readable again, disabling the task did not stop it")
 	}
 }

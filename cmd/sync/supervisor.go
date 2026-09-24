@@ -141,10 +141,14 @@ type supervisor struct {
 	// build resolves a task's configuration to the function that runs it, a field
 	// so a test can substitute a stub for syncers that need databases.
 	build func(config.SyncConfig, *config.Config, *logrus.Logger) func(context.Context) error
+	// reloadEvery is configReloadInterval, a field so a test need not wait ten
+	// seconds for a reload.
+	reloadEvery time.Duration
 }
 
 func newSupervisor(log *logrus.Logger) *supervisor {
-	return &supervisor{log: log, running: map[int]*runningTask{}, build: syncerFor}
+	return &supervisor{log: log, running: map[int]*runningTask{}, build: syncerFor,
+		reloadEvery: configReloadInterval}
 }
 
 func (s *supervisor) apply(ctx context.Context, cfg *config.Config) {
@@ -433,10 +437,13 @@ func syncerFor(sc config.SyncConfig, global *config.Config, log *logrus.Logger) 
 // runSyncTasks keeps the running syncers in step with the stored configuration
 // until its context is cancelled.
 func runSyncTasks(parentCtx context.Context, log *logrus.Logger, cfg *config.Config) {
-	s := newSupervisor(log)
+	newSupervisor(log).run(parentCtx, cfg)
+}
+
+func (s *supervisor) run(parentCtx context.Context, cfg *config.Config) {
 	s.apply(parentCtx, cfg)
 
-	ticker := time.NewTicker(configReloadInterval)
+	ticker := time.NewTicker(s.reloadEvery)
 	defer ticker.Stop()
 
 	for {
@@ -449,7 +456,7 @@ func runSyncTasks(parentCtx context.Context, log *logrus.Logger, cfg *config.Con
 			if err != nil {
 				// One unreadable read is no reason to stop replicating; the tasks go on
 				// with the configuration they have.
-				log.Errorf("Could not re-read the configuration, keeping the "+
+				s.log.Errorf("Could not re-read the configuration, keeping the "+
 					"running tasks as they are: %v", err)
 				continue
 			}
