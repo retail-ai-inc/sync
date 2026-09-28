@@ -177,5 +177,6 @@ jobs:
       - name: Tear down Docker Compose
         if: always()
         run: |
-          docker-compose -f docker/docker-compose.test.yml down
-          docker-compose -f docker/docker-compose.yml down
+          # One project with one default network: taken down separately, the
+          # first call fails to remove the network the other stack still uses.
+          docker-compose -f docker/docker-compose.yml -f docker/docker-compose.test.yml down
