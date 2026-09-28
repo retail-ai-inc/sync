@@ -81,13 +81,21 @@ Create standalone databases outside of your production database servers with the
 ### 1.Start with docker (For End Users)
 
 ```bash
-docker run -d -p 8080:8080 zhangyongguang/sync:latest
+docker run -d -p 8080:8080 \
+  -e SYNC_ADMIN_PASSWORD='choose-one' \
+  -v sync-state:/mnt/state \
+  zhangyongguang/sync:latest
 ```
 
 **Access the Web UI**:
 - URL: [http://localhost:8080](http://localhost:8080)
 - Username: `admin`
-- Password: `admin`
+- Password: whatever `SYNC_ADMIN_PASSWORD` was set to on first start
+
+The control database is created at `/mnt/state/sync.db` on first start, so the
+volume is what carries the tasks across a restart. The image no longer ships a
+database, and there is no default password: see
+[The first sign-in](#the-first-sign-in).
 
 ### 2.Development Setup (For Developers)
 
@@ -100,17 +108,17 @@ cd sync
 go mod tidy
 
 # 3. Run the application
-go run cmd/sync/main.go
+go run ./cmd/sync
 
 # 4. Build the Docker image
 docker build -t sync .
-docker run -d -p 8080:8080 sync
+docker run -d -p 8080:8080 -e SYNC_ADMIN_PASSWORD='choose-one' -v sync-state:/mnt/state sync
 ```
 
 **Access the Web UI**:
 - URL: [http://localhost:8080](http://localhost:8080)
 - Username: `admin`
-- Password: `admin`
+- Password: whatever `SYNC_ADMIN_PASSWORD` was set to on first start
 
 ## Real-Time Synchronization
 
@@ -125,9 +133,99 @@ Upon restart, the tool resumes from the stored state (resume token for MongoDB, 
 ## Availability  
 
 - MongoDB: MongoDB Change Streams require a replica set or sharded cluster. See [Convert Standalone to Replica Set](https://www.mongodb.com/docs/manual/tutorial/convert-standalone-to-replica-set/).
-- MySQL/MariaDB: MySQL/MariaDB binlog-based incremental sync requires ROW or MIXED binlog format for proper event capturing.
+- MySQL/MariaDB: MySQL/MariaDB binlog-based incremental sync requires ROW binlog format and `binlog_row_image=FULL`. With `MINIMAL` the binlog carries only the changed columns, which cannot be told apart from real NULLs, so a task refuses to start rather than write NULL over columns nobody touched.
 - PostgreSQL: PostgreSQL incremental sync requires logical replication enabled with a replication slot.
-- Redis: Redis sync supports standalone and Sentinel setups but does not support Redis Cluster mode. Redis does not support resuming from the last synced state after a crash or interruption.
+- Redis: Redis sync supports standalone, Sentinel and Cluster setups. Keyspace notifications are not a durable log, so a periodic full reconciliation pass is what makes the copy converge; Redis has no offset to resume from after an interruption.
+
+## Operating it
+
+### Field encryption
+
+A table mapping can mark a field `masked` or `encrypted`. Masking is local — the
+value never leaves in readable form. Encryption needs a key, and there is no
+default one: a task that marks a field `encrypted` with neither `SYNC_FIELD_KEY`
+nor `SYNC_CONFIG_KEY` set refuses to start, naming the field.
+
+That is a change. Until recently the key was a literal in this repository, so
+anything encrypted under it could be read by anyone with the source — the
+configuration said the field was protected and it was not. If a target already
+holds values written that way:
+
+1. set `SYNC_FIELD_KEY` to a key of your own;
+2. run the initial copy again for the affected collections — the writes are
+   upserts, so every document is rewritten under the new key;
+3. anything not re-copied stays readable with the old published key, which is
+   still in this repository's history.
+
+### The first sign-in
+
+The control database is created by the program, on first start, at
+`SYNC_DB_PATH`. It comes up with no accounts in it, so set
+`SYNC_ADMIN_PASSWORD` before the first start: an empty user table plus that
+variable creates one administrator called `admin`, and the log says so.
+
+The variable is read **only when there is no account at all**. Leaving it set in
+a manifest afterwards does nothing — it cannot reset a password that has been
+changed since, and it cannot put back an administrator that was removed on
+purpose. Change the password after signing in, and the variable stops mattering.
+
+Earlier versions shipped `sync.db` inside the repository with an administrator
+row already in it, which meant one published password worked on every
+deployment. That file is no longer tracked; a clone no longer carries anybody's
+credentials, and neither does it carry their task configuration.
+
+### Where the state lives
+
+Two different kinds of state, with different durability requirements:
+
+| State | Where it lives | Lost when |
+| --- | --- | --- |
+| Replication position (MongoDB resume token, MySQL GTID/binlog position, PostgreSQL LSN) and the replication direction lock | The **target** database, in `_sync_checkpoint` and `_sync_direction_lock` | Never, short of losing the target |
+| Task definitions, users, sync history, backup jobs | One local **SQLite** file at `SYNC_DB_PATH` | The filesystem holding it goes away |
+| MongoDB change buffer and dead letters | Local directories under the task's configured path (`./mongodb_buffer` by default) | The filesystem holding them goes away — see below |
+
+Positions are on the target on purpose: a syncer that is rescheduled, or rebuilt
+in another region, resumes from where the data actually is rather than from
+whatever a local disk happened to keep.
+
+### The control plane needs one replica and a persistent volume
+
+`SYNC_DB_PATH` is a single SQLite file, and that has two consequences worth
+planning around rather than discovering:
+
+- **It must be on a persistent volume.** On Kubernetes without one, a
+  rescheduled pod comes up with no tasks at all: replication stops until
+  somebody re-enters the configuration. Replication positions survive, since
+  they are on the target, but nothing knows to go and use them.
+- **Only one replica may run.** SQLite takes one writer, and the pool is capped
+  at one connection. Two replicas sharing a volume contend for the same file;
+  two replicas on separate volumes each run every task twice, writing the same
+  rows to the same target. Use `replicas: 1` with the `Recreate` strategy, and
+  let the scheduler restart the pod rather than run a second one beside it.
+
+The MongoDB buffer directory needs a persistent volume for a different reason:
+it holds changes that have been read from the source but not yet applied to the
+target. On `emptyDir`, a reschedule while the target is unreachable drops them.
+The queue between reading and applying is bounded by the settings in the
+console (bytes and events), and a full queue stops the reader rather than the
+disk. There is no separate variable for the buffer directory: one was
+documented here and read by no code, so a deployment that set it believed it
+had a cap it did not have.
+
+### Environment
+
+| Variable | Effect |
+| --- | --- |
+| `SYNC_DB_PATH` | Path to the control-plane SQLite file. Defaults to `sync.db` beside the binary. The file and its schema are created on first start. |
+| `SYNC_ADMIN_PASSWORD` | Password for the first administrator, created only when the user table is empty. Ignored once an account exists. |
+| `SYNC_CONFIG_KEY` | 32-byte key, base64 or hex, that encrypts the database passwords stored in the task configuration. Without it they are stored in clear text and startup says so. |
+| `SYNC_TOKEN_SECRET` | Signing secret for API tokens. Without it a generated one is used, so tokens do not survive a restart. |
+| `SYNC_FIELD_KEY` | 32-byte key, base64 or hex, that encrypts the fields a task marks `encrypted`. `SYNC_CONFIG_KEY` is used when this is unset. A task that marks a field `encrypted` and has neither will not start. |
+| `SYNC_PASSWORD_ITERATIONS` | Work factor for hashing the interface's own passwords. The default costs a noticeable fraction of a second per login; lower it only on slower hardware. |
+| `SYNC_LAG_ALERT_SECONDS` | Replication lag, in seconds, past which a task is reported as alerting. |
+| `SYNC_MONGO_NO_TRANSACTION` | `1` applies each MongoDB batch as a bare bulk write rather than inside a transaction. A batch interrupted part way is then applied in part while the position moves past it, so the target is quietly missing changes. It exists because a batch spanning shards is a two-phase commit and that cost is a measurement, not an opinion — set it only once the cost has been measured on the cluster in question, and run the consistency check while it is set. Startup warns whenever it is on. |
+| `SYNC_VERIFY_INTERVAL` | How often to compare each table against its source, e.g. `1h`. Unset means never. |
+| `SYNC_VERIFY_REPAIR` | `true` to also repair the differences the comparison finds, rather than only report them. |
 
 ## Contributing
 

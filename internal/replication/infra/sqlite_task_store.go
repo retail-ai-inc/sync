@@ -1,0 +1,257 @@
+// Package infra holds the replication context's access to the outside world:
+// the sync_tasks table, the monitoring log it reads progress from, and the four
+// engine adapters in its subdirectories.
+package infra
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+
+	"github.com/retail-ai-inc/sync/internal/platform/httpx"
+	"github.com/retail-ai-inc/sync/internal/platform/secret"
+	"github.com/retail-ai-inc/sync/internal/platform/sqlite"
+	"github.com/retail-ai-inc/sync/internal/replication/domain"
+	"github.com/sirupsen/logrus"
+)
+
+// Stages a store call can fail at, named by the message the endpoint answers
+// with.
+const (
+	StageOpen    = "open db fail"
+	StageQuery   = "query sync_tasks fail"
+	StageScan    = "scan sync_tasks fail"
+	StageIterate = "sync_tasks iteration error"
+	StageInsert  = "insert fail"
+	StageUpdate  = "update fail"
+	StageDelete  = "delete fail"
+	StageLookup  = "query sync_tasks fail"
+	// StageDBFail is kept for callers outside this package that still name it;
+	// nothing here uses it any more, because "db fail" said less than
+	// "open db fail" for the same failure.
+	StageDBFail = "db fail"
+)
+
+type Fault struct {
+	Stage string
+	Err   error
+}
+
+func (f *Fault) Error() string { return f.Stage + ": " + f.Err.Error() }
+func (f *Fault) Unwrap() error { return f.Err }
+
+func faultAt(stage string, err error) *Fault { return &Fault{Stage: stage, Err: err} }
+
+var ErrNoSuchTask = errors.New("no such sync task")
+
+func ListTasks() ([]domain.SyncTask, error) {
+	db, err := sqlite.OpenSQLiteDB()
+	if err != nil {
+		return nil, faultAt(StageOpen, err)
+	}
+	defer db.Close()
+
+	rows, err := db.Query(`
+SELECT
+  id,
+  enable,
+  COALESCE(last_update_time,''),
+  COALESCE(last_run_time,''),
+  config_json
+FROM sync_tasks
+ORDER BY id ASC
+`)
+	if err != nil {
+		return nil, faultAt(StageQuery, err)
+	}
+	defer rows.Close()
+
+	var tasks []domain.SyncTask
+	for rows.Next() {
+		var (
+			id         int
+			enableInt  int
+			lastUpdate string
+			lastRun    string
+			cfgJSON    string
+		)
+		if err := rows.Scan(&id, &enableInt, &lastUpdate, &lastRun, &cfgJSON); err != nil {
+			return nil, faultAt(StageScan, err)
+		}
+		// The credentials are opened here so the rest of the read path sees a
+		// task the way it was written. They are masked again on the way out of
+		// the API, so a value that cannot be opened is not worth failing the
+		// whole listing for — the task simply shows the sealed form.
+		opened, err := secret.OpenTaskConfig(cfgJSON)
+		if err != nil {
+			logrus.Errorf("Task %d: %v", id, err)
+			opened = cfgJSON
+		}
+		tasks = append(tasks, domain.NewSyncTask(id, enableInt, lastUpdate, lastRun, opened))
+	}
+	if err := rows.Err(); err != nil {
+		return nil, faultAt(StageIterate, err)
+	}
+	return tasks, nil
+}
+
+func InsertTask(enable int, now string, config domain.Config) (int64, error) {
+	db, err := sqlite.OpenSQLiteDB()
+	if err != nil {
+		return 0, faultAt(StageOpen, err)
+	}
+	defer db.Close()
+
+	cfgBytes, _ := json.Marshal(config)
+	stored, err := secret.SealTaskConfig(string(cfgBytes))
+	if err != nil {
+		return 0, faultAt(StageInsert, err)
+	}
+	res, err := db.Exec(`
+INSERT INTO sync_tasks(enable, last_update_time, last_run_time, config_json)
+VALUES(?, ?, ?, ?)
+`, enable, now, "", stored)
+	if err != nil {
+		return 0, faultAt(StageInsert, err)
+	}
+	newID, _ := res.LastInsertId()
+	return newID, nil
+}
+
+func UpdateTask(id string, enable int, now string, config domain.Config) error {
+	db, err := sqlite.OpenSQLiteDB()
+	if err != nil {
+		// The same failure as everywhere else, so the same wording: this used to
+		// say "db fail" while every other call said "open db fail", and the
+		// handler renders the stage.
+		return faultAt(StageOpen, err)
+	}
+	defer db.Close()
+
+	cfgBytes, _ := json.Marshal(config)
+	stored, err := secret.SealTaskConfig(string(cfgBytes))
+	if err != nil {
+		return faultAt(StageUpdate, err)
+	}
+	res, err := db.Exec(`
+UPDATE sync_tasks
+SET enable=?,
+    last_update_time=?,
+    config_json=?
+WHERE id=?
+`, enable, now, stored, id)
+	if err != nil {
+		return faultAt(StageUpdate, err)
+	}
+	if ra, _ := res.RowsAffected(); ra == 0 {
+		return ErrNoSuchTask
+	}
+	return nil
+}
+
+// DeleteTask removes a task. It reports ErrNoSuchTask when the id matched no
+// row.
+func DeleteTask(id string) error {
+	db, err := sqlite.OpenSQLiteDB()
+	if err != nil {
+		return faultAt(StageOpen, err)
+	}
+	defer db.Close()
+
+	res, err := db.Exec(`DELETE FROM sync_tasks WHERE id=?`, id)
+	if err != nil {
+		return faultAt(StageDelete, err)
+	}
+	if ra, _ := res.RowsAffected(); ra == 0 {
+		return ErrNoSuchTask
+	}
+	return nil
+}
+
+// SetEnable flips a task's enable column and writes the matching status into
+// its stored configuration. A configuration that will not parse is replaced
+// with a document holding only the status.
+func SetEnable(id string, toStart bool) error {
+	db, err := sqlite.OpenSQLiteDB()
+	if err != nil {
+		// Every other call in this file returns a Fault carrying the stage, so
+		// the handler can say which step failed. These two returned the driver's
+		// error bare, and "the table is missing", "the row is missing" and "the
+		// database is locked" all came out as one word.
+		return faultAt(StageOpen, err)
+	}
+	defer db.Close()
+
+	var oldCfgJSON string
+	if err = db.QueryRow(`SELECT config_json FROM sync_tasks WHERE id=?`, id).Scan(&oldCfgJSON); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNoSuchTask
+		}
+		return faultAt(StageLookup, err)
+	}
+
+	statusStr, newEnable := domain.StatusStopped, 0
+	if toStart {
+		statusStr, newEnable = domain.StatusRunning, 1
+	}
+
+	data := storedConfig(oldCfgJSON)
+	data["status"] = statusStr
+	newBytes, _ := json.Marshal(data)
+
+	nowStr := httpx.TimeNowStr()
+	_, err = db.Exec(`
+UPDATE sync_tasks
+SET enable=?,
+    last_update_time=?,
+    config_json=?
+WHERE id=?
+`, newEnable, nowStr, string(newBytes), id)
+	if err != nil {
+		return faultAt(StageUpdate, err)
+	}
+	return nil
+}
+
+// storedConfig decodes a stored configuration document into a map that can be
+// written to. It never returns nil.
+func storedConfig(configJSON string) map[string]interface{} {
+	var data map[string]interface{}
+	if err := json.Unmarshal([]byte(configJSON), &data); err != nil || data == nil {
+		return make(map[string]interface{})
+	}
+	return data
+}
+
+// ReadTaskConfig returns a task's stored configuration, reporting why it could
+// not: a database it could not open, a row that is not there, a document that
+// is empty and a document that will not parse are four different failures and
+// a caller that cannot tell them apart falls back to the wrong thing.
+func ReadTaskConfig(id string) (domain.Config, error) {
+	var cfg domain.Config
+
+	db, err := sqlite.OpenSQLiteDB()
+	if err != nil {
+		return cfg, faultAt(StageOpen, err)
+	}
+	defer db.Close()
+
+	var configJSON string
+	if err := db.QueryRow("SELECT config_json FROM sync_tasks WHERE id = ?", id).Scan(&configJSON); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return cfg, ErrNoSuchTask
+		}
+		return cfg, faultAt(StageLookup, err)
+	}
+	opened, err := secret.OpenTaskConfig(configJSON)
+	if err != nil {
+		return cfg, faultAt(StageScan, err)
+	}
+	if opened == "" {
+		return cfg, faultAt(StageScan, errors.New("the stored configuration is empty"))
+	}
+	if err := json.Unmarshal([]byte(opened), &cfg); err != nil {
+		return cfg, faultAt(StageScan, err)
+	}
+	return cfg, nil
+}

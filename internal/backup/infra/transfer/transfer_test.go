@@ -1,0 +1,179 @@
+package transfer
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// stubBin installs an executable stub on PATH under the given name.
+func stubBin(t *testing.T, dir, name, body string, exitCode int) {
+	t.Helper()
+
+	// The outer PATH is restricted to the stub directory so exec.CommandContext
+	// cannot reach a real mysqldump, zip or gsutil.
+	script := fmt.Sprintf(`#!/bin/sh
+PATH=/usr/bin:/bin:/usr/local/bin
+printf '%%s\n' "$@" >> %q
+%s
+exit %d
+`, filepath.Join(dir, name+".args"), body, exitCode)
+
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("write stub %s: %v", name, err)
+	}
+}
+
+// stubPATH points PATH at a fresh directory holding only the stubs a test
+// installs, so nothing can reach a real mysqldump, zip or gsutil.
+func stubPATH(t *testing.T) string {
+	t.Helper()
+
+	dir := t.TempDir()
+	t.Setenv("PATH", dir)
+	return dir
+}
+
+func stubArgs(t *testing.T, dir, name string) []string {
+	t.Helper()
+
+	data, err := os.ReadFile(filepath.Join(dir, name+".args"))
+	if err != nil {
+		t.Fatalf("stub %s was never invoked: %v", name, err)
+	}
+	return strings.Split(strings.TrimSpace(string(data)), "\n")
+}
+
+func containsArg(args []string, want string) bool {
+	for _, a := range args {
+		if a == want {
+			return true
+		}
+	}
+	return false
+}
+
+func TestExecuteExternalZipBuildsItsArguments(t *testing.T) {
+	binDir := stubPATH(t)
+	workDir := t.TempDir()
+	input := filepath.Join(workDir, "orders.sql")
+	output := filepath.Join(workDir, "orders.zip")
+
+	if err := os.WriteFile(input, []byte("payload"), 0o600); err != nil {
+		t.Fatalf("write input: %v", err)
+	}
+	// The stub must produce the output file, which the caller then stats.
+	stubBin(t, binDir, "zip", "touch "+output, 0)
+
+	if err := Zip(context.Background(), workDir, input, output); err != nil {
+		t.Fatalf("transfer.Zip: %v", err)
+	}
+
+	args := stubArgs(t, binDir, "zip")
+	if !containsArg(args, "-j") || !containsArg(args, output) || !containsArg(args, input) {
+		t.Errorf("args = %v, want -j plus both paths", args)
+	}
+}
+
+func TestExecuteExternalZipReportsAFailingCommand(t *testing.T) {
+	binDir := stubPATH(t)
+	stubBin(t, binDir, "zip", "echo 'disk full' >&2", 1)
+
+	workDir := t.TempDir()
+	err := Zip(context.Background(), workDir,
+		filepath.Join(workDir, "in.sql"), filepath.Join(workDir, "out.zip"))
+
+	if err == nil {
+		t.Fatal("executeExternalZip() = nil, want the non-zero exit")
+	}
+	if !strings.Contains(err.Error(), "zip failed") || !strings.Contains(err.Error(), "disk full") {
+		t.Errorf("err = %v, want it to carry the command output", err)
+	}
+}
+
+// A zip command that exits 0 without producing the archive is caught by the
+// stat that follows, so a silently broken compression step does not pass as
+// success.
+func TestExecuteExternalZipRejectsAMissingArchive(t *testing.T) {
+	binDir := stubPATH(t)
+	stubBin(t, binDir, "zip", "", 0) // exits 0, writes nothing
+
+	workDir := t.TempDir()
+	err := Zip(context.Background(), workDir,
+		filepath.Join(workDir, "in.sql"), filepath.Join(workDir, "out.zip"))
+
+	if err == nil {
+		t.Fatal("executeExternalZip() = nil despite no archive being produced")
+	}
+	if !strings.Contains(err.Error(), "zip output file not created") {
+		t.Errorf("err = %v", err)
+	}
+}
+
+// archive writes a local file for an upload to carry.
+func archive(t *testing.T, name string) (string, int) {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), name)
+	body := []byte("archive contents")
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatalf("write %s: %v", name, err)
+	}
+	return path, len(body)
+}
+
+func TestExecuteExternalGCSUploadBuildsItsArguments(t *testing.T) {
+	binDir := stubPATH(t)
+	local, size := archive(t, "orders.zip")
+	stubBin(t, binDir, "gsutil", fmt.Sprintf(
+		`case "$1" in stat) echo "    Content-Length:  %d";; esac`, size), 0)
+
+	if err := UploadGCS(context.Background(), local, "gs://bucket/path/orders.zip"); err != nil {
+		t.Fatalf("transfer.UploadGCS: %v", err)
+	}
+
+	args := stubArgs(t, binDir, "gsutil")
+	// The copy, then the read-back that proves the object is there and whole.
+	want := []string{"cp", local, "gs://bucket/path/orders.zip", "stat", "gs://bucket/path/orders.zip"}
+	if strings.Join(args, " ") != strings.Join(want, " ") {
+		t.Errorf("args = %v, want %v", args, want)
+	}
+}
+
+// TestTheReadBackNamesTheObjectTheCopyWrote covers a destination that is a
+// prefix rather than an object: gsutil cp puts the file under it by its own
+// name, and that is the name the verification has to ask about.
+func TestTheReadBackNamesTheObjectTheCopyWrote(t *testing.T) {
+	binDir := stubPATH(t)
+	local, size := archive(t, "orders.zip")
+	stubBin(t, binDir, "gsutil", fmt.Sprintf(
+		`case "$1" in stat) echo "    Content-Length:  %d";; esac`, size), 0)
+
+	if err := UploadGCS(context.Background(), local, "gs://bucket/path/"); err != nil {
+		t.Fatalf("transfer.UploadGCS: %v", err)
+	}
+
+	args := stubArgs(t, binDir, "gsutil")
+	if got := args[len(args)-1]; got != "gs://bucket/path/orders.zip" {
+		t.Errorf("the read-back asked about %q, want the object cp wrote", got)
+	}
+}
+
+func TestExecuteExternalGCSUploadReportsAFailingCommand(t *testing.T) {
+	binDir := stubPATH(t)
+	local, _ := archive(t, "x.zip")
+	stubBin(t, binDir, "gsutil", "echo 'AccessDeniedException: 403' >&2", 1)
+
+	err := UploadGCS(context.Background(), local, "gs://b/x.zip")
+
+	if err == nil {
+		t.Fatal("executeExternalGCSUpload() = nil, want the non-zero exit")
+	}
+	if !strings.Contains(err.Error(), "gsutil upload failed") || !strings.Contains(err.Error(), "403") {
+		t.Errorf("err = %v, want it to carry the command output", err)
+	}
+}

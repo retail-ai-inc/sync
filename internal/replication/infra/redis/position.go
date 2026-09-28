@@ -1,0 +1,264 @@
+package redis
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"strconv"
+	"strings"
+	"sync"
+
+	goredis "github.com/redis/go-redis/v9"
+)
+
+// Where a shard's stream has got to, and where that is written down.
+//
+// The offset never lives in a place of its own. It is held one per slot, in the
+// target, written in the same transaction as the data of that slot — which is
+// the only atomic unit a Redis cluster has. Everything else about the position
+// is metadata that changes rarely, and lives in a single key.
+
+// streamPosition is the metadata half: which history the offsets belong to, and
+// whether the stream is still catching up to the first copy.
+type streamPosition struct {
+	// ReplID identifies the master's history. An offset from a different history
+	// is meaningless, and asking to resume with the wrong one earns a full
+	// resync.
+	ReplID string `json:"replid"`
+	// Offset is where to resume reading the stream from, and what a slot with no
+	// marker of its own is taken to have applied up to. It only moves after a
+	// batch has landed in every slot it touched, which is what makes both of
+	// those readings safe: a batch that failed part way leaves it where it was,
+	// so the slots that did not land are read again rather than assumed.
+	Offset int64 `json:"offset"`
+	// Phase is "value" while the stream is still inside the window the first copy
+	// was taken over, and "command" afterwards. The first copy is taken with
+	// SCAN, so it is not a point in time: a key read early may have changed
+	// before a key read late.
+	Phase string `json:"phase,omitempty"`
+	// ValueUntil is the offset the copy finished at, and so where the value
+	// phase ends.
+	ValueUntil int64 `json:"value_until,omitempty"`
+}
+
+const (
+	phaseValue   = "value"
+	phaseCommand = "command"
+)
+
+// IsZero reports whether nothing has been recorded, which asks the source for
+// everything.
+func (p streamPosition) IsZero() bool { return p.ReplID == "" }
+
+func (p streamPosition) inValuePhase(offset int64) bool {
+	return p.Phase == phaseValue && offset < p.ValueUntil
+}
+
+func (p streamPosition) encode() (string, error) {
+	payload, err := json.Marshal(p)
+	if err != nil {
+		return "", fmt.Errorf("encode the position: %w", err)
+	}
+	return string(payload), nil
+}
+
+func decodePosition(payload string) (streamPosition, error) {
+	var position streamPosition
+	if payload == "" {
+		return position, nil
+	}
+	if err := json.Unmarshal([]byte(payload), &position); err != nil {
+		return position, fmt.Errorf("read the stored position %q: %w", payload, err)
+	}
+	if position.ReplID == "" {
+		return position, fmt.Errorf("the stored position names no replication id, "+
+			"so its offset cannot be trusted: %q", payload)
+	}
+	return position, nil
+}
+
+func metaKey(taskID int, shard string) string {
+	return positionKeyPrefix + strconv.Itoa(taskID) + ":" + shard
+}
+
+// Checkpoints is the position store for one shard's stream. Two things are
+// written down, and the difference between them matters.
+type Checkpoints struct {
+	Target goredis.UniversalClient
+	TaskID int
+	Shard  string
+
+	// markers caches what was read, so the applier can decide what to skip
+	// without asking the target about every command.
+	mu      sync.Mutex
+	markers []int64
+	loaded  bool
+	// replID is the source history the markers belong to. An offset only means
+	// something within one: two masters number their streams independently, so
+	// a marker left by another history can say "already applied" about a
+	// command this one has never sent.
+	replID string
+}
+
+// ReplID reports the source history the applier should stamp its markers with.
+func (c *Checkpoints) ReplID() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.replID
+}
+
+// markerValue renders a marker: the history it belongs to, then the offset.
+func markerValue(replID string, offset int64) string {
+	return replID + ":" + strconv.FormatInt(offset, 10)
+}
+
+// markerOffset reads a marker back, and reports whether it belongs to the
+// history asked about.
+//
+// A marker written before this carried a history is a bare number, and reads
+// as belonging to no history -- which is the safe answer. Not trusting one
+// costs a replay from the resume floor; trusting the wrong one skips commands
+// that were never applied, and nothing afterwards would find out.
+func markerOffset(stored, replID string) (int64, bool) {
+	cut := strings.LastIndex(stored, ":")
+	if cut < 0 || stored[:cut] != replID || replID == "" {
+		return 0, false
+	}
+	offset, err := strconv.ParseInt(stored[cut+1:], 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return offset, true
+}
+
+// Load reads the metadata and the slot markers, and reports where to resume.
+// The resume point is the offset in the metadata, which is advanced only after
+// a batch has landed in every slot it touched.
+func (c *Checkpoints) Load(ctx context.Context, _ string) (string, error) {
+	payload, err := c.Target.Get(ctx, metaKey(c.TaskID, c.Shard)).Result()
+	if err == goredis.Nil {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("read the stored position: %w", err)
+	}
+	position, err := decodePosition(payload)
+	if err != nil {
+		return "", err
+	}
+
+	markers, err := c.readMarkers(ctx, position.Offset, position.ReplID)
+	if err != nil {
+		return "", err
+	}
+	c.mu.Lock()
+	c.markers, c.loaded, c.replID = markers, true, position.ReplID
+	c.mu.Unlock()
+
+	return position.encode()
+}
+
+// readMarkers fetches every slot's marker, defaulting the ones never written to
+// the offset the stream started at.
+func (c *Checkpoints) readMarkers(ctx context.Context, start int64, replID string) ([]int64, error) {
+	pipe := c.Target.Pipeline()
+	gets := make([]*goredis.StringCmd, SlotCount)
+	for slot := 0; slot < SlotCount; slot++ {
+		gets[slot] = pipe.Get(ctx, OffsetKey(slot, c.TaskID))
+	}
+	// A missing key is a redis.Nil error per command, not a failure of the
+	// pipeline, so the batch error is only worth reporting if it is something else.
+	if _, err := pipe.Exec(ctx); err != nil && err != goredis.Nil {
+		return nil, fmt.Errorf("read the slot markers: %w", err)
+	}
+
+	markers := make([]int64, SlotCount)
+	for slot, get := range gets {
+		value, err := get.Result()
+		if err == goredis.Nil {
+			markers[slot] = start
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read the marker for slot %d: %w", slot, err)
+		}
+		// A marker from another history is not an error, it is a marker that
+		// says nothing: the source was resharded or restarted, this slot is
+		// served by a master that numbers its stream differently, and the only
+		// safe reading is that nothing has been applied since the floor.
+		at, ours := markerOffset(value, replID)
+		if !ours {
+			markers[slot] = start
+			continue
+		}
+		markers[slot] = at
+	}
+	return markers, nil
+}
+
+// Save writes the metadata. This is the resume floor, and it is only ever
+// written after a batch has landed in every slot it touched.
+func (c *Checkpoints) Save(ctx context.Context, _, payload string) error {
+	position, err := decodePosition(payload)
+	if err != nil {
+		return err
+	}
+	if err := c.Target.Set(ctx, metaKey(c.TaskID, c.Shard), payload, 0).Err(); err != nil {
+		return fmt.Errorf("record the position: %w", err)
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.replID = position.ReplID
+	if !c.loaded {
+		markers := make([]int64, SlotCount)
+		for slot := range markers {
+			markers[slot] = position.Offset
+		}
+		c.markers, c.loaded = markers, true
+	}
+	return nil
+}
+
+// Refresh forgets the in-memory slot markers so the next batch reads them from
+// the target again. The markers are advanced in memory as each slot lands,
+// which is what lets a batch that failed part way be re-applied without
+// repeating the slots that did land.
+func (c *Checkpoints) Refresh(ctx context.Context) error {
+	c.mu.Lock()
+	c.loaded = false
+	c.markers = nil
+	c.mu.Unlock()
+	_, err := c.Load(ctx, "")
+	return err
+}
+
+func (c *Checkpoints) markersFor(start int64) []int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.loaded {
+		c.markers = make([]int64, SlotCount)
+		for slot := range c.markers {
+			c.markers[slot] = start
+		}
+		c.loaded = true
+	}
+	return c.markers
+}
+
+// Purge removes this task's position and every slot marker it wrote.
+//
+// A deleted task used to leave them on the target for ever, and a new task
+// given the same id would read a stranger's offsets and skip the stream up to
+// them rather than copying.
+func (c *Checkpoints) Purge(ctx context.Context) error {
+	pipe := c.Target.Pipeline()
+	pipe.Del(ctx, metaKey(c.TaskID, c.Shard))
+	for slot := 0; slot < SlotCount; slot++ {
+		pipe.Del(ctx, OffsetKey(slot, c.TaskID))
+	}
+	if _, err := pipe.Exec(ctx); err != nil && err != goredis.Nil {
+		return fmt.Errorf("remove the positions of task %d: %w", c.TaskID, err)
+	}
+	return nil
+}

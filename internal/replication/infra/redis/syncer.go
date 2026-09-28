@@ -1,0 +1,601 @@
+package redis
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net/url"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	goredis "github.com/redis/go-redis/v9"
+	"github.com/sirupsen/logrus"
+	"golang.org/x/sync/errgroup"
+
+	"github.com/retail-ai-inc/sync/internal/platform/config"
+	intRedis "github.com/retail-ai-inc/sync/internal/platform/dbconn/redis"
+	"github.com/retail-ai-inc/sync/internal/platform/dsn"
+	"github.com/retail-ai-inc/sync/internal/platform/metrics"
+	"github.com/retail-ai-inc/sync/internal/platform/resilience"
+	"github.com/retail-ai-inc/sync/internal/replication/app/pipeline"
+	"github.com/retail-ai-inc/sync/internal/replication/domain"
+	"github.com/retail-ai-inc/sync/internal/replication/infra/directionlock"
+)
+
+// One task, one pipeline per source shard. This is the one place the Redis
+// flow differs in shape from MySQL and MongoDB.
+
+type Syncer struct {
+	cfg    config.SyncConfig
+	logger logrus.FieldLogger
+}
+
+func NewSyncer(cfg config.SyncConfig, logger *logrus.Logger) *Syncer {
+	return &Syncer{cfg: cfg, logger: logger.WithField("sync_task_id", cfg.ID)}
+}
+
+// Start replicates until the context is cancelled, or until it cannot carry on.
+//
+// The returned error is what the supervisor decides on: nil or a transient
+// failure means try again, an ErrUnrecoverable means stop and tell somebody.
+func (s *Syncer) Start(ctx context.Context) error {
+	labels := s.labels()
+
+	source, target, err := s.connect(ctx)
+	if err != nil {
+		return err
+	}
+	defer source.Close()
+	defer target.Close()
+
+	// Nothing is read or written until the direction is agreed. A target that
+	// has been promoted, or a source that is itself somebody's target, means the
+	// pair has been reversed and carrying on would overwrite the newer side with
+	// the older one.
+	guard, stopGuard, err := s.claimDirection(ctx, source, target)
+	if err != nil {
+		if directionlock.IsBlocking(err) {
+			return domain.Unrecoverable("%v", err)
+		}
+		// Anything else is transient and the task is restarted for it: another
+		// process still finishing its shutdown, or an endpoint that is briefly
+		// unreachable — the guard reads its claims from the databases, so an
+		// outage on either side fails it while the outage lasts.
+		return fmt.Errorf("%w", err)
+	}
+	defer stopGuard()
+
+	metrics.SetTaskInfo(labels,
+		dsn.Endpoint("redis", s.cfg.SourceConnection),
+		dsn.Endpoint("redis", s.cfg.TargetConnection))
+	metrics.SetTaskUp(labels, true)
+	defer metrics.SetTaskUp(labels, false)
+
+	if err := s.warnAboutUnreplicatedThings(ctx, source, target); err != nil {
+		return err
+	}
+	s.targetPreflight(ctx, source, target, labels)
+
+	// The command specifications come from the target: it is the server that has
+	// to execute what arrives, so its idea of which key a command touches is the
+	// one that matters.
+	commands, err := loadCommandTable(ctx, target)
+	if err != nil {
+		return err
+	}
+
+	shards, err := shardsOf(ctx, source, s.sourceAddr())
+	if err != nil {
+		return err
+	}
+	s.logger.Infof("[Redis] Replicating %d shard(s)", len(shards))
+
+	// One watcher for the task, fanning out to every shard's comparison.
+	triggers := make([]chan string, len(shards))
+	for i := range triggers {
+		triggers[i] = make(chan string, 1)
+	}
+	watcher := &topologyWatcher{
+		Source:   source,
+		Baseline: shapeOf(shards),
+		Logger:   s.logger,
+		OnChange: func(what string) {
+			for _, trigger := range triggers {
+				// Never block: a comparison already queued is as good as two.
+				select {
+				case trigger <- what:
+				default:
+				}
+			}
+		},
+	}
+	// The watcher stops the shards through a cause rather than by joining the
+	// group. In the group it would only ever return on ctx.Done, so a group whose
+	// shards all returned nil while the parent context was still live would wait
+	// on it for ever -- and Start never returning means the supervisor never
+	// restarts the task and the direction claim is never released.
+	shardCtx, stopShards := context.WithCancelCause(ctx)
+	defer stopShards(nil)
+	go func() {
+		if err := watcher.Run(shardCtx); err != nil {
+			stopShards(err)
+		}
+	}()
+
+	group, groupCtx := errgroup.WithContext(shardCtx)
+
+	for i, shard := range shards {
+		shard, trigger := shard, triggers[i]
+		group.Go(func() error {
+			// errgroup does not recover a panic, so a shard's panic would end the
+			// process rather than the shard.
+			return resilience.Guard(func() error {
+				return s.runShard(groupCtx, shard, len(shards), source, target, commands, trigger, guard)
+			})
+		})
+	}
+	err = group.Wait()
+	// A shard that stopped because the watcher cancelled it reports the
+	// cancellation; the reshard is the reason worth reporting.
+	if cause := context.Cause(shardCtx); cause != nil && cause != context.Canceled {
+		return cause
+	}
+	return err
+}
+
+type shard struct {
+	// id is stable across restarts, so a position can be found again. The slot
+	// range serves: a master's address changes when it fails over, but the slots
+	// it owns are what identify it in the cluster. A master owning several ranges
+	// is named by all of them, joined by commas in slot order.
+	id   string
+	addr string
+}
+
+// sourceAddr is the address a single-server source is dialled at. It must be
+// host:port and nothing else. dsn.Endpoint appends the database, which is
+// right for a log line and wrong for a dial: a standalone source with a
+// database configured stopped the task on every attempt with "lookup
+// tcp/6379/0: unknown port".
+func (s *Syncer) sourceAddr() string {
+	return dsn.HostPort("redis", s.cfg.SourceConnection)
+}
+
+// databaseIndex reads the database a Redis DSN addresses. An unnumbered DSN
+// means database zero, which is what a client that says nothing connects to.
+func databaseIndex(connection string) (int, error) {
+	name := dsn.GetDatabaseName("redis", connection)
+	if name == "" {
+		return 0, nil
+	}
+	db, err := strconv.Atoi(name)
+	if err != nil || db < 0 {
+		return 0, fmt.Errorf("the database in the connection is %q, not an index", name)
+	}
+	return db, nil
+}
+
+// shardsOf finds the masters of a source. A shard is named by the slots it owns
+// rather than by its address, so that a shard which fails over to another node
+// keeps its position.
+func shardsOf(ctx context.Context, source goredis.UniversalClient, single string) ([]shard, error) {
+	cluster, ok := source.(*goredis.ClusterClient)
+	if !ok {
+		// One server, one stream.
+		return []shard{{id: "0", addr: single}}, nil
+	}
+
+	slots, err := cluster.ClusterSlots(ctx).Result()
+	if err != nil {
+		return nil, fmt.Errorf("ask the source which shards it has: %w", err)
+	}
+	found := shardsFromSlots(slots)
+	if len(found) == 0 {
+		return nil, fmt.Errorf("the source reported no shards")
+	}
+	return found, nil
+}
+
+// shardsFromSlots gives each master one shard, however many ranges it owns.
+// Every link to a master receives its whole stream, so a second shard on the
+// same master applies each of its writes a second time.
+func shardsFromSlots(slots []goredis.ClusterSlot) []shard {
+	seen := make(map[string]bool)
+	owned := make(map[string][]goredis.ClusterSlot)
+	var masters []string
+	for _, slot := range slots {
+		if len(slot.Nodes) == 0 {
+			continue
+		}
+		span := strconv.Itoa(int(slot.Start)) + "-" + strconv.Itoa(int(slot.End))
+		if seen[span] {
+			continue
+		}
+		seen[span] = true
+		addr := slot.Nodes[0].Addr
+		if _, known := owned[addr]; !known {
+			masters = append(masters, addr)
+		}
+		owned[addr] = append(owned[addr], slot)
+	}
+
+	found := make([]shard, 0, len(masters))
+	for _, addr := range masters {
+		ranges := owned[addr]
+		sort.Slice(ranges, func(i, j int) bool { return ranges[i].Start < ranges[j].Start })
+		spans := make([]string, len(ranges))
+		for i, slot := range ranges {
+			spans[i] = strconv.Itoa(int(slot.Start)) + "-" + strconv.Itoa(int(slot.End))
+		}
+		found = append(found, shard{id: strings.Join(spans, ","), addr: addr})
+	}
+	return found
+}
+
+func (s *Syncer) runShard(ctx context.Context, sh shard, shards int,
+	source, target goredis.UniversalClient, commands *commandTable,
+	compareNow <-chan string, guard *directionlock.Guard) error {
+
+	labels := s.labels()
+	labels["shard"] = sh.id
+
+	dir, err := s.bufferDir(sh.id)
+	if err != nil {
+		return err
+	}
+	buffer, err := OpenBuffer(BufferOptions{
+		Dir: dir,
+		// What one shard's history may take of the disk the shards share. The
+		// built-in limit is per shard and knows nothing of the volume.
+		MaxBytes: bufferCapacity(dir, shards, s.cfg.RedisBufferBytes, s.logger, labels),
+	})
+	if err != nil {
+		return err
+	}
+	defer buffer.Close()
+
+	username, password := credentials(s.cfg.SourceConnection)
+	// A rediss:// source is reached over TLS by every other client this program
+	// opens. The replication link and the node client below are not go-redis
+	// clients built from the DSN, so they have to be told: without this such a
+	// source passed the connection check and then could not be replicated from.
+	sourceTLS, tlsErr := intRedis.TLSFor(s.cfg.SourceConnection)
+	if tlsErr != nil {
+		return fmt.Errorf("read the source's TLS settings: %w", tlsErr)
+	}
+	connection := &link{
+		opts: StreamOptions{
+			Addr:     sh.addr,
+			Username: username,
+			Password: password,
+			TLS:      sourceTLS,
+		},
+		buffer: buffer,
+		shard:  sh.id,
+		logger: s.logger,
+		labels: labels,
+	}
+	defer connection.close()
+
+	// A plain connection to this shard's master, used only to ask how much
+	// history it keeps. The replication connection cannot answer: once it is a
+	// replica link it takes no ordinary commands.
+	node := goredis.NewClient(&goredis.Options{
+		Addr:      sh.addr,
+		Username:  username,
+		Password:  password,
+		TLSConfig: sourceTLS,
+	})
+	defer node.Close()
+
+	// The link reports the lag against the source's own offset, which needs a
+	// connection that still takes ordinary commands.
+	connection.node = node
+
+	// The database the target connection is on. The slot markers and the stored
+	// position live there: they are this task's bookkeeping rather than
+	// anything the source has, and keeping them in one database is what lets a
+	// slot commit its data and its marker in a single transaction however many
+	// databases that data came from.
+	bookkeepingDB, err := databaseIndex(s.cfg.TargetConnection)
+	if err != nil {
+		return err
+	}
+	sourceHomeDB, err := databaseIndex(s.cfg.SourceConnection)
+	if err != nil {
+		return err
+	}
+
+	positions := &Checkpoints{Target: target, TaskID: s.cfg.ID, Shard: sh.id}
+
+	runner := &pipeline.Runner{
+		Reader: &Reader{
+			Shard:      sh.id,
+			Link:       connection,
+			Target:     target,
+			Commands:   commands,
+			Node:       node,
+			Configured: s.cfg.RetentionWindow,
+			Logger:     s.logger,
+			Labels:     labels,
+		},
+		Applier: &Applier{
+			Target:        target,
+			Source:        source,
+			Link:          connection,
+			Positions:     positions,
+			Commands:      commands,
+			SourceHomeDB:  sourceHomeDB,
+			BookkeepingDB: bookkeepingDB,
+			// What this task keeps on the target, for the transaction that
+			// replicates a flush to write back after emptying the database it
+			// lives in. Assembled here because the two pieces belong to two
+			// packages the applier has no business knowing.
+			RestoreState: func(ctx context.Context, pipe goredis.Pipeliner, position string) {
+				if position != "" {
+					pipe.Set(ctx, metaKey(s.cfg.ID, sh.id), position, 0)
+				}
+				claim, err := guard.TargetClaim()
+				if err != nil {
+					s.logger.Warnf("[Redis] Could not encode the direction claim to "+
+						"restore after a flush: %v", err)
+					return
+				}
+				pipe.HSet(ctx, directionlock.RedisKey, strconv.Itoa(s.cfg.ID), claim)
+			},
+			Logger: s.logger,
+			Labels: labels,
+		},
+		Snapshotter: &Snapshotter{
+			Link:       connection,
+			Node:       node,
+			Source:     source,
+			Target:     target,
+			SourceConn: s.cfg.SourceConnection,
+			TargetConn: s.cfg.TargetConnection,
+			Logger:     s.logger,
+			Labels:     labels,
+			ReadRate:   s.cfg.RedisSourceReadRate,
+		},
+		Checkpoints:   positions,
+		CheckpointKey: sh.id,
+		Opts: pipeline.Options{
+			FlushInterval: s.cfg.RedisBatchWindow,
+			// A command stream cannot be reordered.
+			StreamOrder: true,
+			Labels:      labels,
+			Logger:      s.logger,
+			Engine:      "Redis",
+		},
+	}
+
+	// The comparison runs alongside, and its failures do not stop replication:
+	// a gap in assurance is not a reason to create a gap in the copy.
+	if s.cfg.RedisReconcileInterval >= 0 {
+		reconciler := &Reconciler{
+			Node:   node,
+			Source: source,
+			Target: target,
+			Shard:  sh.id,
+			// How far the target has been written, so a repair waits until the
+			// buffered commands have arrived rather than writing over them.
+			Applied:  connection.appliedOffset,
+			Interval: s.cfg.RedisReconcileInterval,
+			ReadRate: s.cfg.RedisSourceReadRate,
+			Repair:   true,
+			Now:      compareNow,
+			Logger:   s.logger,
+			Labels:   labels,
+		}
+		go reconciler.Run(ctx)
+	}
+
+	s.logger.Infof("[Redis] Shard %s: replicating %s", sh.id, sh.addr)
+	return runner.Run(ctx)
+}
+
+func (s *Syncer) bufferDir(id string) (string, error) {
+	root := s.cfg.RedisBufferDir
+	if root == "" {
+		return "", domain.Unrecoverable(
+			"this task has no redis_buffer_dir. The replication stream is written to " +
+				"disk so that a target that is briefly unavailable costs a partial " +
+				"resync rather than a full one, and there is nowhere to write it")
+	}
+	// The task id keeps two tasks on one volume apart.
+	return filepath.Join(root, strconv.Itoa(s.cfg.ID), sanitise(id)), nil
+}
+
+func sanitise(id string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r >= '0' && r <= '9', r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z',
+			r == '-', r == '_':
+			return r
+		}
+		return '_'
+	}, id)
+}
+
+func (s *Syncer) connect(ctx context.Context) (goredis.UniversalClient, goredis.UniversalClient, error) {
+	var source, target goredis.UniversalClient
+
+	err := resilience.Retry(ctx, 5, 2*time.Second, 2.0, func() error {
+		var connErr error
+		source, connErr = intRedis.GetRedisClient(s.cfg.SourceConnection)
+		return connErr
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("connect to the source: %w", err)
+	}
+	err = resilience.Retry(ctx, 5, 2*time.Second, 2.0, func() error {
+		var connErr error
+		target, connErr = intRedis.GetRedisClient(s.cfg.TargetConnection)
+		return connErr
+	})
+	if err != nil {
+		source.Close()
+		return nil, nil, fmt.Errorf("connect to the target: %w", err)
+	}
+	return source, target, nil
+}
+
+// warnAboutUnreplicatedThings says out loud what this does not carry.
+//
+// Both of these are silent in production and obvious in hindsight, which is the
+// worst combination: the data arrives, the target looks right, and the thing that
+// is missing is only discovered by the failover that needed it.
+func (s *Syncer) warnAboutUnreplicatedThings(ctx context.Context, source, target goredis.UniversalClient) error {
+	// Search indexes are not keys. FT.CREATE builds a definition that lives
+	// outside the keyspace, so copying every key still leaves the target unable
+	// to answer a single query.
+	if indexes, err := source.Do(ctx, "FT._LIST").StringSlice(); err == nil && len(indexes) > 0 {
+		s.logger.Warnf("[Redis] The source has %d search index(es) (%s). Index "+
+			"definitions are not keys and are not replicated: create them on the "+
+			"target as part of its deployment, or a failover will find the data "+
+			"present and every query empty.", len(indexes), strings.Join(indexes, ", "))
+	}
+
+	// A source that starts its fork immediately never starts the command stream.
+	// Setting this to zero reads like an optimisation: do not wait five seconds
+	// to batch several replicas into one fork, just go.
+	if delay, err := source.ConfigGet(ctx, "repl-diskless-sync-delay").Result(); err == nil {
+		if delay["repl-diskless-sync-delay"] == "0" {
+			s.logger.Warnf("[Redis] The source has repl-diskless-sync-delay set to 0. " +
+				"On Redis 8.10.1 that makes a master accept a replica and then send it " +
+				"nothing, so replication stalls after every full resync. Set it back to " +
+				"a non-zero value — the delay it buys costs seconds, and this costs " +
+				"the whole stream.")
+		}
+	}
+
+	// A value serialised by a newer server cannot be restored into an older one,
+	// so the target has to be upgraded first.
+	sourceVersion := serverVersion(ctx, source)
+	targetVersion := serverVersion(ctx, target)
+	if sourceVersion != "" && targetVersion != "" && olderThan(targetVersion, sourceVersion) {
+		return domain.Unrecoverable(
+			"the target runs Redis %s and the source runs %s. RESTORE refuses a value "+
+				"serialised by a newer server, so the first copy would fail part way "+
+				"through. Upgrade the target first — that is the order for every "+
+				"upgrade of this pair, not just this one",
+			targetVersion, sourceVersion)
+	}
+	return nil
+}
+
+func serverVersion(ctx context.Context, client goredis.UniversalClient) string {
+	info, err := client.Info(ctx, "server").Result()
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(info, "\n") {
+		if value, ok := strings.CutPrefix(strings.TrimSpace(line), "redis_version:"); ok {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func olderThan(a, b string) bool {
+	fieldsA, fieldsB := strings.Split(a, "."), strings.Split(b, ".")
+	for i := 0; i < len(fieldsA) && i < len(fieldsB); i++ {
+		numA, errA := strconv.Atoi(fieldsA[i])
+		numB, errB := strconv.Atoi(fieldsB[i])
+		if errA != nil || errB != nil {
+			return false
+		}
+		if numA != numB {
+			return numA < numB
+		}
+	}
+	return false
+}
+
+// credentials pulls the user and password out of a DSN, for the replication
+// connection which is made directly to a shard rather than through the client.
+func credentials(connection string) (string, string) {
+	parsed, err := url.Parse(connection)
+	if err != nil || parsed.User == nil {
+		return "", ""
+	}
+	password, _ := parsed.User.Password()
+	return parsed.User.Username(), password
+}
+
+// claimDirection records which way this task replicates, on both endpoints, and
+// keeps the claims refreshed for as long as it runs.
+func (s *Syncer) claimDirection(ctx context.Context, source, target goredis.UniversalClient) (*directionlock.Guard, func(), error) {
+	guard := &directionlock.Guard{
+		TaskID: s.cfg.ID,
+		Source: &directionlock.RedisStore{
+			Client:  source,
+			Address: dsn.Endpoint("redis", s.cfg.SourceConnection),
+		},
+		Target: &directionlock.RedisStore{
+			Client:  target,
+			Address: dsn.Endpoint("redis", s.cfg.TargetConnection),
+		},
+	}
+	if err := guard.Acquire(ctx); err != nil {
+		return nil, nil, err
+	}
+
+	heartbeatCtx, stop := context.WithCancel(ctx)
+	go guard.KeepAlive(heartbeatCtx, func(err error) {
+		s.logger.Warnf("[Redis] Could not refresh the replication direction claim: %v", err)
+	})
+	return guard, func() {
+		stop()
+		// The task's context is already cancelled by the time this runs, so the
+		// release needs a deadline of its own.
+		releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := guard.Release(releaseCtx); err != nil {
+			s.logger.Warnf("[Redis] Could not release the replication direction claim: %v", err)
+		}
+	}, nil
+}
+
+// labels identify this task in the metrics. Task and engine, as every other
+// engine publishes, with the shard added per shard because a cluster's shards
+// genuinely differ. The endpoints go on sync_task_info: a label is repeated on
+// every series that carries it, and these two are long and never change.
+func (s *Syncer) labels() metrics.Labels {
+	return metrics.Labels{
+		"task":   strconv.Itoa(s.cfg.ID),
+		"engine": domain.EngineLabel(s.cfg.Type),
+	}
+}
+
+// PurgeCheckpoints removes what a task left on its target, for a task that is
+// being deleted. Every shard's position goes, which needs the shard names -- so
+// the source is asked for them, and a source that cannot be reached leaves the
+// per-shard markers behind rather than blocking the delete.
+func PurgeCheckpoints(ctx context.Context, cfg config.SyncConfig) error {
+	target, err := intRedis.GetRedisClient(cfg.TargetConnection)
+	if err != nil {
+		return fmt.Errorf("connect to the target: %w", err)
+	}
+	defer target.Close()
+
+	shards := []shard{{id: "0"}}
+	if source, srcErr := intRedis.GetRedisClient(cfg.SourceConnection); srcErr == nil {
+		defer source.Close()
+		if found, listErr := shardsOf(ctx, source, dsn.HostPort("redis", cfg.SourceConnection)); listErr == nil {
+			shards = found
+		}
+	}
+
+	var failures []error
+	for _, sh := range shards {
+		positions := &Checkpoints{Target: target, TaskID: cfg.ID, Shard: sh.id}
+		if err := positions.Purge(ctx); err != nil {
+			failures = append(failures, err)
+		}
+	}
+	return errors.Join(failures...)
+}

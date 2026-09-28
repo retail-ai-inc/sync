@@ -1,0 +1,126 @@
+package mongodb
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"strings"
+	"time"
+
+	_ "github.com/mattn/go-sqlite3" // SQLite driver
+	"github.com/retail-ai-inc/sync/internal/platform/sqlite"
+	"github.com/sirupsen/logrus"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
+)
+
+func GetMongoClient(ctx context.Context, uri string) (*mongo.Client, error) {
+	clientOptions := options.Client().ApplyURI(uri)
+	clientOptions.SetConnectTimeout(10 * time.Second)
+	clientOptions.SetServerSelectionTimeout(10 * time.Second)
+	// The driver's v2 client has one timeout covering a whole operation rather
+	// than a separate socket timeout, which is what the socket timeout was being
+	// used to approximate.
+	clientOptions.SetTimeout(30 * time.Second)
+
+	client, err := mongo.Connect(clientOptions)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to MongoDB: %w", err)
+	}
+
+	// Verify the connection
+	if err := client.Ping(ctx, readpref.Primary()); err != nil {
+		client.Disconnect(ctx)
+		return nil, fmt.Errorf("failed to ping MongoDB: %w", err)
+	}
+
+	return client, nil
+}
+
+func ConnectMongoDB(ctx context.Context, host string, port string, user string, password string, database string, logger *logrus.Logger) (*mongo.Client, string, error) {
+	if logger == nil {
+		logger = logrus.StandardLogger()
+	}
+
+	logger.Infof("[MongoDB] Connecting to %s:%s database: %s", host, port, database)
+
+	uri := fmt.Sprintf("mongodb://%s:%s@%s:%s/%s?authSource=admin", user, password, host, port, database)
+
+	client, err := GetMongoClient(ctx, uri)
+	if err != nil {
+		logger.Errorf("[MongoDB] Connection failed: %v", err)
+		return nil, database, err
+	}
+
+	logger.Infof("[MongoDB] Connected successfully to %s:%s database: %s", host, port, database)
+	return client, database, nil
+}
+
+func ConnectMongoDBFromTaskID(ctx context.Context, taskID string, logger *logrus.Logger) (*mongo.Client, string, error) {
+	if logger == nil {
+		logger = logrus.StandardLogger()
+	}
+
+	db, err := openLocalDB()
+	if err != nil {
+		logger.Errorf("[MongoDB] Failed to open local DB: %v", err)
+		return nil, "", fmt.Errorf("failed to open local DB: %w", err)
+	}
+	defer db.Close()
+
+	var configJSON string
+	err = db.QueryRow("SELECT config_json FROM sync_tasks WHERE id = ?", taskID).Scan(&configJSON)
+	if err != nil {
+		logger.Errorf("[MongoDB] Failed to get task configuration: %v", err)
+		return nil, "", fmt.Errorf("failed to get task configuration: %w", err)
+	}
+
+	var config struct {
+		Type       string            `json:"type"`
+		SourceConn map[string]string `json:"sourceConn"`
+		TargetConn map[string]string `json:"targetConn"`
+	}
+
+	if err := json.Unmarshal([]byte(configJSON), &config); err != nil {
+		logger.Errorf("[MongoDB] Failed to parse config JSON: %v", err)
+		return nil, "", fmt.Errorf("failed to parse config JSON: %w", err)
+	}
+
+	// Verify it's a MongoDB task
+	if !strings.EqualFold(config.Type, "mongodb") {
+		logger.Errorf("[MongoDB] Task is not MongoDB type: %s", config.Type)
+		return nil, "", fmt.Errorf("task is not MongoDB type: %s", config.Type)
+	}
+
+	// Extract connection parameters. A task with no target connection used to
+	// produce "mongodb://:@:/?authSource=admin" and fail with an error about the
+	// URI, which says nothing about what is actually missing.
+	host := config.TargetConn["host"]
+	port := config.TargetConn["port"]
+	username := config.TargetConn["user"]
+	password := config.TargetConn["password"]
+	database := config.TargetConn["database"]
+
+	if host == "" || database == "" {
+		logger.Errorf("[MongoDB] Task %s has no target connection", taskID)
+		return nil, "", fmt.Errorf("task %s does not name a target host and database", taskID)
+	}
+
+	// Connect to MongoDB
+	return ConnectMongoDB(
+		ctx,
+		host,
+		port,
+		username,
+		password,
+		database,
+		logger,
+	)
+}
+
+// Helper function to open the local SQLite database
+func openLocalDB() (*sql.DB, error) {
+	return sqlite.OpenSQLiteDB()
+}

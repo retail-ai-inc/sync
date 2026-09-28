@@ -5,7 +5,10 @@ on:
     branches: [ main, develop ]
   pull_request:
     branches: [ main, develop ]
-    
+
+permissions:
+  contents: read
+
 jobs:
   test:
     name: Run tests and collect coverage
@@ -45,7 +48,12 @@ jobs:
 
       - name: Start Docker Compose services
         run: |
+          # Both stacks: the first carries MySQL, MariaDB and PostgreSQL, the
+          # second the MongoDB replica set and the Redis pair the integration
+          # suite addresses. Without the second, every MongoDB and Redis
+          # integration test is skipped and nothing says so.
           docker-compose -f docker/docker-compose.yml up -d
+          docker-compose -f docker/docker-compose.test.yml up -d
 
       - name: Wait for services to be ready
         run: |
@@ -72,12 +80,96 @@ jobs:
             echo "Waiting for MongoDB..."
             sleep 1
           done
-          
+
+          # 5433 is the PostgreSQL target and 3308 the MySQL one; the loops
+          # above wait only for each pair's source.
+          for port in 27117 27118 6479 6480 5433 3308 27018; do
+            for i in {1..30}; do
+              nc -z localhost $port && echo "port $port is up" && break
+              echo "Waiting for port $port..."
+              sleep 1
+            done
+          done
+
           sleep 5
           echo "All services are up!"
+
+      - name: Initiate the MongoDB replica sets
+        run: |
+          # A change stream needs a replica set on the source, and the target's
+          # applier writes each batch in a transaction, which a standalone
+          # refuses. A single-node set still has to be initiated. The main
+          # stack's source does this from init.js; the test stack's do not.
+          for pair in mongo_test_source:rs0 mongo_test_target:rs1; do
+            container=${pair%%:*}
+            set_name=${pair##*:}
+            docker exec "$container" mongosh --quiet --eval "
+              try { rs.status() } catch (e) {
+                rs.initiate({_id: '$set_name', members: [{_id: 0, host: '127.0.0.1:27017'}]})
+              }"
+            for i in {1..30}; do
+              docker exec "$container" mongosh --quiet --eval \
+                'db.hello().isWritablePrimary' | grep -q true && break
+              echo "Waiting for $set_name to elect itself..."
+              sleep 1
+            done
+          done
         
+      - name: Form the Redis clusters
+        run: |
+          # The comparison and the per-slot transaction tests need real clusters,
+          # not a standalone pair: a slot marker only means anything where slots
+          # exist. Three nodes each is the smallest set that covers 16,384 slots.
+          for port in 7001 7002 7003 7004 7005 7006; do
+            for i in {1..30}; do
+              nc -z 127.0.0.1 $port && break
+              echo "Waiting for the cluster node on $port..."
+              sleep 1
+            done
+          done
+          docker exec redis_cluster_1 redis-cli --cluster create \
+            127.0.0.1:7001 127.0.0.1:7002 127.0.0.1:7003 --cluster-yes
+          docker exec redis_cluster_4 redis-cli --cluster create \
+            127.0.0.1:7004 127.0.0.1:7005 127.0.0.1:7006 --cluster-yes
+
       - name: Run tests
-        run: go test -race -coverprofile=coverage.txt -covermode=atomic ./...
+        run: |
+          # -coverpkg=./... is required, not a nicety: the packages are split by
+          # bounded context and layer, so a test in one package exercises code in
+          # another. Without it every cross-package call counts as uncovered and
+          # the report understates coverage by roughly eight points.
+          #
+          # -tags integration runs the suite that talks to the servers started
+          # above in the same pass. Run separately and without coverage, as it
+          # used to be, every line that only a real database reaches counted as
+          # uncovered — which is most of the replication engines, the part of
+          # this repository where a defect loses data.
+          # The Redis integration suite skips itself unless it is told which
+          # servers to use and given leave to empty them — it flushes both ends,
+          # so it refuses to guess. Nobody had set these, so every Redis
+          # integration test had been skipping silently since they were written,
+          # and that package sat at 36% while the rest of the engines were near
+          # 80%. The tests that were being skipped cover the reader, the initial
+          # copy, the applier and the comparison: the parts where a defect loses
+          # data rather than availability.
+          export SYNC_REDIS_SOURCE=127.0.0.1:6479
+          export SYNC_REDIS_TARGET=127.0.0.1:6480
+          export SYNC_REDIS_ALLOW_FLUSH=1
+          export SYNC_REDIS_SOURCE_CLUSTER=127.0.0.1:7001,127.0.0.1:7002,127.0.0.1:7003
+          export SYNC_REDIS_TARGET_CLUSTER=127.0.0.1:7004,127.0.0.1:7005,127.0.0.1:7006
+          go test -race -tags integration -timeout 30m -coverpkg=./... -coverprofile=coverage.raw -covermode=atomic ./...
+          # -coverpkg emits one entry per test binary for every block in the
+          # repository, which makes the profile 32x larger. Collapse it by keeping
+          # the highest count seen for each block; `go tool cover` reports the same
+          # total either way.
+          {
+            echo "mode: atomic"
+            awk 'NR > 1 {
+              count[$1 " " $2] = ($1 " " $2 in count && count[$1 " " $2] > $3) \
+                ? count[$1 " " $2] : $3
+            }
+            END { for (block in count) print block, count[block] }' coverage.raw
+          } > coverage.txt
 
       - name: Upload results to Codecov
         uses: codecov/codecov-action@v5
@@ -88,4 +180,6 @@ jobs:
       - name: Tear down Docker Compose
         if: always()
         run: |
-          docker-compose -f docker/docker-compose.yml down
+          # One project with one default network: taken down separately, the
+          # first call fails to remove the network the other stack still uses.
+          docker-compose -f docker/docker-compose.yml -f docker/docker-compose.test.yml down
