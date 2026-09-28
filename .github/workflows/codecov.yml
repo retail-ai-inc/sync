@@ -91,20 +91,25 @@ jobs:
           sleep 5
           echo "All services are up!"
 
-      - name: Initiate the MongoDB replica set
+      - name: Initiate the MongoDB replica sets
         run: |
-          # A change stream needs a replica set, and a single-node set still has
-          # to be initiated. The main stack's source does this from init.js; the
-          # test stack's does not.
-          docker exec mongo_test_source mongosh --quiet --eval '
-            try { rs.status() } catch (e) {
-              rs.initiate({_id: "rs0", members: [{_id: 0, host: "127.0.0.1:27017"}]})
-            }'
-          for i in {1..30}; do
-            docker exec mongo_test_source mongosh --quiet --eval \
-              'db.hello().isWritablePrimary' | grep -q true && break
-            echo "Waiting for the replica set to elect itself..."
-            sleep 1
+          # A change stream needs a replica set on the source, and the target's
+          # applier writes each batch in a transaction, which a standalone
+          # refuses. A single-node set still has to be initiated. The main
+          # stack's source does this from init.js; the test stack's do not.
+          for pair in mongo_test_source:rs0 mongo_test_target:rs1; do
+            container=${pair%%:*}
+            set_name=${pair##*:}
+            docker exec "$container" mongosh --quiet --eval "
+              try { rs.status() } catch (e) {
+                rs.initiate({_id: '$set_name', members: [{_id: 0, host: '127.0.0.1:27017'}]})
+              }"
+            for i in {1..30}; do
+              docker exec "$container" mongosh --quiet --eval \
+                'db.hello().isWritablePrimary' | grep -q true && break
+              echo "Waiting for $set_name to elect itself..."
+              sleep 1
+            done
           done
         
       - name: Form the Redis clusters
