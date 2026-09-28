@@ -227,12 +227,14 @@ func preferInformative(kept, latest error) error {
 	return kept
 }
 
-func parseUint(value string) uint64 {
-	n, err := strconv.ParseUint(strings.TrimSpace(value), 10, 64)
+// parseUint32 reads a binlog offset, which the replication protocol carries in
+// four bytes; a value that does not fit is treated as unreadable, not truncated.
+func parseUint32(value string) uint32 {
+	n, err := strconv.ParseUint(strings.TrimSpace(value), 10, 32)
 	if err != nil {
 		return 0
 	}
-	return n
+	return uint32(n)
 }
 
 func readStatusRow(ctx context.Context, source *sql.DB, statement string,
@@ -266,7 +268,7 @@ func readStatusRow(ctx context.Context, source *sql.DB, statement string,
 		case "file":
 			head.File = value
 		case "position":
-			head.Position = uint32(parseUint(value))
+			head.Position = parseUint32(value)
 		case "executed_gtid_set":
 			head.GTIDSet = strings.ReplaceAll(value, "\n", "")
 		}

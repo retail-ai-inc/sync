@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 
 	"github.com/retail-ai-inc/sync/internal/platform/config"
 	"github.com/retail-ai-inc/sync/internal/platform/dsn"
@@ -98,13 +99,5 @@ func countTable(ctx context.Context, db *sql.DB, schema, table string) (int64, e
 // quoteName renders an identifier, doubling any backtick in it so a name
 // cannot end the quoting and become part of the statement.
 func quoteName(name string) string {
-	out := make([]rune, 0, len(name)+2)
-	out = append(out, '`')
-	for _, r := range name {
-		if r == '`' {
-			out = append(out, '`')
-		}
-		out = append(out, r)
-	}
-	return string(append(out, 0x60))
+	return "`" + strings.ReplaceAll(name, "`", "``") + "`"
 }

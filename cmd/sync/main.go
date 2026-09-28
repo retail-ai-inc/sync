@@ -5,10 +5,11 @@ import (
 	"errors"
 	"fmt"
 	replicationapp "github.com/retail-ai-inc/sync/internal/replication/app"
+	"io/fs"
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
+	"path"
 	"strings"
 	"syscall"
 	"time"
@@ -208,11 +209,14 @@ func newRouter() *chi.Mux {
 // entry point otherwise, because the routes belong to the single-page
 // application rather than to this server.
 func serveUI(w http.ResponseWriter, r *http.Request) {
-	path := r.URL.Path
-	filePath := filepath.Join("ui/dist", path)
-
-	_, err := os.Stat(filePath)
-	fileExists := !os.IsNotExist(err)
+	// Looked up through an fs.FS, which refuses a name that climbs out of its
+	// root, so a request cannot probe for files outside ui/dist.
+	name := strings.TrimPrefix(path.Clean("/"+r.URL.Path), "/")
+	if name == "" {
+		name = "."
+	}
+	_, err := fs.Stat(os.DirFS("ui/dist"), name)
+	fileExists := !errors.Is(err, fs.ErrNotExist)
 
 	if fileExists {
 		http.StripPrefix("/", http.FileServer(http.Dir("ui/dist"))).ServeHTTP(w, r)

@@ -97,6 +97,23 @@ func TestABuiltFileIsServedAsItself(t *testing.T) {
 	}
 }
 
+// TestAPathOutsideTheBuildIsNotLookedUp: a request that climbs out of ui/dist
+// is answered the same whether or not the file it names exists.
+func TestAPathOutsideTheBuildIsNotLookedUp(t *testing.T) {
+	inWorkingDirectory(t)
+	writeUIFile(t, "index.html", "<html>the application</html>")
+	if err := os.WriteFile("ui/outside.txt", []byte("outside"), 0o644); err != nil {
+		t.Fatalf("write ui/outside.txt: %v", err)
+	}
+
+	present := serve(t, http.MethodGet, "/../outside.txt")
+	absent := serve(t, http.MethodGet, "/../absent.txt")
+	if present.Code != absent.Code || present.Body.String() != absent.Body.String() {
+		t.Errorf("an existing file outside the build answers %d %q, a missing one %d %q",
+			present.Code, present.Body.String(), absent.Code, absent.Body.String())
+	}
+}
+
 // inWorkingDirectory moves the process into a throwaway directory, because the
 // UI is served from the relative path "ui/dist".
 func inWorkingDirectory(t *testing.T) {

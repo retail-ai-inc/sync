@@ -130,6 +130,24 @@ func TestAPositionThatIsNotANumberReadsAsZero(t *testing.T) {
 	}
 }
 
+// TestAPositionTooLargeForTheProtocolReadsAsZero rather than wrapping to an
+// offset that exists in the file.
+func TestAPositionTooLargeForTheProtocolReadsAsZero(t *testing.T) {
+	fake := &fakeDB{replies: []reply{{
+		match:   "SHOW BINARY LOG STATUS",
+		columns: []string{"File", "Position"},
+		rows:    [][]driver.Value{{"mysql-bin.000001", "4294967300"}},
+	}}}
+
+	head, err := readBinlogHead(context.Background(), fake.open(t))
+	if err != nil {
+		t.Fatalf("readBinlogHead: %v", err)
+	}
+	if head.Position != 0 {
+		t.Errorf("Position = %d, want 0", head.Position)
+	}
+}
+
 // TestTheGTIDComparisonAsksTheServer covers the preferred comparison: whether
 // the source's set is contained in what the target applied. The server makes
 // the judgement, because a GTID set is not something to compare as text.
