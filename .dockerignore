@@ -3,8 +3,12 @@
 # names, so stale content-hashed chunks would survive into the image.
 ui/dist
 
-# Build output and local state, rebuilt inside the image
+# Build output and local state. The control database is created by the program
+# at SYNC_DB_PATH on first start; a developer's local copy must not reach the
+# build context, which is how one admin password and one set of sync tasks ended
+# up in every published image.
 sync
+sync.db
 sync.db-wal
 sync.db-shm
 

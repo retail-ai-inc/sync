@@ -1,0 +1,68 @@
+package mongodb
+
+import (
+	"testing"
+
+	"go.mongodb.org/mongo-driver/v2/bson"
+)
+
+// TestANestedDocumentIsReadWhicheverShapeTheDriverGaveIt.
+func TestANestedDocumentIsReadWhicheverShapeTheDriverGaveIt(t *testing.T) {
+	raw, err := bson.Marshal(bson.M{"city": "Osaka", "postcode": "530-0001"})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+
+	for _, c := range []struct {
+		name  string
+		value interface{}
+	}{
+		{"bson.M, as the stream usually decodes it", bson.M{"city": "Osaka", "postcode": "530-0001"}},
+		{"a plain map", map[string]interface{}{"city": "Osaka", "postcode": "530-0001"}},
+		{"bson.D, which keeps field order", bson.D{{Key: "city", Value: "Osaka"}, {Key: "postcode", Value: "530-0001"}}},
+		{"bson.Raw, undecoded", bson.Raw(raw)},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got := documentOf(c.value)
+			if got == nil {
+				t.Fatal("read as nothing — an update built from this would write no " +
+					"fields and still report success")
+			}
+			if got["city"] != "Osaka" {
+				t.Errorf("city = %v, want Osaka", got["city"])
+			}
+			if got["postcode"] != "530-0001" {
+				t.Errorf("postcode = %v, want 530-0001", got["postcode"])
+			}
+		})
+	}
+}
+
+// TestReadingADocumentDoesNotShareItsStorage.
+func TestReadingADocumentDoesNotShareItsStorage(t *testing.T) {
+	original := bson.M{"city": "Osaka"}
+
+	got := documentOf(original)
+	got["city"] = "Tokyo"
+
+	if original["city"] != "Osaka" {
+		t.Errorf("the event's own document was changed to %v", original["city"])
+	}
+}
+
+// TestSomethingThatIsNotADocumentReadsAsNothing, rather than as an empty
+// document that would be written as one.
+func TestSomethingThatIsNotADocumentReadsAsNothing(t *testing.T) {
+	for _, value := range []interface{}{nil, "a string", 42, []int{1, 2}} {
+		if got := documentOf(value); got != nil {
+			t.Errorf("documentOf(%v) = %v, want nil", value, got)
+		}
+	}
+}
+
+// TestAnUnreadableRawDocumentReadsAsNothing.
+func TestAnUnreadableRawDocumentReadsAsNothing(t *testing.T) {
+	if got := documentOf(bson.Raw([]byte{1, 2, 3})); got != nil {
+		t.Errorf("unreadable bytes read as %v, want nil", got)
+	}
+}

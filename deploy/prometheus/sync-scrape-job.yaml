@@ -1,0 +1,32 @@
+# The Prometheus scrape job for this deployment's metrics.
+#
+# Append this to the scrape_configs of the Prometheus that serves the Grafana
+# "Replication" folder. It is a fragment and not a whole configuration on
+# purpose: that Prometheus scrapes several other things, and a file here that
+# claimed to be the whole config would delete them the first time somebody
+# applied it.
+#
+#   Prometheus:   monitoring/prometheus in the staging-manju cluster
+#   ConfigMap:    monitoring/prometheus-config, key prometheus.yml
+#   Target:       the sync-headless Service in the staging-mongo cluster,
+#                 deploy/kubernetes/sync-headless-service.yaml
+#
+# Why the target is a cross-cluster DNS name: sync runs in the database cluster
+# and Prometheus in the monitoring cluster. The .svc.mongo suffix is the
+# multicluster alias for the database cluster's DNS, and the name has to resolve
+# to pod addresses rather than a ClusterIP -- a ClusterIP is only routable
+# inside the cluster that owns it. Hence a headless Service.
+#
+# To apply it, merge into the ConfigMap and reload; do not restart the pod
+# without checking the ConfigMap has this in it first (see deploy/README.md).
+
+- job_name: sync-replication
+  scrape_interval: 30s
+  scrape_timeout: 10s
+  metrics_path: /metrics
+  static_configs:
+    - targets:
+        - 'sync-headless.default.svc.mongo:8080'
+      labels:
+        cluster: 'staging-mongo'
+        component: 'sync'

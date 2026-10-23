@@ -1,0 +1,36 @@
+# A headless Service for scraping this deployment's metrics from another
+# cluster.
+#
+# Prometheus runs in the Tokyo monitoring cluster and sync runs in the database
+# cluster. A ClusterIP is only routable inside the cluster that owns it, so a
+# scrape job pointed at one from outside connects to nothing and the target
+# reports as down with no other symptom -- the deployment is healthy, the
+# metrics endpoint answers, and the dashboard is empty.
+#
+# A headless Service has no ClusterIP: it resolves to the pod addresses
+# themselves, which are routable across the peered VPCs. That is what makes
+# sync's metrics reachable from the monitoring cluster.
+#
+# This existed only on the cluster. Rebuilding it, or moving to a new one,
+# would have left the dashboards blank with nothing in version control to say
+# why -- which is what this file is for. It is applied with the deployment:
+#
+#   kubectl --context stg-mongo -n default apply -f deploy/kubernetes/sync-headless-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: sync-headless
+  namespace: default
+  labels:
+    app: sync
+spec:
+  # The whole point. Do not give this one a ClusterIP.
+  clusterIP: None
+  type: ClusterIP
+  selector:
+    app: sync
+  ports:
+    - name: metrics
+      port: 8080
+      targetPort: 8080
+      protocol: TCP

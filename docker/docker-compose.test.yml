@@ -1,0 +1,106 @@
+# Test-only stack. Ports are shifted so this can run alongside whatever already
+# occupies the defaults on the host (a native mongod holds 27017).
+#
+#   mongo  source 27117 (single-node replica set rs0)  target 27118 (rs1)
+#   redis  source 6479  (keyspace notifications on)    target 6480
+#
+# MySQL and MariaDB are not included: the containers from docker-compose.yml are
+# already running and now accept remote connections.
+services:
+  mongo_test_source:
+    image: mongo:6.0
+    container_name: mongo_test_source
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
+    ports:
+      - "127.0.0.1:27117:27017"
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  mongo_test_target:
+    image: mongo:6.0
+    container_name: mongo_test_target
+    # A replica set, not a standalone. The applier writes a batch inside a
+    # transaction so the batch and its position land together, and a standalone
+    # refuses one outright — so the path production takes could not be run here
+    # at all, and the suite only ever exercised the fallback.
+    command: ["mongod", "--replSet", "rs1", "--bind_ip_all"]
+    ports:
+      - "127.0.0.1:27118:27017"
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  redis_test_source:
+    image: redis:7.0
+    container_name: redis_test_source
+    command: ["redis-server", "--appendonly", "yes", "--notify-keyspace-events", "KEA"]
+    ports:
+      - "127.0.0.1:6479:6379"
+
+  redis_test_target:
+    image: redis:7.0
+    container_name: redis_test_target
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "127.0.0.1:6480:6379"
+
+  # Two three-node clusters. The comparison and the per-slot transaction tests
+  # need real clusters rather than the standalone pair above: a slot marker only
+  # means anything where slots exist, and a cluster client splits a cross-slot
+  # transaction silently, which is the behaviour the applier is built around.
+  #
+  # Host networking because a cluster advertises the addresses its nodes were
+  # told to use, and a bridged node would advertise one the test cannot reach.
+  redis_cluster_1:
+    image: redis:7.0
+    container_name: redis_cluster_1
+    network_mode: host
+    command: ["redis-server", "--port", "7001", "--cluster-enabled", "yes",
+              "--cluster-config-file", "/tmp/n7001.conf",
+              "--cluster-node-timeout", "5000", "--appendonly", "no"]
+
+  redis_cluster_2:
+    image: redis:7.0
+    container_name: redis_cluster_2
+    network_mode: host
+    command: ["redis-server", "--port", "7002", "--cluster-enabled", "yes",
+              "--cluster-config-file", "/tmp/n7002.conf",
+              "--cluster-node-timeout", "5000", "--appendonly", "no"]
+
+  redis_cluster_3:
+    image: redis:7.0
+    container_name: redis_cluster_3
+    network_mode: host
+    command: ["redis-server", "--port", "7003", "--cluster-enabled", "yes",
+              "--cluster-config-file", "/tmp/n7003.conf",
+              "--cluster-node-timeout", "5000", "--appendonly", "no"]
+
+  redis_cluster_4:
+    image: redis:7.0
+    container_name: redis_cluster_4
+    network_mode: host
+    command: ["redis-server", "--port", "7004", "--cluster-enabled", "yes",
+              "--cluster-config-file", "/tmp/n7004.conf",
+              "--cluster-node-timeout", "5000", "--appendonly", "no"]
+
+  redis_cluster_5:
+    image: redis:7.0
+    container_name: redis_cluster_5
+    network_mode: host
+    command: ["redis-server", "--port", "7005", "--cluster-enabled", "yes",
+              "--cluster-config-file", "/tmp/n7005.conf",
+              "--cluster-node-timeout", "5000", "--appendonly", "no"]
+
+  redis_cluster_6:
+    image: redis:7.0
+    container_name: redis_cluster_6
+    network_mode: host
+    command: ["redis-server", "--port", "7006", "--cluster-enabled", "yes",
+              "--cluster-config-file", "/tmp/n7006.conf",
+              "--cluster-node-timeout", "5000", "--appendonly", "no"]
+

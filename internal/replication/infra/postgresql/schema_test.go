@@ -1,0 +1,630 @@
+package postgresql
+
+import (
+	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"database/sql"
+	"encoding/base64"
+	"errors"
+	"fmt"
+	"sort"
+	"strings"
+	"testing"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/retail-ai-inc/sync/internal/platform/config"
+)
+
+// Reading the source's shape and preparing the target's.
+//
+// These reached straight for a *pgx.Conn, which is a concrete type with no
+// interface behind it, so none of it could be exercised without a PostgreSQL
+// and none of it was. They now ask one method of the source, which is enough to
+// stand in for.
+
+// cannedRows answers a query with prepared columns and rows.
+type cannedRows struct {
+	columns []string
+	rows    [][]any
+	at      int
+	err     error
+}
+
+func (c *cannedRows) Close()                        {}
+func (c *cannedRows) Err() error                    { return c.err }
+func (c *cannedRows) CommandTag() pgconn.CommandTag { return pgconn.CommandTag{} }
+func (c *cannedRows) Conn() *pgx.Conn               { return nil }
+
+// RawValues prints the row as a text-format result carries it.
+func (c *cannedRows) RawValues() [][]byte {
+	row := c.rows[c.at-1]
+	raw := make([][]byte, len(row))
+	for i, value := range row {
+		if value != nil {
+			raw[i] = []byte(fmt.Sprint(value))
+		}
+	}
+	return raw
+}
+
+func (c *cannedRows) FieldDescriptions() []pgconn.FieldDescription {
+	fields := make([]pgconn.FieldDescription, len(c.columns))
+	for i, name := range c.columns {
+		fields[i] = pgconn.FieldDescription{Name: name}
+	}
+	return fields
+}
+
+func (c *cannedRows) Next() bool {
+	if c.at >= len(c.rows) {
+		return false
+	}
+	c.at++
+	return true
+}
+
+func (c *cannedRows) Values() ([]any, error) { return c.rows[c.at-1], nil }
+
+func (c *cannedRows) Scan(dest ...any) error {
+	row := c.rows[c.at-1]
+	for i := range dest {
+		if i >= len(row) {
+			break
+		}
+		switch target := dest[i].(type) {
+		case *string:
+			if row[i] == nil {
+				*target = ""
+				continue
+			}
+			*target = row[i].(string)
+		case *sql.NullString:
+			if row[i] == nil {
+				*target = sql.NullString{}
+				continue
+			}
+			*target = sql.NullString{String: row[i].(string), Valid: true}
+		case *sql.NullInt64:
+			if row[i] == nil {
+				*target = sql.NullInt64{}
+				continue
+			}
+			*target = sql.NullInt64{Int64: row[i].(int64), Valid: true}
+		}
+	}
+	return nil
+}
+
+// answering is a source that replies to queries matched by substring, in order.
+type answering struct {
+	replies []sourceReply
+	asked   []string
+}
+
+type sourceReply struct {
+	match   string
+	columns []string
+	rows    [][]any
+	err     error
+}
+
+func (a *answering) Query(_ context.Context, sql string, _ ...any) (pgx.Rows, error) {
+	a.asked = append(a.asked, sql)
+	for _, reply := range a.replies {
+		if strings.Contains(sql, reply.match) {
+			if reply.err != nil {
+				return nil, reply.err
+			}
+			return &cannedRows{columns: reply.columns, rows: reply.rows}, nil
+		}
+	}
+	return nil, errors.New("the fake source was not told how to answer: " + sql)
+}
+
+func TestThePrimaryKeyIsReadInOrder(t *testing.T) {
+	source := &answering{replies: []sourceReply{{
+		match:   "indisprimary",
+		columns: []string{"attname"},
+		rows:    [][]any{{"account"}, {"entry"}},
+	}}}
+	work := &schemaWork{Source: source, Logger: quiet()}
+
+	keys, err := work.primaryKey("public", "entries")
+	if err != nil {
+		t.Fatalf("primaryKey: %v", err)
+	}
+	if len(keys) != 2 || keys[0] != "account" || keys[1] != "entry" {
+		t.Errorf("keys = %v, want the composite key in order", keys)
+	}
+}
+
+// TestATableWithNoKeyReadsAsNone rather than as an error: a row is then
+// addressed by every column, which still finds it.
+func TestATableWithNoKeyReadsAsNone(t *testing.T) {
+	source := &answering{replies: []sourceReply{{
+		match: "indisprimary", columns: []string{"attname"},
+	}}}
+	work := &schemaWork{Source: source, Logger: quiet()}
+
+	keys, err := work.primaryKey("public", "events")
+	if err != nil {
+		t.Fatalf("primaryKey: %v", err)
+	}
+	if len(keys) != 0 {
+		t.Errorf("keys = %v, want none", keys)
+	}
+}
+
+func TestASourceThatWillNotAnswerAboutKeysIsReported(t *testing.T) {
+	source := &answering{replies: []sourceReply{{
+		match: "indisprimary", err: errors.New("permission denied"),
+	}}}
+	work := &schemaWork{Source: source, Logger: quiet()}
+
+	if _, err := work.primaryKey("public", "orders"); err == nil {
+		t.Error("a source that refused was reported as a table with no key, so " +
+			"every row would be addressed by every column without saying why")
+	}
+}
+
+// TestTheCreateStatementCarriesTheColumnTypes covers the shape the target is
+// given when a table is missing from it.
+func TestTheCreateStatementCarriesTheColumnTypes(t *testing.T) {
+	source := &answering{replies: []sourceReply{{
+		match:   "information_schema.columns",
+		columns: []string{"column_name", "data_type", "is_nullable", "column_default", "character_maximum_length", "numeric_precision", "numeric_scale"},
+		rows: [][]any{
+			{"id", "integer", "NO", "nextval('orders_id_seq'::regclass)", nil, nil, nil},
+			{"name", "character varying", "YES", nil, nil, nil, nil},
+			{"amount", "numeric", "NO", nil, nil, nil, nil},
+		},
+	}}}
+	work := &schemaWork{Source: source, Logger: quiet()}
+
+	create, sequences, err := work.createTableSQL(context.Background(),
+		"public", "orders", "public", "orders")
+	if err != nil {
+		t.Fatalf("createTableSQL: %v", err)
+	}
+
+	for _, want := range []string{`"public"."orders"`, `"id" integer`, `"name" character varying`, `"amount" numeric`} {
+		if !strings.Contains(create, want) {
+			t.Errorf("the statement is missing %q: %s", want, create)
+		}
+	}
+	if !strings.Contains(create, "NOT NULL") {
+		t.Errorf("a NOT NULL column was made nullable: %s", create)
+	}
+	if len(sequences) != 1 || !strings.Contains(sequences[0], "orders_id_seq") {
+		t.Errorf("sequences = %v, want the one the default draws from -- without it "+
+			"the create fails on a column whose default names a sequence that is "+
+			"not there", sequences)
+	}
+}
+
+// A failure means a created table folds or rejects a column the stream names exactly, or its sequence is not the one its default draws from.
+func TestTheCreateStatementQuotesEachColumnAndCreatesTheSequenceItsDefaultNames(t *testing.T) {
+	source := &answering{replies: []sourceReply{{
+		match:   "information_schema.columns",
+		columns: []string{"column_name", "data_type", "is_nullable", "column_default", "character_maximum_length", "numeric_precision", "numeric_scale"},
+		rows: [][]any{
+			{"userId", "text", "YES", nil, nil, nil, nil},
+			{"order", "integer", "NO", nil, nil, nil, nil},
+			{"amount", "numeric", "YES", nil, nil, int64(12), int64(2)},
+			{"rate", "numeric", "YES", nil, nil, int64(5), nil},
+			{"code", "character varying", "YES", nil, int64(8), nil, nil},
+			{"id", "integer", "NO", "nextval('sales.orders_id_seq'::regclass)", nil, nil, nil},
+			{"ref", "bigint", "NO", `nextval('"Sales"."Refs_seq"'::regclass)`, nil, nil, nil},
+		},
+	}}}
+	work := &schemaWork{Source: source, Logger: quiet()}
+
+	create, sequences, err := work.createTableSQL(context.Background(),
+		"sales", "orders", "sales", "orders")
+	if err != nil {
+		t.Fatalf("createTableSQL: %v", err)
+	}
+
+	for _, want := range []string{
+		`"userId" text,`,
+		`"order" integer NOT NULL,`,
+		`"amount" numeric(12,2),`,
+		`"rate" numeric(5),`,
+		`"code" character varying(8),`,
+		`"id" integer DEFAULT nextval('sales.orders_id_seq'::regclass) NOT NULL,`,
+	} {
+		if !strings.Contains(create, want) {
+			t.Errorf("the statement is missing %q: %s", want, create)
+		}
+	}
+	sort.Strings(sequences)
+	want := []string{
+		`CREATE SEQUENCE IF NOT EXISTS "Sales"."Refs_seq"`,
+		`CREATE SEQUENCE IF NOT EXISTS sales.orders_id_seq`,
+	}
+	if strings.Join(sequences, "\n") != strings.Join(want, "\n") {
+		t.Errorf("sequences = %q, want %q", sequences, want)
+	}
+}
+
+func TestExtractSequenceNameReadsTheDefault(t *testing.T) {
+	for in, want := range map[string]string{
+		"nextval('orders_id_seq'::regclass)":        "orders_id_seq",
+		"nextval('public.orders_id_seq'::regclass)": "public.orders_id_seq",
+		"now()":        "",
+		"":             "",
+		"nextval('x')": "",
+	} {
+		if got := extractSequenceName(in); got != want {
+			t.Errorf("extractSequenceName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestTheCopyLeavesAPopulatedTableAlone. Skipping is what makes a restarted
+// task cheap; it is also why the copy is not a repair, and a table with one row
+// in it is left as it is.
+func TestTheCopyLeavesAPopulatedTableAlone(t *testing.T) {
+	target := schemaTargetDB(t)
+	if _, err := target.Exec(`INSERT INTO public.orders VALUES ('1','100')`); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	source := &answering{}
+
+	snap := snapshotOver(source, target, [2]string{"orders", "orders"})
+	if err := snap.Copy(context.Background()); err != nil {
+		t.Fatalf("Copy: %v", err)
+	}
+	if len(source.asked) != 0 {
+		t.Errorf("the source was read for a table that already holds rows: %v", source.asked)
+	}
+}
+
+func TestTheCopyFillsAnEmptyTable(t *testing.T) {
+	target := schemaTargetDB(t)
+	source := &answering{replies: []sourceReply{{
+		match:   "SELECT * FROM public.orders",
+		columns: []string{"id", "amount"},
+		rows:    [][]any{{"1", "100"}, {"2", "200"}},
+	}}}
+
+	snap := snapshotOver(source, target, [2]string{"orders", "orders"})
+	if err := snap.Copy(context.Background()); err != nil {
+		t.Fatalf("Copy: %v", err)
+	}
+
+	var count int
+	if err := target.QueryRow(`SELECT COUNT(*) FROM public.orders`).Scan(&count); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("%d rows were copied, want 2", count)
+	}
+}
+
+// A failure means the copy names a column unquoted, so a keyword or mixed-case name fails or folds.
+func TestTheCopyWritesAColumnWhoseNameIsAKeyword(t *testing.T) {
+	target := schemaTargetDB(t)
+	if _, err := target.Exec(`CREATE TABLE public.lines ("id" TEXT, "order" TEXT)`); err != nil {
+		t.Fatalf("create the table: %v", err)
+	}
+	source := &answering{replies: []sourceReply{{
+		match:   "SELECT * FROM public.lines",
+		columns: []string{"id", "order"},
+		rows:    [][]any{{"1", "o-7"}},
+	}}}
+
+	if err := snapshotOver(source, target, [2]string{"lines", "lines"}).
+		Copy(context.Background()); err != nil {
+		t.Fatalf("Copy: %v", err)
+	}
+	var order string
+	if err := target.QueryRow(`SELECT "order" FROM public.lines WHERE id = '1'`).Scan(&order); err != nil {
+		t.Fatalf("read the copied row: %v", err)
+	}
+	if order != "o-7" {
+		t.Errorf("order = %q, want o-7", order)
+	}
+}
+
+// A failure means the first copy wrote a protected field to the target as the source holds it.
+func TestTheCopyMasksAndEncryptsTheFieldsATableProtects(t *testing.T) {
+	t.Setenv("SYNC_FIELD_KEY", testFieldKey)
+	target := schemaTargetDB(t)
+	if _, err := target.Exec(`CREATE TABLE public.customers (id TEXT, email TEXT, card TEXT)`); err != nil {
+		t.Fatalf("create the table: %v", err)
+	}
+	source := &answering{replies: []sourceReply{{
+		match:   "SELECT * FROM public.customers",
+		columns: []string{"id", "email", "card"},
+		rows:    [][]any{{"1", "ada@example.com", "4111111111111111"}, {"2", nil, nil}},
+	}}}
+	snap := snapshotOver(source, target, [2]string{"customers", "customers"})
+	snap.Config.Mappings[0].Tables[0].SecurityEnabled = true
+	snap.Config.Mappings[0].Tables[0].FieldSecurity = []interface{}{
+		map[string]interface{}{"field": "email", "securityType": "masked"},
+		map[string]interface{}{"field": "card", "securityType": "encrypted"},
+	}
+
+	if err := snap.Copy(context.Background()); err != nil {
+		t.Fatalf("Copy: %v", err)
+	}
+
+	var email, card sql.NullString
+	if err := target.QueryRow(`SELECT email, card FROM public.customers WHERE id = '1'`).
+		Scan(&email, &card); err != nil {
+		t.Fatalf("read row 1: %v", err)
+	}
+	if want := strings.Repeat("*", len("ada@example.com")); email.String != want {
+		t.Errorf("email = %q, want %q", email.String, want)
+	}
+	if plain, err := opened(card.String); err != nil || plain != "4111111111111111" {
+		t.Errorf("card = %q, want the source's value encrypted: %v", card.String, err)
+	}
+
+	if err := target.QueryRow(`SELECT email, card FROM public.customers WHERE id = '2'`).
+		Scan(&email, &card); err != nil {
+		t.Fatalf("read row 2: %v", err)
+	}
+	if email.Valid || card.Valid {
+		t.Errorf("email = %q, card = %q, want both NULL", email.String, card.String)
+	}
+}
+
+// TestACopyOfNothingSaysSo: a task that names no tables replicates nothing, and
+// finishing quietly makes that look like success.
+func TestACopyOfNothingSaysSo(t *testing.T) {
+	snap := &Snapshotter{
+		Schema:   &schemaWork{Logger: quiet()},
+		Snapshot: snapshotRead{},
+		Config:   config.SyncConfig{},
+		Logger:   quiet(),
+	}
+	if err := snap.Copy(context.Background()); err != nil {
+		t.Fatalf("Copy with no tables: %v", err)
+	}
+	if len(snap.pairs()) != 0 {
+		t.Error("pairs were found where the task names none")
+	}
+}
+
+func TestAMappingWithNoSchemaMeansPublic(t *testing.T) {
+	snap := &Snapshotter{Config: config.SyncConfig{
+		Mappings: []config.DatabaseMapping{{
+			Tables: []config.TableMapping{{SourceTable: "orders"}},
+		}},
+	}}
+
+	pairs := snap.pairs()
+	if len(pairs) != 1 {
+		t.Fatalf("pairs = %v", pairs)
+	}
+	if pairs[0].source() != "public.orders" || pairs[0].target() != "public.orders" {
+		t.Errorf("pair = %s -> %s, want public on both sides and the source's name "+
+			"carried over", pairs[0].source(), pairs[0].target())
+	}
+}
+
+// TestPinIsTheSlotsConsistentPoint: the copy and the stream meet there, so
+// every change made while the copy ran is still in the log.
+func TestPinIsTheSlotsConsistentPoint(t *testing.T) {
+	snap := &Snapshotter{ConsistentPoint: 1 << 32, Snapshot: snapshotRead{}, Source: "tokyo:5432/shop"}
+
+	pos, err := snap.Pin(context.Background())
+	if err != nil {
+		t.Fatalf("Pin: %v", err)
+	}
+	lsn, _, err := decodeLSN(pos.Payload, "tokyo:5432/shop")
+	if err != nil {
+		t.Fatalf("the pinned position does not read back: %v", err)
+	}
+	if lsn != 1<<32 {
+		t.Errorf("pinned %s, want the consistent point", lsn)
+	}
+}
+
+// A failure means a first copy could start without the slot's snapshot, so it would overlap the stream.
+func TestAPinWithoutTheSlotsSnapshotFails(t *testing.T) {
+	for name, snap := range map[string]*Snapshotter{
+		"no consistent point": {Snapshot: snapshotRead{}},
+		"no snapshot":         {ConsistentPoint: 1 << 32},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if pos, err := snap.Pin(context.Background()); err == nil {
+				t.Errorf("Pin = %v, want an error", pos)
+			}
+		})
+	}
+}
+
+// A failure means a copy without the slot's snapshot read the source anyway, or panicked.
+func TestACopyWithoutTheSlotsSnapshotFails(t *testing.T) {
+	target := schemaTargetDB(t)
+	source := &answering{}
+	snap := snapshotOver(source, target, [2]string{"orders", "orders"})
+	snap.Snapshot = nil
+
+	if err := snap.Copy(context.Background()); err == nil {
+		t.Error("Copy with no snapshot reported success")
+	}
+	if len(source.asked) != 0 {
+		t.Errorf("the source was read outside the slot's snapshot: %v", source.asked)
+	}
+}
+
+// schemaTargetDB gives SQLite a database attached as "public", so the
+// schema-qualified names the copy builds resolve the way they do on PostgreSQL.
+func schemaTargetDB(t *testing.T) *sql.DB {
+	t.Helper()
+
+	db := targetDB(t, "")
+	if _, err := db.Exec(`ATTACH DATABASE ':memory:' AS public`); err != nil {
+		t.Fatalf("attach a schema: %v", err)
+	}
+	if _, err := db.Exec(`CREATE TABLE public.orders (id TEXT, amount TEXT)`); err != nil {
+		t.Fatalf("create the table: %v", err)
+	}
+	return db
+}
+
+func snapshotOver(source sourceQuerier, target *sql.DB, tables ...[2]string) *Snapshotter {
+	mapped := make([]config.TableMapping, 0, len(tables))
+	for _, pair := range tables {
+		mapped = append(mapped, config.TableMapping{SourceTable: pair[0], TargetTable: pair[1]})
+	}
+	work := &schemaWork{Source: source, Target: target, Logger: quiet()}
+	return &Snapshotter{
+		Schema:   work,
+		Snapshot: snapshotRead{source: source},
+		Config:   config.SyncConfig{Mappings: []config.DatabaseMapping{{Tables: mapped}}},
+		Logger:   quiet(),
+	}
+}
+
+const testFieldKey = "abcdefghijklmnopqrstuvwxyz012345"
+
+// opened decrypts a field sealed under testFieldKey.
+func opened(sealed string) (string, error) {
+	raw, err := base64.StdEncoding.DecodeString(sealed)
+	if err != nil {
+		return "", err
+	}
+	block, err := aes.NewCipher([]byte(testFieldKey))
+	if err != nil {
+		return "", err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+	if len(raw) < gcm.NonceSize() {
+		return "", errors.New("shorter than a nonce, so not sealed")
+	}
+	plain, err := gcm.Open(nil, raw[:gcm.NonceSize()], raw[gcm.NonceSize():], nil)
+	return string(plain), err
+}
+
+// snapshotRead answers the copy's reads from source, as the slot's snapshot would.
+type snapshotRead struct {
+	source sourceQuerier
+}
+
+func (s snapshotRead) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+	return s.source.Query(ctx, sql, args...)
+}
+
+func (snapshotRead) Rollback(context.Context) error { return nil }
+
+// TestATargetTableThatCannotBeCountedStopsTheCopy covers a silent skip that is
+// now a stop.
+//
+// It used to warn and carry on, so a table missing from the target -- because
+// the schema preparation failed, or because nobody created it -- left the copy
+// doing nothing and reporting success. The link then ran with a table that had
+// never been filled, and only a full comparison would ever have said so.
+func TestATargetTableThatCannotBeCountedStopsTheCopy(t *testing.T) {
+	target := targetDB(t, "") // no tables at all
+	source := &answering{}
+
+	err := snapshotOver(source, target, [2]string{"orders", "orders"}).
+		Copy(context.Background())
+	if err == nil {
+		t.Fatal("a table missing from the target was skipped and the copy " +
+			"reported success")
+	}
+	if !strings.Contains(err.Error(), "orders") {
+		t.Errorf("the error does not name the table: %v", err)
+	}
+}
+
+// byTable answers a question about a table with that table's columns, and says it has no indexes.
+type byTable struct {
+	columns map[string][][]any
+	asked   []string
+}
+
+func (b *byTable) Query(_ context.Context, sql string, args ...any) (pgx.Rows, error) {
+	table := args[1].(string)
+	b.asked = append(b.asked, table)
+	if strings.Contains(sql, "pg_indexes") {
+		return &cannedRows{columns: []string{"indexname", "indexdef"}}, nil
+	}
+	rows, known := b.columns[table]
+	if !known {
+		return nil, errors.New("permission denied for table " + table)
+	}
+	return &cannedRows{rows: rows}, nil
+}
+
+// A failure means one table the target could not be given stopped the rest, or one it already held was rebuilt.
+func TestPreparingTheTargetCreatesEachMissingTableAndGoesPastOneThatFails(t *testing.T) {
+	target := schemaTargetDB(t)
+	for _, statement := range []string{
+		`ATTACH DATABASE ':memory:' AS information_schema`,
+		`CREATE TABLE information_schema.tables (table_schema TEXT, table_name TEXT)`,
+		`INSERT INTO information_schema.tables VALUES ('public', 'orders')`,
+	} {
+		if _, err := target.Exec(statement); err != nil {
+			t.Fatalf("%s: %v", statement, err)
+		}
+	}
+	source := &byTable{columns: map[string][][]any{
+		// SQLite takes neither the sequence nor the default, so this create fails on the target.
+		"serial": {{"id", "integer", "NO", "nextval('serial_id_seq'::regclass)", nil, nil, nil}},
+		"lines": {
+			{"id", "integer", "NO", nil, nil, nil, nil},
+			{"amount", "numeric", "YES", nil, nil, int64(12), int64(2)},
+		},
+	}}
+	work := &schemaWork{Source: source, Target: target, Logger: quiet(), Config: config.SyncConfig{
+		Mappings: []config.DatabaseMapping{{}, {Tables: []config.TableMapping{
+			{SourceTable: "orders", TargetTable: "orders"},
+			{SourceTable: "unreadable", TargetTable: "unreadable"},
+			{SourceTable: "serial", TargetTable: "serial"},
+			{SourceTable: "lines", TargetTable: "lines"},
+		}}},
+	}}
+
+	if err := work.prepare(context.Background()); err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+
+	if got := strings.Join(source.asked, ","); got != "unreadable,serial,lines,lines" {
+		t.Errorf("the source was asked about %s, want each missing table once and the "+
+			"created one's indexes", got)
+	}
+	var columns []string
+	listed, err := target.Query(`SELECT name, type FROM pragma_table_info('lines', 'public')`)
+	if err != nil {
+		t.Fatalf("list the created table's columns: %v", err)
+	}
+	defer listed.Close()
+	for listed.Next() {
+		var name, kind string
+		if err := listed.Scan(&name, &kind); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		columns = append(columns, name+" "+strings.ToLower(kind))
+	}
+	if got := strings.Join(columns, ", "); got != "id integer, amount numeric(12,2)" {
+		t.Errorf("public.lines has columns %q, want the source's with their precision", got)
+	}
+}
+
+// A failure means a target that cannot say which tables it holds was given tables anyway.
+func TestATargetThatCannotListItsTablesIsNotGivenAny(t *testing.T) {
+	source := &byTable{}
+	work := &schemaWork{Source: source, Target: targetDB(t, ""), Logger: quiet(), Config: config.SyncConfig{
+		Mappings: []config.DatabaseMapping{{Tables: []config.TableMapping{{SourceTable: "orders", TargetTable: "orders"}}}},
+	}}
+
+	if err := work.prepare(context.Background()); err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if len(source.asked) != 0 {
+		t.Errorf("the source was asked about %v", source.asked)
+	}
+}
