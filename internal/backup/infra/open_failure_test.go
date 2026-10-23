@@ -1,0 +1,83 @@
+package infra
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/retail-ai-inc/sync/internal/backup/domain"
+)
+
+// unopenableDB points SYNC_DB_PATH at a path whose parent is a regular file, so
+// the directory creation inside OpenSQLiteDB fails immediately with ENOTDIR.
+func unopenableDB(t *testing.T) {
+	t.Helper()
+
+	dir := t.TempDir()
+	blocker := filepath.Join(dir, "not-a-directory")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write blocker: %v", err)
+	}
+	t.Setenv("SYNC_DB_PATH", filepath.Join(blocker, "sub", "sync.db"))
+}
+
+func TestEveryStoreCallReportsAnUnopenableDatabase(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		call func() error
+	}{
+		{"ListJobs", func() error { _, err := ListJobs(); return err }},
+		{"InsertJob", func() error { _, err := InsertJob(1, "now", "next", domain.Config{}); return err }},
+		{"ReadJobRow", func() error { _, _, err := ReadJobRow("1"); return err }},
+		{"UpdateJob", func() error { return UpdateJob("1", "now", "next", domain.Config{}) }},
+		{"DeleteJob", func() error { return DeleteJob("1") }},
+		{"JobExists", func() error { _, err := JobExists("1"); return err }},
+		{"StampLastBackup", func() error { return StampLastBackup("1", "now") }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			unopenableDB(t)
+
+			err := tt.call()
+			if err == nil {
+				t.Fatalf("%s returned no error for an unopenable database", tt.name)
+			}
+			if got := stageOf(err); got != StageOpen {
+				t.Errorf("stage = %q, want %q (err = %v)", got, StageOpen, err)
+			}
+		})
+	}
+}
+
+// SetEnable returned the driver's error untouched, so the endpoint could not
+// tell a database it failed to open from a row it failed to find — both came
+// out as "pause fail".
+func TestSetEnableTagsAnUnopenableDatabase(t *testing.T) {
+	unopenableDB(t)
+
+	err := SetEnable("1", true, "now")
+	if err == nil {
+		t.Fatal("SetEnable returned no error for an unopenable database")
+	}
+	if got := stageOf(err); got != StageOpen {
+		t.Errorf("stage = %q, want %q", got, StageOpen)
+	}
+}
+
+// TestListJobsReportsAScanFailure covers the branch a badly typed column takes.
+func TestListJobsReportsAScanFailure(t *testing.T) {
+	db := useTempJobDB(t)
+	if _, err := db.Exec(
+		`INSERT INTO backup_tasks (enable, last_update_time, last_backup_time, next_backup_time, config_json)
+		 VALUES ('not a number', '', '', '', '{}')`); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	_, err := ListJobs()
+	if err == nil {
+		t.Fatal("ListJobs accepted a text enable column; SQLite appears to enforce " +
+			"the declared type now, so assert the rejection at insert time instead")
+	}
+	if got := stageOf(err); got != StageScan {
+		t.Errorf("stage = %q, want %q (err = %v)", got, StageScan, err)
+	}
+}

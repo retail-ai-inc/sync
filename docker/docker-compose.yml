@@ -21,6 +21,11 @@ services:
       MYSQL_ROOT_PASSWORD: root
       MYSQL_ROOT_HOST: '%'
       MYSQL_DATABASE: target_db
+    volumes:
+      # The target carries the same settings as the source: after a failover it
+      # is the source, and a replica whose binlog is configured differently
+      # cannot take that role.
+      - ./resources/mysql/mysql_custom.cnf:/etc/mysql/conf.d/mysql_custom.cnf
     ports:
       - "127.0.0.1:3308:3306"
 
