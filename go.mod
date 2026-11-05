@@ -1,6 +1,6 @@
 module github.com/retail-ai-inc/sync
 
-go 1.27.0
+go 1.27.3
 
 require (
 	github.com/go-chi/chi v1.5.5

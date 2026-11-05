@@ -1,0 +1,6 @@
+coverage:
+  status:
+    project:
+      default:
+        # Timing-dependent integration paths shift a few lines per run.
+        threshold: 0.5%
