@@ -33,7 +33,7 @@ jobs:
       - name: Run govulncheck (SARIF)
         uses: golang/govulncheck-action@v1
         with:
-          go-version-input: '1.26.x'  # Latest 1.26 patch, same as the golang:1.26 build images
+          go-version-input: '1.27.x'  # Latest 1.27 patch, same as the golang:1.27 build images
           go-package: './...'         # Scans all packages in the current module
           output-format: 'sarif'
           output-file: 'vulns.sarif'
