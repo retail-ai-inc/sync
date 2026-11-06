@@ -1,0 +1,86 @@
+name: Code Vulnerability Scan
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+
+  schedule:
+    # Runs at 00:00 every Monday to catch newly discovered database vulnerabilities
+    - cron: '0 0 * * 1'
+  workflow_dispatch: # Allows manual triggering from the Actions tab
+
+permissions:
+  contents: read
+  pull-requests: write # Comments the scan result on PRs
+
+# A new push to the same PR cancels the scan still running for the previous one
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  govulncheck:
+    name: Run govulncheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      # 1. Run govulncheck and output to SARIF. The action checks out the repo and installs Go itself.
+      # Note: outputting to sarif prevents the step from hard-failing early.
+      - name: Run govulncheck (SARIF)
+        uses: golang/govulncheck-action@v1
+        with:
+          go-version-input: '1.26.x'  # Latest 1.26 patch, same as the golang:1.26 build images
+          go-package: './...'         # Scans all packages in the current module
+          output-format: 'sarif'
+          output-file: 'vulns.sarif'
+
+      # 2. Build the HTML report, the PR comment / job summary and the error annotations from the SARIF output
+      # Uses the latest Python 3.14 patch instead of the one preinstalled on the runner
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.14'
+          check-latest: true
+
+      - name: Build reports
+        id: report
+        run: python3 .github/scripts/govulncheck_report.py vulns.sarif
+
+      # 3. Upload the resulting HTML file as a downloadable workflow artifact
+      - name: Upload HTML Report
+        uses: actions/upload-artifact@v7
+        with:
+          name: govulncheck-html-report
+          path: govulncheck-report.html
+
+      # 4. Show the result on the PR: one comment, created when vulnerable code is called and updated on every later run
+      - name: Comment on PR
+        if: github.event_name == 'pull_request' && github.actor != 'dependabot[bot]'
+        uses: actions/github-script@v9
+        env:
+          CALLED: ${{ steps.report.outputs.called }}
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- govulncheck-report -->';
+            const body = fs.readFileSync('govulncheck-summary.md', 'utf8');
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number, per_page: 100 });
+            const existing = comments.find(c => c.user.type === 'Bot' && (c.body || '').includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else if (process.env.CALLED !== '0') {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
+
+      # 5. Fail the job only when our code calls a vulnerable function (the reports are already published above)
+      - name: Fail on called vulnerabilities
+        if: steps.report.outputs.called != '0'
+        run: |
+          echo "::error::Your code calls ${{ steps.report.outputs.called }} vulnerability(ies). See the PR comment or the job summary for the call sites."
+          exit 1
