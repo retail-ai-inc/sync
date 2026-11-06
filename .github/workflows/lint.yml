@@ -33,7 +33,7 @@ jobs:
         uses: reviewdog/action-golangci-lint@v2
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          go_version: '1.26'
+          go_version: '1.27.x'
           level: error
           filter_mode: nofilter
           reporter: github-pr-review
