@@ -1,10 +1,14 @@
-# Sync
-
-[![Go Report Card](https://goreportcard.com/badge/github.com/retail-ai-inc/sync)](https://goreportcard.com/report/github.com/retail-ai-inc/sync)
+[![Lint](https://github.com/retail-ai-inc/sync/actions/workflows/lint.yml/badge.svg)](https://github.com/retail-ai-inc/sync/actions/workflows/lint.yml)
+[![Code Vulnerability Scan](https://github.com/retail-ai-inc/sync/actions/workflows/govulncheck.yml/badge.svg)](https://github.com/retail-ai-inc/sync/actions/workflows/govulncheck.yml)
+[![Dependabot Updates](https://github.com/retail-ai-inc/sync/actions/workflows/dependabot/dependabot-updates/badge.svg)](https://github.com/retail-ai-inc/sync/actions/workflows/dependabot/dependabot-updates)
+[![Dependency Graph](https://github.com/retail-ai-inc/sync/actions/workflows/dependabot/update-graph/badge.svg)](https://github.com/retail-ai-inc/sync/actions/workflows/dependabot/update-graph)
+[![CodeQL](https://github.com/retail-ai-inc/sync/actions/workflows/github-code-scanning/codeql/badge.svg)](https://github.com/retail-ai-inc/sync/actions/workflows/github-code-scanning/codeql)
 [![Coverage Status](https://codecov.io/gh/retail-ai-inc/sync/graph/badge.svg)](https://codecov.io/gh/retail-ai-inc/sync)
 [![GoDoc](https://godoc.org/github.com/retail-ai-inc/sync?status.svg)](https://godoc.org/github.com/retail-ai-inc/sync)
+[![Ask DeepWiki](https://img.shields.io/badge/Ask-Deepwiki-badge?labelColor=blue)](https://deepwiki.com/retail-ai-inc/sync)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/retail-ai-inc/sync)
+
+# Sync
 
 **Sync** is a real-time, one-way, and [PII](https://en.wikipedia.org/wiki/Personal_data)-proof database backup tool written in **Golang** to synchronize NOSQL and SQL data to standalone instances, GCS, using a UI and workflow engine for Data scientists, auditing, and various other purposes. **Sync** can synchronize MongoDB or SQL data from a **MongoDB replica set** or **sharded cluster**, or production SQL instance to a **standalone instance**, supports initial and incremental synchronization, including **indexes** with change stream monitoring.
 
