@@ -12,7 +12,7 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/go-chi/chi"
+	"github.com/go-chi/chi/v5"
 	"github.com/retail-ai-inc/sync/internal/identity/app"
 	"github.com/retail-ai-inc/sync/internal/identity/domain"
 	"github.com/retail-ai-inc/sync/internal/identity/infra"

@@ -25,7 +25,9 @@ func (e *BackupExecutor) copyFile(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer sourceFile.Close()
+
+	// Explicitly discarding the error
+	defer func() { _ = sourceFile.Close() }()
 
 	dstDir := filepath.Dir(dst)
 	if err := os.MkdirAll(dstDir, 0755); err != nil {
@@ -36,7 +38,9 @@ func (e *BackupExecutor) copyFile(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer destFile.Close()
+
+	// Explicitly discarding the error
+	defer func() { _ = destFile.Close() }()
 
 	// Use buffered copy with controlled buffer size to avoid memory spike
 	bufSize := 64 * 1024 // 64KB buffer instead of default 32KB
@@ -142,7 +146,9 @@ func (e *BackupExecutor) writeJSONFile(filePath string, documents []interface{})
 	if err != nil {
 		return fmt.Errorf("failed to create file %s: %w", filePath, err)
 	}
-	defer file.Close()
+
+	// Explicitly discarding the error
+	defer func() { _ = file.Close() }()
 
 	// Write each document as a separate line (JSONL format)
 	for _, doc := range documents {
