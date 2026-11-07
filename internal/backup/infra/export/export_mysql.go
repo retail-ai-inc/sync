@@ -218,7 +218,9 @@ func (e *BackupExecutor) executeExternalMySQLDump(ctx context.Context, host, por
 	if err != nil {
 		return fmt.Errorf("failed to create output file: %w", err)
 	}
-	defer outFile.Close()
+
+	// Explicitly discarding the error
+	defer func() { _ = outFile.Close() }()
 
 	cmd.Stdout = outFile
 	var complained complaint
@@ -324,7 +326,9 @@ except Exception as e:
 	if err != nil {
 		return fmt.Errorf("failed to create output file: %w", err)
 	}
-	defer outFile.Close()
+
+	// Explicitly discarding the error
+	defer func() { _ = outFile.Close() }()
 
 	// Setup pipeline: mysql | python3 > output.csv
 	pythonCmd.Stdin, err = mysqlCmd.StdoutPipe()
@@ -425,7 +429,9 @@ func (e *BackupExecutor) exportMySQLMergedTables(ctx context.Context, connection
 	if err != nil {
 		return fmt.Errorf("failed to create merged file: %w", err)
 	}
-	defer mergedFile.Close()
+
+	// Explicitly discarding the error
+	defer func() { _ = mergedFile.Close() }()
 
 	for i, table := range tables {
 		logrus.Infof("[BackupExecutor] 📄 Exporting table %d/%d: %s", i+1, len(tables), table)
