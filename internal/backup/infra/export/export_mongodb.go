@@ -189,9 +189,7 @@ func (e *BackupExecutor) exportMongoDBMergedTables(ctx context.Context, connStr,
 	if err != nil {
 		return fmt.Errorf("failed to create merged file: %w", err)
 	}
-
-	// Explicitly discarding the error
-	defer func() { _ = mergedFile.Close() }()
+	defer mergedFile.Close()
 
 	// Buffered, because the merge writes a line at a time: unbuffered that is
 	// one write syscall per document.
@@ -288,9 +286,7 @@ func (e *BackupExecutor) countRecordsInFile(filePath string) (int, float64, erro
 	if err != nil {
 		return 0, fileSize, err
 	}
-
-	// Explicitly discarding the error
-	defer func() { _ = file.Close() }()
+	defer file.Close()
 
 	scanner := bufio.NewScanner(file)
 	// A BSON document may be 16 MB, and mongoexport writes one per line. The

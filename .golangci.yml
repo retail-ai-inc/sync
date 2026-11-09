@@ -1,0 +1,16 @@
+version: "2"
+
+linters:
+  settings:
+    errcheck:
+      exclude-functions:
+        # Deferred after Commit, where it returns sql.ErrTxDone
+        - (*database/sql.Tx).Rollback
+  exclusions:
+    presets:
+      # Unchecked Close, Flush, Remove, Setenv and print calls
+      - std-error-handling
+    rules:
+      - path: _test\.go
+        linters:
+          - errcheck

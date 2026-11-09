@@ -218,9 +218,7 @@ func (e *BackupExecutor) executeExternalMySQLDump(ctx context.Context, host, por
 	if err != nil {
 		return fmt.Errorf("failed to create output file: %w", err)
 	}
-
-	// Explicitly discarding the error
-	defer func() { _ = outFile.Close() }()
+	defer outFile.Close()
 
 	cmd.Stdout = outFile
 	var complained complaint
@@ -231,6 +229,9 @@ func (e *BackupExecutor) executeExternalMySQLDump(ctx context.Context, host, por
 
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("mysqldump failed: %w%s", err, complained.said())
+	}
+	if err := outFile.Close(); err != nil {
+		return fmt.Errorf("close the mysqldump output: %w", err)
 	}
 
 	if stat, err := os.Stat(outputPath); err == nil {
@@ -326,9 +327,7 @@ except Exception as e:
 	if err != nil {
 		return fmt.Errorf("failed to create output file: %w", err)
 	}
-
-	// Explicitly discarding the error
-	defer func() { _ = outFile.Close() }()
+	defer outFile.Close()
 
 	// Setup pipeline: mysql | python3 > output.csv
 	pythonCmd.Stdin, err = mysqlCmd.StdoutPipe()
@@ -360,6 +359,9 @@ except Exception as e:
 
 	if err := pythonCmd.Wait(); err != nil {
 		return fmt.Errorf("python csv conversion failed: %w%s", err, pythonComplained.said())
+	}
+	if err := outFile.Close(); err != nil {
+		return fmt.Errorf("close the CSV output: %w", err)
 	}
 
 	stat, err := os.Stat(outputPath)
@@ -429,9 +431,7 @@ func (e *BackupExecutor) exportMySQLMergedTables(ctx context.Context, connection
 	if err != nil {
 		return fmt.Errorf("failed to create merged file: %w", err)
 	}
-
-	// Explicitly discarding the error
-	defer func() { _ = mergedFile.Close() }()
+	defer mergedFile.Close()
 
 	for i, table := range tables {
 		logrus.Infof("[BackupExecutor] 📄 Exporting table %d/%d: %s", i+1, len(tables), table)
@@ -471,7 +471,9 @@ func (e *BackupExecutor) exportMySQLMergedTables(ctx context.Context, connection
 		logrus.Infof("[BackupExecutor] ✅ Table %s merged successfully", table)
 	}
 
-	mergedFile.Close()
+	if err := mergedFile.Close(); err != nil {
+		return fmt.Errorf("close the merged file: %w", err)
+	}
 
 	if stat, err := os.Stat(mergedFilePath); err == nil {
 		logrus.Infof("[BackupExecutor] ✅ Merge completed: %.2f MB", float64(stat.Size())/1024/1024)

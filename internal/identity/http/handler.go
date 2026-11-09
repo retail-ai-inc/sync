@@ -263,7 +263,7 @@ func GetOAuthConfigHandler(w http.ResponseWriter, r *http.Request) {
 	name := provider(r)
 	if name == "" {
 		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": false,
 			"error":   "missing provider parameter",
 		})
@@ -274,14 +274,14 @@ func GetOAuthConfigHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if errors.Is(err, app.ErrNoOAuthConfig) {
 			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"error":   "No specified OAuth configuration found",
 				"success": false,
 			})
 			return
 		}
 		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": false,
 			"error":   "Failed to get OAuth configuration",
 		})
@@ -289,7 +289,7 @@ func GetOAuthConfigHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
 		"data":    config,
 	})
@@ -300,7 +300,7 @@ func UpdateOAuthConfigHandler(w http.ResponseWriter, r *http.Request) {
 	supplied, isAdmin := app.AuthoriseAdmin(r.Header.Get("Authorization"))
 	if !supplied {
 		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": false,
 			"error":   "Admin privileges required",
 		})
@@ -308,7 +308,7 @@ func UpdateOAuthConfigHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	if !isAdmin {
 		w.WriteHeader(http.StatusForbidden)
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": false,
 			"error":   "Admin privileges required",
 		})
@@ -318,7 +318,7 @@ func UpdateOAuthConfigHandler(w http.ResponseWriter, r *http.Request) {
 	name := provider(r)
 	if name == "" {
 		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": false,
 			"error":   "missing provider parameter",
 		})
@@ -328,7 +328,7 @@ func UpdateOAuthConfigHandler(w http.ResponseWriter, r *http.Request) {
 	var config map[string]interface{}
 	if err := json.NewDecoder(r.Body).Decode(&config); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": false,
 			"error":   "Invalid request data",
 		})
@@ -339,14 +339,14 @@ func UpdateOAuthConfigHandler(w http.ResponseWriter, r *http.Request) {
 		var missing *app.MissingOAuthFieldError
 		if errors.As(err, &missing) {
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"success": false,
 				"error":   missing.Error(),
 			})
 			return
 		}
 		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": false,
 			"error":   "Failed to update configuration: " + err.Error(),
 		})
@@ -354,7 +354,7 @@ func UpdateOAuthConfigHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
 		"message": "Configuration updated successfully",
 	})

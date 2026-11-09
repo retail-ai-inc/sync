@@ -41,9 +41,7 @@ func countCSVDataRows(path string) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-
-	// Explicitly discarding the error
-	defer func() { _ = file.Close() }()
+	defer file.Close()
 
 	scanner := bufio.NewScanner(file)
 	// A CSV cell can be long; the same allowance the JSONL counter makes.
