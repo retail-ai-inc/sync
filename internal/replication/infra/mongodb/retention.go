@@ -177,15 +177,6 @@ func oplogWindow(ctx context.Context, client *mongo.Client) (time.Duration, erro
 	return time.Duration(last.T-first.T) * time.Second, nil
 }
 
-// oplogEdge reads the timestamp of the oldest or newest oplog entry.
-//
-// Sorting by $natural rather than by ts is what keeps this cheap: the oplog has
-// no index, and $natural walks the capped collection from whichever end is
-// asked for, so each call reads one document.
-func (r *Reader) oplogEdge(ctx context.Context, direction int) (bson.Timestamp, error) {
-	return oplogEdgeOf(ctx, r.Client, direction)
-}
-
 func oplogEdgeOf(ctx context.Context, client *mongo.Client, direction int) (bson.Timestamp, error) {
 	var entry struct {
 		TS bson.Timestamp `bson:"ts"`

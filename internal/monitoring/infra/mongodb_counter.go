@@ -117,18 +117,14 @@ func CountAndLogMongoDB(ctx context.Context, sc config.SyncConfig, log *logrus.L
 	activeStreams := changeStreamActivity(sc.ID)
 
 	// Always check ChangeStream statistics and daily reset
-	csDetails := make([]string, 0, len(activeStreams))
 	activeCount := 0
 	receivedTotal := 0
 	executedTotal := 0
 
-	for key, cs := range activeStreams {
+	for _, cs := range activeStreams {
 		activeCount++
 		receivedTotal += cs.ReceivedEvents
 		executedTotal += cs.ExecutedEvents
-		details := fmt.Sprintf("%s[events:%d,received:%d,executed:%d,errors:%d]",
-			key, cs.EventCount, cs.ReceivedEvents, cs.ExecutedEvents, cs.ErrorCount)
-		csDetails = append(csDetails, details)
 	}
 
 	pendingTotal := receivedTotal - executedTotal

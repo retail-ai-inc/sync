@@ -258,17 +258,17 @@ func TestConnectionHandler(w http.ResponseWriter, r *http.Request) {
 func sqlTables(driver, dsn, query string) ([]string, error) {
 	db, err := sql.Open(driver, dsn)
 	if err != nil {
-		return nil, fmt.Errorf("Error opening connection: %v", err)
+		return nil, fmt.Errorf("error opening connection: %v", err)
 	}
 	defer db.Close()
 
 	if err := db.Ping(); err != nil {
-		return nil, fmt.Errorf("Ping failed: %v", err)
+		return nil, fmt.Errorf("ping failed: %v", err)
 	}
 
 	rows, err := db.Query(query)
 	if err != nil {
-		return nil, fmt.Errorf("Query failed: %v", err)
+		return nil, fmt.Errorf("query failed: %v", err)
 	}
 	defer rows.Close()
 
@@ -276,12 +276,12 @@ func sqlTables(driver, dsn, query string) ([]string, error) {
 	for rows.Next() {
 		var table string
 		if err := rows.Scan(&table); err != nil {
-			return nil, fmt.Errorf("Scan failed: %v", err)
+			return nil, fmt.Errorf("scan failed: %v", err)
 		}
 		tables = append(tables, table)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("Query failed: %v", err)
+		return nil, fmt.Errorf("query failed: %v", err)
 	}
 	return tables, nil
 }

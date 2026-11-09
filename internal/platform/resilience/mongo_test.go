@@ -3,20 +3,12 @@ package resilience
 import (
 	"context"
 	"errors"
-	"io"
 	"testing"
 	"time"
 
-	"github.com/sirupsen/logrus"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
-
-func quietFieldLogger() logrus.FieldLogger {
-	l := logrus.New()
-	l.SetOutput(io.Discard)
-	return l
-}
 
 // TestCheckMongoConnectionIsJustAPing records that the check has no timeout of
 // its own: it forwards the caller's context straight to Ping, so a caller that

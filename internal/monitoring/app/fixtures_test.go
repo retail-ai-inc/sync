@@ -31,9 +31,3 @@ func useMonitoringDB(t *testing.T) *sql.DB {
 	t.Cleanup(func() { _ = conn.Close() })
 	return conn
 }
-
-type statsRow struct {
-	Received, Executed, Pending, Errors int
-	Inserted, Updated, Deleted          int
-	LastUpdated                         string
-}

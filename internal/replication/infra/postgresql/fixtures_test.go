@@ -148,13 +148,6 @@ func withConfig(t *testing.T, cfg config.SyncConfig, db *sql.DB,
 	return &rig{reader: r, db: db}
 }
 
-// keys tells the rig which columns address a row, as the source's catalogue
-// would.
-func (g *rig) keys(columns ...string) *rig {
-	g.reader.Keys = func(string, string) ([]string, error) { return columns, nil }
-	return g
-}
-
 func (g *rig) handleInsert(msg *pglogrepl.InsertMessageV2) (bool, error) {
 	return g.carry(g.reader.decode(msg))
 }

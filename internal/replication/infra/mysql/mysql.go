@@ -584,11 +584,6 @@ type MyEventHandler struct {
 	// so the warning appears once rather than once per row.
 	keylessTables    map[string]bool
 	TargetConnection string
-	// flavor names the server dialect the recorded GTID set belongs to, so a
-	// MariaDB set is not read back as a MySQL one.
-	flavor string
-	// source names the server the offsets belong to, without credentials.
-	source string
 	// labels identify this task in the metrics.
 	labels metrics.Labels
 	// discovering means the task listed no tables, so every table it sees is
@@ -746,12 +741,6 @@ type statement struct {
 	query string
 	args  []interface{}
 }
-
-// maxPendingStatements caps the transaction buffer. A source transaction larger
-// than this is split across more than one target transaction: atomicity is lost
-// for that transaction and the split is logged, but the alternative is holding
-// an unbounded stretch of the binlog in memory.
-const maxPendingStatements = 10000
 
 // buildStatement renders one row event, or reports nil when the event has
 // nothing the target can apply — an update or delete on a table with no primary
@@ -951,13 +940,6 @@ func (h *MyEventHandler) enqueue(stmt *statement) error {
 	}
 	return h.sink(stmt)
 }
-
-// defaultCheckpointInterval is how often the binlog position is recorded.
-// canal reports a synced position once per source transaction. Recording each
-// one costs a round trip and an fsync on the target per transaction
-// replicated, which is most of the cost of replicating a payment ledger where
-// every payment is its own transaction.
-const defaultCheckpointInterval = 200 * time.Millisecond
 
 // claimDirection records which way this task replicates, on both databases, and
 // keeps the claims refreshed for as long as it runs.

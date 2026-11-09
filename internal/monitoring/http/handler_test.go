@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/retail-ai-inc/sync/internal/platform/sqlite"
 	"github.com/retail-ai-inc/sync/internal/platform/sqlite/sqlitetest"
@@ -37,10 +36,6 @@ func useMonitorDB(t *testing.T) *sql.DB {
 	}
 	t.Cleanup(func() { _ = conn.Close() })
 	return conn
-}
-
-func sqlNow(offset time.Duration) string {
-	return time.Now().UTC().Add(offset).Format("2006-01-02 15:04:05")
 }
 
 func TestChangeStreamsStatusHandlerAggregates(t *testing.T) {

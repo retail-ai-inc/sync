@@ -1,17 +1,6 @@
 package mongodb
 
-import (
-	"strings"
-
-	"go.mongodb.org/mongo-driver/v2/bson"
-)
-
-// streamEvent represents the data passed from the Change Stream reader to the disk writer.
-// It contains the raw BSON data and the corresponding resume token.
-type streamEvent struct {
-	RawData     bson.Raw
-	ResumeToken bson.Raw
-}
+import "strings"
 
 // positionLost reports whether an error says the change stream cannot be
 // resumed from the token or cluster time this task holds. The oplog is capped,

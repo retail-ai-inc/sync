@@ -1,13 +1,10 @@
 package monitoringhttp
 
 import (
-	"context"
 	"encoding/json"
-	"net/http"
 	"net/http/httptest"
 	"testing"
 
-	"github.com/go-chi/chi/v5"
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -26,14 +23,4 @@ func decodeEnvelope(t *testing.T, rec *httptest.ResponseRecorder) map[string]int
 		t.Fatalf("body is not JSON: %v (%q)", err, rec.Body.String())
 	}
 	return resp
-}
-
-// serveWithURLParams runs a handler with chi route parameters populated, which
-// is how the handlers read {id} and {taskId}.
-func serveWithURLParams(rec *httptest.ResponseRecorder, req *http.Request, h http.HandlerFunc, params map[string]string) {
-	rctx := chi.NewRouteContext()
-	for k, v := range params {
-		rctx.URLParams.Add(k, v)
-	}
-	h(rec, req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx)))
 }

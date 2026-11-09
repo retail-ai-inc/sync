@@ -18,25 +18,18 @@ import (
 )
 
 type MongoDBSyncer struct {
-	sourceClient  *mongo.Client
-	targetClient  *mongo.Client
-	cfg           config.SyncConfig
-	logger        logrus.FieldLogger
-	resumeTokens  map[string]bson.Raw
-	resumeTokensM sync.RWMutex
+	sourceClient *mongo.Client
+	targetClient *mongo.Client
+	cfg          config.SyncConfig
+	logger       logrus.FieldLogger
+	resumeTokens map[string]bson.Raw
 	// Fields for goroutine lifecycle management
 	activeProcessors map[string]context.CancelFunc
-	processorMutex   sync.RWMutex
 	// Global configuration for accessing Slack settings
 	globalConfig *config.Config
 	// connectErr is why the constructor could not reach one side, kept so Start
 	// can report it rather than the caller having to notice a nil syncer.
 	connectErr error
-	// faults carries the first reason a watcher gave up, so Start can report it
-	// rather than blocking on collections that have all stopped. It holds one
-	// value: the first reason is the one worth acting on and the rest follow
-	// from it.
-	faults chan error
 	// droppedDeletes remembers which collections have already been reported for
 	// ignoreDeleteOps, so the warning is one a collection rather than one an
 	// event.
@@ -406,10 +399,6 @@ func (s *MongoDBSyncer) claimDirection(ctx context.Context, sourceDBName, target
 
 	return directionlock.Hold(ctx, guard, s.logger, "MongoDB")
 }
-
-// discoveryInterval is how often a task with no configured collections looks
-// for ones that have appeared since it started.
-const discoveryInterval = time.Minute
 
 // unlistedScanEvery is how often a task that names its collections is compared
 // against what the source actually holds.

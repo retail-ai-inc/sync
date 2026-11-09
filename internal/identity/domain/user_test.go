@@ -1,15 +1,10 @@
 package domain
 
 import (
-	"fmt"
 	"strings"
 	"testing"
 	"time"
 )
-
-// fmtSscan is fmt.Sscan, named so the mirrored parsing below reads like the
-// handler it mirrors.
-func fmtSscan(s string, a ...interface{}) (int, error) { return fmt.Sscan(s, a...) }
 
 // TestGeneratedPasswordsAreNotGuessable covers the password a new Google user
 // is given.
@@ -35,7 +30,7 @@ func TestGeneratedPasswordsAreNotGuessable(t *testing.T) {
 
 // TestTwoPasswordsInTheSameSecondCollide records the consequence.
 func TestTwoPasswordsInTheSameSecondCollide(t *testing.T) {
-	if GenerateRandomPassword() != GenerateRandomPassword() {
+	if GenerateRandomPassword() != GenerateRandomPassword() { //nolint:staticcheck // two calls, two values
 		t.Skip("the two calls straddled a second boundary")
 	}
 }

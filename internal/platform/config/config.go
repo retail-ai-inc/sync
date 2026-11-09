@@ -150,22 +150,6 @@ type TableMappingJSON struct {
 	CountQuery      map[string]interface{} `json:"countQuery"`
 }
 
-type jsonMapping struct {
-	SourceDatabase string `json:"sourceDatabase"`
-	SourceSchema   string `json:"sourceSchema"`
-	TargetDatabase string `json:"targetDatabase"`
-	TargetSchema   string `json:"targetSchema"`
-	Tables         []struct {
-		SourceTable   string                 `json:"sourceTable"`
-		TargetTable   string                 `json:"targetTable"`
-		CountQuery    map[string]interface{} `json:"countQuery"`
-		FieldSecurity []struct {
-			Field        string `json:"field"`
-			SecurityType string `json:"securityType"`
-		} `json:"fieldSecurity"`
-	} `json:"tables"`
-}
-
 // NewConfig reads the stored configuration. Every failure used to be
 // log.Fatalf, and the supervisor re-reads the configuration every ten seconds:
 // one unreadable read — a locked SQLite file, a moment of disk trouble — took

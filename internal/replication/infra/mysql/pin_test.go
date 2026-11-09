@@ -24,7 +24,8 @@ func masterStatus(file string, pos int64, gtid string) [][]driver.Value {
 
 // What Cloud SQL answers: its default user has no RELOAD privilege, so the
 // global read lock is refused and the pin has to prove itself another way.
-var errNoReload = errors.New("Error 1227 (42000): Access denied; you need (at least one of) the RELOAD privilege(s) for this operation")
+var errNoReload = errors.New( //nolint:staticcheck // MySQL's own wording
+	"Error 1227 (42000): Access denied; you need (at least one of) the RELOAD privilege(s) for this operation")
 
 var masterStatusColumns = []string{
 	"File", "Position", "Binlog_Do_DB", "Binlog_Ignore_DB", "Executed_Gtid_Set",
@@ -79,7 +80,7 @@ func TestTheSnapshotIsPinnedToCoordinatesThatAgree(t *testing.T) {
 	lock := strings.Index(statements, "FLUSH TABLES")
 	snapshot := strings.Index(statements, "START TRANSACTION")
 	unlock := strings.Index(statements, "UNLOCK TABLES")
-	if !(lock < snapshot && snapshot < unlock) {
+	if lock >= snapshot || snapshot >= unlock {
 		t.Errorf("statements ran in the wrong order: %s", statements)
 	}
 }

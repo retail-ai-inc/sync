@@ -466,12 +466,8 @@ func (c *Cursor) Next(ctx context.Context) ([]byte, int64, error) {
 			return nil, 0, err
 		}
 
-		advanced, err := c.waitOrAdvance(ctx)
-		if err != nil {
+		if _, err := c.waitOrAdvance(ctx); err != nil {
 			return nil, 0, err
-		}
-		if advanced {
-			continue
 		}
 	}
 }

@@ -181,7 +181,6 @@ func (l *link) pump(ctx context.Context, stream *Stream) error {
 	ticker := time.NewTicker(ackPeriod)
 	defer ticker.Stop()
 
-	var unsynced bool
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil
@@ -200,7 +199,6 @@ func (l *link) pump(ctx context.Context, stream *Stream) error {
 		if err := l.buffer.Append(cmd.Raw); err != nil {
 			return err
 		}
-		unsynced = true
 		// Recorded per command, not per flush: it is what the acknowledgement
 		// reports, and a value a second stale makes the source keep history this side
 		// no longer needs.
@@ -210,11 +208,8 @@ func (l *link) pump(ctx context.Context, stream *Stream) error {
 		case <-ticker.C:
 			// One flush per tick rather than per command. The source can resend the
 			// tail, so a crash costs little, while an fsync per command does not.
-			if unsynced {
-				if err := l.buffer.Sync(); err != nil {
-					return err
-				}
-				unsynced = false
+			if err := l.buffer.Sync(); err != nil {
+				return err
 			}
 			l.durable.Store(cmd.End)
 		default:
