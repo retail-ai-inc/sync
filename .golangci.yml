@@ -1,5 +1,10 @@
 version: "2"
 
+run:
+  # The tag CI tests with; without it, helpers only integration tests use read as unused
+  build-tags:
+    - integration
+
 linters:
   settings:
     errcheck:

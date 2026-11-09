@@ -267,3 +267,12 @@ func storedOffset(ctx context.Context, target goredis.UniversalClient,
 	}
 	return position.Offset, nil
 }
+
+func closeBoth(source, target goredis.UniversalClient) {
+	if source != nil {
+		_ = source.Close()
+	}
+	if target != nil {
+		_ = target.Close()
+	}
+}
