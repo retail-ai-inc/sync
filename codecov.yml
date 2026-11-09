@@ -4,3 +4,8 @@ coverage:
       default:
         # Timing-dependent integration paths shift a few lines per run.
         threshold: 0.5%
+    patch:
+      default:
+        # Reported but never failing: error branches such as a failed Close are
+        # changed lines no test can reach.
+        informational: true
