@@ -22,7 +22,7 @@ import (
 // configuration, so what they may contain is worth being explicit about: this
 // used to be pasted in unquoted and unchecked, which makes every monitored table
 // name a fragment of a query run against both databases.
-var qualifiedName = regexp.MustCompile("^[A-Za-z_][A-Za-z0-9_$]*(\\.[A-Za-z_][A-Za-z0-9_$]*)?$")
+var qualifiedName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_$]*(\.[A-Za-z_][A-Za-z0-9_$]*)?$`)
 
 // getRowCountWithContext is used by MySQL / MariaDB / PostgreSQL. It used to
 // flatten every failure to -1 and hand that back as a count: a table that does

@@ -103,7 +103,7 @@ func (e *BackupExecutor) getMongoDBCollections(ctx context.Context, config *Exec
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to MongoDB: %w", err)
 	}
-	defer client.Disconnect(ctx)
+	defer func() { _ = client.Disconnect(ctx) }()
 
 	database := client.Database(config.Database.Database)
 

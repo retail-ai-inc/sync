@@ -59,6 +59,9 @@ func (e *BackupExecutor) copyFile(src, dst string) error {
 			return readErr
 		}
 	}
+	if err := destFile.Close(); err != nil {
+		return err
+	}
 
 	var memStatsAfter runtime.MemStats
 	runtime.ReadMemStats(&memStatsAfter)
@@ -159,5 +162,5 @@ func (e *BackupExecutor) writeJSONFile(filePath string, documents []interface{})
 		}
 	}
 
-	return nil
+	return file.Close()
 }

@@ -32,7 +32,7 @@ func GetMongoClient(ctx context.Context, uri string) (*mongo.Client, error) {
 
 	// Verify the connection
 	if err := client.Ping(ctx, readpref.Primary()); err != nil {
-		client.Disconnect(ctx)
+		_ = client.Disconnect(ctx)
 		return nil, fmt.Errorf("failed to ping MongoDB: %w", err)
 	}
 

@@ -40,20 +40,14 @@ jobs:
 
 
       # Install Docker Compose
-      - name: Install Docker Compose
-        run: |
-          curl -L https://github.com/docker/compose/releases/download/1.29.2/docker-compose-$(uname -s)-$(uname -m) -o /usr/local/bin/docker-compose
-          chmod +x /usr/local/bin/docker-compose
-          docker-compose --version  # Verify installation
-
       - name: Start Docker Compose services
         run: |
           # Both stacks: the first carries MySQL, MariaDB and PostgreSQL, the
           # second the MongoDB replica set and the Redis pair the integration
           # suite addresses. Without the second, every MongoDB and Redis
           # integration test is skipped and nothing says so.
-          docker-compose -f docker/docker-compose.yml up -d
-          docker-compose -f docker/docker-compose.test.yml up -d
+          docker compose -f docker/docker-compose.yml up -d
+          docker compose -f docker/docker-compose.test.yml up -d
 
       - name: Wait for services to be ready
         run: |
@@ -182,4 +176,4 @@ jobs:
         run: |
           # One project with one default network: taken down separately, the
           # first call fails to remove the network the other stack still uses.
-          docker-compose -f docker/docker-compose.yml -f docker/docker-compose.test.yml down
+          docker compose -f docker/docker-compose.yml -f docker/docker-compose.test.yml down

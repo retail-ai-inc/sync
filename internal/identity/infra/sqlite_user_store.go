@@ -303,7 +303,7 @@ func GetAuthConfig(provider string) (map[string]interface{}, error) {
 	}
 
 	var configData []byte
-	var enabled bool = false
+	var enabled bool
 
 	if hasEnabledColumn {
 		err = db.QueryRow("SELECT config_json, enabled FROM auth_configs WHERE provider = ?", provider).Scan(&configData, &enabled)

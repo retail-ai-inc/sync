@@ -70,7 +70,7 @@ func TestAnUnreachableMySQLIsReportedAsAPingFailure(t *testing.T) {
 	if code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want 500 (body: %q)", code, body)
 	}
-	if !strings.Contains(body, "Ping failed") {
+	if !strings.Contains(body, "ping failed") {
 		t.Errorf("body = %q, want a ping failure", body)
 	}
 }

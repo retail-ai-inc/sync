@@ -74,25 +74,3 @@ func serveWithURLParams(rec *httptest.ResponseRecorder, req *http.Request, h htt
 	}
 	h(rec, req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx)))
 }
-
-// useMonitorDB points the package at a throwaway SQLite file carrying the
-// tables the monitoring handlers read.
-func useMonitorDB(t *testing.T) *sql.DB {
-	t.Helper()
-
-	isolateCrontab(t)
-
-	path := filepath.Join(t.TempDir(), "sync.db")
-	t.Setenv("SYNC_DB_PATH", path)
-
-	// Through the real opener, which carries the whole schema and creates it
-	// only when it is missing — rather than a copy kept here that can drift from
-	// it, and that a background goroutine racing to the same path turns into
-	// "table already exists".
-	conn, err := sqlite.OpenSQLiteDB()
-	if err != nil {
-		t.Fatalf("open temp sqlite: %v", err)
-	}
-	t.Cleanup(func() { _ = conn.Close() })
-	return conn
-}

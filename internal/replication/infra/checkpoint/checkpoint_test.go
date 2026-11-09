@@ -23,31 +23,6 @@ func sqlStore(t *testing.T, taskID int) *SQLStore {
 	return &SQLStore{DB: db, TaskID: taskID}
 }
 
-type stubStore struct {
-	payloads map[string]string
-	loadErr  error
-	saveErr  error
-	saves    int
-}
-
-func newStub() *stubStore { return &stubStore{payloads: map[string]string{}} }
-
-func (s *stubStore) Load(_ context.Context, key string) (string, error) {
-	if s.loadErr != nil {
-		return "", s.loadErr
-	}
-	return s.payloads[key], nil
-}
-
-func (s *stubStore) Save(_ context.Context, key, payload string) error {
-	if s.saveErr != nil {
-		return s.saveErr
-	}
-	s.saves++
-	s.payloads[key] = payload
-	return nil
-}
-
 func TestTheSQLStoreCreatesItsOwnTable(t *testing.T) {
 	s := sqlStore(t, 1)
 
